@@ -1,0 +1,18 @@
+[package]
+name = "xross-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xross-core = { path = "../xross-core" }
+gpui-kit = "0.8.1"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+smallvec = "1"
+env_logger = "0.11"
+parking_lot.workspace = true

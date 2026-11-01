@@ -1,0 +1,559 @@
+//! SQLite persistence with migrations, encrypted payloads and JSON backups.
+
+pub mod crypto;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+
+use crate::error::{io_context, Error, Result};
+use crate::model::AppModel;
+use crate::paths::AppPaths;
+use crate::subscription::Subscription;
+use crate::util::{atomic_write_json, now_rfc3339, now_unix};
+
+use crypto::SecretBox;
+
+pub const SCHEMA_VERSION: i64 = 2;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProfileMeta {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredProfile {
+    pub id: String,
+    pub name: String,
+    pub model: AppModel,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LatencyEntry {
+    pub key: String,
+    pub delay_ms: Option<u32>,
+    pub checked_at: i64,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupBundle {
+    pub format: u32,
+    pub exported_at: String,
+    pub profiles: Vec<BackupProfile>,
+    pub subscriptions: Vec<BackupSubscription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupProfile {
+    pub id: String,
+    pub name: String,
+    pub model_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupSubscription {
+    pub name: String,
+    pub url: String,
+    #[serde(default)]
+    pub user_agent: String,
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+}
+
+pub struct Store {
+    conn: Mutex<Connection>,
+    secrets: SecretBox,
+    db_path: PathBuf,
+    backup_dir: PathBuf,
+}
+
+impl Store {
+    pub fn open(paths: &AppPaths) -> Result<Arc<Self>> {
+        paths.ensure()?;
+        let db_path = paths.database();
+        let secrets = SecretBox::load_or_create(&paths.secrets_key())?;
+        let conn = Connection::open(&db_path)?;
+        conn.pragma_update(None, "journal_mode", "WAL").ok();
+        conn.pragma_update(None, "foreign_keys", "ON").ok();
+        let store = Self {
+            conn: Mutex::new(conn),
+            secrets,
+            db_path,
+            backup_dir: paths.backup_dir(),
+        };
+        store.migrate()?;
+        store.seed_default_profile()?;
+        Ok(Arc::new(store))
+    }
+
+    fn backup_before_migration(&self, version: i64) -> Result<()> {
+        std::fs::create_dir_all(&self.backup_dir).map_err(|e| io_context(&self.backup_dir, e))?;
+        let target = self
+            .backup_dir
+            .join(format!("xross-v{version}-{}.db", now_unix()));
+        std::fs::copy(&self.db_path, &target).map_err(|e| io_context(&target, e))?;
+        Ok(())
+    }
+
+    fn migrate(&self) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap_or(0);
+        if version >= SCHEMA_VERSION {
+            return Ok(());
+        }
+        if version > 0 && self.db_path.exists() {
+            let _ = self.backup_before_migration(version);
+        }
+        let tx = conn.transaction()?;
+        if version < 1 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS subscriptions (
+                    id TEXT PRIMARY KEY,
+                    payload TEXT NOT NULL,
+                    sort INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS app_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                "#,
+            )?;
+        }
+        if version < 2 {
+            tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS latency (
+                    key TEXT PRIMARY KEY,
+                    delay_ms INTEGER,
+                    checked_at INTEGER NOT NULL,
+                    detail TEXT
+                );
+                "#,
+            )?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn seed_default_profile(&self) -> Result<()> {
+        // Never call another method that locks the connection while holding it:
+        // parking_lot mutexes are not reentrant.
+        let (count, active, first_id): (i64, Option<String>, Option<String>) = {
+            let conn = self.conn.lock();
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM profiles", [], |row| row.get(0))?;
+            let active: Option<String> = conn
+                .query_row(
+                    "SELECT value FROM app_state WHERE key = 'active_profile'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let first_id: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM profiles ORDER BY created_at LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            (count, active, first_id)
+        };
+        if count == 0 {
+            let id = self.save_profile(&AppModel::default())?;
+            self.set_active_profile(&id)?;
+        } else if active.is_none() {
+            if let Some(id) = first_id {
+                self.set_active_profile(&id)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
+    }
+
+    // -- profiles ---------------------------------------------------------
+
+    pub fn profiles(&self) -> Result<Vec<ProfileMeta>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, name, created_at, updated_at FROM profiles ORDER BY created_at")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProfileMeta {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn load_profile(&self, id: &str) -> Result<Option<StoredProfile>> {
+        let conn = self.conn.lock();
+        let payload: Option<(String, String, i64, i64)> = conn
+            .query_row(
+                "SELECT model, name, created_at, updated_at FROM profiles WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        drop(conn);
+        let Some((payload, name, created_at, updated_at)) = payload else {
+            return Ok(None);
+        };
+        let json = self.secrets.decrypt(&payload)?;
+        let model: AppModel = serde_json::from_str(&json)?;
+        Ok(Some(StoredProfile {
+            id: id.to_string(),
+            name,
+            model,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    pub fn save_profile(&self, model: &AppModel) -> Result<String> {
+        let id = crate::util::new_id("profile");
+        self.save_profile_with_id(&id, model)?;
+        Ok(id)
+    }
+
+    pub fn save_profile_with_id(&self, id: &str, model: &AppModel) -> Result<()> {
+        let id = if id.trim().is_empty() {
+            crate::util::new_id("profile")
+        } else {
+            id.to_string()
+        };
+        let json = serde_json::to_string(model)?;
+        let encrypted = self.secrets.encrypt(&json);
+        let conn = self.conn.lock();
+        conn.execute(
+            r#"INSERT INTO profiles (id, name, model, created_at, updated_at)
+               VALUES (?1, ?2, ?3, ?4, ?4)
+               ON CONFLICT(id) DO UPDATE SET name = ?2, model = ?3, updated_at = ?4"#,
+            params![id, model.name, encrypted, now_unix()],
+        )?;
+        Ok(())
+    }
+
+    /// Persists the currently active profile, creating one if needed.
+    pub fn save_active_profile(&self, model: &AppModel) -> Result<String> {
+        if let Some(id) = self.active_profile_id() {
+            self.save_profile_with_id(&id, model)?;
+            Ok(id)
+        } else {
+            let id = self.save_profile(model)?;
+            self.set_active_profile(&id)?;
+            Ok(id)
+        }
+    }
+
+    pub fn delete_profile(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM profiles WHERE id = ?1", [id])?;
+        drop(conn);
+        if self.active_profile_id().as_deref() == Some(id) {
+            if let Some(next) = self.profiles()?.first() {
+                self.set_active_profile(&next.id)?;
+            } else {
+                let conn = self.conn.lock();
+                conn.execute("DELETE FROM app_state WHERE key = 'active_profile'", [])?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn active_profile_id(&self) -> Option<String> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT value FROM app_state WHERE key = 'active_profile'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+    }
+
+    pub fn set_active_profile(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES ('active_profile', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = ?1",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    // -- subscriptions ----------------------------------------------------
+
+    pub fn subscriptions(&self) -> Result<Vec<Subscription>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT payload FROM subscriptions ORDER BY sort, rowid")?;
+        let payloads: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(stmt);
+        drop(conn);
+        let mut result = Vec::new();
+        for payload in payloads {
+            let json = self.secrets.decrypt(&payload)?;
+            if let Ok(sub) = serde_json::from_str::<Subscription>(&json) {
+                result.push(sub);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn save_subscription(&self, subscription: &Subscription) -> Result<()> {
+        let encrypted = self.secrets.encrypt(&serde_json::to_string(subscription)?);
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO subscriptions (id, payload, sort) VALUES (?1, ?2, ?3)
+             ON CONFLICT(id) DO UPDATE SET payload = ?2, sort = ?3",
+            params![subscription.id, encrypted, subscription.sort],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM subscriptions WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    // -- latency cache ----------------------------------------------------
+
+    pub fn latency_cache(&self) -> Result<Vec<LatencyEntry>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT key, delay_ms, checked_at, detail FROM latency")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LatencyEntry {
+                key: row.get(0)?,
+                delay_ms: row.get(1)?,
+                checked_at: row.get(2)?,
+                detail: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_latency(&self, entry: &LatencyEntry) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO latency (key, delay_ms, checked_at, detail) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(key) DO UPDATE SET delay_ms = ?2, checked_at = ?3, detail = ?4",
+            params![entry.key, entry.delay_ms, entry.checked_at, entry.detail],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_latency(&self) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM latency", [])?;
+        Ok(())
+    }
+
+    // -- backup / export --------------------------------------------------
+
+    /// Copies the SQLite database (including WAL) to the backup directory.
+    pub fn backup_database(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.backup_dir).map_err(|e| io_context(&self.backup_dir, e))?;
+        let target = self.backup_dir.join(format!(
+            "xross-{}.db",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        {
+            let conn = self.conn.lock();
+            conn.execute("PRAGMA wal_checkpoint(FULL)", []).ok();
+        }
+        std::fs::copy(&self.db_path, &target).map_err(|e| io_context(&target, e))?;
+        Ok(target)
+    }
+
+    /// Human readable export with decrypted contents (for migration/backup).
+    pub fn export_json(&self, path: &Path) -> Result<()> {
+        let mut profiles = Vec::new();
+        for meta in self.profiles()? {
+            if let Some(profile) = self.load_profile(&meta.id)? {
+                profiles.push(BackupProfile {
+                    id: profile.id,
+                    name: profile.name,
+                    model_json: serde_json::to_value(&profile.model)?,
+                });
+            }
+        }
+        let subscriptions = self
+            .subscriptions()?
+            .into_iter()
+            .map(|sub| BackupSubscription {
+                name: sub.name,
+                url: sub.url,
+                user_agent: sub.user_agent,
+                headers: sub.headers,
+            })
+            .collect();
+        let bundle = BackupBundle {
+            format: 1,
+            exported_at: now_rfc3339(),
+            profiles,
+            subscriptions,
+        };
+        atomic_write_json(path, &bundle)
+    }
+
+    /// Imports profiles/subscriptions from an export file. Existing ids are kept
+    /// when free; collisions get a fresh id.
+    pub fn import_json(&self, path: &Path) -> Result<usize> {
+        let data = std::fs::read(path).map_err(|e| io_context(path, e))?;
+        let bundle: BackupBundle = serde_json::from_slice(&data)?;
+        if bundle.format != 1 {
+            return Err(Error::other(format!("不支持的备份格式：{}", bundle.format)));
+        }
+        let mut imported = 0;
+        for profile in bundle.profiles {
+            let model: AppModel = serde_json::from_value(profile.model_json)?;
+            let id = if self.load_profile(&profile.id)?.is_some() {
+                crate::util::new_id("profile")
+            } else {
+                profile.id
+            };
+            self.save_profile_with_id(&id, &model)?;
+            imported += 1;
+        }
+        for sub in bundle.subscriptions {
+            let mut s = Subscription::new(sub.name, sub.url);
+            s.user_agent = sub.user_agent;
+            s.headers = sub.headers;
+            self.save_subscription(&s)?;
+            imported += 1;
+        }
+        Ok(imported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (Arc<Store>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        paths.ensure().unwrap();
+        (Store::open(&paths).unwrap(), dir)
+    }
+
+    #[test]
+    fn seeds_default_profile() {
+        let (store, _dir) = store();
+        let profiles = store.profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert!(store.active_profile_id().is_some());
+        let loaded = store.load_profile(&profiles[0].id).unwrap().unwrap();
+        assert_eq!(loaded.model.name, profiles[0].name);
+    }
+
+    #[test]
+    fn profiles_are_encrypted_on_disk() {
+        let (store, _dir) = store();
+        let mut model = AppModel::default();
+        let mut node =
+            crate::model::Node::new("secret", crate::model::Protocol::Vless, "example.com", 443);
+        node.credentials.uuid = Some("super-secret-uuid".into());
+        model.add_nodes(vec![node]);
+        let id = store.save_profile(&model).unwrap();
+        let conn = Connection::open(store.db_path()).unwrap();
+        let raw: String = conn
+            .query_row("SELECT model FROM profiles WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(!raw.contains("super-secret-uuid"));
+        assert!(SecretBox::is_encrypted(&raw));
+        let loaded = store.load_profile(&id).unwrap().unwrap();
+        assert_eq!(
+            loaded.model.nodes[0].credentials.uuid.as_deref(),
+            Some("super-secret-uuid")
+        );
+    }
+
+    #[test]
+    fn subscriptions_roundtrip() {
+        let (store, _dir) = store();
+        let mut sub = Subscription::new("机场", "https://example.com/sub?token=abc");
+        sub.node_count = 12;
+        store.save_subscription(&sub).unwrap();
+        let list = store.subscriptions().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "机场");
+        store.delete_subscription(&sub.id).unwrap();
+        assert!(store.subscriptions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn latency_cache_roundtrip() {
+        let (store, _dir) = store();
+        store
+            .set_latency(&LatencyEntry {
+                key: "node-a".into(),
+                delay_ms: Some(120),
+                checked_at: now_unix(),
+                detail: None,
+            })
+            .unwrap();
+        assert_eq!(store.latency_cache().unwrap()[0].delay_ms, Some(120));
+        store.clear_latency().unwrap();
+        assert!(store.latency_cache().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backup_and_export() {
+        let (store, dir) = store();
+        store
+            .save_subscription(&crate::subscription::Subscription::new(
+                "backup-sub",
+                "https://example.com/sub",
+            ))
+            .unwrap();
+        let db_backup = store.backup_database().unwrap();
+        assert!(db_backup.exists());
+        let export = dir.path().join("export.json");
+        store.export_json(&export).unwrap();
+        assert!(export.exists());
+        let imported = store.import_json(&export).unwrap();
+        assert!(imported >= 2);
+    }
+
+    #[test]
+    fn migrations_set_version() {
+        let (store, _dir) = store();
+        let conn = Connection::open(store.db_path()).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+}

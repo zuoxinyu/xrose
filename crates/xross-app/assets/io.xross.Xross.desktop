@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Xross
+GenericName=Proxy Client
+Comment=Xray / sing-box desktop client
+Exec=xross-app
+Icon=xross
+Terminal=false
+Categories=Network;Utility;
+Keywords=proxy;xray;sing-box;vpn;
+StartupNotify=true
+StartupWMClass=io.xross.Xross

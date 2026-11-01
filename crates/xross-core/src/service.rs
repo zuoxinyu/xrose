@@ -1,0 +1,2378 @@
+//! The single facade the UI talks to. All heavy work is dispatched to an
+//! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use parking_lot::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
+
+use crate::adapters::{CompiledConfig, ValidationReport};
+use crate::core::logs::{LogBus, LogEntry, LogStream};
+use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
+use crate::dns::{self, DnsPreset};
+use crate::error::{Error, Result};
+use crate::model::{AppModel, CoreKind, InboundKind, Node, RoutePreset, RouteRule};
+use crate::paths::AppPaths;
+use crate::runtime::{
+    ClashClient, ClashConnection, ClashProxy, TrafficHistory, TrafficSample, XrayStatsClient,
+};
+use crate::settings::LogLevel;
+use crate::settings::Settings;
+use crate::storage::{LatencyEntry, ProfileMeta, Store};
+use crate::subscription::{parse_subscription, qr_ascii, Subscription, SubscriptionUsage};
+use crate::trace::{self, TraceSession};
+use crate::system::{self, DoctorCheck, PacServer, ProxyManager};
+use crate::updates::{self, AppUpdate, RuleSetUpdate, UpdateCandidate};
+use crate::util::now_unix;
+
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToastLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Toast {
+    pub id: u64,
+    pub level: ToastLevel,
+    pub message: String,
+    pub at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlatformInfo {
+    pub os: String,
+    pub arch: String,
+    pub proxy_backend: String,
+    pub elevated: bool,
+    pub helper_available: bool,
+    pub log_dir: String,
+    pub data_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateStatus {
+    pub core: Option<UpdateCandidate>,
+    pub app: Option<AppUpdate>,
+    pub checked_at: Option<i64>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RuntimeView {
+    pub connections: Vec<ClashConnection>,
+    pub proxies: BTreeMap<String, ClashProxy>,
+    pub up_total: u64,
+    pub down_total: u64,
+    pub up_speed: u64,
+    pub down_speed: u64,
+    pub history: Vec<TrafficSample>,
+    pub error: Option<String>,
+}
+
+/// Everything the UI needs for one frame. Cloned at ~3 Hz by the view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiSnapshot {
+    pub app_version: String,
+    pub settings: Settings,
+    pub model: AppModel,
+    pub process: ProcessState,
+    pub logs: Vec<LogEntry>,
+    pub subscriptions: Vec<Subscription>,
+    pub profiles: Vec<ProfileMeta>,
+    pub active_profile: Option<String>,
+    pub runtime: RuntimeView,
+    pub latency: BTreeMap<String, LatencyEntry>,
+    pub validation: Option<ValidationReport>,
+    pub compiled_warnings: Vec<String>,
+    pub compiled_json: Option<String>,
+    pub binaries: Vec<BinaryRecord>,
+    pub toasts: Vec<Toast>,
+    pub busy: Vec<String>,
+    pub platform: PlatformInfo,
+    pub doctor: Vec<DoctorCheck>,
+    pub updates: UpdateStatus,
+    pub system_proxy_active: bool,
+    pub pac_url: Option<String>,
+    pub config_dirty: bool,
+    pub recovery_note: Option<String>,
+    pub rule_set_updates: Vec<RuleSetUpdate>,
+    pub trace: Option<TraceSession>,
+}
+
+struct Inner {
+    paths: AppPaths,
+    settings: RwLock<Settings>,
+    model: RwLock<AppModel>,
+    store: Arc<Store>,
+    core: Arc<CoreManager>,
+    rt: Runtime,
+    subs: RwLock<Vec<Subscription>>,
+    profiles: RwLock<Vec<ProfileMeta>>,
+    active_profile: RwLock<Option<String>>,
+    traffic: Mutex<TrafficHistory>,
+    connections: RwLock<Vec<ClashConnection>>,
+    proxies: RwLock<BTreeMap<String, ClashProxy>>,
+    latency: RwLock<BTreeMap<String, LatencyEntry>>,
+    busy: RwLock<BTreeSet<String>>,
+    toasts: Mutex<Vec<Toast>>,
+    proxy: Mutex<ProxyManager>,
+    pac: Mutex<Option<PacServer>>,
+    validation: RwLock<Option<ValidationReport>>,
+    compiled: RwLock<Option<CompiledConfig>>,
+    compiled_json: RwLock<Option<String>>,
+    config_dirty: AtomicBool,
+    updates: Mutex<UpdateStatus>,
+    doctor: RwLock<Vec<DoctorCheck>>,
+    recovery_note: RwLock<Option<String>>,
+    rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
+    trace: RwLock<Option<TraceSession>>,
+    trace_generation: AtomicU64,
+    toast_seq: AtomicU64,
+}
+
+/// Cheap to clone; all state lives behind Arc.
+#[derive(Clone)]
+pub struct AppService {
+    inner: Arc<Inner>,
+}
+
+impl AppService {
+    pub fn new() -> Result<Self> {
+        Self::with_paths(AppPaths::discover())
+    }
+
+    pub fn with_paths(paths: AppPaths) -> Result<Self> {
+        paths.ensure()?;
+        let settings = Settings::load(&paths.settings_file())?;
+        if !paths.settings_file().exists() {
+            let _ = settings.save(&paths.settings_file());
+        }
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!("[debug] settings loaded");
+        }
+        let store = Store::open(&paths)?;
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!("[debug] store opened");
+        }
+        let active_profile = store.active_profile_id();
+        let model = active_profile
+            .as_deref()
+            .and_then(|id| store.load_profile(id).ok().flatten())
+            .map(|p| p.model)
+            .unwrap_or_default();
+        let logs = LogBus::with_file(
+            paths.logs_dir(),
+            "xross",
+            settings.log_max_bytes,
+            settings.log_keep,
+        );
+        logs.load_tail(&paths.logs_dir().join("xross.log"), 300);
+        let core = Arc::new(CoreManager::new(paths.clone(), logs));
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!(
+                "[debug] profile {} model loaded",
+                active_profile.as_deref().unwrap_or("-")
+            );
+        }
+        let subs = store.subscriptions().unwrap_or_default();
+        let profiles = store.profiles().unwrap_or_default();
+        let latency = store
+            .latency_cache()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| (e.key.clone(), e))
+            .collect();
+        let proxy = ProxyManager::new(paths.proxy_snapshot());
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!("[debug] proxy backend detected");
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("xross-worker")
+            .build()
+            .map_err(|e| Error::other(format!("无法创建异步运行时：{e}")))?;
+
+        let inner = Arc::new(Inner {
+            paths,
+            settings: RwLock::new(settings),
+            model: RwLock::new(model),
+            store,
+            core,
+            rt,
+            subs: RwLock::new(subs),
+            profiles: RwLock::new(profiles),
+            active_profile: RwLock::new(active_profile),
+            traffic: Mutex::new(TrafficHistory::new(180)),
+            connections: RwLock::new(Vec::new()),
+            proxies: RwLock::new(BTreeMap::new()),
+            latency: RwLock::new(latency),
+            busy: RwLock::new(BTreeSet::new()),
+            toasts: Mutex::new(Vec::new()),
+            proxy: Mutex::new(proxy),
+            pac: Mutex::new(None),
+            validation: RwLock::new(None),
+            compiled: RwLock::new(None),
+            compiled_json: RwLock::new(None),
+            config_dirty: AtomicBool::new(false),
+            updates: Mutex::new(UpdateStatus::default()),
+            doctor: RwLock::new(Vec::new()),
+            recovery_note: RwLock::new(None),
+            rule_set_updates: RwLock::new(Vec::new()),
+            trace: RwLock::new(None),
+            trace_generation: AtomicU64::new(0),
+            toast_seq: AtomicU64::new(1),
+        });
+        let service = Self {
+            inner: inner.clone(),
+        };
+
+        if let Some(snapshot) = inner.proxy.lock().recover_after_crash() {
+            let settings = inner.settings.read().clone();
+            if settings.system_proxy {
+                let mut updated = settings;
+                updated.system_proxy = false;
+                let _ = updated.save(&inner.paths.settings_file());
+                *inner.settings.write() = updated;
+            }
+            *inner.recovery_note.write() = Some(format!(
+                "上次退出时系统代理未还原（{}），已自动恢复",
+                snapshot.backend
+            ));
+            service.toast(ToastLevel::Warning, "已恢复上次异常退出时的系统代理设置");
+        }
+
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!("[debug] runtime ready");
+        }
+        service.refresh_doctor();
+        if std::env::var_os("XROSS_DEBUG").is_some() {
+            eprintln!("[debug] doctor done");
+        }
+        service.start_monitor();
+        service.start_subscription_scheduler();
+        Ok(service)
+    }
+
+    pub fn paths(&self) -> &AppPaths {
+        &self.inner.paths
+    }
+
+    pub fn store(&self) -> Arc<Store> {
+        self.inner.store.clone()
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.inner.settings.read().clone()
+    }
+
+    pub fn model(&self) -> AppModel {
+        self.inner.model.read().clone()
+    }
+
+    pub fn process_state(&self) -> ProcessState {
+        self.inner.core.state()
+    }
+
+    pub fn logs(&self) -> &LogBus {
+        self.inner.core.logs()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.core.state().phase.is_alive()
+    }
+
+    pub fn core(&self) -> Arc<CoreManager> {
+        self.inner.core.clone()
+    }
+
+    pub fn snapshot(&self) -> UiSnapshot {
+        let settings = self.inner.settings.read().clone();
+        let model = self.inner.model.read().clone();
+        let process = self.inner.core.state();
+        let (up_total, down_total, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
+        let history = self.inner.traffic.lock().samples();
+        let pac_url = self.inner.pac.lock().as_ref().map(|p| p.info.url.clone());
+        let proxy_backend = self.inner.proxy.lock().backend().label().to_string();
+        let doctor = self.inner.doctor.read().clone();
+        let validation = self.inner.validation.read().clone();
+        let runtime = RuntimeView {
+            connections: self.inner.connections.read().clone(),
+            proxies: self.inner.proxies.read().clone(),
+            up_total,
+            down_total,
+            up_speed,
+            down_speed,
+            history,
+            error: None,
+        };
+        UiSnapshot {
+            app_version: APP_VERSION.into(),
+            settings,
+            model,
+            process,
+            logs: self.inner.core.logs().recent(800, LogLevel::Trace, ""),
+            subscriptions: self.inner.subs.read().clone(),
+            profiles: self.inner.profiles.read().clone(),
+            active_profile: self.inner.active_profile.read().clone(),
+            runtime,
+            latency: self.inner.latency.read().clone(),
+            validation,
+            compiled_warnings: self
+                .inner
+                .compiled
+                .read()
+                .as_ref()
+                .map(|c| c.warnings.clone())
+                .unwrap_or_default(),
+            compiled_json: self.inner.compiled_json.read().clone(),
+            binaries: self.inner.core.binaries().list(),
+            toasts: self.active_toasts(),
+            busy: self.inner.busy.read().iter().cloned().collect(),
+            platform: PlatformInfo {
+                os: std::env::consts::OS.into(),
+                arch: std::env::consts::ARCH.into(),
+                proxy_backend,
+                elevated: system::privilege::is_elevated(),
+                helper_available: system::privilege::helper_available(),
+                log_dir: self.inner.paths.logs_dir().display().to_string(),
+                data_dir: self.inner.paths.data_dir.display().to_string(),
+            },
+            doctor,
+            updates: self.inner.updates.lock().clone(),
+            system_proxy_active: self.inner.settings.read().system_proxy,
+            pac_url,
+            config_dirty: self.inner.config_dirty.load(Ordering::SeqCst),
+            recovery_note: self.inner.recovery_note.read().clone(),
+            rule_set_updates: self.inner.rule_set_updates.read().clone(),
+            trace: self.inner.trace.read().clone(),
+        }
+    }
+
+    fn spawn<F>(&self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.inner.rt.spawn(future);
+    }
+
+    fn set_busy(&self, key: &str, busy: bool) {
+        let mut set = self.inner.busy.write();
+        if busy {
+            set.insert(key.to_string());
+        } else {
+            set.remove(key);
+        }
+    }
+
+    pub fn is_busy(&self, key: &str) -> bool {
+        self.inner.busy.read().contains(key)
+    }
+
+    pub fn toast(&self, level: ToastLevel, message: impl Into<String>) {
+        let id = self.inner.toast_seq.fetch_add(1, Ordering::SeqCst);
+        let message = message.into();
+        let toast = Toast {
+            id,
+            level,
+            message: message.clone(),
+            at: now_unix(),
+        };
+        let mut toasts = self.inner.toasts.lock();
+        toasts.push(toast);
+        while toasts.len() > 20 {
+            toasts.remove(0);
+        }
+        let log_level = match level {
+            ToastLevel::Info | ToastLevel::Success => LogLevel::Info,
+            ToastLevel::Warning => LogLevel::Warn,
+            ToastLevel::Error => LogLevel::Error,
+        };
+        self.inner
+            .core
+            .logs()
+            .push(LogStream::App, log_level, format!("[UI] {message}"));
+    }
+
+    pub fn dismiss_toast(&self, id: u64) {
+        self.inner.toasts.lock().retain(|t| t.id != id);
+    }
+
+    fn active_toasts(&self) -> Vec<Toast> {
+        let cutoff = now_unix() - 12;
+        let mut toasts = self.inner.toasts.lock();
+        toasts.retain(|t| t.at >= cutoff);
+        toasts.clone()
+    }
+
+    fn persist_model(&self) -> Result<()> {
+        let model = self.inner.model.read().clone();
+        match self.inner.store.save_active_profile(&model) {
+            Ok(id) => {
+                *self.inner.active_profile.write() = Some(id);
+                Ok(())
+            }
+            Err(err) => {
+                self.toast(ToastLevel::Error, format!("保存配置失败：{err}"));
+                Err(err)
+            }
+        }
+    }
+
+    fn mark_dirty(&self) {
+        if self.is_running() {
+            self.inner.config_dirty.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn sync_model_settings(&self) {
+        let settings = self.inner.settings.read().clone();
+        let mut model = self.inner.model.write();
+        for inbound in model.inbounds.iter_mut() {
+            match inbound.kind {
+                InboundKind::Mixed => {
+                    inbound.port = settings.mixed_port;
+                    inbound.allow_lan = settings.allow_lan;
+                    inbound.listen = if settings.allow_lan {
+                        "0.0.0.0".into()
+                    } else {
+                        settings.listen_host.clone()
+                    };
+                }
+                InboundKind::Tun => {
+                    inbound.enabled = settings.tun_enabled;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn save_settings(&self, settings: &Settings) -> Result<()> {
+        settings.save(&self.inner.paths.settings_file())?;
+        *self.inner.settings.write() = settings.clone();
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Profiles
+    // ------------------------------------------------------------------
+
+    pub fn switch_profile(&self, id: &str) -> Result<()> {
+        if self.is_running() {
+            self.toast(ToastLevel::Warning, "切换配置前请先停止 core");
+            return Err(Error::other("core 正在运行"));
+        }
+        let current_model = self.inner.model.read().clone();
+        if let Some(current_id) = self.inner.active_profile.read().clone() {
+            let _ = self
+                .inner
+                .store
+                .save_profile_with_id(&current_id, &current_model);
+        }
+        let Some(profile) = self.inner.store.load_profile(id)? else {
+            return Err(Error::other("配置不存在"));
+        };
+        *self.inner.model.write() = profile.model;
+        *self.inner.active_profile.write() = Some(id.to_string());
+        self.inner.store.set_active_profile(id)?;
+        self.inner.validation.write().take();
+        self.inner.compiled.write().take();
+        self.inner.compiled_json.write().take();
+        self.inner.config_dirty.store(false, Ordering::SeqCst);
+        self.sync_model_settings();
+        self.refresh_doctor();
+        self.refresh_profiles();
+        self.toast(
+            ToastLevel::Success,
+            format!("已切换到配置“{}”", profile.name),
+        );
+        Ok(())
+    }
+
+    pub fn create_profile(&self, name: impl Into<String>) -> Result<()> {
+        if self.is_running() {
+            return Err(Error::other("请先停止 core 再新建配置"));
+        }
+        let name = name.into();
+        let current_model = self.inner.model.read().clone();
+        if let Some(current_id) = self.inner.active_profile.read().clone() {
+            let _ = self
+                .inner
+                .store
+                .save_profile_with_id(&current_id, &current_model);
+        }
+        let model = AppModel::new(if name.trim().is_empty() {
+            "新配置".into()
+        } else {
+            name
+        });
+        let id = self.inner.store.save_profile(&model)?;
+        self.inner.store.set_active_profile(&id)?;
+        *self.inner.model.write() = model;
+        *self.inner.active_profile.write() = Some(id);
+        self.sync_model_settings();
+        self.refresh_profiles();
+        self.toast(ToastLevel::Success, "已创建新配置");
+        Ok(())
+    }
+
+    pub fn delete_profile(&self, id: &str) -> Result<()> {
+        if self.is_running() {
+            return Err(Error::other("请先停止 core 再删除配置"));
+        }
+        if self.inner.profiles.read().len() <= 1 {
+            self.toast(ToastLevel::Warning, "至少保留一个配置");
+            return Err(Error::other("至少保留一个配置"));
+        }
+        self.inner.store.delete_profile(id)?;
+        self.refresh_profiles();
+        if self.inner.store.active_profile_id().is_none() {
+            if let Some(first) = self.inner.profiles.read().first().cloned() {
+                self.switch_profile(&first.id)?;
+            }
+        }
+        self.toast(ToastLevel::Info, "配置已删除");
+        Ok(())
+    }
+
+    pub fn rename_profile(&self, name: impl Into<String>) {
+        let name = name.into();
+        {
+            let mut model = self.inner.model.write();
+            model.name = name.clone();
+            model.updated_at = now_unix();
+        }
+        let _ = self.persist_model();
+        self.refresh_profiles();
+        self.toast(ToastLevel::Success, format!("配置已重命名为“{name}”"));
+    }
+
+    fn refresh_profiles(&self) {
+        if let Ok(profiles) = self.inner.store.profiles() {
+            *self.inner.profiles.write() = profiles;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Subscriptions
+    // ------------------------------------------------------------------
+
+    pub fn add_subscription(
+        &self,
+        name: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<String> {
+        let url = url.into();
+        if url.trim().is_empty() {
+            return Err(Error::other("订阅地址不能为空"));
+        }
+        let name = name.into();
+        let mut subscription = Subscription::new(
+            if name.trim().is_empty() {
+                pretty_host(&url)
+            } else {
+                name
+            },
+            url,
+        );
+        subscription.sort = self.inner.subs.read().len() as i64;
+        self.inner.store.save_subscription(&subscription)?;
+        self.inner.subs.write().push(subscription.clone());
+        let id = subscription.id.clone();
+        self.refresh_subscription(&id);
+        Ok(id)
+    }
+
+    pub fn update_subscription_settings(&self, subscription: Subscription) -> Result<()> {
+        self.inner.store.save_subscription(&subscription)?;
+        let mut subs = self.inner.subs.write();
+        if let Some(existing) = subs.iter_mut().find(|s| s.id == subscription.id) {
+            *existing = subscription;
+        } else {
+            subs.push(subscription);
+        }
+        Ok(())
+    }
+
+    pub fn delete_subscription(&self, id: &str) -> Result<()> {
+        self.inner.store.delete_subscription(id)?;
+        {
+            let mut model = self.inner.model.write();
+            model.remove_subscription_nodes(id);
+            for group in &mut model.groups {
+                group.repair();
+            }
+        }
+        let _ = self.persist_model();
+        self.inner.subs.write().retain(|s| s.id != id);
+        self.refresh_doctor();
+        self.toast(ToastLevel::Info, "订阅及对应节点已删除");
+        Ok(())
+    }
+
+    pub fn refresh_subscription(&self, id: &str) {
+        let Some(subscription) = self.inner.subs.read().iter().find(|s| s.id == id).cloned() else {
+            self.toast(ToastLevel::Error, "订阅不存在");
+            return;
+        };
+        let key = format!("sub:{id}");
+        if self.is_busy(&key) {
+            return;
+        }
+        self.set_busy(&key, true);
+        let service = self.clone();
+        self.spawn(async move {
+            let request = crate::subscription::FetchRequest {
+                url: subscription.url.clone(),
+                user_agent: subscription.user_agent.clone(),
+                headers: subscription.headers.clone(),
+                etag: subscription.etag.clone(),
+                last_modified: subscription.last_modified.clone(),
+            };
+            let result = crate::subscription::fetch_subscription(request).await;
+            service.set_busy(&key, false);
+            match result {
+                Ok(response)
+                    if response.status == crate::subscription::FetchStatus::NotModified =>
+                {
+                    let mut sub = subscription.clone();
+                    sub.last_updated = Some(now_unix());
+                    sub.last_error = None;
+                    let _ = service.update_subscription_settings(sub);
+                    service.toast(ToastLevel::Info, format!("“{}”已是最新", subscription.name));
+                }
+                Ok(response) => {
+                    let mut parsed = parse_subscription(&response.body);
+                    if let Some(title) = response.title.clone() {
+                        if !title.trim().is_empty() {
+                            parsed.warnings.push(format!("订阅标题：{title}"));
+                        }
+                    }
+                    let added = service.merge_parsed(&subscription.id, &parsed);
+                    let mut updated = subscription.clone();
+                    updated.etag = response.etag;
+                    updated.last_modified = response.last_modified;
+                    updated.usage = response
+                        .userinfo
+                        .as_ref()
+                        .map(SubscriptionUsage::from_userinfo);
+                    updated.last_updated = Some(now_unix());
+                    updated.last_error = None;
+                    updated.node_count = added;
+                    if let Some(hours) = response.update_interval_hours {
+                        if hours > 0 {
+                            updated.update_interval_secs = hours * 3600;
+                        }
+                    }
+                    let _ = service.update_subscription_settings(updated);
+                    if parsed.is_empty() {
+                        service.toast(
+                            ToastLevel::Warning,
+                            format!(
+                                "“{}”未解析出节点：{}",
+                                subscription.name,
+                                parsed.warnings.join("；")
+                            ),
+                        );
+                    } else {
+                        service.toast(
+                            ToastLevel::Success,
+                            format!(
+                                "“{}”更新完成：{} 个新节点（{}）",
+                                subscription.name,
+                                added,
+                                parsed.format.label()
+                            ),
+                        );
+                    }
+                    for warning in parsed.warnings.iter().take(3) {
+                        service.toast(ToastLevel::Warning, warning.clone());
+                    }
+                }
+                Err(err) => {
+                    let mut sub = subscription.clone();
+                    sub.last_error = Some(err.to_string());
+                    let _ = service.update_subscription_settings(sub);
+                    service.toast(
+                        ToastLevel::Error,
+                        format!("更新订阅“{}”失败：{err}", subscription.name),
+                    );
+                }
+            }
+        });
+    }
+
+    pub fn refresh_all_subscriptions(&self) {
+        let ids: Vec<String> = self
+            .inner
+            .subs
+            .read()
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.toast(ToastLevel::Info, "还没有订阅");
+            return;
+        }
+        for id in ids {
+            self.refresh_subscription(&id);
+        }
+    }
+
+    /// Adds parsed nodes + groups to the model. Returns how many nodes were new.
+    fn merge_parsed(
+        &self,
+        subscription_id: &str,
+        parsed: &crate::subscription::ParsedSubscription,
+    ) -> usize {
+        let mut model = self.inner.model.write();
+        let before: BTreeSet<String> = model.nodes.iter().map(|n| n.id.clone()).collect();
+        let mut incoming: Vec<Node> = parsed.nodes.clone();
+        for node in &mut incoming {
+            node.subscription_id = Some(subscription_id.to_string());
+            node.source = crate::model::NodeSource::Subscription;
+        }
+        let added = model.add_nodes(incoming);
+        let new_nodes: Vec<(String, String)> = model
+            .nodes
+            .iter()
+            .filter(|n| !before.contains(&n.id))
+            .filter(|n| n.subscription_id.as_deref() == Some(subscription_id))
+            .map(|n| (n.name.clone(), n.id.clone()))
+            .collect();
+        for group in &parsed.groups {
+            let members: Vec<String> = group
+                .members
+                .iter()
+                .filter_map(|name| {
+                    new_nodes
+                        .iter()
+                        .find(|(node_name, _)| node_name == name)
+                        .map(|(_, id)| id.clone())
+                })
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            if let Some(existing) = model.groups.iter_mut().find(|g| g.name == group.name) {
+                existing.kind = group.kind;
+                existing.enabled = true;
+                for member in members {
+                    if !existing.members.contains(&member) {
+                        existing.members.push(member);
+                    }
+                }
+                existing.repair();
+            } else {
+                let mut new_group =
+                    crate::model::OutboundGroup::new(group.name.clone(), group.kind);
+                new_group.members = members;
+                new_group.selected = new_group.members.first().cloned();
+                model.groups.push(new_group);
+            }
+        }
+        model.updated_at = now_unix();
+        drop(model);
+        let _ = self.persist_model();
+        self.refresh_doctor();
+        self.mark_dirty();
+        added
+    }
+
+    /// Imports share links / Clash YAML / SIP008 / sing-box JSON pasted by the user.
+    pub fn import_content(&self, content: &str) -> usize {
+        let parsed = parse_subscription(content);
+        if parsed.is_empty() {
+            self.toast(
+                ToastLevel::Error,
+                format!("导入失败：{}", parsed.warnings.join("；")),
+            );
+            return 0;
+        }
+        let added = self.merge_parsed("import", &parsed);
+        self.toast(
+            ToastLevel::Success,
+            format!("已导入 {} 个节点（{}）", added, parsed.format.label()),
+        );
+        added
+    }
+
+    // ------------------------------------------------------------------
+    // Nodes and groups
+    // ------------------------------------------------------------------
+
+    pub fn select_node(&self, group_id: &str, node_id: &str) {
+        let group_tag;
+        {
+            let mut model = self.inner.model.write();
+            if !model.select_node(group_id, node_id) {
+                return;
+            }
+            let Some(group) = model.group(group_id) else {
+                return;
+            };
+            group_tag = group.tag();
+        }
+        let _ = self.persist_model();
+        let node = self.inner.model.read().node(node_id).cloned();
+        let Some(node) = node else { return };
+
+        if !self.is_running() {
+            return;
+        }
+        let settings = self.inner.settings.read().clone();
+        if settings.core == CoreKind::SingBox {
+            // sing-box's selector supports instant switching through Clash API.
+            let client = ClashClient::new(settings.api_port, "");
+            let tag = node.outbound_tag();
+            let service = self.clone();
+            self.spawn(async move {
+                match client.select(&group_tag, &tag).await {
+                    Ok(()) => {
+                        service.toast(ToastLevel::Success, format!("已切换到“{}”", node.name))
+                    }
+                    Err(err) => {
+                        // Fall back to a config reapply if the group is not live.
+                        service.toast(
+                            ToastLevel::Warning,
+                            format!("实时切换失败，将重启 core：{err}"),
+                        );
+                        service.apply_config();
+                    }
+                }
+            });
+        } else {
+            self.toast(
+                ToastLevel::Info,
+                "Xray 不支持热切换节点，正在重启 core 以应用新节点",
+            );
+            self.apply_config();
+        }
+    }
+
+    pub fn set_node_enabled(&self, node_id: &str, enabled: bool) {
+        {
+            let mut model = self.inner.model.write();
+            let Some(node) = model.node_mut(node_id) else {
+                return;
+            };
+            node.enabled = enabled;
+        }
+        let _ = self.persist_model();
+        self.refresh_doctor();
+        self.mark_dirty();
+    }
+
+    pub fn delete_node(&self, node_id: &str) {
+        {
+            let mut model = self.inner.model.write();
+            model.remove_node(node_id);
+        }
+        let _ = self.persist_model();
+        self.inner.latency.write().remove(node_id);
+        self.refresh_doctor();
+        self.mark_dirty();
+        self.toast(ToastLevel::Info, "节点已删除");
+    }
+
+    pub fn select_group_kind(&self, group_id: &str, kind: crate::model::GroupKind) {
+        {
+            let mut model = self.inner.model.write();
+            let Some(group) = model.group_mut(group_id) else {
+                return;
+            };
+            group.kind = kind;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn export_links(&self, node_ids: &[String]) -> String {
+        let model = self.inner.model.read();
+        node_ids
+            .iter()
+            .filter_map(|id| model.node(id))
+            .filter_map(crate::subscription::node_to_share_link)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub fn node_qr(&self, node_id: &str) -> Result<String> {
+        let node = self
+            .inner
+            .model
+            .read()
+            .node(node_id)
+            .cloned()
+            .ok_or_else(|| Error::other("节点不存在"))?;
+        let link = crate::subscription::node_to_share_link(&node)
+            .ok_or_else(|| Error::other("该协议暂不支持导出分享链接"))?;
+        qr_ascii(&link)
+    }
+
+    // ------------------------------------------------------------------
+    // Latency
+    // ------------------------------------------------------------------
+
+    pub fn test_latency(&self, scope: LatencyScope) {
+        if self.is_busy("latency") {
+            return;
+        }
+        let model = self.inner.model.read().clone();
+        let node_ids: Vec<String> = match &scope {
+            LatencyScope::All => model.nodes.iter().map(|n| n.id.clone()).collect(),
+            LatencyScope::Node(id) => vec![id.clone()],
+            LatencyScope::Group(id) => model
+                .group(id)
+                .map(|g| g.members.clone())
+                .unwrap_or_default(),
+        };
+        let targets: Vec<(String, String, u16)> = node_ids
+            .iter()
+            .filter_map(|id| model.node(id))
+            .filter(|n| n.enabled)
+            .map(|n| (n.id.clone(), n.server.clone(), n.port))
+            .collect();
+        if targets.is_empty() {
+            self.toast(ToastLevel::Warning, "没有可测试的节点");
+            return;
+        }
+        self.set_busy("latency", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let results =
+                crate::runtime::test_many(targets, 8, std::time::Duration::from_secs(4)).await;
+            let mut ok_count = 0;
+            {
+                let mut cache = service.inner.latency.write();
+                for (key, result) in &results {
+                    if result.ok {
+                        ok_count += 1;
+                    }
+                    let entry = LatencyEntry {
+                        key: key.clone(),
+                        delay_ms: result.delay_ms,
+                        checked_at: now_unix(),
+                        detail: result.error.clone(),
+                    };
+                    let _ = service.inner.store.set_latency(&entry);
+                    cache.insert(key.clone(), entry);
+                }
+            }
+            service.set_busy("latency", false);
+            service.toast(
+                ToastLevel::Info,
+                format!("测速完成：{ok_count}/{} 个节点可用", results.len()),
+            );
+        });
+    }
+
+    /// Real latency through the running core (requires Clash API / sing-box).
+    pub fn test_real_latency(&self, node_id: &str) {
+        let settings = self.inner.settings.read().clone();
+        if !self.is_running() || settings.core != CoreKind::SingBox {
+            self.toast(ToastLevel::Warning, "走代理的真实延迟需要运行中的 sing-box");
+            return;
+        }
+        let Some(node) = self.inner.model.read().node(node_id).cloned() else {
+            return;
+        };
+        let client = ClashClient::new(settings.api_port, "");
+        let service = self.clone();
+        let key = node.id.clone();
+        let url = settings.urltest_url.clone();
+        self.spawn(async move {
+            let delay = client.delay(&node.outbound_tag(), &url, 5000).await;
+            let entry = LatencyEntry {
+                key: key.clone(),
+                delay_ms: delay,
+                checked_at: now_unix(),
+                detail: delay.is_none().then(|| "通过代理请求失败".to_string()),
+            };
+            let _ = service.inner.store.set_latency(&entry);
+            service.inner.latency.write().insert(key, entry);
+            service.toast(
+                if delay.is_some() {
+                    ToastLevel::Success
+                } else {
+                    ToastLevel::Warning
+                },
+                match delay {
+                    Some(ms) => format!("“{}”真实延迟 {ms} ms", node.name),
+                    None => format!("“{}”真实延迟测试失败", node.name),
+                },
+            );
+        });
+    }
+
+    pub fn clear_latency(&self) {
+        self.inner.latency.write().clear();
+        let _ = self.inner.store.clear_latency();
+        self.toast(ToastLevel::Info, "已清除测速结果");
+    }
+
+    // ------------------------------------------------------------------
+    // Core lifecycle
+    // ------------------------------------------------------------------
+
+    /// Downloads any missing rule-sets before starting sing-box. The core will
+    /// otherwise fetch them itself at startup, which fails behind a broken DNS
+    /// path and makes the start non-deterministic.
+    async fn ensure_rule_sets(&self) -> std::result::Result<(), String> {
+        if self.inner.settings.read().core != CoreKind::SingBox {
+            return Ok(());
+        }
+        let model = self.inner.model.read().clone();
+        let mut sets: BTreeMap<String, crate::model::RuleSet> = BTreeMap::new();
+        for set in &model.routing.rule_sets {
+            sets.entry(set.tag.clone()).or_insert_with(|| set.clone());
+        }
+        for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+            for geosite in &rule.matchers.geosites {
+                let tag = format!("geosite-{geosite}");
+                if let Some(set) = default_rule_set(&tag) {
+                    sets.entry(tag).or_insert(set);
+                }
+            }
+            for geoip in &rule.matchers.geoips {
+                let tag = format!("geoip-{geoip}");
+                if let Some(set) = default_rule_set(&tag) {
+                    sets.entry(tag).or_insert(set);
+                }
+            }
+        }
+        for server in &model.dns.servers {
+            let split = crate::adapters::split_dns_domains(&server.domains);
+            for geosite in split.geosites {
+                let tag = format!("geosite-{geosite}");
+                if let Some(set) = default_rule_set(&tag) {
+                    sets.entry(tag).or_insert(set);
+                }
+            }
+        }
+        // The compiler always references these two.
+        for tag in ["geosite-cn", "geoip-cn"] {
+            if let Some(set) = default_rule_set(tag) {
+                sets.entry(tag.to_string()).or_insert(set);
+            }
+        }
+        let dir = self.inner.paths.rule_sets_dir();
+        let missing: Vec<crate::model::RuleSet> = sets
+            .into_values()
+            .filter(|set| !dir.join(format!("{}.srs", set.tag)).exists())
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.toast(
+            ToastLevel::Info,
+            format!("正在预下载 {} 个规则集…", missing.len()),
+        );
+        let results = updates::sync_rule_sets(&missing, &dir).await;
+        let failed: Vec<_> = results.iter().filter(|r| r.status == "failed").collect();
+        for failure in failed {
+            self.inner.core.logs().push(
+                LogStream::App,
+                LogLevel::Warn,
+                format!(
+                    "规则集 {} 下载失败：{}",
+                    failure.tag,
+                    failure.error.clone().unwrap_or_default()
+                ),
+            );
+        }
+        *self.inner.rule_set_updates.write() = results;
+        let still_missing: Vec<String> = missing
+            .iter()
+            .filter(|set| !dir.join(format!("{}.srs", set.tag)).exists())
+            .map(|set| set.tag.clone())
+            .collect();
+        if still_missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "规则集下载失败：{}。请检查网络，或在“路由 → 规则集”中使用可访问的镜像。",
+                still_missing.join(", ")
+            ))
+        }
+    }
+
+    pub fn start_core(&self) {
+        if self.is_running() {
+            self.toast(ToastLevel::Info, "core 已在运行");
+            return;
+        }
+        if self.is_busy("core") {
+            return;
+        }
+        self.sync_model_settings();
+        let _ = self.persist_model();
+        self.refresh_doctor();
+        self.set_busy("core", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let settings = service.inner.settings.read().clone();
+            let model = service.inner.model.read().clone();
+            if let Err(err) = service.ensure_rule_sets().await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, err);
+                return;
+            }
+            let result = service
+                .inner
+                .core
+                .start(&model, &settings, settings.core)
+                .await;
+            service.set_busy("core", false);
+            match result {
+                Ok(outcome) => {
+                    let started = service.record_outcome(&outcome);
+                    if started {
+                        service.inner.traffic.lock().reset();
+                        service.inner.connections.write().clear();
+                        service.inner.proxies.write().clear();
+                        service.inner.config_dirty.store(false, Ordering::SeqCst);
+                        if settings.system_proxy {
+                            service.enable_system_proxy();
+                        }
+                        service.toast(
+                            ToastLevel::Success,
+                            format!(
+                                "{} 已启动，代理端口 {}",
+                                settings.core.display_name(),
+                                settings.mixed_port
+                            ),
+                        );
+                    }
+                }
+                Err(err) => {
+                    service.toast(ToastLevel::Error, format!("启动失败：{err}"));
+                }
+            }
+        });
+    }
+
+    pub fn stop_core(&self) {
+        if !self.is_running() {
+            self.toast(ToastLevel::Info, "core 未运行");
+            return;
+        }
+        if self.is_busy("core") {
+            return;
+        }
+        self.set_busy("core", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let result = service.inner.core.stop().await;
+            service.set_busy("core", false);
+            match result {
+                Ok(()) => {
+                    service.inner.traffic.lock().reset();
+                    service.inner.connections.write().clear();
+                    service.inner.proxies.write().clear();
+                    service.toast(ToastLevel::Success, "core 已停止");
+                    if service.inner.settings.read().system_proxy {
+                        service.disable_system_proxy();
+                    }
+                }
+                Err(err) => service.toast(ToastLevel::Error, format!("停止失败：{err}")),
+            }
+        });
+    }
+
+    pub fn toggle_core(&self) {
+        if self.is_running() {
+            self.stop_core();
+        } else {
+            self.start_core();
+        }
+    }
+
+    /// Stops (if needed) and starts with the current model. This is the
+    /// "apply changes" path: neither core supports config hot reload.
+    pub fn apply_config(&self) {
+        if self.is_busy("core") {
+            return;
+        }
+        self.sync_model_settings();
+        let _ = self.persist_model();
+        self.refresh_doctor();
+        let was_running = self.is_running();
+        self.set_busy("core", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let settings = service.inner.settings.read().clone();
+            let model = service.inner.model.read().clone();
+            if was_running {
+                // Prepare dependencies before stopping the working core.
+                if let Err(err) = service.ensure_rule_sets().await {
+                    service.set_busy("core", false);
+                    service.toast(ToastLevel::Error, err);
+                    return;
+                }
+                if let Err(err) = service.inner.core.stop().await {
+                    service.set_busy("core", false);
+                    service.toast(ToastLevel::Error, format!("重启前停止失败：{err}"));
+                    return;
+                }
+                service.inner.traffic.lock().reset();
+                service.inner.connections.write().clear();
+            }
+            let result = if was_running {
+                service
+                    .inner
+                    .core
+                    .start(&model, &settings, settings.core)
+                    .await
+            } else {
+                service
+                    .inner
+                    .core
+                    .prepare(&model, &settings, settings.core)
+                    .await
+            };
+            service.set_busy("core", false);
+            match result {
+                Ok(outcome) => {
+                    let ok = service.record_outcome(&outcome);
+                    if was_running && ok {
+                        service.inner.config_dirty.store(false, Ordering::SeqCst);
+                        if settings.system_proxy {
+                            service.enable_system_proxy();
+                        }
+                        service.toast(ToastLevel::Success, "配置已应用，core 已重启");
+                    } else if !was_running && ok {
+                        service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
+                    }
+                }
+                Err(err) => service.toast(ToastLevel::Error, format!("应用配置失败：{err}")),
+            }
+        });
+    }
+
+    pub fn validate_config(&self) {
+        if self.is_busy("validate") {
+            return;
+        }
+        self.sync_model_settings();
+        self.set_busy("validate", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let settings = service.inner.settings.read().clone();
+            let model = service.inner.model.read().clone();
+            let result = service
+                .inner
+                .core
+                .prepare(&model, &settings, settings.core)
+                .await;
+            service.set_busy("validate", false);
+            match result {
+                Ok(outcome) => {
+                    service.record_outcome(&outcome);
+                    if outcome.report.ok {
+                        service.toast(ToastLevel::Success, "配置校验通过");
+                    }
+                }
+                Err(err) => service.toast(ToastLevel::Error, format!("校验失败：{err}")),
+            }
+        });
+    }
+
+    fn record_outcome(&self, outcome: &StartOutcome) -> bool {
+        *self.inner.validation.write() = Some(outcome.report.clone());
+        *self.inner.compiled.write() = Some(outcome.compiled.clone());
+        *self.inner.compiled_json.write() = Some(
+            outcome
+                .compiled
+                .to_pretty_string()
+                .unwrap_or_else(|_| outcome.compiled.json.to_string()),
+        );
+        for warning in &outcome.compiled.warnings {
+            self.inner
+                .core
+                .logs()
+                .push(LogStream::App, LogLevel::Warn, warning.clone());
+        }
+        if !outcome.report.ok {
+            let detail = outcome
+                .report
+                .issues
+                .iter()
+                .map(|issue| match issue.line {
+                    Some(line) => format!("第 {line} 行：{}", issue.message),
+                    None => issue.message.clone(),
+                })
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.toast(
+                ToastLevel::Error,
+                format!(
+                    "配置校验失败：{}",
+                    if detail.is_empty() {
+                        outcome.report.summary()
+                    } else {
+                        detail
+                    }
+                ),
+            );
+        }
+        outcome.report.ok
+    }
+
+    // ------------------------------------------------------------------
+    // Settings
+    // ------------------------------------------------------------------
+
+    pub fn update_settings(&self, mut new: Settings) {
+        let old = self.settings();
+        new.mixed_port = new.mixed_port.max(1);
+        new.api_port = new.api_port.max(1);
+        new.stats_port = new.stats_port.max(1);
+        if new.api_port == new.mixed_port || new.stats_port == new.mixed_port {
+            self.toast(ToastLevel::Warning, "端口不能重复，已保留旧端口");
+            new.mixed_port = old.mixed_port;
+        }
+        if let Err(err) = self.save_settings(&new) {
+            self.toast(ToastLevel::Error, format!("保存设置失败：{err}"));
+            return;
+        }
+        self.sync_model_settings();
+        let _ = self.persist_model();
+        if new.autostart != old.autostart {
+            if let Err(err) = system::autostart::set_enabled(new.autostart) {
+                self.toast(ToastLevel::Warning, format!("设置开机自启失败：{err}"));
+            }
+        }
+        if new.core != old.core && self.is_running() {
+            self.toast(
+                ToastLevel::Warning,
+                format!("已切换到 {}，请先停止再启动 core", new.core.display_name()),
+            );
+        }
+        if new.system_proxy != old.system_proxy {
+            self.set_system_proxy(new.system_proxy);
+        }
+        if new.tun_enabled && !new.core.capabilities().native_tun {
+            self.toast(
+                ToastLevel::Warning,
+                format!("{} 不支持 TUN，请切换到 sing-box", new.core.display_name()),
+            );
+        }
+        self.refresh_doctor();
+        self.mark_dirty();
+    }
+
+    pub fn set_language(&self, language: crate::settings::Language) {
+        let mut settings = self.settings();
+        settings.language = language;
+        let _ = self.save_settings(&settings);
+    }
+
+    pub fn set_theme(&self, theme: crate::settings::ThemeMode) {
+        let mut settings = self.settings();
+        settings.theme = theme;
+        let _ = self.save_settings(&settings);
+    }
+
+    pub fn set_core(&self, core: CoreKind) {
+        let mut settings = self.settings();
+        settings.core = core;
+        self.update_settings(settings);
+    }
+
+    // ------------------------------------------------------------------
+    // Routing and DNS
+    // ------------------------------------------------------------------
+
+    pub fn set_route_preset(&self, preset: RoutePreset) {
+        {
+            let mut model = self.inner.model.write();
+            model.apply_preset(preset);
+            model.updated_at = now_unix();
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+        self.toast(
+            ToastLevel::Info,
+            format!("路由模板已切换为“{}”，应用配置后生效", preset.label()),
+        );
+    }
+
+    pub fn upsert_rule(&self, rule: RouteRule) {
+        {
+            let mut model = self.inner.model.write();
+            if let Some(existing) = model.routing.rules.iter_mut().find(|r| r.id == rule.id) {
+                *existing = rule;
+            } else {
+                model.routing.rules.push(rule);
+            }
+            model.routing.preset = RoutePreset::Custom;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+        self.toast(ToastLevel::Info, "规则已保存，应用配置后生效");
+    }
+
+    pub fn new_rule(&self) -> RouteRule {
+        RouteRule::new(
+            "新规则",
+            crate::model::Matchers::default(),
+            crate::model::RouteAction::proxy(),
+        )
+    }
+
+    pub fn delete_rule(&self, rule_id: &str) {
+        {
+            let mut model = self.inner.model.write();
+            model.routing.rules.retain(|r| r.id != rule_id);
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_rule_enabled(&self, rule_id: &str, enabled: bool) {
+        {
+            let mut model = self.inner.model.write();
+            if let Some(rule) = model.routing.rules.iter_mut().find(|r| r.id == rule_id) {
+                rule.enabled = enabled;
+            }
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_routing_flags(
+        &self,
+        bypass_lan: bool,
+        bypass_china_ips: bool,
+        strategy: crate::model::DomainStrategy,
+    ) {
+        {
+            let mut model = self.inner.model.write();
+            model.routing.bypass_lan = bypass_lan;
+            model.routing.bypass_china_ips = bypass_china_ips;
+            model.routing.domain_strategy = strategy;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_dns_preset(&self, preset: DnsPreset) {
+        {
+            let mut model = self.inner.model.write();
+            dns::apply_preset(&mut model.dns, preset);
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+        self.toast(
+            ToastLevel::Info,
+            format!("DNS 模板已切换：{}", preset.label()),
+        );
+    }
+
+    pub fn set_dns_enabled(&self, enabled: bool) {
+        {
+            let mut model = self.inner.model.write();
+            model.dns.enabled = enabled;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_fake_ip(&self, enabled: bool) {
+        {
+            let mut model = self.inner.model.write();
+            model.dns.fake_ip = enabled;
+            if enabled && !model.dns.servers.iter().any(|s| s.is_fakeip()) {
+                model.dns.servers.insert(
+                    0,
+                    crate::model::DnsServer {
+                        tag: "fakeip".into(),
+                        server_type: crate::model::DnsServerType::FakeIp,
+                        address: "fakeip".into(),
+                        domains: Vec::new(),
+                        detour: None,
+                        strategy: None,
+                        expect_ips: Vec::new(),
+                        client_subnet: None,
+                    },
+                );
+            }
+        }
+        let _ = self.persist_model();
+        self.refresh_doctor();
+        self.mark_dirty();
+    }
+
+    pub fn upsert_dns_server(&self, server: crate::model::DnsServer) {
+        {
+            let mut model = self.inner.model.write();
+            if let Some(existing) = model.dns.servers.iter_mut().find(|s| s.tag == server.tag) {
+                *existing = server;
+            } else {
+                model.dns.servers.push(server);
+            }
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn delete_dns_server(&self, tag: &str) {
+        {
+            let mut model = self.inner.model.write();
+            model.dns.servers.retain(|s| s.tag != tag);
+            if model.dns.final_server.as_deref() == Some(tag) {
+                model.dns.final_server = model.dns.servers.first().map(|s| s.tag.clone());
+            }
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_final_dns(&self, tag: impl Into<String>) {
+        {
+            let mut model = self.inner.model.write();
+            model.dns.final_server = Some(tag.into());
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn set_hosts(&self, hosts: BTreeMap<String, Vec<String>>) {
+        {
+            let mut model = self.inner.model.write();
+            model.dns.hosts = hosts;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn dns_issues(&self) -> Vec<String> {
+        dns::validate(&self.inner.model.read().dns)
+    }
+
+    // ------------------------------------------------------------------
+    // System proxy / PAC
+    // ------------------------------------------------------------------
+
+    pub fn set_system_proxy(&self, enabled: bool) {
+        if enabled {
+            self.enable_system_proxy();
+        } else {
+            self.disable_system_proxy();
+        }
+    }
+
+    fn enable_system_proxy(&self) {
+        if self.is_busy("proxy") {
+            return;
+        }
+        self.set_busy("proxy", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let settings = service.inner.settings.read().clone();
+            let compiled_http_port = service
+                .inner
+                .compiled
+                .read()
+                .as_ref()
+                .map(|c| c.http_port())
+                .unwrap_or(settings.mixed_port);
+            let pac_url = if settings.pac_enabled {
+                let model = service.inner.model.read().clone();
+                let mut direct_domains = Vec::new();
+                let mut direct_cidrs = vec![
+                    "10.0.0.0/8".to_string(),
+                    "172.16.0.0/12".to_string(),
+                    "192.168.0.0/16".to_string(),
+                ];
+                for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+                    if rule.action.kind == crate::model::RouteActionKind::Direct {
+                        direct_domains.extend(rule.matchers.domains.iter().cloned());
+                        direct_domains.extend(rule.matchers.domain_suffixes.iter().cloned());
+                        direct_cidrs.extend(rule.matchers.ip_cidrs.iter().cloned());
+                    }
+                }
+                let pac = system::build_pac(
+                    "127.0.0.1",
+                    compiled_http_port,
+                    &direct_domains,
+                    &direct_cidrs,
+                );
+                match PacServer::start(pac, settings.pac_port) {
+                    Ok(server) => {
+                        let url = server.info.url.clone();
+                        *service.inner.pac.lock() = Some(server);
+                        Some(url)
+                    }
+                    Err(err) => {
+                        service.toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let result = service.inner.proxy.lock().apply(
+                "127.0.0.1",
+                compiled_http_port,
+                pac_url.as_deref(),
+            );
+            service.set_busy("proxy", false);
+            match result {
+                Ok(_) => {
+                    let mut settings = service.inner.settings.read().clone();
+                    settings.system_proxy = true;
+                    let _ = service.save_settings(&settings);
+                    service.toast(
+                        ToastLevel::Success,
+                        format!("系统代理已开启（127.0.0.1:{compiled_http_port}）"),
+                    );
+                }
+                Err(err) => {
+                    *service.inner.pac.lock() = None;
+                    let mut settings = service.inner.settings.read().clone();
+                    settings.system_proxy = false;
+                    let _ = service.save_settings(&settings);
+                    service.toast(ToastLevel::Error, format!("设置系统代理失败：{err}"));
+                }
+            }
+        });
+    }
+
+    fn disable_system_proxy(&self) {
+        if self.is_busy("proxy") {
+            return;
+        }
+        self.set_busy("proxy", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let result = service.inner.proxy.lock().restore();
+            *service.inner.pac.lock() = None;
+            let mut settings = service.inner.settings.read().clone();
+            settings.system_proxy = false;
+            let _ = service.save_settings(&settings);
+            service.set_busy("proxy", false);
+            match result {
+                Ok(()) => service.toast(ToastLevel::Info, "系统代理已关闭并还原"),
+                Err(err) => service.toast(ToastLevel::Warning, format!("还原系统代理失败：{err}")),
+            }
+        });
+    }
+
+    pub fn refresh_doctor(&self) {
+        let model = self.inner.model.read().clone();
+        let settings = self.inner.settings.read().clone();
+        let checks = system::diagnose_tun(&model, &settings);
+        *self.inner.doctor.write() = checks;
+    }
+
+    // ------------------------------------------------------------------
+    // Binaries, updates, rule-sets
+    // ------------------------------------------------------------------
+
+    pub fn adopt_binary(&self, core: CoreKind, version: &str, path: &std::path::Path) {
+        match self
+            .inner
+            .core
+            .binaries()
+            .adopt_existing(core, version, path)
+        {
+            Ok(record) => {
+                let mut settings = self.inner.settings.read().clone();
+                settings
+                    .active_versions
+                    .insert(core.as_str().into(), record.version.clone());
+                let _ = self.save_settings(&settings);
+                self.toast(
+                    ToastLevel::Success,
+                    format!(
+                        "已登记 {} {}（{}）",
+                        core.display_name(),
+                        record.version,
+                        path.display()
+                    ),
+                );
+            }
+            Err(err) => self.toast(ToastLevel::Error, format!("登记 core 失败：{err}")),
+        }
+    }
+
+    pub fn remove_binary(&self, core: CoreKind, version: &str) {
+        match self.inner.core.binaries().remove(core, version) {
+            Ok(()) => {
+                let mut settings = self.inner.settings.read().clone();
+                if settings
+                    .active_version(core)
+                    .map(|v| v == version)
+                    .unwrap_or(false)
+                {
+                    settings.active_versions.remove(core.as_str());
+                    let _ = self.save_settings(&settings);
+                }
+                self.toast(
+                    ToastLevel::Info,
+                    format!("已删除 {} {}", core.display_name(), version),
+                );
+            }
+            Err(err) => self.toast(ToastLevel::Error, format!("删除失败：{err}")),
+        }
+    }
+
+    pub fn set_active_version(&self, core: CoreKind, version: &str) {
+        let mut settings = self.inner.settings.read().clone();
+        settings
+            .active_versions
+            .insert(core.as_str().into(), version.to_string());
+        settings.binary_paths.remove(core.as_str());
+        let _ = self.save_settings(&settings);
+        self.toast(
+            ToastLevel::Info,
+            format!("{} 将使用版本 {}", core.display_name(), version),
+        );
+    }
+
+    pub fn set_binary_override(&self, core: CoreKind, path: Option<String>) {
+        let mut settings = self.inner.settings.read().clone();
+        match path.filter(|p| !p.trim().is_empty()) {
+            Some(path) => {
+                settings.binary_paths.insert(core.as_str().into(), path);
+            }
+            None => {
+                settings.binary_paths.remove(core.as_str());
+            }
+        }
+        let _ = self.save_settings(&settings);
+    }
+
+    pub fn check_updates(&self) {
+        if self.is_busy("updates") {
+            return;
+        }
+        self.set_busy("updates", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let settings = service.inner.settings.read().clone();
+            let current = service
+                .inner
+                .core
+                .binaries()
+                .resolve(
+                    settings.core,
+                    settings.active_version(settings.core).map(|s| s.as_str()),
+                )
+                .map(|b| b.version);
+            let core_result = updates::check_core_update(settings.core, current.as_deref()).await;
+            let app_result = updates::check_app_update(APP_VERSION).await;
+            let mut status = UpdateStatus {
+                checked_at: Some(now_unix()),
+                ..Default::default()
+            };
+            match core_result {
+                Ok(candidate) => status.core = candidate,
+                Err(err) => status.error = Some(err.to_string()),
+            }
+            match app_result {
+                Ok(update) => status.app = update,
+                Err(err) => {
+                    status.error = Some(match status.error.take() {
+                        Some(existing) => format!("{existing}；{err}"),
+                        None => err.to_string(),
+                    });
+                }
+            }
+            *service.inner.updates.lock() = status.clone();
+            service.set_busy("updates", false);
+            let core_label = status
+                .core
+                .as_ref()
+                .map(|u| format!("{} {}", u.core.display_name(), u.version));
+            let app_label = status.app.as_ref().map(|a| format!("App {}", a.version));
+            if core_label.is_none() && app_label.is_none() {
+                service.toast(ToastLevel::Info, "已是最新版本");
+            } else {
+                service.toast(
+                    ToastLevel::Info,
+                    format!(
+                        "发现更新：{}",
+                        [core_label, app_label]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join("，")
+                    ),
+                );
+            }
+            if let Some(error) = &status.error {
+                if status.core.is_none() {
+                    service.toast(ToastLevel::Warning, format!("检查更新失败：{error}"));
+                }
+            }
+        });
+    }
+
+    pub fn install_core_update(&self, core: CoreKind) {
+        if self.is_busy("install") {
+            return;
+        }
+        self.set_busy("install", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let current = service
+                .inner
+                .core
+                .binaries()
+                .resolve(
+                    core,
+                    service
+                        .inner
+                        .settings
+                        .read()
+                        .active_version(core)
+                        .map(|s| s.as_str()),
+                )
+                .map(|b| b.version);
+            let candidate = match updates::check_core_update(core, current.as_deref()).await {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => {
+                    service.set_busy("install", false);
+                    service.toast(
+                        ToastLevel::Info,
+                        format!("{} 已是最新版本", core.display_name()),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    service.set_busy("install", false);
+                    service.toast(ToastLevel::Error, format!("检查更新失败：{err}"));
+                    return;
+                }
+            };
+            let checksum = match &candidate.checksum_url {
+                Some(url) => updates::download_checksum(url).await.ok().flatten(),
+                None => None,
+            };
+            service.toast(
+                ToastLevel::Info,
+                format!("正在下载 {} {}…", core.display_name(), candidate.version),
+            );
+            let result = service
+                .inner
+                .core
+                .binaries()
+                .install_from_url(core, &candidate.version, &candidate.asset.url, checksum)
+                .await;
+            service.set_busy("install", false);
+            match result {
+                Ok(record) => {
+                    let mut settings = service.inner.settings.read().clone();
+                    settings
+                        .active_versions
+                        .insert(core.as_str().into(), record.version.clone());
+                    settings.binary_paths.remove(core.as_str());
+                    let _ = service.save_settings(&settings);
+                    service.toast(
+                        ToastLevel::Success,
+                        format!("{} {} 安装完成", core.display_name(), record.version),
+                    );
+                }
+                Err(err) => service.toast(ToastLevel::Error, format!("安装失败：{err}")),
+            }
+        });
+    }
+
+    pub fn sync_rule_sets(&self) {
+        if self.is_busy("rulesets") {
+            return;
+        }
+        self.set_busy("rulesets", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let model = service.inner.model.read().clone();
+            let dir = service.inner.paths.rule_sets_dir();
+            let results = updates::sync_rule_sets(&model.routing.rule_sets, &dir).await;
+            let updated = results.iter().filter(|r| r.status == "updated").count();
+            let failed = results.iter().filter(|r| r.status == "failed").count();
+            let unchanged = results
+                .iter()
+                .filter(|r| r.status == "not-modified")
+                .count();
+            *service.inner.rule_set_updates.write() = results;
+            service.set_busy("rulesets", false);
+            service.toast(
+                if failed > 0 {
+                    ToastLevel::Warning
+                } else {
+                    ToastLevel::Success
+                },
+                format!("规则集更新完成：更新 {updated}，无变化 {unchanged}，失败 {failed}"),
+            );
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Logs
+    // ------------------------------------------------------------------
+
+    pub fn logs_filtered(&self, level: LogLevel, query: &str, limit: usize) -> Vec<LogEntry> {
+        self.inner.core.logs().recent(limit, level, query)
+    }
+
+    pub fn clear_logs(&self) {
+        self.inner.core.logs().clear();
+        self.toast(ToastLevel::Info, "日志已清空（磁盘日志仍保留）");
+    }
+
+    /// Exports the in-memory log buffer to `logs/exports/`.
+    pub fn export_logs(&self) -> Result<String> {
+        let dir = self.inner.paths.logs_dir().join("exports");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Error::other(format!("创建日志目录失败：{e}")))?;
+        let path = dir.join(format!(
+            "xross-log-{}.log",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        self.inner.core.logs().export_to(&path)?;
+        self.toast(
+            ToastLevel::Success,
+            format!("日志已导出：{}", path.display()),
+        );
+        Ok(path.display().to_string())
+    }
+
+    // ------------------------------------------------------------------
+    // Runtime monitoring
+    // ------------------------------------------------------------------
+
+    pub fn refresh_connections(&self) {
+        let settings = self.inner.settings.read().clone();
+        if !self.is_running() || settings.core != CoreKind::SingBox {
+            return;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            let client = ClashClient::new(settings.api_port, "");
+            match client.connections().await {
+                Ok(response) => {
+                    service
+                        .inner
+                        .traffic
+                        .lock()
+                        .sample(response.upload_total, response.download_total);
+                    *service.inner.connections.write() = response.connections;
+                }
+                Err(err) => service.inner.core.logs().push(
+                    LogStream::App,
+                    LogLevel::Warn,
+                    format!("读取连接列表失败：{err}"),
+                ),
+            }
+        });
+    }
+
+    pub fn kill_connection(&self, id: &str) {
+        let settings = self.inner.settings.read().clone();
+        if settings.core != CoreKind::SingBox {
+            self.toast(ToastLevel::Warning, "当前 core 不支持断开单个连接");
+            return;
+        }
+        let id = id.to_string();
+        let service = self.clone();
+        self.spawn(async move {
+            let client = ClashClient::new(settings.api_port, "");
+            match client.close_connection(&id).await {
+                Ok(()) => {
+                    service.toast(ToastLevel::Info, "连接已断开");
+                    service.inner.connections.write().retain(|c| c.id != id);
+                }
+                Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
+            }
+        });
+    }
+
+    pub fn kill_all_connections(&self) {
+        let settings = self.inner.settings.read().clone();
+        if settings.core != CoreKind::SingBox {
+            self.toast(ToastLevel::Warning, "当前 core 不支持断开连接");
+            return;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            let client = ClashClient::new(settings.api_port, "");
+            match client.close_all_connections().await {
+                Ok(()) => {
+                    service.inner.connections.write().clear();
+                    service.toast(ToastLevel::Info, "所有连接已断开");
+                }
+                Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
+            }
+        });
+    }
+
+    fn start_monitor(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        self.spawn(async move {
+            let mut tick: u64 = 0;
+            let mut last_phase = crate::core::ProcessPhase::Stopped;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+                let Some(inner) = weak.upgrade() else { break };
+                let service = AppService {
+                    inner: inner.clone(),
+                };
+                let state = service.inner.core.state();
+                if state.phase == crate::core::ProcessPhase::Failed
+                    && last_phase != crate::core::ProcessPhase::Failed
+                {
+                    if let Some(exit) = &state.last_exit {
+                        service.toast(ToastLevel::Error, format!("core 已退出：{}", exit.reason));
+                    }
+                }
+                last_phase = state.phase;
+                if !state.phase.is_alive() {
+                    tick += 1;
+                    continue;
+                }
+                let settings = service.inner.settings.read().clone();
+                if settings.core == CoreKind::SingBox {
+                    let client = ClashClient::new(settings.api_port, "");
+                    if let Ok(response) = client.connections().await {
+                        inner
+                            .traffic
+                            .lock()
+                            .sample(response.upload_total, response.download_total);
+                        *inner.connections.write() = response.connections;
+                    }
+                    if tick % 5 == 0 {
+                        if let Ok(proxies) = client.proxies().await {
+                            *inner.proxies.write() = proxies.proxies;
+                        }
+                    }
+                } else if let Ok(binary) = inner.core.resolve_binary(CoreKind::Xray, &settings) {
+                    let client = XrayStatsClient::new(binary, settings.stats_port);
+                    if let Ok(traffic) = client.query().await {
+                        inner
+                            .traffic
+                            .lock()
+                            .sample(traffic.uplink, traffic.downlink);
+                    }
+                }
+                tick += 1;
+            }
+        });
+    }
+
+    fn start_subscription_scheduler(&self) {
+        let weak = Arc::downgrade(&self.inner);
+        self.spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+            loop {
+                let Some(inner) = weak.upgrade() else { break };
+                let service = AppService { inner };
+                let due: Vec<String> = service
+                    .inner
+                    .subs
+                    .read()
+                    .iter()
+                    .filter(|s| s.due_for_update())
+                    .map(|s| s.id.clone())
+                    .collect();
+                for id in due {
+                    service.refresh_subscription(&id);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Shutdown and misc
+    // ------------------------------------------------------------------
+
+    /// Best-effort cleanup called by the UI on exit.
+    pub fn shutdown(&self) {
+        let _ = self.persist_model();
+        if self.inner.settings.read().system_proxy {
+            let _ = self.inner.proxy.lock().restore();
+            let mut settings = self.inner.settings.read().clone();
+            settings.system_proxy = false;
+            let _ = settings.save(&self.inner.paths.settings_file());
+        }
+        *self.inner.pac.lock() = None;
+        let core = self.inner.core.clone();
+        let _ = self.inner.rt.block_on(async move {
+            let _ = core.stop().await;
+        });
+    }
+
+    /// Re-applies the system proxy with the current PAC/port settings.
+    /// Disabling and re-enabling is sequenced on the runtime so the two
+    /// command sequences can never interleave.
+    pub fn reapply_system_proxy(&self) {
+        if !self.inner.settings.read().system_proxy || self.is_busy("proxy") {
+            return;
+        }
+        self.disable_system_proxy();
+        let service = self.clone();
+        self.spawn(async move {
+            for _ in 0..100 {
+                if !service.is_busy("proxy") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            service.enable_system_proxy();
+        });
+    }
+
+    pub fn export_backup(&self) -> Result<String> {
+        let dir = self.inner.paths.backup_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Error::other(format!("创建备份目录失败：{e}")))?;
+        let path = dir.join(format!(
+            "xross-export-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        self.inner.store.export_json(&path)?;
+        self.toast(
+            ToastLevel::Success,
+            format!("备份已导出：{}", path.display()),
+        );
+        Ok(path.display().to_string())
+    }
+
+    pub fn backup_database(&self) -> Result<String> {
+        let path = self.inner.store.backup_database()?;
+        self.toast(
+            ToastLevel::Success,
+            format!("数据库已备份：{}", path.display()),
+        );
+        Ok(path.display().to_string())
+    }
+
+    // ------------------------------------------------------------------
+    // Link tracer
+    // ------------------------------------------------------------------
+
+    pub fn start_trace(&self, target: &str) -> Result<()> {
+        let parsed = trace::parse_target(target).map_err(Error::other)?;
+        let id = self.inner.trace_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let session = TraceSession::new(id, &parsed);
+        *self.inner.trace.write() = Some(session.clone());
+        let service = self.clone();
+        self.spawn(async move {
+            trace::run(service, session).await;
+        });
+        Ok(())
+    }
+
+    pub fn clear_trace(&self) {
+        self.inner.trace_generation.fetch_add(1, Ordering::SeqCst);
+        *self.inner.trace.write() = None;
+    }
+
+    pub(crate) fn publish_trace(&self, session: &TraceSession) {
+        let mut guard = self.inner.trace.write();
+        if guard.as_ref().map(|current| current.id) == Some(session.id) {
+            *guard = Some(session.clone());
+        }
+    }
+
+    pub(crate) fn is_trace_current(&self, id: u64) -> bool {
+        self.inner.trace.read().as_ref().map(|s| s.id) == Some(id)
+    }
+
+    pub fn compiled_config(&self) -> Option<CompiledConfig> {
+        self.inner.compiled.read().clone()
+    }
+
+    pub fn trace_snapshot(&self) -> Option<TraceSession> {
+        self.inner.trace.read().clone()
+    }
+
+    pub fn open_url(&self, url: &str) {
+        let url = url.to_string();
+        self.spawn(async move {
+            #[cfg(target_os = "linux")]
+            let program = "xdg-open";
+            #[cfg(target_os = "macos")]
+            let program = "open";
+            #[cfg(target_os = "windows")]
+            let program = "cmd";
+            #[cfg(target_os = "windows")]
+            let args = vec!["/C".to_string(), "start".to_string(), String::new(), url];
+            #[cfg(not(target_os = "windows"))]
+            let args = vec![url];
+            let _ = tokio::process::Command::new(program).args(args).spawn();
+        });
+    }
+
+    pub fn platform_proxy_backend(&self) -> String {
+        self.inner.proxy.lock().backend().label().to_string()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LatencyScope {
+    All,
+    Node(String),
+    Group(String),
+}
+
+fn default_rule_set(tag: &str) -> Option<crate::model::RuleSet> {
+    if let Some(name) = tag.strip_prefix("geosite-") {
+        return Some(crate::model::RuleSet {
+            tag: tag.into(),
+            url: format!(
+                "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{name}.srs"
+            ),
+            format: crate::model::RuleSetFormat::Binary,
+            download_detour: false,
+            update_interval_hours: 168,
+        });
+    }
+    if let Some(code) = tag.strip_prefix("geoip-") {
+        return Some(crate::model::RuleSet {
+            tag: tag.into(),
+            url: format!(
+                "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs"
+            ),
+            format: crate::model::RuleSetFormat::Binary,
+            download_detour: false,
+            update_interval_hours: 168,
+        });
+    }
+    None
+}
+
+fn pretty_host(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "订阅".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Protocol;
+
+    fn service() -> (AppService, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        let service = AppService::with_paths(paths).unwrap();
+        (service, dir)
+    }
+
+    #[test]
+    fn imports_links_and_exports() {
+        let (service, _dir) = service();
+        let link = "vless://11111111-2222-3333-4444-555555555555@example.com:443?security=tls&sni=example.com#Node";
+        let added = service.import_content(link);
+        assert_eq!(added, 1);
+        let model = service.model();
+        assert_eq!(model.nodes.len(), 1);
+        assert_eq!(model.nodes[0].protocol, Protocol::Vless);
+        let exported = service.export_links(&[model.nodes[0].id.clone()]);
+        assert!(exported.starts_with("vless://"));
+        assert!(service.node_qr(&model.nodes[0].id).unwrap().contains("██"));
+    }
+
+    #[test]
+    fn imports_clash_groups() {
+        let (service, _dir) = service();
+        let yaml = r#"
+proxies:
+  - name: A
+    type: ss
+    server: a.example.com
+    port: 8388
+    cipher: aes-256-gcm
+    password: pass
+proxy-groups:
+  - name: 我的组
+    type: url-test
+    proxies: [A]
+"#;
+        service.import_content(yaml);
+        let model = service.model();
+        assert!(model
+            .groups
+            .iter()
+            .any(|g| g.name == "我的组" && g.members.len() == 1));
+    }
+
+    #[test]
+    fn snapshots_are_consistent() {
+        let (service, _dir) = service();
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.app_version, APP_VERSION);
+        assert!(!snapshot.profiles.is_empty());
+        assert_eq!(snapshot.active_profile, service.store().active_profile_id());
+        assert_eq!(snapshot.settings.core, service.settings().core);
+    }
+
+    #[test]
+    fn profiles_can_be_created_and_switched() {
+        let (service, _dir) = service();
+        service.create_profile("工作").unwrap();
+        assert_eq!(service.model().name, "工作");
+        let profiles = service.snapshot().profiles;
+        assert_eq!(profiles.len(), 2);
+        service.switch_profile(&profiles[0].id).unwrap();
+        assert_eq!(service.model().name, profiles[0].name);
+    }
+
+    #[test]
+    fn settings_update_model_ports() {
+        let (service, _dir) = service();
+        let mut settings = service.settings();
+        settings.mixed_port = 10888;
+        service.update_settings(settings);
+        let model = service.model();
+        let mixed = model
+            .inbounds
+            .iter()
+            .find(|i| i.kind == InboundKind::Mixed)
+            .unwrap();
+        assert_eq!(mixed.port, 10888);
+    }
+
+    #[test]
+    fn route_preset_replaces_rules() {
+        let (service, _dir) = service();
+        service.set_route_preset(RoutePreset::Global);
+        assert!(service.model().routing.rules.is_empty());
+        service.set_route_preset(RoutePreset::BypassMainland);
+        assert!(!service.model().routing.rules.is_empty());
+    }
+
+    #[test]
+    fn subscription_merge_dedupes() {
+        let (service, _dir) = service();
+        let subscription = Subscription::new("sub", "https://example.com/sub");
+        service.store().save_subscription(&subscription).unwrap();
+        service.inner.subs.write().push(subscription.clone());
+        let content = "vless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A\nvless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A";
+        let parsed = parse_subscription(content);
+        let added = service.merge_parsed(&subscription.id, &parsed);
+        assert_eq!(added, 1);
+        assert_eq!(
+            service
+                .model()
+                .nodes_of_subscription(&subscription.id)
+                .len(),
+            1
+        );
+    }
+}

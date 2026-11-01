@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["crates/xross-core", "crates/xross-app", "crates/xross-cli"]
+exclude = [".probe", ".probe2"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/xross-app/xross"
+rust-version = "1.92"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate"] }
+futures-util = "0.3"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+directories = "5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
+fs2 = "0.4"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+url = "2"
+percent-encoding = "2"
+regex = "1"
+semver = "1"
+qrcode = { version = "0.14", default-features = false }
+interprocess = "2"
+bytes = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

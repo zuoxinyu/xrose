@@ -1,0 +1,594 @@
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::Input;
+use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::*;
+use xross_core::model::{
+    DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule,
+};
+use xross_core::route::action_label;
+
+use super::theme::palette;
+use super::widgets::*;
+use super::{AppView, MatcherKind};
+
+impl AppView {
+    pub(crate) fn page_routing(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let lang = self.lang();
+        let model = self.snapshot.model.clone();
+        let routing = model.routing.clone();
+        let dirty = self.snapshot.config_dirty;
+        let running = self.snapshot.process.phase.is_alive();
+
+        let mut body = div().flex().flex_col().gap_4().w_full();
+
+        if dirty {
+            body = body.child(
+                card(&p)
+                    .border_color(p.warning)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(p.fg)
+                                            .child(self.tr(
+                                                "路由已修改，尚未生效",
+                                                "Routing changed, not applied",
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .child(self.tr(
+                                                "xray / sing-box 都不支持热加载路由，应用会重启 core（切换节点除外）",
+                                                "Neither core hot-reloads routing. Applying restarts the core (node switching excepted).",
+                                            )),
+                                    ),
+                            )
+                            .child(
+                                Button::new("routing-apply")
+                                    .compact()
+                                    .warning()
+                                    .label(self.tr("应用配置", "Apply"))
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.apply_config();
+                                    })),
+                            ),
+                    ),
+            );
+        }
+
+        // Presets.
+        body = body.child(
+            card(&p)
+                .child(section_title(
+                    &p,
+                    self.tr("路由模板", "Routing presets"),
+                    self.tr(
+                        "以用户意图建模；“绕过大陆”会自动展开为域名/GeoIP 规则",
+                        "Intent-based presets; “Bypass mainland” expands into domain/GeoIP rules",
+                    ),
+                ))
+                .child(div().flex().flex_wrap().gap_2().children(
+                    RoutePreset::all().into_iter().map(|preset| {
+                        let selected = routing.preset == preset;
+                        div()
+                            .id(SharedString::from(format!("preset-{preset:?}")))
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if selected { p.primary } else { p.border })
+                            .bg(if selected { p.accent } else { p.bg })
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.service.set_route_preset(preset);
+                                this.sync(cx);
+                            }))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(if selected { p.fg } else { p.muted_fg })
+                                    .child(self.route_preset_label(preset)),
+                            )
+                    }),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_6()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    toggle(
+                                        "bypass-lan",
+                                        self.tr("局域网直连", "Bypass LAN"),
+                                        routing.bypass_lan,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            let strategy =
+                                                this.snapshot.model.routing.domain_strategy;
+                                            let china =
+                                                this.snapshot.model.routing.bypass_china_ips;
+                                            this.service
+                                                .set_routing_flags(*checked, china, strategy);
+                                            this.sync(cx);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle(
+                                        "bypass-china",
+                                        self.tr("中国大陆 IP 直连", "Bypass China IPs"),
+                                        routing.bypass_china_ips,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            let strategy =
+                                                this.snapshot.model.routing.domain_strategy;
+                                            let lan = this.snapshot.model.routing.bypass_lan;
+                                            this.service.set_routing_flags(lan, *checked, strategy);
+                                            this.sync(cx);
+                                        },
+                                    )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(self.tr("域名策略", "Domain strategy")),
+                                )
+                                .children(
+                                    [
+                                        (DomainStrategy::AsIs, "AsIs"),
+                                        (DomainStrategy::PreferIpv4, "IPv4"),
+                                        (DomainStrategy::PreferIpv6, "IPv6"),
+                                        (DomainStrategy::IpIfNonMatch, "IPIfNonMatch"),
+                                    ]
+                                    .into_iter()
+                                    .map(
+                                        |(strategy, label)| {
+                                            let selected = routing.domain_strategy == strategy;
+                                            div()
+                                                .id(SharedString::from(format!("strategy-{label}")))
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .text_xs()
+                                                .border_1()
+                                                .border_color(if selected {
+                                                    p.primary
+                                                } else {
+                                                    p.border
+                                                })
+                                                .bg(if selected { p.accent } else { p.bg })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    let model = &this.snapshot.model.routing;
+                                                    this.service.set_routing_flags(
+                                                        model.bypass_lan,
+                                                        model.bypass_china_ips,
+                                                        strategy,
+                                                    );
+                                                    this.sync(cx);
+                                                }))
+                                                .child(label.to_string())
+                                        },
+                                    ),
+                                ),
+                        ),
+                ),
+        );
+
+        // Rules.
+        body = body.child(
+            card(&p)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(section_title(
+                            &p,
+                            self.tr("路由规则", "Rules"),
+                            self.tr(
+                                "按顺序匹配，命中即停",
+                                "Evaluated top-down, first match wins",
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("toggle-rule-form")
+                                        .compact()
+                                        .primary()
+                                        .label(if self.show_rule_form {
+                                            self.tr("收起", "Close")
+                                        } else {
+                                            self.tr("添加规则", "Add rule")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_rule_form = !this.show_rule_form;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("validate-route")
+                                        .compact()
+                                        .label(self.tr("校验", "Validate"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.validate_config();
+                                        })),
+                                ),
+                        ),
+                )
+                .when(self.show_rule_form, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .p_3()
+                            .rounded_md()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .child(div().w(px(180.)).child(Input::new(&self.rule_name)))
+                                    .child(div().flex_1().child(Input::new(&self.rule_value))),
+                            )
+                            .child(
+                                div().flex().items_center().gap_2().flex_wrap().children(
+                                    [
+                                        MatcherKind::Domain,
+                                        MatcherKind::Suffix,
+                                        MatcherKind::Geo,
+                                        MatcherKind::Ip,
+                                        MatcherKind::Process,
+                                        MatcherKind::Port,
+                                    ]
+                                    .into_iter()
+                                    .map(|kind| {
+                                        let selected = self.matcher_kind == kind;
+                                        div()
+                                            .id(SharedString::from(format!("matcher-{kind:?}")))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .border_1()
+                                            .border_color(if selected {
+                                                p.primary
+                                            } else {
+                                                p.border
+                                            })
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.matcher_kind = kind;
+                                                cx.notify();
+                                            }))
+                                            .child(kind.label(lang))
+                                    }),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(p.muted_fg)
+                                                    .child(self.tr("动作", "Action")),
+                                            )
+                                            .children(
+                                                [
+                                                    (
+                                                        RouteActionKind::Proxy,
+                                                        self.tr("代理", "Proxy"),
+                                                    ),
+                                                    (
+                                                        RouteActionKind::Direct,
+                                                        self.tr("直连", "Direct"),
+                                                    ),
+                                                    (
+                                                        RouteActionKind::Block,
+                                                        self.tr("阻止", "Block"),
+                                                    ),
+                                                ]
+                                                .into_iter()
+                                                .map(|(kind, label)| {
+                                                    let selected = self.rule_action == kind;
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "rule-action-{kind:?}"
+                                                        )))
+                                                        .px_2()
+                                                        .py_1()
+                                                        .rounded_md()
+                                                        .text_xs()
+                                                        .border_1()
+                                                        .border_color(if selected {
+                                                            p.primary
+                                                        } else {
+                                                            p.border
+                                                        })
+                                                        .bg(if selected { p.accent } else { p.bg })
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.rule_action = kind;
+                                                                cx.notify();
+                                                            },
+                                                        ))
+                                                        .child(label)
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("save-rule")
+                                            .compact()
+                                            .primary()
+                                            .label(self.tr("保存规则", "Save rule"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let name =
+                                                    this.rule_name.read(cx).value().to_string();
+                                                let raw =
+                                                    this.rule_value.read(cx).value().to_string();
+                                                let values: Vec<String> = raw
+                                                    .split(',')
+                                                    .map(|s| s.trim().to_string())
+                                                    .filter(|s| !s.is_empty())
+                                                    .collect();
+                                                if values.is_empty() {
+                                                    this.service.toast(
+                                                        xross_core::service::ToastLevel::Warning,
+                                                        "请填写匹配值",
+                                                    );
+                                                    return;
+                                                }
+                                                let mut matchers = Matchers::default();
+                                                match this.matcher_kind {
+                                                    MatcherKind::Domain => {
+                                                        matchers.domains = values
+                                                    }
+                                                    MatcherKind::Suffix => {
+                                                        matchers.domain_suffixes = values
+                                                    }
+                                                    MatcherKind::Geo => matchers.geosites = values,
+                                                    MatcherKind::Ip => matchers.ip_cidrs = values,
+                                                    MatcherKind::Process => {
+                                                        matchers.process_names = values
+                                                    }
+                                                    MatcherKind::Port => matchers.ports = values,
+                                                }
+                                                let rule = RouteRule::new(
+                                                    if name.trim().is_empty() {
+                                                        "自定义规则".into()
+                                                    } else {
+                                                        name
+                                                    },
+                                                    matchers,
+                                                    RouteAction {
+                                                        kind: this.rule_action,
+                                                        group: None,
+                                                    },
+                                                );
+                                                this.service.upsert_rule(rule);
+                                                this.show_rule_form = false;
+                                                this.sync(cx);
+                                            })),
+                                    ),
+                            ),
+                    )
+                })
+                .when(routing.rules.is_empty(), |d| {
+                    d.child(empty_hint(
+                        &p,
+                        self.tr("当前模板没有额外规则", "No extra rules in this preset"),
+                    ))
+                })
+                .children(routing.rules.iter().map(|rule| {
+                    let rule_id = rule.id.clone();
+                    let rule_id_toggle = rule.id.clone();
+                    let rule_id_delete = rule.id.clone();
+                    let enabled = rule.enabled;
+                    div()
+                        .id(SharedString::from(format!("rule-{}", rule.id)))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .p_3()
+                        .rounded_md()
+                        .bg(p.bg)
+                        .border_1()
+                        .border_color(p.border)
+                        .child(
+                            toggle(
+                                SharedString::from(format!("rule-enabled-{}", rule.id)),
+                                "",
+                                enabled,
+                            )
+                            .on_change(cx.listener(
+                                move |this, checked, _, cx| {
+                                    this.service.set_rule_enabled(&rule_id_toggle, *checked);
+                                    this.sync(cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_0p5()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(if enabled { p.fg } else { p.muted_fg })
+                                        .child(rule.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(rule.matchers.summary()),
+                                ),
+                        )
+                        .child(pill(
+                            action_label(&model, &rule.action),
+                            p.primary_fg,
+                            match rule.action.kind {
+                                RouteActionKind::Proxy => p.primary,
+                                RouteActionKind::Direct => p.success,
+                                RouteActionKind::Block => p.danger,
+                            },
+                        ))
+                        .child(
+                            Button::new(SharedString::from(format!("delete-rule-{}", rule_id)))
+                                .compact()
+                                .ghost()
+                                .label("✕")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.service.delete_rule(&rule_id_delete);
+                                    this.sync(cx);
+                                })),
+                        )
+                })),
+        );
+
+        // Rule sets / geo data.
+        body = body.child(
+            card(&p)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(section_title(
+                            &p,
+                            self.tr("规则集 / Geo 数据", "Rule sets / Geo data"),
+                            self.tr(
+                                "sing-box 使用 .srs rule-set（新版已移除 geoip/geosite 字段）；Xray 使用原生 geo 字段",
+                                "sing-box uses .srs rule-sets (legacy geoip/geosite fields were removed); Xray uses native geo fields",
+                            ),
+                        ))
+                        .child(
+                            Button::new("sync-rulesets")
+                                .compact()
+                                .label(self.tr("更新规则集", "Update rule-sets"))
+                                .loading(self.snapshot.busy.iter().any(|b| b == "rulesets"))
+                                .on_click(cx.listener(|this, _, _, _| {
+                                    this.service.sync_rule_sets();
+                                })),
+                        ),
+                )
+                .children(routing.rule_sets.iter().map(|set| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .rounded_md()
+                        .bg(p.bg)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(div().text_sm().text_color(p.fg).child(set.tag.clone()))
+                                .child(pill(set.format.as_str(), p.muted_fg, p.panel_alt)),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .child(set.url.clone()),
+                        )
+                }))
+                .when(!self.snapshot.rule_set_updates.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .children(self.snapshot.rule_set_updates.iter().map(|update| {
+                                div()
+                                    .text_xs()
+                                    .text_color(if update.status == "failed" { p.danger } else { p.muted_fg })
+                                    .child(format!(
+                                        "{} · {} · {}",
+                                        update.tag,
+                                        update.status,
+                                        update.error.clone().unwrap_or_else(|| format!("{} B", update.bytes))
+                                    ))
+                            })),
+                    )
+                }),
+        );
+
+        // Validation / warnings.
+        if let Some(validation) = &self.snapshot.validation {
+            if !validation.ok || !self.snapshot.compiled_warnings.is_empty() {
+                body = body.child(
+                    card(&p)
+                        .border_color(if validation.ok { p.warning } else { p.danger })
+                        .child(section_title(
+                            &p,
+                            self.tr("编译与校验", "Compile & validation"),
+                            validation.summary(),
+                        ))
+                        .children(validation.issues.iter().map(|issue| {
+                            div()
+                                .text_xs()
+                                .text_color(p.danger)
+                                .child(match issue.line {
+                                    Some(line) => format!("第 {line} 行：{}", issue.message),
+                                    None => issue.message.clone(),
+                                })
+                        }))
+                        .children(self.snapshot.compiled_warnings.iter().map(|warning| {
+                            div().text_xs().text_color(p.warning).child(warning.clone())
+                        })),
+                );
+            }
+        }
+
+        let _ = (lang, running);
+        body
+    }
+}
