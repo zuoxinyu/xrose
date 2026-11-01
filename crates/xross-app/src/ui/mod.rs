@@ -18,7 +18,7 @@ use gpui_kit::*;
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
 use xross_core::settings::{Language, LogLevel};
-use xross_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
+use xross_core::trace::{TracePhase, TraceStepKind};
 use xross_core::AppService;
 
 use self::theme::{palette, Palette};
@@ -144,7 +144,8 @@ pub struct AppView {
     pub(crate) endpoint_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) trace_anim: f32,
-    pub(crate) trace_animating: bool,
+    pub(crate) auto_trace_started: bool,
+    pub(crate) last_refresh: std::time::Instant,
 
     pub(crate) show_subscription_form: bool,
     pub(crate) show_rule_form: bool,
@@ -202,7 +203,9 @@ impl AppView {
         );
         let trace_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("https://example.com 或 tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1")
+                .placeholder(
+                    "https://example.com 或 tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
+                )
                 .default_value("https://www.gstatic.com/generate_204")
         });
 
@@ -215,7 +218,7 @@ impl AppView {
             "settings" => Page::Settings,
             _ => Page::Nodes,
         };
-        let view = Self {
+        let mut view = Self {
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
             logo_hero: crate::brand_assets::logo_hero(),
@@ -237,7 +240,8 @@ impl AppView {
             endpoint_input,
             trace_input,
             trace_anim: 0.0,
-            trace_animating: false,
+            auto_trace_started: false,
+            last_refresh: std::time::Instant::now(),
             show_subscription_form: false,
             show_rule_form: false,
             show_dns_form: false,
@@ -249,32 +253,7 @@ impl AppView {
             qr_node: None,
             show_qr: false,
         };
-        view.start_refresh(cx);
         view
-    }
-
-    fn start_refresh(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(400))
-                .await;
-            let updated = this.update(cx, |view, cx| {
-                view.snapshot = view.service.snapshot();
-                if view
-                    .selected_group
-                    .as_ref()
-                    .map(|id| view.snapshot.model.group(id).is_none())
-                    .unwrap_or(true)
-                {
-                    view.selected_group = view.snapshot.model.default_group_id();
-                }
-                cx.notify();
-            });
-            if updated.is_err() {
-                break;
-            }
-        })
-        .detach();
     }
 
     fn tr(&self, zh: &'static str, en: &'static str) -> SharedString {
@@ -290,39 +269,62 @@ impl AppView {
         cx.notify();
     }
 
-    pub(crate) fn start_trace_animation(&mut self, cx: &mut Context<Self>) {
-        if self.trace_animating {
-            return;
-        }
-        self.trace_animating = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(40))
-                    .await;
-                let keep = this.update(cx, |view, cx| {
-                    view.trace_anim = (view.trace_anim + 0.011) % 1.0;
-                    if let Some(trace) = view.service.trace_snapshot() {
-                        view.snapshot.trace = Some(trace);
-                    }
-                    cx.notify();
-                    let active = view
-                        .snapshot
-                        .trace
-                        .as_ref()
-                        .map(|trace| !matches!(trace.phase, TracePhase::Done | TracePhase::Failed))
-                        .unwrap_or(false);
-                    if !active {
-                        view.trace_animating = false;
-                    }
-                    active
-                });
-                if !matches!(keep, Ok(true)) {
-                    break;
+    /// Called by the main-thread tick task. Polls state, advances the trace
+    /// animation and repaints only when something changed.
+    pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
+        if !self.auto_trace_started {
+            self.auto_trace_started = true;
+            if let Ok(target) = std::env::var("XROSS_TRACE") {
+                if !target.trim().is_empty() {
+                    let _ = self.service.start_trace(&target);
                 }
             }
-        })
-        .detach();
+        }
+        let now = std::time::Instant::now();
+        let current = self.service.trace_snapshot();
+        let active = current
+            .as_ref()
+            .map(|trace| !matches!(trace.phase, TracePhase::Done | TracePhase::Failed))
+            .unwrap_or(false);
+        let changed = match (&current, &self.snapshot.trace) {
+            (Some(new), Some(old)) => {
+                new.phase != old.phase
+                    || new.response_ms != old.response_ms
+                    || new.summary != old.summary
+                    || new.steps.iter().zip(old.steps.iter()).any(|(a, b)| {
+                        a.status != b.status
+                            || a.detail != b.detail
+                            || a.duration_ms != b.duration_ms
+                    })
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        if current.is_some() {
+            self.snapshot.trace = current;
+        }
+        if active {
+            self.trace_anim = (self.trace_anim + 0.018) % 1.0;
+            cx.notify();
+            return;
+        }
+        let refresh_due = now.duration_since(self.last_refresh) >= Duration::from_millis(400);
+        if refresh_due {
+            self.snapshot = self.service.snapshot();
+            self.last_refresh = now;
+            if self
+                .selected_group
+                .as_ref()
+                .map(|id| self.snapshot.model.group(id).is_none())
+                .unwrap_or(true)
+            {
+                self.selected_group = self.snapshot.model.default_group_id();
+            }
+            cx.notify();
+        } else if changed {
+            cx.notify();
+        }
     }
 
     fn trace_step_label(&self, kind: TraceStepKind) -> SharedString {

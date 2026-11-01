@@ -23,8 +23,8 @@ use crate::settings::LogLevel;
 use crate::settings::Settings;
 use crate::storage::{LatencyEntry, ProfileMeta, Store};
 use crate::subscription::{parse_subscription, qr_ascii, Subscription, SubscriptionUsage};
-use crate::trace::{self, TraceSession};
 use crate::system::{self, DoctorCheck, PacServer, ProxyManager};
+use crate::trace::{self, TraceSession};
 use crate::updates::{self, AppUpdate, RuleSetUpdate, UpdateCandidate};
 use crate::util::now_unix;
 
@@ -2183,8 +2183,20 @@ impl AppService {
 
     pub(crate) fn publish_trace(&self, session: &TraceSession) {
         let mut guard = self.inner.trace.write();
-        if guard.as_ref().map(|current| current.id) == Some(session.id) {
+        let current = guard.as_ref().map(|current| current.id);
+        if current == Some(session.id) {
+            if std::env::var_os("XROSS_DEBUG_TRACE").is_some() {
+                eprintln!(
+                    "[trace] publish {:?} success={:?} summary={:?}",
+                    session.phase, session.success, session.summary
+                );
+            }
             *guard = Some(session.clone());
+        } else if std::env::var_os("XROSS_DEBUG_TRACE").is_some() {
+            eprintln!(
+                "[trace] drop publish id {} current {:?}",
+                session.id, current
+            );
         }
     }
 

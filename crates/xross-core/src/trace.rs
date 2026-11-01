@@ -48,7 +48,10 @@ impl TraceProtocol {
         }
     }
     fn is_stream(&self) -> bool {
-        matches!(self, TraceProtocol::Tcp | TraceProtocol::Http | TraceProtocol::Https)
+        matches!(
+            self,
+            TraceProtocol::Tcp | TraceProtocol::Http | TraceProtocol::Https
+        )
     }
     fn scheme(&self) -> &'static str {
         match self {
@@ -75,7 +78,13 @@ impl TraceTarget {
     pub fn display(&self) -> String {
         match self.protocol {
             TraceProtocol::Icmp => format!("icmp://{}", self.host),
-            _ => format!("{}://{}:{}{}", self.protocol.scheme(), self.host, self.port, self.path),
+            _ => format!(
+                "{}://{}:{}{}",
+                self.protocol.scheme(),
+                self.host,
+                self.port,
+                self.path
+            ),
         }
     }
 }
@@ -331,13 +340,16 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     // Source -----------------------------------------------------------
     let stage = Instant::now();
-    session.activate(TraceStepKind::Source, format!("Xross 测试链接 · {}", target.display()));
+    session.activate(
+        TraceStepKind::Source,
+        format!("Xross 测试链接 · {}", target.display()),
+    );
     publish(service, session)?;
     sleep(120).await;
     session.set(
         TraceStepKind::Source,
         TraceStatus::Ok,
-        format!("来自连接页的手动请求 · {}", target.original),
+        format!("Xross 手动测试 · {}", target.protocol.label()),
         Some(stage.elapsed().as_millis() as u64),
     );
 
@@ -348,7 +360,11 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     sleep(100).await;
     session.set(
         TraceStepKind::Inbound,
-        if inbound.0 { TraceStatus::Ok } else { TraceStatus::Warn },
+        if inbound.0 {
+            TraceStatus::Ok
+        } else {
+            TraceStatus::Warn
+        },
         inbound.1.clone(),
         None,
     );
@@ -379,26 +395,51 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 ips.dedup();
                 if ips.is_empty() {
                     let msg = "DNS 未返回任何地址".to_string();
-                    session.set(TraceStepKind::Dns, TraceStatus::Error, &msg, Some(dns_started.elapsed().as_millis() as u64));
+                    session.set(
+                        TraceStepKind::Dns,
+                        TraceStatus::Error,
+                        &msg,
+                        Some(dns_started.elapsed().as_millis() as u64),
+                    );
                     return Err(msg);
                 }
                 resolved_ip = ips.first().copied();
                 session.resolved_ips = ips.iter().map(|ip| ip.to_string()).collect();
                 let server = choose_dns_server(&model, &target.host);
                 session.dns_server = server.map(|s| format!("{} · {}", s.tag, s.display_address()));
-                let fake = if model.dns.fake_ip { " · fake-ip 已启用，core 内部会使用映射地址" } else { "" };
+                let fake = if model.dns.fake_ip {
+                    " · fake-ip 已启用，core 内部会使用映射地址"
+                } else {
+                    ""
+                };
                 let detail = format!(
                     "系统解析 {} → {}{}{}",
                     target.host,
-                    ips.iter().take(3).map(|ip| ip.to_string()).collect::<Vec<_>>().join(", "),
-                    server.map(|s| format!(" · DNS: {} ({})", s.tag, s.display_address())).unwrap_or_default(),
+                    ips.iter()
+                        .take(3)
+                        .map(|ip| ip.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    server
+                        .map(|s| format!(" · DNS: {} ({})", s.tag, s.display_address()))
+                        .unwrap_or_default(),
                     fake
                 );
-                session.set(TraceStepKind::Dns, TraceStatus::Ok, detail, Some(dns_started.elapsed().as_millis() as u64));
+                session.set(
+                    TraceStepKind::Dns,
+                    TraceStatus::Ok,
+                    detail,
+                    Some(dns_started.elapsed().as_millis() as u64),
+                );
             }
             Ok(Err(err)) => {
                 let msg = format!("DNS 解析失败：{err}");
-                session.set(TraceStepKind::Dns, TraceStatus::Error, &msg, Some(dns_started.elapsed().as_millis() as u64));
+                session.set(
+                    TraceStepKind::Dns,
+                    TraceStatus::Error,
+                    &msg,
+                    Some(dns_started.elapsed().as_millis() as u64),
+                );
                 return Err(msg);
             }
             Err(_) => {
@@ -424,13 +465,21 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         ..Default::default()
     };
     let preview = route::evaluate(&model, &info);
-    let action_label = route::action_label(&model, &preview.action);
-    let group = preview
-        .action
+    let effective_action = if preview.needs_core {
+        model.routing.final_action.clone()
+    } else {
+        preview.action.clone()
+    };
+    let action_label = route::action_label(&model, &effective_action);
+    let group = effective_action
         .group
         .clone()
         .and_then(|gid| model.group(&gid).cloned())
-        .or_else(|| model.default_group_id().and_then(|gid| model.group(&gid).cloned()));
+        .or_else(|| {
+            model
+                .default_group_id()
+                .and_then(|gid| model.group(&gid).cloned())
+        });
     if let Some(group) = &group {
         session.group_name = Some(group.name.clone());
         if let Some(node_id) = group.active_node() {
@@ -440,11 +489,17 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     session.activate(TraceStepKind::Route, "正在匹配路由规则…");
     publish(service, session)?;
     sleep(110).await;
-    let route_detail = format!("{} · {}", preview.explanation, action_label);
+    let route_detail = if preview.needs_core && !running {
+        format!("依赖 geo/rule-set，core 未运行；按默认出站预览 · {action_label}")
+    } else {
+        format!("{} · {}", preview.explanation, action_label)
+    };
     session.rule = preview.rule.as_ref().map(|r| r.name.clone());
     session.set(
         TraceStepKind::Route,
-        if preview.action.kind == RouteActionKind::Block {
+        if preview.needs_core {
+            TraceStatus::Warn
+        } else if effective_action.kind == RouteActionKind::Block {
             TraceStatus::Warn
         } else {
             TraceStatus::Ok
@@ -453,23 +508,43 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         None,
     );
 
-    if preview.action.kind == RouteActionKind::Block {
-        session.set(TraceStepKind::Outbound, TraceStatus::Skipped, "规则阻止，未发起出站连接", None);
-        session.set(TraceStepKind::Remote, TraceStatus::Skipped, "请求被路由规则拦截", None);
+    if !preview.needs_core && effective_action.kind == RouteActionKind::Block {
+        session.set(
+            TraceStepKind::Outbound,
+            TraceStatus::Skipped,
+            "规则阻止，未发起出站连接",
+            None,
+        );
+        session.set(
+            TraceStepKind::Remote,
+            TraceStatus::Skipped,
+            "请求被路由规则拦截",
+            None,
+        );
         session.phase = TracePhase::Done;
         session.success = Some(true);
-        session.summary = Some(format!("{} 被规则“{}”阻止，未发起网络连接", target.display(), preview.rule.as_ref().map(|r| r.name.as_str()).unwrap_or("阻止")));
+        session.summary = Some(format!(
+            "{} 被规则“{}”阻止，未发起网络连接",
+            target.display(),
+            preview
+                .rule
+                .as_ref()
+                .map(|r| r.name.as_str())
+                .unwrap_or("阻止")
+        ));
         session.finished_at = Some(now_unix());
         publish(service, session)?;
-        service
-            .logs()
-            .push(crate::core::logs::LogStream::App, crate::settings::LogLevel::Info, format!("测试链接：{} → 已按规则阻止", target.display()));
+        service.logs().push(
+            crate::core::logs::LogStream::App,
+            crate::settings::LogLevel::Info,
+            format!("测试链接：{} → 已按规则阻止", target.display()),
+        );
         return Ok(());
     }
     publish(service, session)?;
 
     // Outbound ---------------------------------------------------------
-    let direct = preview.action.kind == RouteActionKind::Direct;
+    let direct = effective_action.kind == RouteActionKind::Direct;
     let outbound_label = if direct {
         "direct（直连，不经过节点）".to_string()
     } else {
@@ -499,6 +574,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     let ports = proxy_ports(compiled.as_ref(), &model);
     let use_proxy = running && !direct;
+    let used_direct = !use_proxy;
     if use_proxy && ports.socks.is_none() && target.protocol.is_stream() {
         session.set(
             TraceStepKind::Outbound,
@@ -512,7 +588,13 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     if !running {
         session.activate(TraceStepKind::Remote, "core 未运行，本机直连…");
     } else {
-        session.activate(TraceStepKind::Remote, format!("通过 {outbound_label} 访问 {}:{}…", target.host, target.port));
+        session.activate(
+            TraceStepKind::Remote,
+            format!(
+                "通过 {outbound_label} 访问 {}:{}…",
+                target.host, target.port
+            ),
+        );
     }
     publish(service, session)?;
     sleep(90).await;
@@ -525,7 +607,16 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         TraceProtocol::Tcp => {
             if use_proxy {
                 match ports.socks {
-                    Some(socks) => tcp_probe(service, &settings, socks, &target, running && settings.core == CoreKind::SingBox).await,
+                    Some(socks) => {
+                        tcp_probe(
+                            service,
+                            &settings,
+                            socks,
+                            &target,
+                            running && settings.core == CoreKind::SingBox,
+                        )
+                        .await
+                    }
                     None => tcp_direct(&target).await,
                 }
             } else {
@@ -535,7 +626,16 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         TraceProtocol::Udp => {
             if use_proxy {
                 match ports.socks {
-                    Some(socks) => udp_probe(service, &settings, socks, &target, running && settings.core == CoreKind::SingBox).await,
+                    Some(socks) => {
+                        udp_probe(
+                            service,
+                            &settings,
+                            socks,
+                            &target,
+                            running && settings.core == CoreKind::SingBox,
+                        )
+                        .await
+                    }
                     None => udp_direct(&target).await,
                 }
             } else {
@@ -560,9 +660,19 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         };
         if let Some(rule) = rule_text {
             session.rule = Some(rule.clone());
-            if let Some(step) = session.steps.iter_mut().find(|s| s.kind == TraceStepKind::Route) {
+            if let Some(step) = session
+                .steps
+                .iter_mut()
+                .find(|s| s.kind == TraceStepKind::Route)
+            {
                 step.status = TraceStatus::Ok;
-                step.detail = format!("实际规则：{rule} → {}", session.group_name.clone().unwrap_or_else(|| action_label.clone()));
+                step.detail = format!(
+                    "实际规则：{rule} → {}",
+                    session
+                        .group_name
+                        .clone()
+                        .unwrap_or_else(|| action_label.clone())
+                );
             }
         }
         let (group_name, node) = chain_info(&model, &connection.chains);
@@ -571,7 +681,11 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         }
         if let Some(node) = node {
             session.node_name = Some(node.name.clone());
-            if let Some(step) = session.steps.iter_mut().find(|s| s.kind == TraceStepKind::Outbound) {
+            if let Some(step) = session
+                .steps
+                .iter_mut()
+                .find(|s| s.kind == TraceStepKind::Outbound)
+            {
                 step.status = TraceStatus::Ok;
                 step.detail = format!(
                     "{} · {} · {}",
@@ -585,7 +699,12 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     let remote_duration = remote.duration_ms;
     let remote_detail = remote.detail.clone();
-    session.set(TraceStepKind::Remote, remote.status, remote_detail.clone(), remote_duration);
+    session.set(
+        TraceStepKind::Remote,
+        remote.status,
+        remote_detail.clone(),
+        remote_duration,
+    );
     if remote.status == TraceStatus::Ok || remote.status == TraceStatus::Warn {
         session.success = Some(true);
     } else {
@@ -604,16 +723,27 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     sleep(220).await;
     let response_ms = remote.duration_ms.unwrap_or(0);
     session.response_ms = Some(response_ms);
-    let endpoint = session
-        .node_name
-        .clone()
-        .map(|node| format!("节点 {node}"))
-        .unwrap_or_else(|| "直连".into());
+    let endpoint = if used_direct {
+        "直连".to_string()
+    } else {
+        session
+            .node_name
+            .clone()
+            .map(|node| format!("节点 {node}"))
+            .unwrap_or_else(|| "代理".into())
+    };
     if session.success == Some(true) {
         session.set(
             TraceStepKind::Response,
             TraceStatus::Ok,
-            format!("{} → Xross · {response_ms} ms", if direct { "目标 → 直连".into() } else { format!("目标 → {endpoint}") }),
+            format!(
+                "{} → Xross · {response_ms} ms",
+                if direct {
+                    "目标 → 直连".into()
+                } else {
+                    format!("目标 → {endpoint}")
+                }
+            ),
             Some(response_ms),
         );
         session.phase = TracePhase::Done;
@@ -622,13 +752,22 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             session.target,
             remote_detail,
             overall.elapsed().as_millis(),
-            if remote.warning.is_some() { format!(" · {}", remote.warning.clone().unwrap_or_default()) } else { String::new() }
+            if remote.warning.is_some() {
+                format!(" · {}", remote.warning.clone().unwrap_or_default())
+            } else {
+                String::new()
+            }
         ));
         session.finished_at = Some(now_unix());
         service.logs().push(
             crate::core::logs::LogStream::App,
             crate::settings::LogLevel::Info,
-            format!("测试链接：{} → {}（{} ms）", target.display(), remote_detail, overall.elapsed().as_millis()),
+            format!(
+                "测试链接：{} → {}（{} ms）",
+                target.display(),
+                remote_detail,
+                overall.elapsed().as_millis()
+            ),
         );
     } else {
         session.phase = TracePhase::Failed;
@@ -678,7 +817,17 @@ fn pick_inbound(
         {
             return (
                 true,
-                format!("{} · {} :{} · {}", inbound.kind, inbound.tag, inbound.port, if inbound.allow_lan { "allow LAN" } else { "local" }),
+                format!(
+                    "{} · {} :{} · {}",
+                    inbound.kind,
+                    inbound.tag,
+                    inbound.port,
+                    if inbound.allow_lan {
+                        "allow LAN"
+                    } else {
+                        "local"
+                    }
+                ),
             );
         }
         if let Some(inbound) = compiled.inbounds.iter().find(|i| i.kind == "tun") {
@@ -688,14 +837,24 @@ fn pick_inbound(
             );
         }
     }
-    let inbound = model
-        .inbounds
-        .iter()
-        .find(|i| i.enabled && matches!(i.kind, crate::model::InboundKind::Mixed | crate::model::InboundKind::Socks | crate::model::InboundKind::Http));
+    let inbound = model.inbounds.iter().find(|i| {
+        i.enabled
+            && matches!(
+                i.kind,
+                crate::model::InboundKind::Mixed
+                    | crate::model::InboundKind::Socks
+                    | crate::model::InboundKind::Http
+            )
+    });
     match inbound {
         Some(inbound) => (
             true,
-            format!("{} · {} :{}", inbound.kind.as_str(), inbound.tag, inbound.port),
+            format!(
+                "{} · {} :{}",
+                inbound.kind.as_str(),
+                inbound.tag,
+                inbound.port
+            ),
         ),
         None => (false, "没有启用的本地代理入站".into()),
     }
@@ -706,10 +865,7 @@ struct ProxyPorts {
     http: Option<u16>,
 }
 
-fn proxy_ports(
-    compiled: Option<&crate::adapters::CompiledConfig>,
-    model: &AppModel,
-) -> ProxyPorts {
+fn proxy_ports(compiled: Option<&crate::adapters::CompiledConfig>, model: &AppModel) -> ProxyPorts {
     let mut socks = None;
     let mut http = None;
     if let Some(compiled) = compiled {
@@ -729,14 +885,26 @@ fn proxy_ports(
         socks = model
             .inbounds
             .iter()
-            .find(|i| i.enabled && matches!(i.kind, crate::model::InboundKind::Mixed | crate::model::InboundKind::Socks))
+            .find(|i| {
+                i.enabled
+                    && matches!(
+                        i.kind,
+                        crate::model::InboundKind::Mixed | crate::model::InboundKind::Socks
+                    )
+            })
             .map(|i| i.port);
     }
     if http.is_none() {
         http = model
             .inbounds
             .iter()
-            .find(|i| i.enabled && matches!(i.kind, crate::model::InboundKind::Mixed | crate::model::InboundKind::Http))
+            .find(|i| {
+                i.enabled
+                    && matches!(
+                        i.kind,
+                        crate::model::InboundKind::Mixed | crate::model::InboundKind::Http
+                    )
+            })
             .map(|i| i.port);
     }
     ProxyPorts { socks, http }
@@ -745,7 +913,11 @@ fn proxy_ports(
 fn choose_dns_server<'a>(model: &'a AppModel, host: &str) -> Option<&'a DnsServer> {
     let lower = host.to_ascii_lowercase();
     for server in model.dns.servers.iter().filter(|s| !s.is_fakeip()) {
-        if server.domains.iter().any(|rule| domain_rule_matches(rule, &lower)) {
+        if server
+            .domains
+            .iter()
+            .any(|rule| domain_rule_matches(rule, &lower))
+        {
             return Some(server);
         }
     }
@@ -753,7 +925,13 @@ fn choose_dns_server<'a>(model: &'a AppModel, host: &str) -> Option<&'a DnsServe
         .dns
         .final_server
         .as_ref()
-        .and_then(|tag| model.dns.servers.iter().find(|s| &s.tag == tag && !s.is_fakeip()))
+        .and_then(|tag| {
+            model
+                .dns
+                .servers
+                .iter()
+                .find(|s| &s.tag == tag && !s.is_fakeip())
+        })
         .or_else(|| model.dns.servers.iter().find(|s| !s.is_fakeip()))
 }
 
@@ -766,7 +944,10 @@ fn domain_rule_matches(rule: &str, host: &str) -> bool {
             _ => false,
         };
     }
-    if let Some(value) = rule.strip_prefix("domain:").or_else(|| rule.strip_prefix("full:")) {
+    if let Some(value) = rule
+        .strip_prefix("domain:")
+        .or_else(|| rule.strip_prefix("full:"))
+    {
         return host == value;
     }
     if let Some(value) = rule.strip_prefix("suffix:") {
@@ -810,9 +991,19 @@ struct RemoteResult {
     clash: Option<ClashConnection>,
 }
 
-async fn http_test(_service: &AppService, target: &TraceTarget, proxy_port: Option<u16>) -> RemoteResult {
+async fn http_test(
+    _service: &AppService,
+    target: &TraceTarget,
+    proxy_port: Option<u16>,
+) -> RemoteResult {
     let Some(url) = &target.url else {
-        return RemoteResult { status: TraceStatus::Error, detail: "缺少 HTTP URL".into(), duration_ms: None, warning: None, clash: None };
+        return RemoteResult {
+            status: TraceStatus::Error,
+            detail: "缺少 HTTP URL".into(),
+            duration_ms: None,
+            warning: None,
+            clash: None,
+        };
     };
     let started = Instant::now();
     let mut builder = reqwest::Client::builder()
@@ -835,7 +1026,13 @@ async fn http_test(_service: &AppService, target: &TraceTarget, proxy_port: Opti
     let client = match builder.build() {
         Ok(client) => client,
         Err(err) => {
-            return RemoteResult { status: TraceStatus::Error, detail: format!("HTTP 客户端创建失败：{err}"), duration_ms: None, warning: None, clash: None }
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail: format!("HTTP 客户端创建失败：{err}"),
+                duration_ms: None,
+                warning: None,
+                clash: None,
+            }
         }
     };
     let result = client.get(url).send().await;
@@ -847,12 +1044,21 @@ async fn http_test(_service: &AppService, target: &TraceTarget, proxy_port: Opti
             let text = format!(
                 "HTTP {} · {}{} · {} ms",
                 status.as_u16(),
-                if proxy_port.is_some() { "经 core 代理" } else { "直连" },
-                len.map(|len| format!(" · {}", format_bytes(len))).unwrap_or_default(),
+                if proxy_port.is_some() {
+                    "经 core 代理"
+                } else {
+                    "直连"
+                },
+                len.map(|len| format!(" · {}", format_bytes(len)))
+                    .unwrap_or_default(),
                 elapsed
             );
             RemoteResult {
-                status: if status.is_success() || status.is_redirection() { TraceStatus::Ok } else { TraceStatus::Warn },
+                status: if status.is_success() || status.is_redirection() {
+                    TraceStatus::Ok
+                } else {
+                    TraceStatus::Warn
+                },
                 detail: text,
                 duration_ms: Some(elapsed),
                 warning: None,
@@ -882,7 +1088,10 @@ async fn tcp_direct(target: &TraceTarget) -> RemoteResult {
             drop(stream);
             RemoteResult {
                 status: TraceStatus::Ok,
-                detail: format!("本机直连 {}:{} 成功 · {elapsed} ms", target.host, target.port),
+                detail: format!(
+                    "本机直连 {}:{} 成功 · {elapsed} ms",
+                    target.host, target.port
+                ),
                 duration_ms: Some(elapsed),
                 warning: None,
                 clash: None,
@@ -990,14 +1199,20 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
             match tokio::time::timeout(Duration::from_secs(3), sock.recv_from(&mut buf)).await {
                 Ok(Ok((n, from))) => RemoteResult {
                     status: TraceStatus::Ok,
-                    detail: format!("本机 UDP 发送成功，收到 {n} 字节响应（来自 {from}）· {} ms", started.elapsed().as_millis()),
+                    detail: format!(
+                        "本机 UDP 发送成功，收到 {n} 字节响应（来自 {from}）· {} ms",
+                        started.elapsed().as_millis()
+                    ),
                     duration_ms: Some(started.elapsed().as_millis() as u64),
                     warning: None,
                     clash: None,
                 },
                 _ => RemoteResult {
                     status: TraceStatus::Warn,
-                    detail: format!("本机 UDP 数据包已发出，3 秒内未收到响应（服务可能不回复）· {} ms", started.elapsed().as_millis()),
+                    detail: format!(
+                        "本机 UDP 数据包已发出，3 秒内未收到响应（服务可能不回复）· {} ms",
+                        started.elapsed().as_millis()
+                    ),
                     duration_ms: Some(started.elapsed().as_millis() as u64),
                     warning: Some("UDP 无响应".into()),
                     clash: None,
@@ -1069,7 +1284,9 @@ async fn udp_probe(
 fn udp_payload(port: u16) -> Vec<u8> {
     if port == 53 {
         // A minimal DNS A query for example.com.
-        let mut query = vec![0x58, 0x52, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut query = vec![
+            0x58, 0x52, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
         query.extend_from_slice(&[7, b'e', b'x', b'a', b'm', b'p', b'l', b'e']);
         query.extend_from_slice(&[3, b'c', b'o', b'm']);
         query.extend_from_slice(&[0x00, 0x00, 0x01, 0x00, 0x01]);
@@ -1109,12 +1326,18 @@ async fn icmp_test(target: &TraceTarget, running: bool, model: &AppModel) -> Rem
         }
     }
     command.arg(&target.host);
-    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     let output = tokio::time::timeout(Duration::from_secs(6), command.output()).await;
     let elapsed = started.elapsed().as_millis() as u64;
     let warning = if running {
         Some("ICMP 不经过 SOCKS/HTTP；只有启用 TUN auto_route 时才会被接管".to_string())
-    } else if !model.inbounds.iter().any(|i| i.enabled && i.kind == crate::model::InboundKind::Tun) {
+    } else if !model
+        .inbounds
+        .iter()
+        .any(|i| i.enabled && i.kind == crate::model::InboundKind::Tun)
+    {
         Some("ICMP 天生绕过代理，除非使用 TUN".to_string())
     } else {
         None
@@ -1141,7 +1364,11 @@ async fn icmp_test(target: &TraceTarget, running: bool, model: &AppModel) -> Rem
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
             RemoteResult {
                 status: TraceStatus::Error,
-                detail: if err.is_empty() { format!("ICMP Echo 失败（退出码 {:?}）", output.status.code()) } else { format!("ICMP Echo 失败：{err}") },
+                detail: if err.is_empty() {
+                    format!("ICMP Echo 失败（退出码 {:?}）", output.status.code())
+                } else {
+                    format!("ICMP Echo 失败：{err}")
+                },
                 duration_ms: Some(elapsed),
                 warning,
                 clash: None,
@@ -1168,9 +1395,15 @@ async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStr
     let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
         .await
         .map_err(|err| format!("连接 SOCKS 入站失败：{err}"))?;
-    stream.write_all(&[0x05, 0x01, 0x00]).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|e| e.to_string())?;
     let mut reply = [0u8; 2];
-    stream.read_exact(&mut reply).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut reply)
+        .await
+        .map_err(|e| e.to_string())?;
     if reply[0] != 0x05 || reply[1] != 0x00 {
         return Err("SOCKS5 不接受的认证方式".into());
     }
@@ -1197,9 +1430,15 @@ async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStr
     }
     request.push((port >> 8) as u8);
     request.push(port as u8);
-    stream.write_all(&request).await.map_err(|e| e.to_string())?;
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|e| e.to_string())?;
     let mut head = [0u8; 4];
-    stream.read_exact(&mut head).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut head)
+        .await
+        .map_err(|e| e.to_string())?;
     if head[0] != 0x05 || head[1] != 0x00 {
         return Err(format!("SOCKS5 CONNECT 失败（代码 {}）", head[1]));
     }
@@ -1208,13 +1447,19 @@ async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStr
         0x04 => 16 + 2,
         0x03 => {
             let mut len = [0u8; 1];
-            stream.read_exact(&mut len).await.map_err(|e| e.to_string())?;
+            stream
+                .read_exact(&mut len)
+                .await
+                .map_err(|e| e.to_string())?;
             len[0] as usize + 2
         }
         _ => return Err("SOCKS5 返回未知地址类型".into()),
     };
     let mut tail = vec![0u8; skip];
-    stream.read_exact(&mut tail).await.map_err(|e| e.to_string())?;
+    stream
+        .read_exact(&mut tail)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(stream)
 }
 
@@ -1227,9 +1472,15 @@ async fn socks5_udp_associate(
     let mut control = TcpStream::connect(("127.0.0.1", proxy_port))
         .await
         .map_err(|err| format!("连接 SOCKS 入站失败：{err}"))?;
-    control.write_all(&[0x05, 0x01, 0x00]).await.map_err(|e| e.to_string())?;
+    control
+        .write_all(&[0x05, 0x01, 0x00])
+        .await
+        .map_err(|e| e.to_string())?;
     let mut reply = [0u8; 2];
-    control.read_exact(&mut reply).await.map_err(|e| e.to_string())?;
+    control
+        .read_exact(&mut reply)
+        .await
+        .map_err(|e| e.to_string())?;
     if reply != [0x05, 0x00] {
         return Err("SOCKS5 认证失败".into());
     }
@@ -1239,41 +1490,61 @@ async fn socks5_udp_associate(
         .await
         .map_err(|e| e.to_string())?;
     let mut head = [0u8; 4];
-    control.read_exact(&mut head).await.map_err(|e| e.to_string())?;
+    control
+        .read_exact(&mut head)
+        .await
+        .map_err(|e| e.to_string())?;
     if head[0] != 0x05 || head[1] != 0x00 {
         return Err(format!("SOCKS5 UDP ASSOCIATE 失败（代码 {}）", head[1]));
     }
     let relay = match head[3] {
         0x01 => {
             let mut buf = [0u8; 6];
-            control.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+            control
+                .read_exact(&mut buf)
+                .await
+                .map_err(|e| e.to_string())?;
             std::net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])
         }
         0x04 => {
             let mut buf = [0u8; 18];
-            control.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
+            control
+                .read_exact(&mut buf)
+                .await
+                .map_err(|e| e.to_string())?;
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&buf[..16]);
             IpAddr::V6(std::net::Ipv6Addr::from(octets));
             let port = u16::from_be_bytes([buf[16], buf[17]]);
-            let addr = std::net::SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(octets)), port);
-            let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
+            let addr =
+                std::net::SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(octets)), port);
+            let socket = UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|e| e.to_string())?;
             let mut packet = vec![0, 0, 0];
             append_socks_target(&mut packet, host, port);
             packet.extend_from_slice(payload);
-            socket.send_to(&packet, addr).await.map_err(|e| e.to_string())?;
+            socket
+                .send_to(&packet, addr)
+                .await
+                .map_err(|e| e.to_string())?;
             return recv_socks_udp(&socket).await;
         }
         _ => return Err("SOCKS5 返回未知中继地址".into()),
     };
     let mut port_buf = [0u8; 2];
-    control.read_exact(&mut port_buf).await.map_err(|e| e.to_string())?;
+    control
+        .read_exact(&mut port_buf)
+        .await
+        .map_err(|e| e.to_string())?;
     let relay_port = u16::from_be_bytes(port_buf);
     let mut relay_ip = relay;
     if relay_ip.is_unspecified() {
         relay_ip = std::net::Ipv4Addr::LOCALHOST;
     }
-    let socket = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
+    let socket = UdpSocket::bind("0.0.0.0:0")
+        .await
+        .map_err(|e| e.to_string())?;
     let mut packet = vec![0, 0, 0];
     append_socks_target(&mut packet, host, port);
     packet.extend_from_slice(payload);
@@ -1372,7 +1643,10 @@ mod tests {
     #[test]
     fn dns_rule_matching_is_semantic() {
         assert!(domain_rule_matches("geosite:cn", "www.taobao.cn"));
-        assert!(!domain_rule_matches("geosite:geolocation-!cn", "www.taobao.cn"));
+        assert!(!domain_rule_matches(
+            "geosite:geolocation-!cn",
+            "www.taobao.cn"
+        ));
         assert!(domain_rule_matches("suffix:example.com", "a.example.com"));
         assert!(domain_rule_matches("fulldomain", "fulldomain"));
         assert!(!domain_rule_matches("suffix:example.com", "notexample.com"));

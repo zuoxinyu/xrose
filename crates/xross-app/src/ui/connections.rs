@@ -1,10 +1,9 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::prelude::InteractiveElement;
 use gpui_kit::*;
 use xross_core::model::CoreKind;
-use xross_core::trace::{TraceSession, TraceStatus, TraceStepKind};
 use xross_core::util::{format_bytes, format_speed};
 
 use super::theme::palette;
@@ -217,10 +216,15 @@ impl AppView {
     }
     fn trace_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let trace = self.snapshot.trace.clone();
+        let trace = self.service.trace_snapshot();
         let active = trace
             .as_ref()
-            .map(|t| !matches!(t.phase, xross_core::trace::TracePhase::Done | xross_core::trace::TracePhase::Failed))
+            .map(|t| {
+                !matches!(
+                    t.phase,
+                    xross_core::trace::TracePhase::Done | xross_core::trace::TracePhase::Failed
+                )
+            })
             .unwrap_or(false);
         let summary = trace.as_ref().and_then(|t| t.summary.clone());
         let success = trace.as_ref().and_then(|t| t.success).unwrap_or(false);
@@ -274,12 +278,11 @@ impl AppView {
                                 self.tr("开始测试", "Start test")
                             })
                             .loading(active)
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
                                 let target = this.trace_input.read(cx).value().to_string();
                                 match this.service.start_trace(&target) {
                                     Ok(()) => {
                                         this.trace_anim = 0.0;
-                                        this.start_trace_animation(cx);
                                     }
                                     Err(err) => this.service.toast(
                                         xross_core::service::ToastLevel::Error,
@@ -382,9 +385,9 @@ impl AppView {
             TraceStepKind::Remote,
         ];
         let centers = [62.0f32, 214.0, 366.0, 518.0, 670.0, 822.0];
-        let node_w = 116.0f32;
-        let node_h = 84.0f32;
-        let node_top = 40.0f32;
+        let node_w = 122.0f32;
+        let node_h = 92.0f32;
+        let node_top = 36.0f32;
         let req_y = 82.0f32;
         let resp_y = 238.0f32;
         let width = 900.0f32;
@@ -405,7 +408,7 @@ impl AppView {
                 TraceStatus::Pending => p.border,
             };
             let detail = step
-                .map(|s| truncate_trace(&s.detail, 38))
+                .map(|s| truncate_trace(&s.detail, 26))
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| self.tr("等待测试…", "waiting…").to_string());
             let duration = step
@@ -424,9 +427,14 @@ impl AppView {
                     .flex_col()
                     .gap_1()
                     .rounded_md()
-                    .bg(if status == TraceStatus::Active { p.accent } else { p.bg })
+                    .bg(if status == TraceStatus::Active {
+                        p.accent
+                    } else {
+                        p.bg
+                    })
                     .border_1()
                     .border_color(color)
+                    .overflow_hidden()
                     .child(
                         div()
                             .flex()
@@ -434,29 +442,19 @@ impl AppView {
                             .justify_between()
                             .gap_1()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .child(dot(color))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(p.fg)
-                                            .child(self.trace_step_label(*kind)),
-                                    ),
+                                div().flex().items_center().gap_1().child(dot(color)).child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.fg)
+                                        .child(self.trace_step_label(*kind)),
+                                ),
                             )
                             .when(!duration.is_empty(), |d| {
                                 d.child(div().text_xs().text_color(color).child(duration))
                             }),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(detail),
-                    ),
+                    .child(div().text_xs().text_color(p.muted_fg).child(detail)),
             );
         }
 
@@ -489,7 +487,13 @@ impl AppView {
             .and_then(|t| t.step(TraceStepKind::Response))
             .map(|s| truncate_trace(&s.detail, 96))
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.tr("响应会沿节点原路返回 Xross", "Response travels back through the node").to_string());
+            .unwrap_or_else(|| {
+                self.tr(
+                    "响应会沿节点原路返回 Xross",
+                    "Response travels back through the node",
+                )
+                .to_string()
+            });
 
         let graph = canvas(
             move |_bounds, _window, _cx| (),
@@ -522,26 +526,22 @@ impl AppView {
                     } else {
                         centers[5]
                     };
-                    let request = Bounds::new(
-                        at(request_x - 4.0, req_y - 4.0),
-                        size(px(8.0), px(8.0)),
-                    );
-                    window.paint_quad(
-                        fill(request, p.primary).corner_radii(Corners::all(px(4.0))),
-                    );
+                    let request =
+                        Bounds::new(at(request_x - 4.0, req_y - 4.0), size(px(8.0), px(8.0)));
+                    window.paint_quad(fill(request, p.primary).corner_radii(Corners::all(px(4.0))));
                     if matches!(
                         phase,
                         TracePhase::Response | TracePhase::Done | TracePhase::Failed
                     ) {
-                        let response_x =
-                            centers[5] - (centers[5] - centers[0]) * anim;
-                        let dot = Bounds::new(
-                            at(response_x - 4.0, resp_y - 4.0),
-                            size(px(8.0), px(8.0)),
-                        );
+                        let response_x = if matches!(phase, TracePhase::Done | TracePhase::Failed) {
+                            centers[0]
+                        } else {
+                            centers[5] - (centers[5] - centers[0]) * anim
+                        };
+                        let dot =
+                            Bounds::new(at(response_x - 4.0, resp_y - 4.0), size(px(8.0), px(8.0)));
                         window.paint_quad(
-                            fill(dot, response_color)
-                                .corner_radii(Corners::all(px(4.0))),
+                            fill(dot, response_color).corner_radii(Corners::all(px(4.0))),
                         );
                     }
                 }
@@ -553,49 +553,44 @@ impl AppView {
         .w(px(width))
         .h(px(height));
 
-        div()
-            .w_full()
-            .overflow_x_scroll()
-            .child(
-                div()
-                    .w(px(width))
-                    .h(px(height))
-                    .relative()
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(16.0))
-                            .top(px(8.0))
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr("请求路径", "Request path")),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(16.0))
-                            .top(px(200.0))
-                            .w(px(width - 32.0))
-                            .text_xs()
-                            .text_color(response_color)
-                            .child(response_detail),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(16.0))
-                            .top(px(220.0))
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr("响应路径", "Response path")),
-                    )
-                    .child(graph)
-                    .children(nodes),
-            )
+        div().w_full().overflow_x_scrollbar().child(
+            div()
+                .w(px(width))
+                .h(px(height))
+                .relative()
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(16.0))
+                        .top(px(8.0))
+                        .text_xs()
+                        .text_color(p.muted_fg)
+                        .child(self.tr("请求路径", "Request path")),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(16.0))
+                        .top(px(200.0))
+                        .w(px(width - 32.0))
+                        .text_xs()
+                        .text_color(response_color)
+                        .child(response_detail),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(16.0))
+                        .top(px(220.0))
+                        .text_xs()
+                        .text_color(p.muted_fg)
+                        .child(self.tr("响应路径", "Response path")),
+                )
+                .child(graph)
+                .children(nodes),
+        )
     }
-
 }
-
 
 fn truncate_trace(value: &str, max: usize) -> String {
     let chars: Vec<char> = value.chars().collect();

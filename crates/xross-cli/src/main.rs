@@ -23,6 +23,7 @@ fn main() {
         Some("core") => core_command(&args[1..]),
         Some("fetch-core") => fetch_core(&args[1..]),
         Some("run") => run_core(&args[1..]),
+        Some("trace") => trace_link(&args[1..]),
         Some("demo") => demo(),
         Some("version") | Some("--version") | Some("-V") => {
             println!("xross-cli {}", env!("CARGO_PKG_VERSION"));
@@ -55,6 +56,7 @@ fn usage() {
   xross-cli core use --core xray --version 1.8.24
   xross-cli fetch-core [--core sing-box]  从 GitHub 下载并校验核心
   xross-cli run [--core xray] [--seconds 5] [--home DIR]
+  xross-cli trace <https://…|tcp://…|udp://…|icmp://…>   追踪测试链接
   xross-cli demo                    打印带示例节点的 sing-box + xray 配置
   xross-cli version
 
@@ -491,6 +493,62 @@ fn run_core(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     println!("已停止");
     Ok(())
+}
+
+fn trace_link(args: &[String]) -> Result<(), String> {
+    let (_, _, home, positional) = parse_args(args);
+    let target = positional
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "https://www.gstatic.com/generate_204".into());
+    let service = service(home)?;
+    service.start_trace(&target).map_err(|e| e.to_string())?;
+    println!("开始追踪：{target}");
+    let mut last_printed = 0usize;
+    let mut final_session = None;
+    for _ in 0..400 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let Some(session) = service.trace_snapshot() else {
+            continue;
+        };
+        while last_printed < session.steps.len() {
+            let step = &session.steps[last_printed];
+            let status = match step.status {
+                xross_core::trace::TraceStatus::Pending => "pending",
+                xross_core::trace::TraceStatus::Active => "active",
+                xross_core::trace::TraceStatus::Ok => "ok",
+                xross_core::trace::TraceStatus::Warn => "warn",
+                xross_core::trace::TraceStatus::Error => "error",
+                xross_core::trace::TraceStatus::Skipped => "skip",
+            };
+            println!(
+                "  [{status:>7}] {:<12} {} {}",
+                step.title,
+                step.detail,
+                step.duration_ms
+                    .map(|ms| format!("({ms} ms)"))
+                    .unwrap_or_default()
+            );
+            last_printed += 1;
+        }
+        if matches!(
+            session.phase,
+            xross_core::trace::TracePhase::Done | xross_core::trace::TracePhase::Failed
+        ) {
+            final_session = Some(session);
+            break;
+        }
+    }
+    if let Some(session) = final_session {
+        println!("{}", session.summary.unwrap_or_default());
+        if session.success == Some(true) {
+            Ok(())
+        } else {
+            Err("测试未成功".into())
+        }
+    } else {
+        Err("追踪超时".into())
+    }
 }
 
 fn truncate(value: &str, max: usize) -> String {

@@ -36,6 +36,8 @@ pub struct RulePreview {
     pub rule: Option<RouteRule>,
     pub action: RouteAction,
     pub explanation: String,
+    /// True when a geo/rule-set matcher prevents a definitive local decision.
+    pub needs_core: bool,
 }
 
 pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
@@ -46,6 +48,7 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
                     rule: Some(rule.clone()),
                     action: rule.action.clone(),
                     explanation: format!("命中规则“{}”", rule.name),
+                    needs_core: false,
                 }
             }
             MatchState::NeedsCore => {
@@ -56,6 +59,7 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
                         "规则“{}”依赖 geo/rule-set 数据，需要在 core 内运行才能确定",
                         rule.name
                     ),
+                    needs_core: true,
                 }
             }
             MatchState::NotMatched => {}
@@ -65,6 +69,7 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
         rule: None,
         action: model.routing.final_action.clone(),
         explanation: "未命中任何规则，使用默认出站".into(),
+        needs_core: false,
     }
 }
 

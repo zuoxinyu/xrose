@@ -75,8 +75,22 @@ fn main() {
                     cx.new(|cx| ui::AppView::new(service, window, cx))
                 },
             );
-            if let Err(err) = result {
-                eprintln!("无法打开窗口：{err}");
+            match result {
+                Ok((_, view)) => {
+                    let view = view.downgrade();
+                    let view_for_tick = view.clone();
+                    let _ = view_for_tick;
+                    cx.spawn(async move |cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(50))
+                            .await;
+                        if view.update(cx, |view, cx| view.tick(cx)).is_err() {
+                            break;
+                        }
+                    })
+                    .detach();
+                }
+                Err(err) => eprintln!("无法打开窗口：{err}"),
             }
             cx.activate(true);
         });
