@@ -1,8 +1,8 @@
 # Xross brand assets
 
-- `logo-mark.png` — transparent X + rose mark, 900×900
-- `app-icon.png` / `-256` / `-128` / `-96` / `-64` — rounded navy app icon (small sizes use a flatter, higher-contrast variant)
-- `icons/xross.png` — icon for the hicolor theme
+- `logo-mark.png` — transparent line-style X + rose mark, 900×900
+- `app-icon.png` / `-256` / `-128` / `-96` / `-64` — transparent line-style app icon
+- `icons/xross.png` — line-style icon for the hicolor theme
 - `io.xross.Xross.desktop` — desktop entry matching the Wayland `app_id`
 
 Install the desktop entry and icon for correct taskbar/launcher branding:

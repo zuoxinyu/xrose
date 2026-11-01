@@ -80,6 +80,7 @@ pub fn detect_backend() -> ProxyBackend {
     }
 }
 
+#[allow(dead_code)]
 fn command_ok(program: &str, args: &[&str]) -> bool {
     match Command::new(program)
         .args(args)
@@ -112,6 +113,7 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
 // GNOME / gsettings
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 const GNOME_KEYS: [(&str, &str, &str); 9] = [
     ("org.gnome.system.proxy", "mode", "none"),
     ("org.gnome.system.proxy", "autoconfig-url", "''"),

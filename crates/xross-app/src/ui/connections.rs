@@ -278,7 +278,7 @@ impl AppView {
                                 self.tr("开始测试", "Start test")
                             })
                             .loading(active)
-                            .on_click(cx.listener(|this, _, window, cx| {
+                            .on_click(cx.listener(|this, _, _window, cx| {
                                 let target = this.trace_input.read(cx).value().to_string();
                                 match this.service.start_trace(&target) {
                                     Ok(()) => {

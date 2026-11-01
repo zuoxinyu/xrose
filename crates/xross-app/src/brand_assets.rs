@@ -32,11 +32,11 @@ impl AssetSource for BrandAssets {
         if let Some((_, bytes)) = BRAND_PATHS.iter().find(|(name, _)| *name == path) {
             return Ok(Some(Cow::Borrowed(*bytes)));
         }
-        gpui_kit::assets::Assets.load(path)
+        gpui_kit::assets::AllAssets.load(path)
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        let mut items = gpui_kit::assets::Assets.list(path)?;
+        let mut items = gpui_kit::assets::AllAssets.list(path)?;
         items.extend(
             BRAND_PATHS
                 .iter()

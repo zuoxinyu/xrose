@@ -1,13 +1,17 @@
+use std::collections::{BTreeMap, HashMap};
+
+use gpui_base::Disableable;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::model::{GroupKind, Node};
-use xross_core::service::LatencyScope;
+use xross_core::model::{CoreKind, GroupKind, Node};
+use xross_core::service::{LatencyScope, ToastLevel};
 use xross_core::util::format_speed;
 
-use super::theme::palette;
+use super::theme::{palette, Palette};
 use super::widgets::*;
 use super::{AppView, Page};
 
@@ -28,10 +32,12 @@ impl AppView {
             .cloned();
         let active_node = group.as_ref().and_then(|g| g.active_node().cloned());
         let running = self.snapshot.process.phase.is_alive();
+        let is_xray = self.snapshot.settings.core == CoreKind::Xray;
+        let is_core_busy = this_busy(&self.snapshot.busy, "core");
 
         let mut body = div().flex().flex_col().gap_4().w_full();
 
-        // First run / empty state.
+        // First run / empty state wizard.
         if model.nodes.is_empty() {
             body = body.child(
                 card(&p)
@@ -121,48 +127,14 @@ impl AppView {
             );
         }
 
-        // Group switcher.
+        // P0: Standard Segmented Control for Outbound Groups / Modes.
         if !groups.is_empty() {
             body = body.child(
-                card(&p)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .children(groups.iter().map(|g| {
-                                let selected = active_group.as_deref() == Some(g.id.as_str());
-                                let gid = g.id.clone();
-                                div()
-                                    .id(SharedString::from(format!("group-{}", g.id)))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .px_3()
-                                    .py_1()
-                                    .rounded_full()
-                                    .border_1()
-                                    .border_color(if selected { p.primary } else { p.border })
-                                    .bg(if selected { p.accent } else { p.bg })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_group = Some(gid.clone());
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(if selected { p.fg } else { p.muted_fg })
-                                            .child(g.name.clone()),
-                                    )
-                                    .child(pill(
-                                        g.kind.display_name(),
-                                        p.muted_fg,
-                                        p.panel_alt,
-                                    ))
-                            })),
-                    )
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .w_full()
                     .child(
                         div()
                             .flex()
@@ -170,308 +142,798 @@ impl AppView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_xs()
-                                    .text_color(p.muted_fg)
-                                    .child(self.tr(
-                                        "点击节点立即切换：sing-box 走 Clash API 热切换，Xray 会重启 core",
-                                        "Click a node to switch: sing-box uses the Clash API, Xray restarts the core",
-                                    )),
-                            )
-                            .child(
-                                div()
                                     .flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("test-all")
-                                            .compact()
-                                            .label(self.tr("全部测速", "Test all"))
-                                            .loading(this_busy(&self.snapshot.busy, "latency"))
-                                            .on_click(cx.listener(|this, _, _, _| {
-                                                this.service.test_latency(LatencyScope::All);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("add-node")
-                                            .compact()
-                                            .label(self.tr("添加节点", "Add node"))
-                                            .on_click(cx.listener(|this, _, _, _| {
-                                                this.service
-                                                    .toast(xross_core::service::ToastLevel::Info, "在下方粘贴节点链接即可导入");
-                                            })),
-                                    ),
-                            ),
+                                    .items_center()
+                                    .gap_1()
+                                    .p_1()
+                                    .rounded_lg()
+                                    .bg(p.panel)
+                                    .border_1()
+                                    .border_color(p.border)
+                                    .children(groups.iter().map(|g| {
+                                        let selected = active_group.as_deref() == Some(g.id.as_str());
+                                        let gid = g.id.clone();
+                                        div()
+                                            .id(SharedString::from(format!("group-{}", g.id)))
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .px_3()
+                                            .py_1p5()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .when(selected, |d| {
+                                                d.bg(p.bg)
+                                                    .shadow_sm()
+                                                    .border_1()
+                                                    .border_color(p.border)
+                                            })
+                                            .when(!selected, |d| {
+                                                d.hover(|h| h.bg(p.panel_alt.opacity(0.4)))
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.selected_group = Some(gid.clone());
+                                                cx.notify();
+                                            }))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(if selected {
+                                                        FontWeight::MEDIUM
+                                                    } else {
+                                                        FontWeight::NORMAL
+                                                    })
+                                                    .text_color(if selected { p.fg } else { p.muted_fg })
+                                                    .child(g.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .px_1p5()
+                                                    .py_0p5()
+                                                    .rounded_sm()
+                                                    .text_xs()
+                                                    .bg(if selected { p.accent } else { p.panel_alt })
+                                                    .text_color(if selected { p.primary } else { p.muted_fg })
+                                                    .child(g.kind.display_name()),
+                                            )
+                                    })),
+                            )
+                            .when(is_xray, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .text_xs()
+                                        .text_color(p.warning)
+                                        .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
+                                        .child(self.tr(
+                                            "Xray core 模式：切换节点需重启 core",
+                                            "Xray core: switching node restarts core",
+                                        )),
+                                )
+                            }),
                     ),
             );
         }
 
-        // Import bar.
-        body = body.child(
-            card(&p)
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .items_center()
-                        .child(div().flex_1().child(Input::new(&self.import_input)))
-                        .child(
-                            Button::new("import-link")
-                                .compact()
-                                .primary()
-                                .label(self.tr("导入", "Import"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let content = this.import_input.read(cx).value().to_string();
-                                    if content.trim().is_empty() {
-                                        this.service.toast(
-                                            xross_core::service::ToastLevel::Warning,
-                                            "请先粘贴节点链接",
-                                        );
-                                    } else {
-                                        this.service.import_content(&content);
-                                        this.import_input.update(cx, |input, cx| {
-                                            input.set_value("", window, cx);
-                                        });
-                                    }
-                                    this.sync(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("import-clipboard")
-                                .compact()
-                                .label(self.tr("从剪贴板导入", "Import clipboard"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                                        this.service.import_content(&text);
-                                    } else {
-                                        this.service.toast(
-                                            xross_core::service::ToastLevel::Warning,
-                                            "剪贴板没有文本",
-                                        );
-                                    }
-                                    this.sync(cx);
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(self.tr(
-                            "支持 vmess / vless / trojan / ss / hysteria2 / tuic 分享链接、Clash YAML、SIP008、sing-box JSON",
-                            "Supports vmess / vless / trojan / ss / hysteria2 / tuic links, Clash YAML, SIP008 and sing-box JSON",
-                        )),
-                ),
-        );
+        // P1: Collapsible Import Drawer (triggered by "+ 添加节点" in list toolbar).
+        if self.show_import_box {
+            let import_val = self.import_input.read(cx).value().trim().to_string();
+            let is_empty = import_val.is_empty();
+            body = body.child(
+                div()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(p.panel)
+                    .border_1()
+                    .border_color(p.primary.opacity(0.3))
+                    .shadow_sm()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().child(Input::new(&self.import_input)))
+                            .child(
+                                Button::new("import-link")
+                                    .compact()
+                                    .primary()
+                                    .disabled(is_empty)
+                                    .label(self.tr("导入", "Import"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let content = this.import_input.read(cx).value().to_string();
+                                        if content.trim().is_empty() {
+                                            this.service.toast(
+                                                ToastLevel::Warning,
+                                                "请先粘贴节点链接",
+                                            );
+                                        } else {
+                                            this.service.import_content(&content);
+                                            this.import_input.update(cx, |input, cx| {
+                                                input.set_value("", window, cx);
+                                            });
+                                            this.show_import_box = false;
+                                        }
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("import-clipboard")
+                                    .compact()
+                                    .label(self.tr("从剪贴板导入", "From Clipboard"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                                            this.service.import_content(&text);
+                                            this.show_import_box = false;
+                                        } else {
+                                            this.service.toast(
+                                                ToastLevel::Warning,
+                                                "剪贴板没有文本",
+                                            );
+                                        }
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-import")
+                                    .compact()
+                                    .ghost()
+                                    .label("✕")
+                                    .tooltip(self.tr("收起", "Close"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_import_box = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .child(self.tr(
+                                "支持 vmess / vless / trojan / ss / hysteria2 / tuic 分享链接、Clash YAML、SIP008、sing-box JSON",
+                                "Supports vmess / vless / trojan / ss / hysteria2 / tuic links, Clash YAML, SIP008, sing-box JSON",
+                            )),
+                    ),
+            );
+        }
 
-        // Node list.
+        // Filter and sort nodes.
         let group_id_for_select = active_group.clone();
         let group_kind = group
             .as_ref()
             .map(|g| g.kind)
             .unwrap_or(GroupKind::Selector);
-        let nodes: Vec<Node> = model.nodes.clone();
+
+        let search_query = self.node_search.read(cx).value().trim().to_lowercase();
+        let mut display_nodes: Vec<Node> = model
+            .nodes
+            .iter()
+            .filter(|n| {
+                if search_query.is_empty() {
+                    true
+                } else {
+                    n.name.to_lowercase().contains(&search_query)
+                        || n.endpoint().to_lowercase().contains(&search_query)
+                        || n.protocol.display_name().to_lowercase().contains(&search_query)
+                }
+            })
+            .cloned()
+            .collect();
+
+        if self.sort_by_latency {
+            display_nodes.sort_by_key(|n| {
+                let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms);
+                match ms {
+                    Some(v) => (0, v),
+                    None => (1, u32::MAX),
+                }
+            });
+        }
+
+        // Identify fastest node (among enabled nodes with valid delay).
+        let fastest_node_id: Option<String> = display_nodes
+            .iter()
+            .filter(|n| n.enabled)
+            .filter_map(|n| {
+                let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms)?;
+                if ms > 0 {
+                    Some((n.id.clone(), ms))
+                } else {
+                    None
+                }
+            })
+            .min_by_key(|(_, ms)| *ms)
+            .map(|(id, _)| id);
+
+        // Identify timeout / dead nodes for batch cleanup.
+        let timeout_node_ids: Vec<String> = model
+            .nodes
+            .iter()
+            .filter(|n| {
+                self.snapshot
+                    .latency
+                    .get(&n.id)
+                    .map(|l| l.delay_ms.is_none())
+                    .unwrap_or(false)
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        let timeout_count = timeout_node_ids.len();
+
+        // Traffic sparkline statistics.
+        let samples = self.snapshot.runtime.history.clone();
+        let max_speed = samples
+            .iter()
+            .map(|s| s.up_speed + s.down_speed)
+            .max()
+            .unwrap_or(0);
+        let has_traffic = max_speed > 0;
+
+        let hide_ips = self.hide_ips;
+        let menu_open = self.node_menu_open.clone();
+        let batch_mode = self.batch_mode;
+        let batch_selected = self.batch_selected.clone();
+
+        // Subscription map for grouping.
+        let sub_names: HashMap<String, String> = self
+            .snapshot
+            .subscriptions
+            .iter()
+            .map(|s| (s.id.clone(), s.name.clone()))
+            .collect();
+
+        // Node list card (now the primary focal point of the page).
         body = body.child(
             card(&p)
+                // Header with unified toolbar (search, sort, group, privacy, test all, add node, batch mode).
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("节点", "Nodes"),
-                            format!("{} {}", nodes.len(), self.tr("个节点", "nodes")),
-                        ))
-                        .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                            "↓ {}  ↑ {}",
-                            format_speed(self.snapshot.runtime.down_speed),
-                            format_speed(self.snapshot.runtime.up_speed)
-                        ))),
-                )
-                .child(self.sparkline(&p))
-                .when(nodes.is_empty(), |d| {
-                    d.child(empty_hint(
-                        &p,
-                        self.tr(
-                            "还没有节点，先添加订阅或导入链接",
-                            "No nodes yet — add a subscription or import a link",
-                        ),
-                    ))
-                })
-                .children(nodes.iter().filter(|n| n.enabled).map(|node| {
-                    let selected = active_node.as_deref() == Some(node.id.as_str());
-                    let latency = self.snapshot.latency.get(&node.id).cloned();
-                    let node_id = node.id.clone();
-                    let node_id_select = node.id.clone();
-                    let node_id_tcp = node.id.clone();
-                    let node_id_real = node.id.clone();
-                    let node_id_share = node.id.clone();
-                    let node_id_qr = node.id.clone();
-                    let node_id_del = node.id.clone();
-                    let group_for_click = group_id_for_select.clone();
-                    let name = node.name.clone();
-                    let meta = format!(
-                        "{} · {} · {}",
-                        node.protocol.display_name(),
-                        node.endpoint(),
-                        node.transport.kind_name()
-                    );
-                    let delay_label = latency
-                        .as_ref()
-                        .map(|l| match l.delay_ms {
-                            Some(ms) => format!("{ms} ms"),
-                            None => self.tr("超时", "timeout").to_string(),
-                        })
-                        .unwrap_or_else(|| "—".into());
-                    let delay_color = match latency.as_ref().and_then(|l| l.delay_ms) {
-                        Some(ms) if ms < 200 => p.success,
-                        Some(ms) if ms < 600 => p.warning,
-                        Some(_) => p.danger,
-                        None => p.muted_fg,
-                    };
-                    div()
-                        .id(SharedString::from(format!("node-{}", node.id)))
-                        .flex()
-                        .items_center()
                         .gap_3()
-                        .p_3()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(if selected { p.primary } else { p.border })
-                        .bg(if selected { p.accent } else { p.bg })
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(group) = &group_for_click {
-                                this.service.select_node(group, &node_id_select);
-                                this.sync(cx);
-                            }
-                        }))
-                        .child(
-                            div()
-                                .w(px(24.))
-                                .text_center()
-                                .text_color(if selected { p.primary } else { p.muted_fg })
-                                .child(if selected { "●" } else { "○" }),
-                        )
                         .child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .flex_1()
-                                .child(div().text_sm().text_color(p.fg).child(name))
-                                .child(div().text_xs().text_color(p.muted_fg).child(meta)),
-                        )
-                        .when(group_kind != GroupKind::Selector, |d| {
-                            d.child(pill(
-                                if group_kind == GroupKind::UrlTest {
-                                    self.tr("自动", "auto")
-                                } else {
-                                    self.tr("备用", "backup")
-                                },
-                                p.muted_fg,
-                                p.panel_alt,
-                            ))
-                        })
-                        .child(
-                            div()
-                                .w(px(72.))
-                                .text_sm()
-                                .text_color(delay_color)
-                                .child(delay_label),
+                                .items_center()
+                                .gap_2p5()
+                                .child(
+                                    div()
+                                        .text_base()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.fg)
+                                        .child(self.tr("节点列表", "Nodes")),
+                                )
+                                .child(pill(
+                                    if search_query.is_empty() {
+                                        format!("{} {}", display_nodes.len(), self.tr("个", ""))
+                                    } else {
+                                        format!(
+                                            "{}/{} {}",
+                                            display_nodes.len(),
+                                            model.nodes.len(),
+                                            self.tr("个", "")
+                                        )
+                                    },
+                                    p.primary,
+                                    p.accent,
+                                )),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_1()
+                                .gap_1p5()
                                 .child(
-                                    Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
-                                        .compact()
-                                        .ghost()
-                                        .label("TCP")
-                                        .on_click(cx.listener(move |this, _, _, _| {
-                                            this.service.test_latency(LatencyScope::Node(
-                                                node_id_tcp.clone(),
-                                            ));
-                                        })),
+                                    div()
+                                        .w(px(190.))
+                                        .child(Input::new(&self.node_search)),
                                 )
+                                // Group by subscription toggle
                                 .child(
-                                    Button::new(SharedString::from(format!("real-{node_id_real}")))
+                                    Button::new("toggle-grouping")
                                         .compact()
-                                        .ghost()
-                                        .label(self.tr("真连", "Real"))
-                                        .on_click(cx.listener(move |this, _, _, _| {
-                                            this.service.test_real_latency(&node_id_real);
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "share-{node_id_share}"
-                                    )))
-                                    .compact()
-                                    .ghost()
-                                    .label("↗")
-                                    .tooltip(self.tr("复制分享链接", "Copy share link"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let link =
-                                            this.service.export_links(&[node_id_share.clone()]);
-                                        if link.is_empty() {
-                                            this.service.toast(
-                                                xross_core::service::ToastLevel::Warning,
-                                                "该协议暂不支持导出链接",
-                                            );
+                                        .when(self.group_by_subscription, |b| b.primary())
+                                        .when(!self.group_by_subscription, |b| b.ghost())
+                                        .label(if self.group_by_subscription { "⊞ 分组中" } else { "⊞ 按订阅" })
+                                        .tooltip(if self.group_by_subscription {
+                                            self.tr("按订阅分组展示中 (点击切回平铺)", "Grouped by subscription (click to flatten)")
                                         } else {
-                                            cx.write_to_clipboard(ClipboardItem::new_string(link));
-                                            this.service.toast(
-                                                xross_core::service::ToastLevel::Success,
-                                                "分享链接已复制",
-                                            );
-                                        }
-                                    })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("qr-{node_id_qr}")))
-                                        .compact()
-                                        .ghost()
-                                        .label("▦")
-                                        .tooltip(self.tr("二维码", "QR code"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.qr_node = Some(node_id_qr.clone());
-                                            this.show_qr = true;
+                                            self.tr("按订阅分组与折叠节点 (推荐 20+ 节点时使用)", "Group by subscription (recommended for 20+ nodes)")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.group_by_subscription = !this.group_by_subscription;
                                             cx.notify();
                                         })),
                                 )
+                                // Latency sort toggle
                                 .child(
-                                    Button::new(SharedString::from(format!("del-{node_id_del}")))
+                                    Button::new("sort-latency")
+                                        .compact()
+                                        .when(self.sort_by_latency, |b| b.primary())
+                                        .when(!self.sort_by_latency, |b| b.ghost())
+                                        .label(self.tr("⇅ 延迟", "⇅ Latency"))
+                                        .tooltip(if self.sort_by_latency {
+                                            self.tr("当前按延迟升序排序 (点击恢复默认)", "Sorted by latency (click to reset)")
+                                        } else {
+                                            self.tr("按延迟排序", "Sort by latency")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sort_by_latency = !this.sort_by_latency;
+                                            cx.notify();
+                                        })),
+                                )
+                                // Privacy mode toggle
+                                .child(
+                                    Button::new("toggle-privacy")
+                                        .compact()
+                                        .when(self.hide_ips, |b| b.primary())
+                                        .when(!self.hide_ips, |b| b.ghost())
+                                        .label(if self.hide_ips { "🔒 隐私" } else { "👁 隐私" })
+                                        .tooltip(if self.hide_ips {
+                                            self.tr("服务器地址已脱敏保护 (点击还原)", "Addresses masked (click to reveal)")
+                                        } else {
+                                            self.tr("脱敏隐藏服务器地址 (防截图泄露)", "Mask server addresses for privacy")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.hide_ips = !this.hide_ips;
+                                            cx.notify();
+                                        })),
+                                )
+                                // Batch management toggle
+                                .child(
+                                    Button::new("toggle-batch")
+                                        .compact()
+                                        .when(self.batch_mode, |b| b.primary())
+                                        .when(!self.batch_mode, |b| b.ghost())
+                                        .label(self.tr("☑ 批量", "☑ Batch"))
+                                        .tooltip(if self.batch_mode {
+                                            self.tr("退出批量管理模式", "Exit batch mode")
+                                        } else {
+                                            self.tr("开启多选批量管理模式", "Open batch management mode")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.batch_mode = !this.batch_mode;
+                                            if !this.batch_mode {
+                                                this.batch_selected.clear();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                // Clean dead nodes button
+                                .child(
+                                    Button::new("clean-dead-nodes")
                                         .compact()
                                         .ghost()
-                                        .label("✕")
-                                        .tooltip(self.tr("删除节点", "Delete node"))
+                                        .label(self.tr("🧹 清理超时", "🧹 Clean Dead"))
+                                        .tooltip(self.tr(
+                                            "一键清理测速超时的不可用节点",
+                                            "Batch delete all timeout/dead nodes",
+                                        ))
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.delete_node(&node_id_del);
-                                            this.sync(cx);
+                                            let timeout_ids: Vec<String> = this
+                                                .snapshot
+                                                .model
+                                                .nodes
+                                                .iter()
+                                                .filter(|n| {
+                                                    this.snapshot
+                                                        .latency
+                                                        .get(&n.id)
+                                                        .map(|l| l.delay_ms.is_none())
+                                                        .unwrap_or(false)
+                                                })
+                                                .map(|n| n.id.clone())
+                                                .collect();
+                                            if timeout_ids.is_empty() {
+                                                this.service.toast(
+                                                    ToastLevel::Info,
+                                                    "当前没有测速超时的不可用节点",
+                                                );
+                                            } else {
+                                                this.show_clean_confirm = true;
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
+                                // Test all
+                                .child(
+                                    Button::new("test-all")
+                                        .compact()
+                                        .label(self.tr("全部测速", "Test All"))
+                                        .loading(this_busy(&self.snapshot.busy, "latency"))
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.test_latency(LatencyScope::All);
+                                        })),
+                                )
+                                // Add node
+                                .child(
+                                    Button::new("toggle-add-drawer")
+                                        .compact()
+                                        .primary()
+                                        .label(if self.show_import_box {
+                                            self.tr("收起导入", "Close")
+                                        } else {
+                                            self.tr("+ 添加节点", "+ Add")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_import_box = !this.show_import_box;
+                                            cx.notify();
                                         })),
                                 ),
-                        )
-                        .child(
-                            div().w(px(52.)).child(
-                                toggle(
-                                    SharedString::from(format!("enabled-{node_id}")),
-                                    "",
-                                    node.enabled,
-                                )
-                                .on_change(cx.listener(
-                                    move |this, checked, _, cx| {
-                                        this.service.set_node_enabled(&node_id, *checked);
-                                        this.sync(cx);
-                                    },
-                                )),
+                        ),
+                )
+                // Batch Operation Bar (Visible when batch_mode is active).
+                .when(batch_mode, |d| {
+                    let all_ids: Vec<String> = display_nodes.iter().map(|n| n.id.clone()).collect();
+                    let all_selected = !all_ids.is_empty() && all_ids.iter().all(|id| batch_selected.contains(id));
+                    let selected_count = batch_selected.len();
+                    let selected_ids: Vec<String> = batch_selected.iter().cloned().collect();
+
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(p.accent)
+                            .border_1()
+                            .border_color(p.primary.opacity(0.4))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.fg)
+                                            .child(format!("已选择 {} / {} 个节点", selected_count, display_nodes.len())),
+                                    )
+                                    .child(
+                                        Button::new("batch-select-all")
+                                            .compact()
+                                            .ghost()
+                                            .label(if all_selected { "取消全选" } else { "全选当前" })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if all_selected {
+                                                    this.batch_selected.clear();
+                                                } else {
+                                                    this.batch_selected = all_ids.iter().cloned().collect();
+                                                }
+                                                cx.notify();
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child({
+                                        let sel = selected_ids.clone();
+                                        Button::new("batch-ping")
+                                            .compact()
+                                            .disabled(selected_count == 0)
+                                            .label("批量测速")
+                                            .on_click(cx.listener(move |this, _, _, _| {
+                                                for id in &sel {
+                                                    this.service.test_latency(LatencyScope::Node(id.clone()));
+                                                }
+                                            }))
+                                    })
+                                    .child({
+                                        let sel = selected_ids.clone();
+                                        Button::new("batch-enable")
+                                            .compact()
+                                            .disabled(selected_count == 0)
+                                            .label("批量启用")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                for id in &sel {
+                                                    this.service.set_node_enabled(id, true);
+                                                }
+                                                this.sync(cx);
+                                            }))
+                                    })
+                                    .child({
+                                        let sel = selected_ids.clone();
+                                        Button::new("batch-disable")
+                                            .compact()
+                                            .disabled(selected_count == 0)
+                                            .label("批量停用")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                for id in &sel {
+                                                    this.service.set_node_enabled(id, false);
+                                                }
+                                                this.sync(cx);
+                                            }))
+                                    })
+                                    .child({
+                                        let sel = selected_ids.clone();
+                                        Button::new("batch-delete")
+                                            .compact()
+                                            .disabled(selected_count == 0)
+                                            .ghost()
+                                            .label("✕ 批量删除")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.service.delete_nodes(&sel);
+                                                this.batch_selected.clear();
+                                                this.sync(cx);
+                                            }))
+                                    })
+                                    .child(
+                                        Button::new("batch-exit")
+                                            .compact()
+                                            .ghost()
+                                            .label("退出批量")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.batch_mode = false;
+                                                this.batch_selected.clear();
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
+                    )
+                })
+                // Clean Dead Nodes Confirmation Banner
+                .when(self.show_clean_confirm, |d| {
+                    let ids = timeout_node_ids.clone();
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_4()
+                            .py_2p5()
+                            .rounded_md()
+                            .bg(p.accent)
+                            .border_1()
+                            .border_color(p.warning)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::TriangleAlert).size(px(16.)).text_color(p.warning))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.fg)
+                                            .child(format!("检测到 {timeout_count} 个节点测速超时或无法连接，确认全部删除？")),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("confirm-clean-dead")
+                                            .compact()
+                                            .primary()
+                                            .label("确认批量删除")
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.service.delete_nodes(&ids);
+                                                this.show_clean_confirm = false;
+                                                this.sync(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("cancel-clean-dead")
+                                            .compact()
+                                            .ghost()
+                                            .label("取消")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_clean_confirm = false;
+                                                cx.notify();
+                                            })),
+                                    ),
+                            ),
+                    )
+                })
+                // Sparkline: collapsed when no active traffic, with clear legend when active.
+                .when(has_traffic, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .py_1()
+                            .border_y_1()
+                            .border_color(p.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .text_xs()
+                                    .text_color(p.muted_fg)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(dot(p.primary))
+                                                    .child(self.tr("下行", "Down")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1()
+                                                    .child(dot(p.info))
+                                                    .child(self.tr("上行", "Up")),
+                                            ),
+                                    )
+                                    .child(
+                                        div().child(format!(
+                                            "{}: {}",
+                                            self.tr("峰值速率", "Peak"),
+                                            format_speed(max_speed)
+                                        )),
+                                    ),
+                            )
+                            .child(self.sparkline(&p)),
+                    )
+                })
+                .when(display_nodes.is_empty(), |d| {
+                    d.child(empty_hint(
+                        &p,
+                        if search_query.is_empty() {
+                            self.tr(
+                                "还没有节点，点击右上角“+ 添加节点”或添加订阅",
+                                "No nodes yet — click '+ Add' above or add a subscription",
+                            )
+                        } else {
+                            self.tr("未找到匹配的节点", "No matching nodes found")
+                        },
+                    ))
+                })
+                // Node list: either Grouped by Subscription or Flat List.
+                .when(!self.group_by_subscription, |container| {
+                    container.children(display_nodes.iter().map(|node| {
+                        render_node_row(
+                            node,
+                            &p,
+                            active_node.as_deref(),
+                            fastest_node_id.as_deref(),
+                            self.snapshot.latency.get(&node.id),
+                            hide_ips,
+                            group_kind,
+                            group_id_for_select.clone(),
+                            is_core_busy,
+                            this_busy(&self.snapshot.busy, "latency"),
+                            menu_open.as_deref(),
+                            batch_mode,
+                            batch_selected.contains(&node.id),
+                            cx,
                         )
-                })),
+                    }))
+                })
+                .when(self.group_by_subscription, |container| {
+                    // Partition nodes into Subscription Groups
+                    let mut sub_groups: BTreeMap<Option<String>, Vec<Node>> = BTreeMap::new();
+                    for node in display_nodes.iter() {
+                        sub_groups
+                            .entry(node.subscription_id.clone())
+                            .or_default()
+                            .push(node.clone());
+                    }
+
+                    let collapsed_set = self.collapsed_subs.clone();
+
+                    container.children(sub_groups.into_iter().map(|(sub_id, group_nodes)| {
+                        let group_key = sub_id.clone().unwrap_or_else(|| "manual".to_string());
+                        let is_collapsed = collapsed_set.contains(&group_key);
+                        let sub_title = match &sub_id {
+                            Some(id) => sub_names.get(id).cloned().unwrap_or_else(|| "订阅节点".to_string()),
+                            None => "📌 手动导入 / 未分类".to_string(),
+                        };
+                        let node_ids_for_ping: Vec<String> = group_nodes.iter().map(|n| n.id.clone()).collect();
+                        let key_for_click = group_key.clone();
+
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(
+                                // Subscription Group Header
+                                div()
+                                    .id(SharedString::from(format!("sub-header-{}", group_key)))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(p.panel)
+                                    .border_1()
+                                    .border_color(p.border)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.collapsed_subs.contains(&key_for_click) {
+                                            this.collapsed_subs.remove(&key_for_click);
+                                        } else {
+                                            this.collapsed_subs.insert(key_for_click.clone());
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(p.muted_fg)
+                                                    .child(if is_collapsed { "▶" } else { "▼" }),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(p.fg)
+                                                    .child(sub_title),
+                                            )
+                                            .child(pill(
+                                                format!("{} 个", group_nodes.len()),
+                                                p.muted_fg,
+                                                p.panel_alt,
+                                            )),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!("ping-sub-{}", group_key)))
+                                            .compact()
+                                            .ghost()
+                                            .label("测速本组")
+                                            .tooltip("测试该订阅下所有节点的延迟")
+                                            .on_click(cx.listener(move |this, _, _, _| {
+                                                for id in &node_ids_for_ping {
+                                                    this.service.test_latency(LatencyScope::Node(id.clone()));
+                                                }
+                                            })),
+                                    ),
+                            )
+                            .when(!is_collapsed, |d| {
+                                d.children(group_nodes.iter().map(|node| {
+                                    render_node_row(
+                                        node,
+                                        &p,
+                                        active_node.as_deref(),
+                                        fastest_node_id.as_deref(),
+                                        self.snapshot.latency.get(&node.id),
+                                        hide_ips,
+                                        group_kind,
+                                        group_id_for_select.clone(),
+                                        is_core_busy,
+                                        this_busy(&self.snapshot.busy, "latency"),
+                                        menu_open.as_deref(),
+                                        batch_mode,
+                                        batch_selected.contains(&node.id),
+                                        cx,
+                                    )
+                                }))
+                            })
+                    }))
+                }),
         );
 
-        // QR overlay as an inline card (keeps the layout simple).
+        // QR overlay as an inline card.
         if self.show_qr {
             if let Some(node_id) = self.qr_node.clone() {
                 let qr = self
@@ -518,62 +980,6 @@ impl AppView {
             }
         }
 
-        // Disabled nodes (collapsed list)
-        let disabled: Vec<&Node> = model.nodes.iter().filter(|n| !n.enabled).collect();
-        if !disabled.is_empty() {
-            body = body.child(
-                card(&p)
-                    .child(section_title(
-                        &p,
-                        self.tr("已禁用", "Disabled"),
-                        format!("{} {}", disabled.len(), self.tr("个节点", "nodes")),
-                    ))
-                    .children(disabled.into_iter().map(|node| {
-                        let node_id = node.id.clone();
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .p_2()
-                            .rounded_md()
-                            .bg(p.bg)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(p.muted_fg)
-                                            .child(node.name.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .child(node.endpoint()),
-                                    ),
-                            )
-                            .child(
-                                toggle(
-                                    SharedString::from(format!("disabled-{}", node.id)),
-                                    "",
-                                    false,
-                                )
-                                .on_change(cx.listener(
-                                    move |this, checked, _, cx| {
-                                        if *checked {
-                                            this.service.set_node_enabled(&node_id, true);
-                                            this.sync(cx);
-                                        }
-                                    },
-                                )),
-                            )
-                    })),
-            );
-        }
-
         let _ = (lang, running);
         body
     }
@@ -581,4 +987,376 @@ impl AppView {
 
 fn this_busy(busy: &[String], key: &str) -> bool {
     busy.iter().any(|b| b == key)
+}
+
+/// Helper function to format and optionally mask host addresses for privacy.
+fn format_endpoint(endpoint: &str, hide: bool) -> String {
+    if hide {
+        if let Some((host, port)) = endpoint.rsplit_once(':') {
+            if host.starts_with('[') && host.ends_with(']') {
+                format!("[••••:••••]:{port}")
+            } else if host.contains('.') {
+                let parts: Vec<&str> = host.split('.').collect();
+                if parts.len() == 4 {
+                    format!("{}.*.*.*:{}", parts[0], port)
+                } else {
+                    format!("••••••:{port}")
+                }
+            } else {
+                format!("••••••:{port}")
+            }
+        } else {
+            "••••••••".to_string()
+        }
+    } else if endpoint.len() > 32 {
+        let start = &endpoint[..14];
+        let end = &endpoint[endpoint.len() - 12..];
+        format!("{start}…{end}")
+    } else {
+        endpoint.to_string()
+    }
+}
+
+/// Render a single node row with interactive controls, radio selection, and optional batch checkbox.
+fn render_node_row(
+    node: &Node,
+    p: &Palette,
+    active_node: Option<&str>,
+    fastest_node_id: Option<&str>,
+    latency: Option<&xross_core::storage::LatencyEntry>,
+    hide_ips: bool,
+    group_kind: GroupKind,
+    group_id_for_select: Option<String>,
+    is_core_busy: bool,
+    is_latency_busy: bool,
+    menu_open: Option<&str>,
+    batch_mode: bool,
+    is_batch_checked: bool,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement {
+    let selected = active_node == Some(node.id.as_str());
+    let node_id = node.id.clone();
+    let node_id_select = node.id.clone();
+    let node_id_tcp = node.id.clone();
+    let node_id_real = node.id.clone();
+    let node_id_share = node.id.clone();
+    let node_id_qr = node.id.clone();
+    let node_id_del = node.id.clone();
+    let node_id_menu = node.id.clone();
+    let node_id_batch = node.id.clone();
+    let group_for_click = group_id_for_select.clone();
+    let name = node.name.clone();
+    let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
+    let is_fastest = fastest_node_id == Some(&node.id);
+    let is_menu_open = menu_open == Some(&node.id);
+    let is_node_busy = is_core_busy && selected;
+
+    let delay_label = latency
+        .as_ref()
+        .map(|l| match l.delay_ms {
+            Some(ms) => format!("{ms} ms"),
+            None => "超时".to_string(),
+        })
+        .unwrap_or_else(|| "—".into());
+
+    let delay_color = match latency.as_ref().and_then(|l| l.delay_ms) {
+        Some(ms) if ms < 150 => p.success,
+        Some(ms) if ms < 350 => p.warning,
+        Some(_) => p.danger,
+        None => p.muted_fg,
+    };
+
+    div()
+        .id(SharedString::from(format!("node-{}", node.id)))
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .border_1()
+        .border_color(if selected { p.primary } else { p.border })
+        .bg(if selected { p.accent } else { p.bg })
+        .overflow_hidden()
+        .when(!node.enabled, |d| d.opacity(0.45))
+        .child(
+            div()
+                .id(SharedString::from(format!("node-row-{}", node.id)))
+                .flex()
+                .items_center()
+                .gap_3()
+                .p_3()
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if batch_mode {
+                        if this.batch_selected.contains(&node_id_batch) {
+                            this.batch_selected.remove(&node_id_batch);
+                        } else {
+                            this.batch_selected.insert(node_id_batch.clone());
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if selected || is_core_busy {
+                        return;
+                    }
+                    if let Some(group) = &group_for_click {
+                        this.service.select_node(group, &node_id_select);
+                        this.sync(cx);
+                    }
+                }))
+                // Batch Checkbox (when batch mode is active)
+                .when(batch_mode, |d| {
+                    d.child(
+                        div()
+                            .w(px(20.))
+                            .h(px(20.))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if is_batch_checked { p.primary } else { p.muted_fg })
+                            .bg(if is_batch_checked { p.primary } else { p.bg })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(p.primary_fg)
+                            .child(if is_batch_checked { "✓" } else { "" }),
+                    )
+                })
+                // Left accent bar
+                .child(
+                    div()
+                        .w(px(3.))
+                        .h(px(22.))
+                        .rounded_full()
+                        .bg(if selected {
+                            p.primary
+                        } else {
+                            hsla(0., 0., 0., 0.)
+                        }),
+                )
+                // Row start: Radio button indicating selected active node.
+                .child(
+                    div()
+                        .w(px(20.))
+                        .h(px(20.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(if selected { p.primary } else { p.muted_fg })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            if selected {
+                                div().size(px(10.)).rounded_full().bg(p.primary)
+                            } else {
+                                div()
+                            },
+                        ),
+                )
+                // Node metadata
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .flex_1()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(p.fg)
+                                        .child(name),
+                                )
+                                .when(is_fastest, |d| {
+                                    d.child(pill("⚡ 最快", p.success, p.accent))
+                                })
+                                .when(is_node_busy, |d| {
+                                    d.child(pill(
+                                        "切换中…",
+                                        p.warning,
+                                        p.accent,
+                                    ))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_xs()
+                                .child(pill(
+                                    node.protocol.display_name().to_uppercase(),
+                                    p.primary,
+                                    p.panel,
+                                ))
+                                .child(
+                                    div()
+                                        .text_color(p.muted_fg)
+                                        .child(endpoint_display),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(p.muted_fg.opacity(0.6))
+                                        .child("·"),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(p.muted_fg)
+                                        .child(node.transport.kind_name().to_uppercase()),
+                                ),
+                        ),
+                )
+                .when(group_kind != GroupKind::Selector, |d| {
+                    d.child(pill(
+                        if group_kind == GroupKind::UrlTest {
+                            "自动测速中"
+                        } else {
+                            "备用"
+                        },
+                        p.muted_fg,
+                        p.panel_alt,
+                    ))
+                })
+                // Latency column: fixed width (80px), right-aligned, mono font.
+                .child(
+                    div()
+                        .w(px(80.))
+                        .flex()
+                        .justify_end()
+                        .text_sm()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(delay_color)
+                        .child(delay_label),
+                )
+                // Action buttons: Ping test and More menu.
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
+                                .compact()
+                                .label("测速")
+                                .tooltip("测试 TCP 延迟")
+                                .loading(is_latency_busy)
+                                .on_click(cx.listener(move |this, _, _, _| {
+                                    this.service.test_latency(LatencyScope::Node(
+                                        node_id_tcp.clone(),
+                                    ));
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("more-{node_id_menu}")))
+                                .compact()
+                                .ghost()
+                                .label("⋯")
+                                .tooltip("更多操作 (真连/分享/二维码/删除)")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.node_menu_open = if this.node_menu_open.as_deref()
+                                        == Some(&node_id_menu)
+                                    {
+                                        None
+                                    } else {
+                                        Some(node_id_menu.clone())
+                                    };
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                // Row end: Enabled toggle switch, isolated with a left border divider.
+                .child(
+                    div()
+                        .pl_2()
+                        .border_l_1()
+                        .border_color(p.border)
+                        .child(
+                            toggle(
+                                SharedString::from(format!("enabled-{node_id}")),
+                                "",
+                                node.enabled,
+                            )
+                            .on_change(cx.listener(
+                                move |this, checked, _, cx| {
+                                    this.service.set_node_enabled(&node_id, *checked);
+                                    this.sync(cx);
+                                },
+                            )),
+                        ),
+                ),
+        )
+        // Expanded '⋯' menu tray
+        .when(is_menu_open, |d| {
+            d.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .px_4()
+                    .py_2()
+                    .bg(p.panel)
+                    .border_t_1()
+                    .border_color(p.border)
+                    .child(
+                        Button::new(SharedString::from(format!("real-{node_id_real}")))
+                            .compact()
+                            .label("⚡ 测真连")
+                            .tooltip("测试真实 HTTP 访问延迟 (通过节点访问 generate_204)")
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.service.test_real_latency(&node_id_real);
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("share-{node_id_share}")))
+                            .compact()
+                            .label("↗ 复制链接")
+                            .tooltip("复制节点分享链接")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let link = this
+                                    .service
+                                    .export_links(&[node_id_share.clone()]);
+                                if link.is_empty() {
+                                    this.service.toast(
+                                        ToastLevel::Warning,
+                                        "该协议暂不支持导出链接",
+                                    );
+                                } else {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                                    this.service.toast(
+                                        ToastLevel::Success,
+                                        "分享链接已复制到剪贴板",
+                                    );
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("qr-{node_id_qr}")))
+                            .compact()
+                            .label("▦ 二维码")
+                            .tooltip("生成并查看二维码")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.qr_node = Some(node_id_qr.clone());
+                                this.show_qr = true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("del-{node_id_del}")))
+                            .compact()
+                            .ghost()
+                            .label("✕ 删除")
+                            .tooltip("删除此节点")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.service.delete_node(&node_id_del);
+                                this.node_menu_open = None;
+                                this.sync(cx);
+                            })),
+                    ),
+            )
+        })
 }

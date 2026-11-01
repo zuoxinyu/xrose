@@ -1,5 +1,6 @@
 mod brand_assets;
 mod i18n;
+mod tray;
 mod ui;
 
 use std::sync::Arc;
@@ -40,6 +41,7 @@ fn main() {
 
     let theme_mode = service.settings().theme;
     let window_service = service.clone();
+    let app_service = service.clone();
 
     application()
         .with_assets(brand_assets::BrandAssets)
@@ -50,6 +52,10 @@ fn main() {
                 ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
                 ThemeMode::System => {}
             }
+            #[cfg(target_os = "macos")]
+            Theme::update(cx, |theme| {
+                theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
+            });
             let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
             let window_icon = image::load_from_memory(include_bytes!("../assets/app-icon-256.png"))
                 .ok()
@@ -61,9 +67,16 @@ fn main() {
                     app_id: Some("io.xross.Xross".into()),
                     icon: window_icon,
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Xross".into()),
-                        ..Default::default()
+                        title: None,
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(14.), px(16.))),
                     }),
+                    window_background: if cfg!(target_os = "macos") {
+                        WindowBackgroundAppearance::Blurred
+                    } else {
+                        WindowBackgroundAppearance::Opaque
+                    },
+                    app_owns_titlebar_drag: false,
                     ..Default::default()
                 },
                 cx,
@@ -71,21 +84,36 @@ fn main() {
                     if matches!(theme_mode, ThemeMode::System) {
                         Theme::sync_system_appearance(Some(window), cx);
                     }
+                    #[cfg(target_os = "macos")]
+                    Theme::update(cx, |theme| {
+                        theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
+                    });
                     let service = window_service.clone();
                     cx.new(|cx| ui::AppView::new(service, window, cx))
                 },
             );
+            tray::setup_macos_window();
+            let tray = Arc::new(parking_lot::Mutex::new(tray::TrayManager::new(app_service.clone())));
+            let tray_for_loop = tray.clone();
+            let service_for_loop = app_service.clone();
+
             match result {
                 Ok((_, view)) => {
                     let view = view.downgrade();
-                    let view_for_tick = view.clone();
-                    let _ = view_for_tick;
-                    cx.spawn(async move |cx| loop {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(50))
-                            .await;
-                        if view.update(cx, |view, cx| view.tick(cx)).is_err() {
-                            break;
+                    cx.spawn(async move |cx| {
+                        let mut macos_configured = false;
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(200))
+                                .await;
+                            if !macos_configured {
+                                tray::setup_macos_window();
+                                macos_configured = true;
+                            }
+                            tray_for_loop.lock().tick(&service_for_loop);
+                            if view.update(cx, |view, cx| view.tick(cx)).is_err() {
+                                break;
+                            }
                         }
                     })
                     .detach();

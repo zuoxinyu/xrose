@@ -10,9 +10,10 @@ mod widgets;
 
 use std::time::Duration;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::{RouteActionKind, RoutePreset};
@@ -48,15 +49,15 @@ impl Page {
         ]
     }
 
-    fn icon(&self) -> &'static str {
+    fn icon(&self) -> IconName {
         match self {
-            Page::Nodes => "◈",
-            Page::Subscriptions => "⇅",
-            Page::Routing => "⇄",
-            Page::Dns => "▤",
-            Page::Connections => "⇆",
-            Page::Logs => "≡",
-            Page::Settings => "⚙",
+            Page::Nodes => IconName::Server,
+            Page::Subscriptions => IconName::Rss,
+            Page::Routing => IconName::Route,
+            Page::Dns => IconName::Globe,
+            Page::Connections => IconName::Activity,
+            Page::Logs => IconName::Terminal,
+            Page::Settings => IconName::Settings,
         }
     }
 
@@ -127,8 +128,18 @@ pub struct AppView {
     pub(crate) logo_badge: std::sync::Arc<gpui_kit::RenderImage>,
     pub(crate) logo_hero: std::sync::Arc<gpui_kit::RenderImage>,
     pub(crate) page: Page,
-    pub(crate) collapsed: bool,
 
+    pub(crate) focus_handle: FocusHandle,
+    pub(crate) node_search: Entity<InputState>,
+    pub(crate) show_import_box: bool,
+    pub(crate) hide_ips: bool,
+    pub(crate) node_menu_open: Option<String>,
+    pub(crate) sort_by_latency: bool,
+    pub(crate) group_by_subscription: bool,
+    pub(crate) collapsed_subs: std::collections::HashSet<String>,
+    pub(crate) batch_mode: bool,
+    pub(crate) batch_selected: std::collections::HashSet<String>,
+    pub(crate) show_clean_confirm: bool,
     pub(crate) sub_name: Entity<InputState>,
     pub(crate) sub_url: Entity<InputState>,
     pub(crate) import_input: Entity<InputState>,
@@ -179,6 +190,7 @@ impl AppView {
             cx,
             "粘贴 vmess:// / vless:// / trojan:// / ss:// 链接",
         );
+        let node_search = text_input(window, cx, "按名称或地址过滤节点…");
         let log_search = text_input(window, cx, "搜索日志…");
         let rule_name = text_input(window, cx, "规则名称");
         let rule_value = text_input(window, cx, "example.com, 或 cn（Geo），或 10.0.0.0/8");
@@ -218,13 +230,23 @@ impl AppView {
             "settings" => Page::Settings,
             _ => Page::Nodes,
         };
-        let mut view = Self {
+        let view = Self {
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
             logo_hero: crate::brand_assets::logo_hero(),
             page: initial_page,
-            collapsed: false,
             service,
+            focus_handle: cx.focus_handle(),
+            node_search,
+            show_import_box: false,
+            hide_ips: false,
+            node_menu_open: None,
+            sort_by_latency: false,
+            group_by_subscription: false,
+            collapsed_subs: std::collections::HashSet::new(),
+            batch_mode: false,
+            batch_selected: std::collections::HashSet::new(),
+            show_clean_confirm: false,
             sub_name,
             sub_url,
             import_input,
@@ -343,58 +365,57 @@ impl AppView {
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
-        let width = if self.collapsed { 68.0 } else { 216.0 };
         div()
-            .w(px(width))
+            .id("sidebar-container")
+            .w(px(220.))
             .h_full()
             .flex()
             .flex_col()
-            .bg(p.panel)
+            .bg(if cfg!(target_os = "macos") { hsla(0., 0., 0., 0.) } else { p.panel })
             .border_r_1()
             .border_color(p.border)
+            .when(cfg!(target_os = "macos"), |d| {
+                d.child(
+                    div()
+                        .id("sidebar-traffic-lights-spacer")
+                        .h(px(32.))
+                        .w_full()
+                        .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                            if ev.click_count == 2 {
+                                window.titlebar_double_click();
+                            } else {
+                                window.start_window_move();
+                            }
+                        }),
+                )
+            })
             .child(
                 div()
-                    .h(px(64.))
+                    .id("sidebar-brand")
+                    .h(px(54.))
                     .px_4()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(p.border)
+                    .justify_start()
+                    .gap_3()
+                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                        if ev.click_count == 2 {
+                            window.titlebar_double_click();
+                        } else {
+                            window.start_window_move();
+                        }
+                    })
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                img(self.logo_badge.clone())
-                                    .w(px(if self.collapsed { 30. } else { 32. }))
-                                    .h(px(if self.collapsed { 30. } else { 32. })),
-                            )
-                            .when(!self.collapsed, |d| {
-                                d.child(
-                                    div()
-                                        .text_lg()
-                                        .font_weight(FontWeight::BOLD)
-                                        .text_color(p.fg)
-                                        .child("Xross"),
-                                )
-                            }),
+                        img(self.logo_badge.clone())
+                            .w(px(28.))
+                            .h(px(28.)),
                     )
                     .child(
-                        Button::new("collapse")
-                            .compact()
-                            .ghost()
-                            .label(if self.collapsed { "»" } else { "«" })
-                            .tooltip(if self.collapsed {
-                                "展开菜单"
-                            } else {
-                                "收起菜单"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.collapsed = !this.collapsed;
-                                cx.notify();
-                            })),
+                        div()
+                            .text_base()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(p.fg)
+                            .child("Xross"),
                     ),
             )
             .child(div().flex().flex_col().gap_1().p_2().flex_1().children(
@@ -404,9 +425,10 @@ impl AppView {
                         .id(SharedString::from(format!("nav-{page:?}")))
                         .flex()
                         .items_center()
+                        .justify_start()
                         .gap_3()
-                        .h(px(40.))
                         .px_3()
+                        .h(px(40.))
                         .rounded_md()
                         .cursor_pointer()
                         .when(active, |d| d.bg(p.accent))
@@ -416,21 +438,21 @@ impl AppView {
                             cx.notify();
                         }))
                         .child(
-                            div()
-                                .w(px(22.))
-                                .text_center()
-                                .text_base()
-                                .text_color(if active { p.primary } else { p.muted_fg })
-                                .child(page.icon()),
+                            Icon::new(page.icon())
+                                .size(px(18.))
+                                .text_color(if active { p.primary } else { p.muted_fg }),
                         )
-                        .when(!self.collapsed, |d| {
-                            d.child(
-                                div()
-                                    .text_sm()
-                                    .text_color(if active { p.fg } else { p.muted_fg })
-                                    .child(tr(lang, page.zh(), page.en())),
-                            )
-                        })
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(if active {
+                                    FontWeight::MEDIUM
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(if active { p.fg } else { p.muted_fg })
+                                .child(tr(lang, page.zh(), page.en())),
+                        )
                 }),
             ))
             .child(
@@ -445,28 +467,24 @@ impl AppView {
                         div()
                             .flex()
                             .items_center()
+                            .justify_start()
                             .gap_2()
                             .child(dot(if self.snapshot.process.phase.is_alive() {
                                 p.success
                             } else {
                                 p.muted_fg
                             }))
-                            .when(!self.collapsed, |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(self.snapshot.process.phase.label()),
-                                )
-                            }),
-                    )
-                    .when(!self.collapsed, |d| {
-                        d.child(div().text_xs().text_color(p.muted_fg).child(format!(
-                            "v{} · {}",
-                            self.snapshot.app_version,
-                            self.snapshot.settings.core.display_name()
-                        )))
-                    }),
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(p.muted_fg)
+                                    .child(format!(
+                                        "v{} · {}",
+                                        self.snapshot.app_version,
+                                        self.snapshot.settings.core.display_name()
+                                    )),
+                            ),
+                    ),
             )
     }
 
@@ -475,7 +493,9 @@ impl AppView {
         let running = self.snapshot.process.phase.is_alive();
         let status_color = if running { p.success } else { p.muted_fg };
         div()
-            .h(px(64.))
+            .id("header-bar")
+            .pt(if cfg!(target_os = "macos") { px(32.) } else { px(0.) })
+            .h(px(if cfg!(target_os = "macos") { 86. } else { 54. }))
             .px_6()
             .flex()
             .items_center()
@@ -483,22 +503,25 @@ impl AppView {
             .border_b_1()
             .border_color(p.border)
             .bg(p.bg)
+            .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                if ev.click_count == 2 {
+                    window.titlebar_double_click();
+                } else {
+                    window.start_window_move();
+                }
+            })
             .child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_0p5()
+                    .items_center()
+                    .gap_3()
                     .child(
                         div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
                             .text_color(p.fg)
                             .child(self.tr(self.page.zh(), self.page.en())),
-                    )
-                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                        "配置变更需要重启 core 生效（不支持热加载）",
-                        "Config changes require a core restart (no hot reload)",
-                    ))),
+                    ),
             )
             .child(
                 div()
@@ -511,11 +534,24 @@ impl AppView {
                             .flex_col()
                             .items_end()
                             .gap_0p5()
-                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                "↓ {}  ↑ {}",
-                                xross_core::util::format_speed(self.snapshot.runtime.down_speed),
-                                xross_core::util::format_speed(self.snapshot.runtime.up_speed)
-                            )))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(
+                                        div()
+                                            .text_color(p.primary)
+                                            .child(format!("↓ {}", xross_core::util::format_speed(self.snapshot.runtime.down_speed))),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(p.info)
+                                            .child(format!("↑ {}", xross_core::util::format_speed(self.snapshot.runtime.up_speed))),
+                                    ),
+                            )
                             .child(div().text_xs().text_color(p.muted_fg).child(format!(
                                 "{} {}",
                                 self.tr("累计", "Total"),
@@ -530,7 +566,8 @@ impl AppView {
                             .flex()
                             .items_center()
                             .gap_2()
-                            .px_3()
+                            .pl_3()
+                            .pr_1()
                             .py_1()
                             .rounded_full()
                             .bg(p.panel)
@@ -540,36 +577,73 @@ impl AppView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(p.fg)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if running { p.fg } else { p.muted_fg })
                                     .child(self.snapshot.process.phase.label()),
+                            )
+                            .child(div().w(px(1.)).h(px(12.)).bg(p.border))
+                            .child(
+                                Button::new("toggle-core")
+                                    .compact()
+                                    .when(running, |b| b.ghost())
+                                    .when(!running, |b| b.primary())
+                                    .label(if running {
+                                        self.tr("停止", "Stop")
+                                    } else {
+                                        self.tr("启动", "Start")
+                                    })
+                                    .loading(self.snapshot.busy.iter().any(|b| b == "core"))
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.toggle_core();
+                                    })),
                             ),
-                    )
-                    .when(self.snapshot.config_dirty, |d| {
-                        d.child(
-                            Button::new("apply-config")
-                                .compact()
-                                .warning()
-                                .label(self.tr("应用配置", "Apply"))
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.service.apply_config();
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("toggle-core")
-                            .compact()
-                            .when(running, |b| b.danger())
-                            .when(!running, |b| b.primary())
-                            .label(if running {
-                                self.tr("停止", "Stop")
-                            } else {
-                                self.tr("启动", "Start")
-                            })
-                            .loading(self.snapshot.busy.iter().any(|b| b == "core"))
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.service.toggle_core();
-                            })),
                     ),
+            )
+    }
+
+    fn config_dirty_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        div()
+            .mx_6()
+            .mt_3()
+            .px_4()
+            .py_2p5()
+            .rounded_lg()
+            .bg(p.accent)
+            .border_1()
+            .border_color(p.warning)
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(16.))
+                            .text_color(p.warning),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.fg)
+                            .child(self.tr(
+                                "有未应用的配置变更，需重启 Core 生效",
+                                "Unapplied config changes. Restart Core to apply.",
+                            )),
+                    ),
+            )
+            .child(
+                Button::new("apply-dirty-config")
+                    .compact()
+                    .primary()
+                    .label(self.tr("立即应用并重启", "Apply & Restart"))
+                    .on_click(cx.listener(|this, _, _, _| {
+                        this.service.apply_config();
+                    })),
             )
     }
 
@@ -685,10 +759,59 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         div()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let mods = event.keystroke.modifiers;
+                let key = event.keystroke.key.as_str();
+                if mods.platform {
+                    match key {
+                        "," => {
+                            this.page = Page::Settings;
+                            cx.notify();
+                        }
+                        "1" => {
+                            this.page = Page::Nodes;
+                            cx.notify();
+                        }
+                        "2" => {
+                            this.page = Page::Subscriptions;
+                            cx.notify();
+                        }
+                        "3" => {
+                            this.page = Page::Routing;
+                            cx.notify();
+                        }
+                        "4" => {
+                            this.page = Page::Dns;
+                            cx.notify();
+                        }
+                        "5" => {
+                            this.page = Page::Connections;
+                            cx.notify();
+                        }
+                        "6" => {
+                            this.page = Page::Logs;
+                            cx.notify();
+                        }
+                        "7" => {
+                            this.page = Page::Settings;
+                            cx.notify();
+                        }
+                        "r" => {
+                            this.service.test_latency(xross_core::service::LatencyScope::All);
+                            cx.notify();
+                        }
+                        "q" => {
+                            cx.quit();
+                        }
+                        _ => {}
+                    }
+                }
+            }))
             .relative()
             .flex()
             .size_full()
-            .bg(p.bg)
+            .bg(if cfg!(target_os = "macos") { hsla(0., 0., 0., 0.) } else { p.bg })
             .text_color(p.fg)
             .font_family(cx.theme().font_family.clone())
             .child(self.sidebar(cx))
@@ -698,8 +821,12 @@ impl Render for AppView {
                     .flex_col()
                     .flex_1()
                     .h_full()
+                    .bg(p.bg)
                     .overflow_hidden()
                     .child(self.header(cx))
+                    .when(self.snapshot.config_dirty, |d| {
+                        d.child(self.config_dirty_banner(cx))
+                    })
                     .child(
                         div()
                             .id("content-scroll")

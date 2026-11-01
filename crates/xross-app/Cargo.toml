@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 xross-core = { path = "../xross-core" }
 gpui-kit = "0.8.1"
+gpui-base = "0.8.1"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,3 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 smallvec = "1"
 env_logger = "0.11"
 parking_lot.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.25"
+objc = "0.2"

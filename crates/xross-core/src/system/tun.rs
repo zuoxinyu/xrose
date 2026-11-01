@@ -1,7 +1,6 @@
 //! Pre-flight diagnostics for TUN mode, shown before the user hits start.
 
 use std::net::TcpListener;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 

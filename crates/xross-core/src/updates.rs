@@ -425,10 +425,12 @@ mod tests {
 
     #[test]
     fn asset_selection() {
-        let (os, _arch) = platform_arch();
-        let xray_name = format!("Xray-{os}-64.zip");
+        let (os, arch) = platform_arch();
+        let xray_arch = if arch == "arm64" { "arm64-v8a" } else { "64" };
+        let sing_arch = if arch == "arm64" { "arm64" } else { "amd64" };
+        let xray_name = format!("Xray-{os}-{xray_arch}.zip");
         let sing_name = format!(
-            "sing-box-1.10.0-{}-amd64.tar.gz",
+            "sing-box-1.10.0-{}-{sing_arch}.tar.gz",
             if os == "macos" { "darwin" } else { os }
         );
         let release = ReleaseInfo {

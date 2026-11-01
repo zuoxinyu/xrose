@@ -8623,9 +8623,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "cocoa",
  "env_logger",
+ "gpui-base",
  "gpui-kit",
  "image",
+ "objc",
  "parking_lot",
  "serde",
  "serde_json",

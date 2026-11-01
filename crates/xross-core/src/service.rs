@@ -884,6 +884,29 @@ impl AppService {
         self.toast(ToastLevel::Info, "节点已删除");
     }
 
+    pub fn delete_nodes(&self, node_ids: &[String]) {
+        if node_ids.is_empty() {
+            return;
+        }
+        let count = node_ids.len();
+        {
+            let mut model = self.inner.model.write();
+            for id in node_ids {
+                model.remove_node(id);
+            }
+        }
+        let _ = self.persist_model();
+        {
+            let mut lat = self.inner.latency.write();
+            for id in node_ids {
+                lat.remove(id);
+            }
+        }
+        self.refresh_doctor();
+        self.mark_dirty();
+        self.toast(ToastLevel::Info, format!("已批量删除 {count} 个节点"));
+    }
+
     pub fn select_group_kind(&self, group_id: &str, kind: crate::model::GroupKind) {
         {
             let mut model = self.inner.model.write();

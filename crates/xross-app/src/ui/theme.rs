@@ -20,8 +20,13 @@ pub struct Palette {
 
 pub fn palette(cx: &App) -> Palette {
     let theme = cx.theme();
+    let content_bg = if theme.mode.is_dark() {
+        gpui_kit::hsla(0., 0., 0.08, 1.0)
+    } else {
+        gpui_kit::hsla(0., 0., 1.0, 1.0)
+    };
     Palette {
-        bg: theme.background,
+        bg: content_bg,
         panel: theme.secondary,
         panel_alt: theme.muted,
         fg: theme.foreground,
