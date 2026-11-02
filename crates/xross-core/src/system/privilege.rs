@@ -46,6 +46,10 @@ const SYSTEMD_UNIT: &str = "xross-helper.service";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HelperRequest {
+    #[cfg(windows)]
+    TunCore {
+        request: Box<super::tun_process::Request>,
+    },
     Mesh {
         request: Box<crate::mesh::ipc::MeshRequest>,
     },
@@ -232,6 +236,20 @@ where
             continue;
         }
         let response = match serde_json::from_str::<HelperRequest>(line.trim()) {
+            #[cfg(windows)]
+            Ok(HelperRequest::TunCore { request }) => {
+                if stream
+                    .peer_creds()
+                    .ok()
+                    .and_then(|c| c.pid())
+                    .map(|pid| pid as u32)
+                    != Some(request.owner_pid)
+                {
+                    HelperResponse::error("TUN 调用进程身份校验失败")
+                } else {
+                    handler(HelperRequest::TunCore { request })
+                }
+            }
             Ok(HelperRequest::Mesh { request }) => {
                 let peer_pid = stream.peer_creds().ok().and_then(|c| c.pid());
                 if peer_pid.map(|pid| pid as u32) != Some(request.owner_pid) {
@@ -258,6 +276,14 @@ where
 /// `xross-cli helper` so both behave identically.
 pub fn handle_request(request: HelperRequest) -> HelperResponse {
     match request {
+        #[cfg(windows)]
+        HelperRequest::TunCore { request } => match super::tun_process::dispatch(&request) {
+            Ok(reply) => match serde_json::to_string(&reply) {
+                Ok(message) => HelperResponse::ok(message),
+                Err(_) => HelperResponse::error("TUN 助手响应编码失败"),
+            },
+            Err(error) => HelperResponse::error(error.to_string()),
+        },
         HelperRequest::Mesh { request } => match crate::mesh::ipc::dispatch(&request) {
             Ok(reply) => match serde_json::to_string(&reply) {
                 Ok(message) => HelperResponse::ok(message),
@@ -781,7 +807,7 @@ fn install_uid() -> u32 {
 #[cfg(windows)]
 mod platform {
     use std::os::windows::process::CommandExt;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::{Command, Stdio};
 
     use super::{HelperResponse, TASK_NAME};
@@ -1029,15 +1055,9 @@ mod platform {
     }
 
     pub fn prepare_tun(interface: &str) -> HelperResponse {
-        match wintun_path() {
-            Some(path) => HelperResponse::ok(format!(
-                "wintun 已就绪（{}），TUN 接口“{interface}”由 sing-box 创建",
-                path.display()
-            )),
-            None => HelperResponse::unsupported(
-                "未找到 wintun.dll：sing-box 1.12 创建 TUN 需要它。请把 wintun.dll 放到 core 同目录或系统 PATH 后重试",
-            ),
-        }
+        HelperResponse::ok(format!(
+            "TUN 接口“{interface}”将由特权助手代启 sing-box 创建；驱动由客户端在启动前校验部署"
+        ))
     }
 
     pub fn remove_tun(_interface: &str) -> HelperResponse {
@@ -1116,28 +1136,6 @@ mod platform {
             return Err("DNS 服务器列表不能为空".into());
         }
         Ok(out)
-    }
-
-    fn wintun_path() -> Option<PathBuf> {
-        let mut candidates = Vec::new();
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(dir) = exe.parent() {
-                candidates.push(dir.join("wintun.dll"));
-            }
-        }
-        let paths = crate::paths::AppPaths::discover();
-        candidates.push(paths.cores_dir().join("wintun.dll"));
-        candidates.push(paths.data_dir.join("wintun.dll"));
-        if let Ok(entries) = std::fs::read_dir(paths.cores_dir()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    candidates.push(path.join("wintun.dll"));
-                }
-            }
-        }
-        candidates.push(PathBuf::from(r"C:\Windows\System32\wintun.dll"));
-        candidates.into_iter().find(|path| path.exists())
     }
 }
 

@@ -123,6 +123,8 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 ### 6. 系统集成
 
 - TUN 使用 sing-box 原生实现；启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
+  Windows 启动前自动校验 Wintun 0.14.1 并部署到实际核心目录，无需手动寻找 DLL。
+  普通权限客户端通过特权助手启动 TUN 核心，支持日志、启停、重启及客户端退出回收。
 - **托盘浮窗**（Windows / macOS / Linux）：使用 GPUI Kit 绘制独立卡片式 dashboard，
   包含运行状态、实时速率与累计流量、可滚动的组内节点与延迟、系统代理、启停 core、
   TUN 开关、路由预设下拉框、全部测速、设置、显示主窗口与退出；再次点击图标、失焦或按 Esc 收起。
@@ -133,12 +135,13 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   **最小化到托盘**与**关闭到托盘**可在设置中分别开关；Linux 使用最小化/激活恢复，保留任务栏入口。
 - **提权助手**：GUI 永不提权。安装为 Windows 计划任务（绑定当前用户，登录时最高权限）/
   macOS LaunchDaemon / Linux systemd service，通过本地 socket（Unix socket /
-  Windows 命名管道）以单行 JSON 执行少量操作：TUN 准备、系统 DNS、Linux tproxy 规则。
+  Windows 命名管道）以单行 JSON 执行少量操作：TUN 核心代启、系统 DNS、Linux tproxy 规则。
   Unix 端校验 peer UID；安装/卸载走系统授权（UAC / osascript / pkexec）。
   Windows GUI 及由它安装的助手在后台运行，不显示命令行窗口；UAC 授权提示保留。
   Windows 安装器维护独立的助手程序副本与 High 完整性标签；GUI 保持普通权限。
   更新程序后重新安装助手以同步其版本。
-  未安装时 TUN 仍由 core 自行创建，界面明确提示助手状态。
+  Windows 普通权限启动 TUN 需要已安装并运行的新版助手；仅代启已登记、摘要校验通过的
+  sing-box 核心，不接受任意命令或参数。其他平台沿用核心自身权限。
 - 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；支持 `--minimized`。
 - 单实例锁（文件锁 + PID）。
 

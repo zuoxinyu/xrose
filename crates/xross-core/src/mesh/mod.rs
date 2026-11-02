@@ -18,8 +18,8 @@ pub const EASYTIER_VERSION: &str = "2.6.4";
 pub const TAILSCALE_CORE_VERSION: &str = "1.14.4";
 pub const TAILSCALE_TUN_ADDRESS: &str = "10.255.253.1/30";
 pub const TAILSCALE_TUN_NETWORK: &str = "10.255.253.0/30";
-pub const TAILSCALE_TUN_IPV6_ADDRESS: &str = "fdfe:dcba:9876::1/126";
-pub const TAILSCALE_TUN_IPV6_NETWORK: &str = "fdfe:dcba:9876::/126";
+pub const TAILSCALE_TUN_IPV6_ADDRESS: &str = "fdfe:dcba:9877::1/126";
+pub const TAILSCALE_TUN_IPV6_NETWORK: &str = "fdfe:dcba:9877::/126";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

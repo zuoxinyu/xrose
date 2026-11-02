@@ -161,6 +161,16 @@ impl CoreManager {
         core: CoreKind,
     ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
+        #[cfg(windows)]
+        if uses_native_tun(model, core) {
+            let archive = crate::mesh::driver::install(&self.paths).await?;
+            crate::mesh::driver::unpack(
+                &archive,
+                binary
+                    .parent()
+                    .ok_or_else(|| Error::binary("TUN 核心路径无效"))?,
+            )?;
+        }
         let mut ctx = adapters::CompileContext::new(
             settings,
             self.paths.data_dir.clone(),
@@ -231,6 +241,7 @@ impl CoreManager {
         spec.args = args;
         spec.workdir = Some(self.paths.data_dir.clone());
         spec.config_path = Some(outcome.config_path.clone());
+        spec.elevated_tun = uses_native_tun(model, core);
         let watchdog = WatchdogConfig {
             enabled: settings.watchdog,
             max_retries: settings.watchdog_max_retries,
@@ -329,6 +340,7 @@ impl CoreManager {
         spec.args = run_args(applied.core, &applied.path);
         spec.workdir = Some(self.paths.data_dir.clone());
         spec.config_path = Some(applied.path.clone());
+        spec.elevated_tun = uses_native_tun(&applied.model, applied.core);
         // Do not let watchdog retries conceal a failed transaction.
         self.supervisor
             .start(
@@ -438,6 +450,14 @@ async fn replace_with_rollback(
         return Err(Error::other(format!("{error}；已恢复原代理配置")));
     }
     Ok(())
+}
+
+fn uses_native_tun(model: &AppModel, core: CoreKind) -> bool {
+    core.capabilities().native_tun
+        && model
+            .inbounds
+            .iter()
+            .any(|i| i.enabled && i.kind == crate::model::InboundKind::Tun)
 }
 
 pub fn run_args(core: CoreKind, config_path: &Path) -> Vec<String> {

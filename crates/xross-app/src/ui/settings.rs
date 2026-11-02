@@ -878,8 +878,8 @@ impl AppView {
                             &p,
                             self.tr("提权助手", "Privilege helper"),
                             self.tr(
-                                "以最小权限代替 GUI 执行 TUN 准备、系统 DNS 与透明代理规则；GUI 本身永不提权",
-                                "Runs TUN preparation, system DNS and transparent rules as a minimal-privilege helper; the GUI itself never elevates",
+                                "代替 GUI 执行 TUN 核心启动、系统 DNS 与透明代理规则；GUI 本身永不提权",
+                                "Launches TUN cores and manages system DNS and transparent rules; the GUI itself never elevates",
                             ),
                         ))
                         .child(
@@ -928,8 +928,8 @@ impl AppView {
                             ))
                         })
                         .child(self.tr(
-                            "TUN 未安装助手时仍由 core 自行创建；助手额外提供系统 DNS 与 Linux tproxy 规则",
-                            "Without the helper the core still creates TUN itself; the helper adds system DNS and Linux tproxy rules",
+                            "Windows TUN 需要安装并启动新版助手；Wintun 驱动会在启动前自动校验部署",
+                            "Windows TUN requires the current helper to be installed and running; Wintun is verified and deployed automatically before startup",
                         )),
                 )
                 .when(platform.helper_supported, |d| {

@@ -106,6 +106,8 @@ pub struct SpawnSpec {
     pub env: Vec<(String, String)>,
     /// For xray: the exact config path shown in validation hints.
     pub config_path: Option<PathBuf>,
+    /// Windows TUN cores must be launched by the installed privileged helper.
+    pub elevated_tun: bool,
 }
 
 impl SpawnSpec {
@@ -117,6 +119,7 @@ impl SpawnSpec {
             workdir: None,
             env: Vec::new(),
             config_path: None,
+            elevated_tun: false,
         }
     }
 }
@@ -266,7 +269,7 @@ async fn run_loop(mut ctx: RunContext) {
             mark_stopped(&ctx);
             return;
         }
-        let spawn_result = spawn_child(&ctx);
+        let spawn_result = spawn_child(&ctx).await;
         let mut child = match spawn_result {
             Ok(child) => child,
             Err(err) => {
@@ -301,7 +304,7 @@ async fn run_loop(mut ctx: RunContext) {
             status = child.wait() => status,
             _ = ctx.stop.changed() => {
                 if *ctx.stop.borrow() {
-                    let _ = child.start_kill();
+                    let _ = child.start_kill().await;
                     let _ = child.wait().await;
                     mark_stopped(&ctx);
                     ctx.logs.push(LogStream::App, LogLevel::Info, "core 已停止");
@@ -310,6 +313,8 @@ async fn run_loop(mut ctx: RunContext) {
                 continue;
             }
         };
+        // Release the helper session before a watchdog restart reuses this owner.
+        let _ = child.start_kill().await;
         // Give the stdout/stderr readers a moment to flush the final lines.
         tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -376,12 +381,53 @@ async fn run_loop(mut ctx: RunContext) {
     }
 }
 
-fn spawn_child(ctx: &RunContext) -> std::io::Result<tokio::process::Child> {
+enum Child {
+    Local(tokio::process::Child),
+    #[cfg(windows)]
+    Elevated(crate::system::tun_process::Client),
+}
+
+impl Child {
+    fn id(&self) -> Option<u32> {
+        match self {
+            Self::Local(child) => child.id(),
+            #[cfg(windows)]
+            Self::Elevated(child) => Some(child.id()),
+        }
+    }
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Local(child) => child.wait().await,
+            #[cfg(windows)]
+            Self::Elevated(child) => child.wait().await,
+        }
+    }
+    async fn start_kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Local(child) => child.start_kill(),
+            #[cfg(windows)]
+            Self::Elevated(child) => child.stop().await,
+        }
+    }
+}
+
+async fn spawn_child(ctx: &RunContext) -> std::io::Result<Child> {
     if !ctx.spec.program.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("找不到 core 可执行文件：{}", ctx.spec.program.display()),
         ));
+    }
+    #[cfg(windows)]
+    if ctx.spec.elevated_tun && !crate::system::privilege::is_elevated() {
+        return crate::system::tun_process::Client::start(
+            &ctx.spec,
+            ctx.logs.clone(),
+            ctx.tail.clone(),
+        )
+        .await
+        .map(Child::Elevated)
+        .map_err(std::io::Error::other);
     }
     let mut command = tokio::process::Command::new(&ctx.spec.program);
     command
@@ -424,7 +470,7 @@ fn spawn_child(ctx: &RunContext) -> std::io::Result<tokio::process::Child> {
     if let Some(stderr) = child.stderr.take() {
         spawn_reader(stderr, LogStream::Stderr, ctx);
     }
-    Ok(child)
+    Ok(Child::Local(child))
 }
 
 fn spawn_reader<R>(reader: R, stream: LogStream, ctx: &RunContext)
@@ -493,6 +539,10 @@ pub fn human_failure_reason(info: &ExitInfo, tail: &[String]) -> String {
     let lower = tail.join("\n").to_ascii_lowercase();
     let cause = if lower.contains("address already in use") || lower.contains("bind:") {
         Some("端口已被占用")
+    } else if lower.contains("access is denied")
+        || lower.contains("a required privilege is not held")
+    {
+        Some("Windows TUN 权限不足，请重新安装并启动提权助手")
     } else if lower.contains("permission denied") || lower.contains("operation not permitted") {
         Some("权限不足（TUN/系统代理可能需要管理员权限）")
     } else if lower.contains("no such host") || lower.contains("dns") && lower.contains("failed") {
@@ -585,6 +635,18 @@ pub fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_tun_access_denied_is_not_reported_as_a_network_failure() {
+        let info = ExitInfo {
+            code: Some(1),
+            reason: "退出码 1".into(),
+            ..Default::default()
+        };
+        let message = human_failure_reason(&info, &["FATAL start service: start inbound/tun[tun-in]: configure tun interface: Access is denied.".into()]);
+        assert!(message.contains("权限不足"));
+        assert!(!message.contains("规则集"));
+    }
 
     #[cfg(windows)]
     #[tokio::test]

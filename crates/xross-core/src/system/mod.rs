@@ -8,6 +8,8 @@ pub mod privilege;
 pub mod proxy;
 pub mod single_instance;
 pub mod tun;
+#[cfg(windows)]
+pub mod tun_process;
 pub mod window_effects;
 
 pub use pac::{build_pac, PacServer, PacServerInfo};

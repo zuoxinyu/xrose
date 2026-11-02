@@ -137,8 +137,12 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 
 ## 安全边界
 
-- 桌面 UI 以普通用户运行；TUN 路由由 sing-box 或特权 helper 完成。
-- helper 协议为单行 JSON，只暴露 TUN 准备、系统 DNS、透明代理规则等必要操作。
+- 桌面 UI 以普通用户运行；Windows TUN 核心通过 `tun_process` 由特权助手代启。
+  `CoreManager` 在校验配置前验证 Wintun 压缩包摘要并部署 DLL 到实际核心目录。
+  `ProcessSupervisor` 统一处理本地及助手进程的日志、停止、重启和回滚。
+- helper 协议为单行 JSON，只暴露 TUN 核心代启、系统 DNS、透明代理规则等必要操作。
+  TUN 请求校验协议版本、管道调用者 PID、所属用户、已登记核心摘要和运行目录内的配置；
+  助手自行构造固定命令参数。进程句柄监控负责客户端退出回收，Job Object 负责助手崩溃回收。
 - helper 由系统服务/计划任务以管理员身份运行；GUI 通过本地 socket 调用。
   Unix 端校验 `SO_PEERCRED`/`LOCAL_PEERCRED` 的 euid（安装用户或 root），
   Windows 依赖命名管道的默认 DACL（创建者用户 + Administrators）。

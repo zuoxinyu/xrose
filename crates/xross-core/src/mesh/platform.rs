@@ -13,6 +13,14 @@ pub struct NetworkBaseline {
     pub mesh_routes: Vec<super::coexist::MeshRoute>,
 }
 
+impl NetworkBaseline {
+    /// Newly created adapters may add DNS rows without changing existing DNS.
+    pub fn preserves_connectivity(&self, original: &Self) -> bool {
+        self.defaults == original.defaults
+            && original.dns.iter().all(|entry| self.dns.contains(entry))
+    }
+}
+
 #[cfg(windows)]
 pub fn powershell(script: &str) -> Result<String> {
     use base64::Engine;
@@ -219,6 +227,24 @@ impl OwnerProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_adapter_does_not_hide_changes_to_original_connectivity() {
+        let original = NetworkBaseline {
+            defaults: vec!["0.0.0.0/0|10.10.10.1|7".into()],
+            dns: vec!["7|2|10.10.10.1".into()],
+            ..Default::default()
+        };
+        let mut current = original.clone();
+        current.dns.push("42|2|".into());
+        assert!(current.preserves_connectivity(&original));
+        current.dns[0] = "7|2|127.0.0.1".into();
+        assert!(!current.preserves_connectivity(&original));
+        current.dns.remove(0);
+        assert!(!current.preserves_connectivity(&original));
+        current = original.clone();
+        current.defaults.push("0.0.0.0/0|10.254.254.1|42".into());
+        assert!(!current.preserves_connectivity(&original));
+    }
     #[test]
     fn foreign_dns_journal_is_never_cleaned() {
         let root = tempfile::tempdir().unwrap();

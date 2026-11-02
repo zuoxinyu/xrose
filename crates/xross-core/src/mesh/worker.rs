@@ -80,7 +80,7 @@ pub fn main() -> Result<()> {
                 let mut state=backend.snapshot().await?;
                 state.probe=probe.clone();
                 let current=super::platform::baseline()?;
-                if current.defaults!=boot.baseline.defaults || current.dns!=boot.baseline.dns{return Err(Error::other("检测到默认路由或原有 DNS 变化，已停止组网以保护现有联网通道"));}
+                if !current.preserves_connectivity(&boot.baseline){return Err(Error::other("检测到默认路由或原有 DNS 变化，已停止组网以保护现有联网通道"));}
                 super::coexist::check_networks(&state.routes,&boot.baseline.protected)?;
                 let other_routes=current.mesh_routes.iter().filter(|route| route.interface!=state.interface)
                     .filter(|route| route.cidr.parse::<ipnet::IpNet>().is_ok_and(|n| !n.addr().is_multicast() && n.addr()!=std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST) && !is_link_local(n.addr())))

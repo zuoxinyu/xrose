@@ -128,6 +128,18 @@ pub fn valid_suffix(s: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn tailscale_internal_addresses_do_not_overlap_default_proxy_tun() {
+        let tun = crate::model::TunOptions::default();
+        assert!(check_networks(
+            &[
+                super::super::TAILSCALE_TUN_NETWORK.into(),
+                super::super::TAILSCALE_TUN_IPV6_NETWORK.into()
+            ],
+            &[tun.inet4_address, tun.inet6_address],
+        )
+        .is_ok());
+    }
+    #[test]
     fn protects_lan_and_both_ip_families() {
         assert!(check_networks(&["10.10.0.0/16".into()], &["10.10.10.0/24".into()]).is_err());
         assert!(check_networks(&["fd00::/64".into()], &["fd00::1/128".into()]).is_err());

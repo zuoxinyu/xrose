@@ -162,6 +162,15 @@ pub async fn check_core_update(
 
 pub fn pick_asset(core: CoreKind, release: &ReleaseInfo) -> Option<ReleaseAsset> {
     let (os, arch) = platform_arch();
+    pick_asset_for(core, release, os, arch)
+}
+
+fn pick_asset_for(
+    core: CoreKind,
+    release: &ReleaseInfo,
+    os: &str,
+    arch: &str,
+) -> Option<ReleaseAsset> {
     let os_name = match core {
         CoreKind::Xray => os,
         CoreKind::SingBox => match os {
@@ -195,7 +204,7 @@ pub fn pick_asset(core: CoreKind, release: &ReleaseInfo) -> Option<ReleaseAsset>
                 || name.contains(&format!("{os_name}_{arch_name}"));
             let is_archive =
                 name.ends_with(".zip") || name.ends_with(".tar.gz") || name.ends_with(".tgz");
-            platform_match && is_archive
+            platform_match && is_archive && !name.contains("legacy")
         })
         .collect();
     let chosen = candidates
@@ -404,6 +413,36 @@ pub fn rule_set_file(dir: &Path, tag: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_download_does_not_select_legacy_asset_listed_first() {
+        let mut release = ReleaseInfo {
+            tag: "v1.14.4".into(),
+            version: "1.14.4".into(),
+            notes: String::new(),
+            published_at: String::new(),
+            prerelease: false,
+            assets: [
+                "sing-box-1.14.4-windows-amd64-legacy-windows-7.zip",
+                "sing-box-1.14.4-windows-amd64.zip",
+            ]
+            .into_iter()
+            .map(|name| ReleaseAsset {
+                name: name.into(),
+                url: "https://example.test/core.zip".into(),
+                size: 1,
+            })
+            .collect(),
+        };
+        assert_eq!(
+            pick_asset_for(CoreKind::SingBox, &release, "windows", "64")
+                .unwrap()
+                .name,
+            "sing-box-1.14.4-windows-amd64.zip"
+        );
+        release.assets.pop();
+        assert!(pick_asset_for(CoreKind::SingBox, &release, "windows", "64").is_none());
+    }
 
     #[test]
     fn checksum_formats() {

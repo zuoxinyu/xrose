@@ -1,4 +1,4 @@
-//! Pinned, signed Wintun distribution. Loading occurs only inside the worker.
+//! Pinned Wintun distribution, shared by proxy TUN and mesh workers.
 use crate::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -62,7 +62,11 @@ pub fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut bytes)
             .map_err(|_| Error::binary("读取 Wintun 失败"))?;
-        crate::util::atomic_write(&path, &bytes)?;
+        // A connected backend may have the same DLL loaded. Never replace an
+        // already verified copy, including during apply/restart operations.
+        if std::fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+            crate::util::atomic_write(&path, &bytes)?;
+        }
     }
     Ok(target)
 }

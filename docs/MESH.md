@@ -100,7 +100,8 @@ EasyTier 显式设置远端网段白名单，不自动安装所有节点发布�
 Tailscale 上游 `accept_routes` 没有逐网段 OS 白名单，所以使用用户态 endpoint，
 配合独立 sing-box TUN 入站；该入站的 `route_address` 仅包含 Tailscale 地址范围
 及用户明确填写的远端网段。控制服务器新增路由不会直接写入系统路由表。
-TUN 使用专用地址 `10.255.253.1/30`（连接前检查冲突），实际 tailnet 地址从状态 API 显示。
+TUN 使用专用地址 `10.255.253.1/30` 和 `fdfe:dcba:9877::1/126`（连接前检查冲突），
+与代理 TUN 默认地址分离；实际 tailnet 地址从状态 API 显示。
 该连接用于访问远端设备和网段，不自动开放本机服务给 tailnet。
 设备探测通过 Tailscale 自带 gRPC ping 完成；用户态转发的业务验收使用 TCP/UDP，
 不能以系统 `ping` 的 ICMP 超时直接判定该连接不可用。
@@ -140,10 +141,21 @@ SQLite v3 的组网配置独立加密保存。普通快照不含网络密钥，�
 `-CrashOwner` 在连通后结束测试所有者，并核对网卡和所属 NRPT 规则已清理。
 脚本需要 UAC 提权，不安装永久服务，也不修改路由器。
 
+`scripts/tun-smoke-windows.ps1` 为 `cargo run -p xross-cli --example tun_smoke`
+提供独立助手与回收监控；两者须使用同一 TEMP 测试目录和随机 `XROSS_HELPER_SOCKET`。
+测试目录须预先登记 sing-box 核心，示例只创建 `auto_route=false`、`dns_mode=disabled`
+的受限网卡，验证助手代启、日志、两次启停；`--crash-owner` 验证客户端异常退出回收。
+结束后写入测试目录的 `finish.flag`，监控程序清理助手并输出 `guardian-result.json`。
+该测试不代替全流量 TUN 验收。
+
 ### 2026-11-03 Windows 验收记录
 
 - 工作区构建通过；仅保留仓库原有的两条警告。修改文件的 rustfmt 检查通过。
-- 核心离线测试 151 项通过，跳过已知 Windows `second_acquire_fails` 锁测试。
+- 核心离线测试 157 项通过，跳过已知 Windows `second_acquire_fails` 锁测试。
+  新增 TUN 核心鉴权边界、所有者退出回收、下载包选择及新增网卡 DNS 基线回归测试。
+- Windows 受限 TUN 的普通权限客户端经助手启动、日志、两次启停、客户端异常退出及
+  助手失联回收通过；同时运行的 Tailscale 在新版复测中保持连接。
+  默认路由、原有 DNS、OpenWrt 管理通道保持不变，测试网卡已删除。
 - EasyTier 静态库与 OpenWrt EasyTier 2.4.5 成功组网，设备发现与探测通过。
 - Tailscale 独立身份登录、TCP 访问、完整设备域名解析和 gRPC 设备探测通过。
 - 双后端同时在线通过；普通权限客户端访问高权限助手通过。

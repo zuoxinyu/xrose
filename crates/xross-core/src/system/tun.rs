@@ -96,9 +96,9 @@ pub(crate) fn diagnose_for_process(
         }
         #[cfg(target_os = "windows")]
         {
-            checks.push(DoctorCheck::warn(
+            checks.push(DoctorCheck::ok(
                 "Wintun",
-                "请确认 wintun.dll 与 core 位于同一目录，并以管理员身份运行",
+                "启动 TUN 前自动校验并部署驱动，由特权助手代启核心",
             ));
         }
         if !super::privilege::is_elevated() && !super::privilege::helper_available() {
