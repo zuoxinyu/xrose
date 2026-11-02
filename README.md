@@ -21,13 +21,12 @@
 
 更多截图：[连接](docs/screenshots/connections.png) · [设置](docs/screenshots/settings.png)
 
-Xross 的核心设计不是"给某个 core 的 JSON 套一层界面"，而是维护一套与 core 无关的
-**用户意图模型**（节点、出站组、入站、路由、DNS），再由两个 `CoreAdapter` 编译成
-差异极大的 Xray / sing-box 配置。因此第二个 core 不是事后补丁，而是一等公民。
+Xross 维护一套独立于具体内核的**用户意图模型**（节点、出站组、入站、路由、DNS），并由对应的
+`CoreAdapter` 编译生成 Xray 或 sing-box 配置文件，使两套内核具备对等的支持能力。
 
 ```
 ┌────────────────────────────── GPUI (xross-app) ──────────────────────────────┐
-│  节点 · 订阅 · 路由 · DNS · 连接 · 日志 · 设置       可折叠两栏布局 / 中英双语  │
+│  节点 · 订阅 · 路由 · DNS · 组网 · 连接 · 日志 · 设置  可折叠两栏布局 / 中英双语 │
 └───────────────────────────────────┬──────────────────────────────────────────┘
                                     │  AppService（同步 API + 轮询快照）
 ┌───────────────────────────────────▼──────────────────────────────────────────┐
@@ -46,29 +45,27 @@ Xross 的核心设计不是"给某个 core 的 JSON 套一层界面"，而是维
 
 ### 异地组网（Windows 首期）
 
-- EasyTier 2.6.4 Rust 库静态链接，由特权助手的独立 Xross 工作进程运行；不调用 EasyTier 外部程序。
-- Tailscale 使用独立的 sing-box 1.14.4，支持浏览器登录、自定义控制服务器、设备探测及完整 MagicDNS 域名。
-- 两种网络独立于代理配置，可同时连接；SQLite v3 加密保存配置，退出清理工作进程和所属 DNS 规则。
-- 自动生成代理直连、TUN 排除与 PAC 绕过；Windows 共存期间暂时关闭 `strict_route`，断开后恢复。
-- 新增“组网”页面及 `xross-cli mesh`。构建、权限、使用限制和测试边界见 [组网文档](docs/MESH.md)。
+- **EasyTier**：静态集成 EasyTier 2.6.4 核心库，由提权助手托管的独立工作进程运行。
+- **Tailscale**：基于独立运行的 sing-box 1.14.4 实例，支持浏览器设备授权、自定义控制服务器、设备探测与 MagicDNS 域名解析。
+- **独立与共存**：组网连接独立于代理核心，支持双后端同时在线；配置加密存储于 SQLite，退出应用时自动清理工作进程与专属 DNS 规则。
+- **分流联动**：组网连接期间自动配置代理直连、TUN 路由排除与 PAC 绕过规则，并在 Windows 下自动关闭代理 TUN 的 `strict_route`，断开后恢复。
+- **入口**：提供“组网”页面与 `xross-cli mesh` 子命令。构建要求、权限边界与验收说明见 [组网文档](docs/MESH.md)。
 
-Windows 首次构建使用 `powershell -NoProfile -File scripts/build-windows.ps1` 准备 protoc，另需安装 7-Zip。
-全流量 TUN 共存必须在独立 Windows 环境验收；macOS/Linux 首期仅保持源码兼容。
+Windows 首次构建可执行 `powershell -NoProfile -File scripts/build-windows.ps1` 准备 `protoc`（需安装 7-Zip）。当前网络功能仅在 Windows 启用，macOS 与 Linux 保持源码兼容。
 
 ### 1. Core 管理（`crates/xross-core/src/core/`）
 
 - **二进制管理**：下载 GitHub Release、SHA-256 校验、多版本共存、按平台/架构选择、
   与 App 完全分离（`cores/<core>/<version>/`）。版本清单写入 `manifest.json`；
   支持自定义可执行文件路径覆盖。
-- **进程生命周期**：启动/停止/重启、`watchdog` 自动拉起（指数退避、可配置次数）、
+- **进程生命周期**：启动/停止/重启、崩溃自动重启（指数退避、可配置次数）、
   退出码与 stderr 归因（端口占用、配置错误、权限不足、OOM/信号等）。
-- **配置生成与校验**：编译 → 写临时配置 → 真实执行 `xray run -test` /
-  `sing-box check` → 解析输出中的行号与错误，未通过时拒绝启动。
+- **配置生成与校验**：编译 → 写临时配置 → 执行 `xray run -test` /
+  `sing-box check` → 解析输出中的行号与错误，校验未通过时拒绝启动。
 - **日志**：接入 stdout/stderr、按级别过滤、大小滚动日志文件
   （`xross.log` / `xross.1.log`，可配置上限与保留数）。
 
-> Xray 与 sing-box 都不支持热加载配置。因此"改配置 → 应用"在本项目中就是
-> **重启 core**；唯一走 API 的热切换是 sing-box 的 selector 组（Clash API）。
+> Xray 与 sing-box 均不支持配置热重载。除 sing-box 的 selector 节点切换通过 Clash API 热切换外，其余配置变更均通过重写配置并重启内核生效。
 
 编译器面向 **sing-box 1.12+**（已在 1.14.4 上验证）：使用新式 typed DNS
 （`type: https/udp/fakeip/local`）、`route.default_domain_resolver` 与
@@ -123,9 +120,9 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 ### 6. 系统集成
 
 - TUN 使用 sing-box 原生实现；启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
-  Windows 启动前自动校验 Wintun 0.14.1 并部署到实际核心目录，无需手动寻找 DLL。
-  普通权限客户端通过特权助手启动 TUN 核心，支持日志、启停、重启及客户端退出回收。
-- **托盘浮窗**（Windows / macOS / Linux）：使用 GPUI Kit 绘制独立卡片式 dashboard，
+  Windows 启动前自动校验 Wintun 0.14.1 并部署到实际核心目录，无需手动配置 DLL。
+  普通权限客户端通过提权助手启动 TUN 核心，支持日志、启停、重启及客户端退出回收。
+- **托盘浮窗**（Windows / macOS / Linux）：使用 GPUI Kit 绘制独立卡片式控制面板，
   包含运行状态、实时速率与累计流量、可滚动的组内节点与延迟、系统代理、启停 core、
   TUN 开关、路由预设下拉框、全部测速、设置、显示主窗口与退出；再次点击图标、失焦或按 Esc 收起。
   浮窗使用紧凑字号；路由下拉框与主界面同步，运行中切换会校验并重启 Core，停止时只保存。
@@ -133,9 +130,9 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   TUN 在 Core 运行时通过校验、重启生效，停止时只保存设置，Xray 下不可启用。
   Windows 使用 `Shell_NotifyIcon`，macOS 使用 AppKit status item，Linux 使用 StatusNotifierItem。
   **最小化到托盘**与**关闭到托盘**可在设置中分别开关；Linux 使用最小化/激活恢复，保留任务栏入口。
-- **提权助手**：GUI 永不提权。安装为 Windows 计划任务（绑定当前用户，登录时最高权限）/
+- **提权助手**：GUI 保持普通用户权限运行。安装为 Windows 计划任务（绑定当前用户，登录时最高权限）/
   macOS LaunchDaemon / Linux systemd service，通过本地 socket（Unix socket /
-  Windows 命名管道）以单行 JSON 执行少量操作：TUN 核心代启、系统 DNS、Linux tproxy 规则。
+  Windows 命名管道）以单行 JSON 执行受限特权操作：TUN 核心代启、组网工作进程托管、系统 DNS、Linux tproxy 规则。
   Unix 端校验 peer UID；安装/卸载走系统授权（UAC / osascript / pkexec）。
   Windows GUI 及由它安装的助手在后台运行，不显示命令行窗口；UAC 授权提示保留。
   Windows 安装器维护独立的助手程序副本与 High 完整性标签；GUI 保持普通权限。
@@ -174,7 +171,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 
 ### 9. UI 与更新
 
-- 两栏式布局：可折叠左侧菜单（节点/订阅/路由/DNS/连接/日志/设置），
+- 两栏式布局：可折叠左侧导航（节点/订阅/路由/DNS/组网/连接/日志/设置），
   右侧内容区；深/浅色主题、跟随系统；中英文切换。
 - 标题栏左侧展示当前组所选节点的名称、缓存延迟与服务器 IP 归属地；
   归属地通过 HTTPS 向 `ipwho.is` 查询（只发送服务器 IP），异步更新并在内存中缓存，
@@ -211,9 +208,9 @@ cargo run -p xross-cli -- demo  # 查看编译出的两套配置
 
 首次运行：
 
-1. **订阅** 页添加机场订阅，或在 **节点** 页粘贴分享链接 / 点击 **手动** 填写节点。
-2. **设置 → Core 管理** 下载 xray 或 sing-box（自动校验 SHA-256）。
-3. 右上角 **启动**。修改路由/DNS 后点击 **应用配置**（会重启 core）。
+1. 在 **订阅** 页添加订阅链接，或在 **节点** 页导入分享链接 / 手动添加节点。
+2. 在 **设置 → Core 管理** 下载 Xray 或 sing-box（自动校验 SHA-256）。
+3. 点击右上角 **启动**。修改路由或 DNS 后点击 **应用配置** 重启内核生效。
 
 关闭窗口默认最小化到托盘；需要彻底退出请用托盘菜单的 **退出 Xross**，
 或在 **设置 → 通用** 关闭“关闭到托盘”（托盘宿主不可用时关闭即退出）。
@@ -281,16 +278,14 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
   真机上端到端验证；安装/卸载会弹出系统管理员授权。
 - **Xray 连接列表**：StatsService 只提供计数，无法列出连接。
 - **流量面板**：sing-box 使用 `/connections` 累计值差分；没有连接时图表为空。
-- **系统代理**：仅在 GNOME/KDE、macOS、Windows 上生效；其他桌面会明确报错。
+- **系统代理**：仅在 GNOME/KDE、macOS、Windows 上生效；其他桌面环境会明确报错。
 - **平台验证**：核心逻辑与 Windows 托盘窗口/菜单/隐藏恢复路径已在本机验证；
   Windows 注册表、`InternetSetOption`、macOS `networksetup`、LaunchDaemon 等代码
   按平台 API 编写，但尚未在真机 CI 上验证。
-- **sing-box 版本**：编译器只生成 1.12+ 的 typed DNS；1.11 及更早版本会校验失败。
-  这是有意取舍，避免同时维护两套 DNS schema。
-- **App 自更新**：只做版本检查与下载页跳转，不做二进制自替换。
-- **i18n**：导航、页面标题、主要按钮支持中英双语；部分提示与错误文本仍为中文。
-- **WireGuard**：模型已预留协议位，但密钥字段未实现，编译时会给出警告并跳过。
-- 系统代理后端在非 GNOME/KDE 的 Linux 桌面上不可用（会明确提示）。
+- **sing-box 版本**：仅支持 1.12+ 的 typed DNS 配置格式，不支持 1.11 及更早版本。
+- **App 自更新**：提供版本检查与下载页跳转，不执行二进制自替换。
+- **i18n**：界面主要控件与说明支持中英双语；部分底层诊断与错误提示仍为中文。
+- **WireGuard**：模型已预留协议位，密钥字段尚未实现，编译时会提示警告并跳过。
 
 ## TODO
 
@@ -326,7 +321,8 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 
 ### 文案与引导
 
-- [ ] 使用 Gemini Argon 润色文案：统一术语与语气，补齐错误/警告提示的中英双语。
+- [x] 统一界面与文档术语及语气，消除口语化与冗余解释文案。
+- [ ] 补齐底层错误与警告提示的中英双语支持。
 - [ ] 优化 Onboarding 体验：首次启动流程更连贯，按“下载 core → 添加订阅 → 启动”串成一条
       引导路径，缺提权助手/缺 rule-set 时就地给出下一步动作，而不是让用户自己去找设置项。
 
@@ -345,13 +341,14 @@ crates/
     src/core/           # binary / process / logs
     src/subscription/   # 解析、抓取、分享链接、二维码
     src/runtime/        # Clash API、Xray stats、延迟测试
+    src/mesh/           # 异地组网（EasyTier / Tailscale、共存规划）
     src/storage/        # SQLite、迁移、加密
-    src/system/         # 系统代理、PAC、自启、单实例、特权助手、TUN 检查
+    src/system/         # 系统代理、PAC、自启、单实例、提权助手、TUN 检查
     src/service.rs      # UI 唯一入口（AppService / UiSnapshot）
   xross-app/
-    src/ui/             # GPUI 页面（节点/订阅/路由/DNS/连接/日志/设置）
-    src/tray/           # dashboard.rs + macos.rs / windows.rs / unsupported.rs
-  xross-cli/            # 无界面工具（含 add-node / helper）
+    src/ui/             # GPUI 页面（节点/订阅/路由/DNS/组网/连接/日志/设置）
+    src/tray/           # dashboard.rs + popup.rs + 平台托盘后端
+  xross-cli/            # 无界面工具（含 add-node / helper / mesh）
 ```
 
 ## 许可

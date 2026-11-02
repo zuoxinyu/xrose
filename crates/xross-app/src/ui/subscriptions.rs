@@ -101,8 +101,8 @@ impl AppView {
                         .text_xs()
                         .text_color(p.muted_fg)
                         .child(self.tr(
-                            "订阅 token 与节点凭据使用 ChaCha20-Poly1305 加密后存入本地数据库；自定义 UA / Header 在节点卡片中不可见但会被发送。",
-                            "Subscription tokens and node credentials are encrypted with ChaCha20-Poly1305; custom UA/headers are sent on refresh.",
+                            "订阅地址与节点凭据均加密存储于本地数据库。",
+                            "Subscription URLs and node credentials are stored encrypted in the local database.",
                         )),
                 ),
         );

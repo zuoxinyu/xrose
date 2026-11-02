@@ -365,7 +365,7 @@ impl AppView {
                                 .child(
                                     settings_toggle(
                                         "watchdog",
-                                        self.tr("watchdog 自动拉起", "Watchdog"),
+                                        self.tr("崩溃自动重启", "Auto-restart on crash"),
                                         settings.watchdog,
                                     )
                                     .on_change(cx.listener(
@@ -449,8 +449,8 @@ impl AppView {
                 )
                 .when(!crate::tray::available(), |d| {
                     d.child(div().text_xs().text_color(p.warning).child(self.tr(
-                        "托盘不可用（平台无实现，或系统拒绝注册）：关闭窗口仍会退出",
-                        "Tray unavailable (no backend on this platform, or the shell refused it): closing the window still quits",
+                        "当前环境不支持系统托盘，关闭窗口将直接退出",
+                        "System tray is unavailable in the current environment; closing the window will quit the app",
                     )))
                 })
                 .child(
@@ -486,7 +486,7 @@ impl AppView {
                         )
                         .when(settings.core == CoreKind::Xray, |d| {
                             d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                                "Xray 没有 mixed：SOCKS 用此端口，HTTP 自动使用 +1",
+                                "Xray 模式下：SOCKS 监听此端口，HTTP 监听端口 +1",
                                 "Xray has no mixed inbound: SOCKS uses this port, HTTP uses +1",
                             )))
                         }),
@@ -551,8 +551,8 @@ impl AppView {
                             &p,
                             self.tr("Core 管理", "Core binaries"),
                             self.tr(
-                                "下载与 App 分离；支持多版本共存、SHA-256 校验、平台/架构选择",
-                                "Independent from the app: multiple versions, SHA-256 verification, platform/arch selection",
+                                "管理已安装的内核版本或指定自定义可执行文件路径",
+                                "Manage installed core versions or specify custom executable paths",
                             ),
                         ))
                         .child(
@@ -582,17 +582,16 @@ impl AppView {
                         ),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(format!(
-                            "{}：{} / {} · {} {}",
-                            self.tr("当前平台", "Platform"),
-                            platform.os,
-                            platform.arch,
-                            self.tr("当前版本", "active version"),
-                            active_version.clone().unwrap_or_else(|| self.tr("未安装", "not installed").to_string())
-                        )),
+                    div().text_xs().text_color(p.muted_fg).child(format!(
+                        "{}：{} / {} · {} {}",
+                        self.tr("当前平台", "Platform"),
+                        platform.os,
+                        platform.arch,
+                        self.tr("当前版本", "active version"),
+                        active_version
+                            .clone()
+                            .unwrap_or_else(|| self.tr("未安装", "not installed").to_string())
+                    )),
                 )
                 .when(core_binaries.is_empty(), |d| {
                     d.child(empty_hint(
@@ -628,7 +627,12 @@ impl AppView {
                                         .flex()
                                         .items_center()
                                         .gap_2()
-                                        .child(div().text_sm().text_color(p.fg).child(format!("v{version}")))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(p.fg)
+                                                .child(format!("v{version}")),
+                                        )
                                         .when(is_active, |d| {
                                             d.child(pill(
                                                 self.tr("使用中", "active"),
@@ -642,16 +646,11 @@ impl AppView {
                                             p.panel_alt,
                                         )),
                                 )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(format!(
-                                            "{} · sha256 {}…",
-                                            xross_core::util::format_bytes(record.size),
-                                            &record.sha256[..12.min(record.sha256.len())]
-                                        )),
-                                ),
+                                .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                    "{} · sha256 {}…",
+                                    xross_core::util::format_bytes(record.size),
+                                    &record.sha256[..12.min(record.sha256.len())]
+                                ))),
                         )
                         .child(
                             div()
@@ -664,10 +663,12 @@ impl AppView {
                                         )))
                                         .compact()
                                         .label(self.tr("使用", "Use"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.set_active_version(core, &version);
-                                            this.sync(cx);
-                                        })),
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.service.set_active_version(core, &version);
+                                                this.sync(cx);
+                                            }),
+                                        ),
                                     )
                                 })
                                 .child(
@@ -696,7 +697,8 @@ impl AppView {
                                 .compact()
                                 .label(self.tr("使用自定义路径", "Use custom path"))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    let path = this.endpoint_input.read(cx).value().trim().to_string();
+                                    let path =
+                                        this.endpoint_input.read(cx).value().trim().to_string();
                                     let core = this.snapshot.settings.core;
                                     if path.is_empty() {
                                         this.service.set_binary_override(core, None);
@@ -878,8 +880,8 @@ impl AppView {
                             &p,
                             self.tr("提权助手", "Privilege helper"),
                             self.tr(
-                                "代替 GUI 执行 TUN 核心启动、系统 DNS 与透明代理规则；GUI 本身永不提权",
-                                "Launches TUN cores and manages system DNS and transparent rules; the GUI itself never elevates",
+                                "用于启动虚拟网卡（TUN）、托管组网进程、配置系统 DNS 与透明代理规则的后台服务",
+                                "Background service for launching TUN cores, mesh workers, system DNS, and transparent proxy rules",
                             ),
                         ))
                         .child(
@@ -1018,7 +1020,7 @@ impl AppView {
                     &p,
                     self.tr("运行环境检查", "Environment checks"),
                     self.tr(
-                        "TUN、端口、权限、协议兼容性；系统代理后端与特权助手状态",
+                        "TUN、端口、权限、协议兼容性；系统代理后端与提权助手状态",
                         "TUN, ports, permissions, protocol support, proxy backend and helper",
                     ),
                 ))
@@ -1037,15 +1039,19 @@ impl AppView {
                         .child(format!(
                             "{}：{}",
                             self.tr("提权", "Elevated"),
-                            if platform.elevated { "yes" } else { "no" }
+                            if platform.elevated {
+                                self.tr("是", "yes")
+                            } else {
+                                self.tr("否", "no")
+                            }
                         ))
                         .child(format!(
                             "{}：{}",
-                            self.tr("特权助手", "Helper"),
+                            self.tr("提权助手", "Helper"),
                             if platform.helper_available {
-                                "available"
+                                self.tr("可用", "available")
                             } else {
-                                "not installed"
+                                self.tr("未就绪", "not ready")
                             }
                         ))
                         .child(format!(

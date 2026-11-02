@@ -365,12 +365,52 @@ impl AppView {
         let m = &c.metadata;
         let process = c.process_name();
         let fields = [
-            (self.tr("01 · 谁发起", "01 · Source"), format!("{}\n{}:{}\n{}", if process.is_empty() { self.tr("进程未提供", "Process unavailable").to_string() } else { process }, m.source_ip, m.source_port, m.process_path)),
-            (self.tr("02 · 协议 / 入站", "02 · Protocol / inbound"), format!("{} · {}", m.network.to_uppercase(), m.kind)),
-            (self.tr("03 · 谁解析", "03 · DNS resolver"), self.tr("core 未提供 DNS 解析器信息；下方测试可观测本机预解析", "The core does not expose the DNS resolver; the test below observes local pre-resolution").to_string()),
-            (self.tr("04 · 命中规则", "04 · Matched rule"), rule_label(c, self.tr("core 未提供规则", "Rule unavailable").as_ref())),
-            (self.tr("05 · 出站链", "05 · Outbound chain"), self.connection_chain(c)),
-            (self.tr("06 · 目标 / 返回", "06 · Target / return"), format!("{} → {}:{}\n{}\n↓{} · ↑{}", c.host(), m.destination_ip, m.destination_port, self.tr("沿已建立的连接返回发起方（路径推导）", "Returns over the established connection (inferred)"), format_bytes(c.download), format_bytes(c.upload))),
+            (
+                self.tr("01 · 发起方", "01 · Source"),
+                format!(
+                    "{}\n{}:{}\n{}",
+                    if process.is_empty() {
+                        self.tr("进程未提供", "Process unavailable").to_string()
+                    } else {
+                        process
+                    },
+                    m.source_ip,
+                    m.source_port,
+                    m.process_path
+                ),
+            ),
+            (
+                self.tr("02 · 协议 / 入站", "02 · Protocol / inbound"),
+                format!("{} · {}", m.network.to_uppercase(), m.kind),
+            ),
+            (
+                self.tr("03 · DNS 解析", "03 · DNS resolver"),
+                self.tr(
+                    "内核未暴露此连接的 DNS 解析器",
+                    "DNS resolver metadata is not exposed by the core",
+                )
+                .to_string(),
+            ),
+            (
+                self.tr("04 · 命中规则", "04 · Matched rule"),
+                rule_label(c, self.tr("core 未提供规则", "Rule unavailable").as_ref()),
+            ),
+            (
+                self.tr("05 · 出站链", "05 · Outbound chain"),
+                self.connection_chain(c),
+            ),
+            (
+                self.tr("06 · 目标 / 返回", "06 · Target / return"),
+                format!(
+                    "{} → {}:{}\n{}\n↓{} · ↑{}",
+                    c.host(),
+                    m.destination_ip,
+                    m.destination_port,
+                    self.tr("经原连接返回", "Returns over the established connection"),
+                    format_bytes(c.download),
+                    format_bytes(c.upload)
+                ),
+            ),
         ];
         card(&p)
             .child(
@@ -448,7 +488,7 @@ impl AppView {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.fg)
-                            .child(self.tr("一键增加规则", "Add a rule")),
+                            .child(self.tr("快速添加规则", "Quick rule")),
                     )
                     .children(
                         [
@@ -533,8 +573,8 @@ impl AppView {
                             })),
                     )
                     .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                        "精确匹配 · 用户规则置顶，内置绕过仍优先 · 应用后生效",
-                        "Exact match · first user rule, built-in bypasses still apply · activate by applying configuration",
+                        "置顶保存至自定义规则（优先级低于局域网与大陆绕过），应用配置后生效",
+                        "Saved at the top of custom rules (below built-in LAN/China bypasses); apply config to take effect",
                     ))),
             )
     }
@@ -558,8 +598,8 @@ impl AppView {
         let success = trace.as_ref().and_then(|t| t.success);
         card(&p)
             .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
-                .child(section_title(&p, self.tr("测试链接", "Test a link"), self.tr("由 Xross 发起新请求，检查解析、路由、节点和返回；不复现原进程身份", "Xross sends a new request to inspect DNS, routing, nodes and return; the original process identity is not reproduced")))
-                .child(pill(if active { self.tr("● 探测中", "● Probing") } else if success == Some(true) { self.tr("✓ 请求完成", "✓ Completed") } else if success == Some(false) { self.tr("! 发现问题", "! Issue found") } else { self.tr("链路实验室", "Path lab") }, if success == Some(false) { p.danger } else { p.primary }, p.primary.opacity(0.1))))
+                .child(section_title(&p, self.tr("链路测试", "Link trace"), self.tr("发起探测请求，依次检查 DNS 解析、路由匹配与出站连通性", "Send a probe request to inspect DNS resolution, route matching, and outbound connectivity")))
+                .child(pill(if active { self.tr("● 探测中", "● Probing") } else if success == Some(true) { self.tr("✓ 请求完成", "✓ Completed") } else if success == Some(false) { self.tr("! 发现问题", "! Issue found") } else { self.tr("就绪", "Ready") }, if success == Some(false) { p.danger } else { p.primary }, p.primary.opacity(0.1))))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.trace_input)))
                 .child(Button::new("trace-start").compact().primary().label(if trace.is_some() { self.tr("重新测试", "Run again") } else { self.tr("开始测试", "Start test") }).loading(active)

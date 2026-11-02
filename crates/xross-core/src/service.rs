@@ -2496,7 +2496,7 @@ impl AppService {
 
     pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
         let id = self.inner.mesh.save(profile)?;
-        self.toast(ToastLevel::Success, "组网配置已加密保存");
+        self.toast(ToastLevel::Success, "组网配置已保存");
         Ok(id)
     }
 

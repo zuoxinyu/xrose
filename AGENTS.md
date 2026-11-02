@@ -28,7 +28,7 @@ Isolate all state with `XROSS_HOME` so you never touch the user's real profile:
 - bash: `XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`
 
 `xross-cli` also has `parse`, `import`, `export`, `add-node`, `doctor`, `core`, `fetch-core`,
-`run`, `helper` and `trace` subcommands — prefer it over the GUI when verifying core logic.
+`run`, `helper`, `mesh` and `trace` subcommands — prefer it over the GUI when verifying core logic.
 
 Formatting: `cargo fmt --all --check` currently reports pre-existing diffs, so format only the
 files you changed (`rustfmt <file>`). `cargo clippy` is available but not enforced.
@@ -37,14 +37,15 @@ files you changed (`rustfmt <file>`). `cargo clippy` is available but not enforc
 
 | Crate | Responsibility |
 | --- | --- |
-| `crates/xross-core` | Everything that is not UI: model, adapters, core binaries/process, subscriptions, storage, runtime APIs, system integration, `service.rs` facade |
+| `crates/xross-core` | Everything that is not UI: model, adapters, core binaries/process, subscriptions, mesh, storage, runtime APIs, system integration, `service.rs` facade |
 | `crates/xross-app` | GPUI Kit UI (`ui/`), tray dashboard (`tray/`: macOS `NSMenu`, Windows `Shell_NotifyIcon`), assets |
 | `crates/xross-cli` | Headless entry points for the same core |
 
 `xross-core/src/`: `model/` (intent), `adapters/` (compile to core JSON), `core/` (binaries,
-process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash API, Xray stats),
-`system/` (proxy, PAC, autostart, TUN, single instance, privilege IPC), plus `route.rs`
-(local rule preview), `dns.rs` (presets/validation), `trace.rs` (link tracer), `updates.rs`.
+process, logs), `subscription/`, `mesh/` (EasyTier/Tailscale, coexistence plan), `storage/`
+(SQLite + crypto), `runtime/` (Clash API, Xray stats), `system/` (proxy, PAC, autostart, TUN,
+single instance, privilege IPC), plus `route.rs` (local rule preview), `dns.rs`
+(presets/validation), `trace.rs` (link tracer), `updates.rs`.
 
 ## Architecture invariants
 
@@ -72,6 +73,19 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 
 - User-visible text is Chinese. In the UI supply both languages at the call site:
   `tr(lang, zh, en)` / `self.tr("停止", "Stop")` — no central translation table.
+- **Copy and tone (UI, CLI, README, docs):**
+  - Keep all copy concise, formal, and objective. State what a control does or what the current
+    state is; never lecture the user or editorialize (no "最容易出错的一层", "这是有意取舍").
+  - Avoid AI-style rhetorical contrasts (`不是…而是…`, `不是事后补丁，而是一等公民`) and
+    self-justifying disclaimers (`与订阅并行：…凭据不会上传`, `不调用外部程序`).
+  - Do not leak internal implementation details, crypto algorithms, or schema history into UI
+    subtitles or button labels (write `保存` / `保存配置` instead of `加密保存`; describe
+    user-facing behavior instead of `ChaCha20-Poly1305` or `1.12+ predefined action`).
+  - Avoid colloquialisms, slang, and anthropomorphic phrasing (use `节点订阅` instead of
+    `机场订阅`, `崩溃自动重启` instead of `watchdog 自动拉起`, `发起方` / `DNS 解析` instead of
+    `谁发起` / `谁解析`, `HTTP 测速` instead of `测真连`).
+  - Use unified terminology across UI and docs: `提权助手` (not `特权助手`), `内核` / `Core`,
+    `出站组`, `规则集`, `异地组网` (`组网` in navigation).
 - Module-level `//!` docs and inline comments in English; error and warning strings in Chinese.
 - Errors go through `crate::error::Error` + `Result`; `to_string()` is rendered to the user
   verbatim, so make messages actionable.
@@ -102,7 +116,7 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 - `system::single_instance::tests::second_acquire_fails` **fails on Windows**: the lock itself
   works, but `existing_pid()` cannot read the file while the lock is held (Windows byte-range
   locks are mandatory, so the read-back is a sharing violation). Use
-  `cargo test -p xross-core -- --skip second_acquire_fails`; 99 tests pass.
+  `cargo test -p xross-core -- --skip second_acquire_fails`; 157 tests pass.
 - If the workspace tree carries a **Low mandatory integrity label** (the sandbox applied one
   earlier in this session), a process launched from `target\debug\xross-app.exe` inherits that
   Low IL. Low IL cannot call `Shell_NotifyIconW` against the Medium IL shell
@@ -161,6 +175,7 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 | Binary download/verify/lifecycle | `core/binary.rs`, `core/process.rs`, `updates.rs` |
 | Persistence/schema | `storage/mod.rs` (bump `SCHEMA_VERSION`, add a migration) |
 | Proxy/PAC/autostart/TUN | `system/*` |
+| Mesh networking | `crates/xross-core/src/mesh/`, `ui/mesh.rs`, `docs/MESH.md` |
 | Rule preview, tracer | `route.rs`, `trace.rs` |
 | Manual node form | `model/node.rs` (`NodeDraft`), `ui/manual_node.rs`, `ui/nodes.rs` |
 | Tray dashboard / window hide-show | `crates/xross-app/src/tray/` (`dashboard.rs` is shared; `macos.rs` / `windows.rs` are backends) |

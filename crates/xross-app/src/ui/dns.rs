@@ -36,8 +36,8 @@ impl AppView {
                             &p,
                             self.tr("DNS 策略", "DNS policy"),
                             self.tr(
-                                "最容易出错的一层：fake-ip、DoH/DoT、按域名分流、hosts、dns-hijack",
-                                "The most error-prone layer: fake-ip, DoH/DoT, split DNS, hosts, DNS hijack",
+                                "配置域名解析服务器、分流规则、Fake-IP 与静态 Hosts",
+                                "Configure DNS servers, split-routing rules, Fake-IP, and static Hosts",
                             ),
                         ))
                         .child(
@@ -120,7 +120,7 @@ impl AppView {
                         .child(section_title(
                             &p,
                             self.tr("DNS 服务器", "DNS servers"),
-                            self.tr("按 domains 条件选择性使用；final 为兜底", "Selected by domain conditions; final is the fallback"),
+                            self.tr("按域名条件匹配解析服务器，未命中时使用默认服务器（final）", "Match DNS servers by domain conditions; unmatched queries use the final server"),
                         ))
                         .child(
                             Button::new("toggle-dns-form")
@@ -321,8 +321,8 @@ impl AppView {
                             &p,
                             self.tr("Hosts", "Hosts"),
                             self.tr(
-                                "域名到 IP 的静态映射；sing-box 使用 1.12+ 的 dns predefined 动作",
-                                "Static domain→IP mappings; sing-box uses the 1.12+ predefined action",
+                                "配置域名到 IP 地址的静态映射",
+                                "Configure static domain-to-IP address mappings",
                             ),
                         ))
                         .child(
@@ -353,7 +353,8 @@ impl AppView {
                                     .primary()
                                     .label(self.tr("保存", "Save"))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let domain = this.host_domain.read(cx).value().trim().to_string();
+                                        let domain =
+                                            this.host_domain.read(cx).value().trim().to_string();
                                         let ips: Vec<String> = this
                                             .host_ips
                                             .read(cx)
@@ -379,7 +380,10 @@ impl AppView {
                     )
                 })
                 .when(dns_config.hosts.is_empty(), |d| {
-                    d.child(empty_hint(&p, self.tr("没有静态映射", "No static mappings")))
+                    d.child(empty_hint(
+                        &p,
+                        self.tr("没有静态映射", "No static mappings"),
+                    ))
                 })
                 .children(dns_config.hosts.iter().map(|(domain, ips)| {
                     let domain = domain.clone();
@@ -397,7 +401,9 @@ impl AppView {
                                 .flex()
                                 .flex_col()
                                 .child(div().text_sm().text_color(p.fg).child(domain))
-                                .child(div().text_xs().text_color(p.muted_fg).child(ips.join(", "))),
+                                .child(
+                                    div().text_xs().text_color(p.muted_fg).child(ips.join(", ")),
+                                ),
                         )
                         .child(
                             Button::new(SharedString::from(format!("del-host-{domain_delete}")))

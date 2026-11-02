@@ -89,17 +89,17 @@ impl AppView {
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
         let mut body = div().flex().flex_col().gap_4().w_full().min_w(px(0.));
         body=body.child(card(&p)
-            .child(section_title(&p,self.tr("异地组网","Mesh networks"),self.tr("EasyTier 与 Tailscale 可同时在线，独立于代理核心","EasyTier and Tailscale run independently of the proxy core")))
+            .child(section_title(&p,self.tr("异地组网","Mesh networks"),self.tr("管理 EasyTier 与 Tailscale 虚拟局域网连接","Manage EasyTier and Tailscale virtual network connections")))
             .child(div().flex().flex_wrap().gap_2()
                 .child(Button::new("mesh-new").primary().label(self.tr("新增网络","Add network")).on_click(cx.listener(|this,_,window,cx|{
                     this.mesh_form.load(MeshProfile::default().summary(),window,cx);cx.notify();
                 })))
                 .when(!self.snapshot.mesh.tailscale_installed,|d|d.child(Button::new("mesh-install").label(self.tr("安装 Tailscale 组件","Install Tailscale component")).disabled(busy).on_click(cx.listener(|this,_,_,_|this.service.mesh_install_tailscale()))))
-                .when(!self.snapshot.platform.helper_available,|d|d.child(Button::new("mesh-helper").label(self.tr("准备特权助手","Set up helper")).on_click(cx.listener(|this,_,_,_|{
+                .when(!self.snapshot.platform.helper_available,|d|d.child(Button::new("mesh-helper").label(self.tr("启用提权助手","Enable privilege helper")).on_click(cx.listener(|this,_,_,_|{
                     if this.snapshot.platform.helper_installed {this.service.start_helper();} else {this.service.install_helper();}
                 })))))
-            .child(div().text_sm().text_color(p.muted_fg).child(self.tr("默认不自动连接、不启用出口节点、不发布本机网段。关闭到托盘会保持连接，退出时断开。","Connections are manual. Exit nodes and local subnet advertising are disabled. Connections remain in the tray and stop on exit.")))
-            .when(!self.snapshot.mesh.supported,|d|d.child(empty_hint(&p,tr(lang,"当前平台仅支持配置管理；网络功能首先在 Windows 启用。","Configuration is available here; networking is enabled on Windows first."))))) ;
+            .child(div().text_sm().text_color(p.muted_fg).child(self.tr("支持多网并存与代理分流联动；主窗口关闭至托盘时保持连接，退出应用时自动断开。","Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.")))
+            .when(!self.snapshot.mesh.supported,|d|d.child(empty_hint(&p,tr(lang,"当前平台仅支持配置管理，组网连接仅在 Windows 可用。","Only profile management is available on this platform; mesh connections require Windows."))))) ;
 
         if self.mesh_form.visible {
             let mut form = card(&p).child(
@@ -185,8 +185,8 @@ impl AppView {
             if self.mesh_form.provider == MeshProvider::Tailscale {
                 form = form.child(
                     div().text_sm().text_color(p.muted_fg).child(self.tr(
-                        "保存后点击“连接”，再点击“在浏览器登录”完成授权。断开会保留登录状态。",
-                        "Save, then connect and select “Sign in with browser” to authorize this device. Disconnecting keeps you signed in.",
+                        "保存后点击“连接”，并在浏览器中完成设备授权；断开连接不会清除登录状态。",
+                        "Save, then connect and authorize this device in your browser. Disconnecting preserves your sign-in state.",
                     )),
                 );
             }
@@ -199,7 +199,7 @@ impl AppView {
                         .child(
                             Button::new("mesh-save")
                                 .primary()
-                                .label(self.tr("加密保存", "Save encrypted"))
+                                .label(self.tr("保存配置", "Save profile"))
                                 .disabled(busy)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     match this.service.save_mesh_profile(this.mesh_form.profile(cx))
@@ -365,7 +365,10 @@ impl AppView {
                 network = network.child(div().text_sm().child(format!("MagicDNS: *.{suffix}")));
             }
             if active && cfg!(windows) && self.snapshot.settings.effective_tun() {
-                network=network.child(div().text_sm().text_color(p.warning).child(self.tr("组网运行期间暂时关闭 strict_route，严格 DNS 防泄漏过滤已放宽。","While mesh is active, strict_route is temporarily disabled and strict DNS leak filtering is relaxed.")));
+                network = network.child(div().text_sm().text_color(p.warning).child(self.tr(
+                    "组网连接期间已自动关闭 TUN strict_route 以保障路由互通。",
+                    "TUN strict_route is automatically disabled while mesh is connected.",
+                )));
             }
             if let Some(probe) = state.probe {
                 network = network.child(
@@ -442,8 +445,8 @@ impl AppView {
             body = body.child(empty_hint(
                 &p,
                 self.tr(
-                    "添加一个网络以连接异地设备",
-                    "Add a network to connect remote devices",
+                    "暂无组网配置，点击“新增网络”创建",
+                    "No mesh networks configured",
                 ),
             ));
         }

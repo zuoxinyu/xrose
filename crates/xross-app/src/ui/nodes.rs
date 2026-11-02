@@ -562,7 +562,7 @@ impl AppView {
                                         .tooltip(if self.group_by_subscription {
                                             self.tr("按订阅分组展示中 (点击切回平铺)", "Grouped by subscription (click to flatten)")
                                         } else {
-                                            self.tr("按订阅分组与折叠节点 (推荐 20+ 节点时使用)", "Group by subscription (recommended for 20+ nodes)")
+                                            self.tr("按订阅分组与折叠节点", "Group and collapse nodes by subscription")
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.group_by_subscription = !this.group_by_subscription;
@@ -596,9 +596,9 @@ impl AppView {
                                         .icon(if self.hide_ips { IconName::EyeOff } else { IconName::Eye })
                                         .label(self.tr("隐私", "Privacy"))
                                         .tooltip(if self.hide_ips {
-                                            self.tr("服务器地址已脱敏保护 (点击还原)", "Addresses masked (click to reveal)")
+                                            self.tr("服务器地址已隐藏 (点击显示)", "Addresses masked (click to reveal)")
                                         } else {
-                                            self.tr("脱敏隐藏服务器地址 (防截图泄露)", "Mask server addresses for privacy")
+                                            self.tr("隐藏服务器地址", "Mask server addresses")
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.hide_ips = !this.hide_ips;
@@ -632,10 +632,10 @@ impl AppView {
                                         .compact()
                                         .ghost()
                                         .icon(IconName::Broom)
-                                        .label(self.tr("清理超时", "Clean Dead"))
+                                        .label(self.tr("清理超时", "Remove Timed Out"))
                                         .tooltip(self.tr(
-                                            "一键清理测速超时的不可用节点",
-                                            "Batch delete all timeout/dead nodes",
+                                            "移除所有测速超时的节点",
+                                            "Remove all nodes that timed out during latency testing",
                                         ))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             let timeout_ids: Vec<String> = this
@@ -1417,11 +1417,7 @@ fn render_node_row(
                                 .compact()
                                 .ghost()
                                 .icon(IconName::Ellipsis)
-                                .tooltip(super::tr(
-                                    lang,
-                                    "更多操作 (真连/分享/二维码/删除)",
-                                    "More actions (HTTP test, share, QR, delete)",
-                                ))
+                                .tooltip(super::tr(lang, "更多操作", "More actions"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     cx.stop_propagation();
                                     this.node_menu_open =
@@ -1476,11 +1472,11 @@ fn render_node_row(
                         Button::new(SharedString::from(format!("real-{node_id_real}")))
                             .compact()
                             .icon(IconName::Zap)
-                            .label(super::tr(lang, "测真连", "Test HTTP"))
+                            .label(super::tr(lang, "HTTP 测速", "HTTP Test"))
                             .tooltip(super::tr(
                                 lang,
-                                "测试真实 HTTP 访问延迟 (通过节点访问 generate_204)",
-                                "Test HTTP latency through this node (generate_204)",
+                                "通过节点发起 HTTP 请求测试实际连通延迟",
+                                "Measure end-to-end HTTP latency through this node",
                             ))
                             .on_click(cx.listener(move |this, _, _, _| {
                                 this.service.test_real_latency(&node_id_real);

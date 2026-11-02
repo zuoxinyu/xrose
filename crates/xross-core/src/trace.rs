@@ -418,14 +418,14 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 resolved_ip = ips.first().copied();
                 session.resolved_ips = ips.iter().map(|ip| ip.to_string()).collect();
                 let server = choose_dns_server(&model, &target.host);
-                session.dns_server = Some("本机系统解析器（测试预解析）".into());
+                session.dns_server = Some("系统解析器".into());
                 let fake = if model.dns.fake_ip {
-                    " · fake-ip 已启用，core 内部会使用映射地址"
+                    " · 已启用 Fake-IP"
                 } else {
                     ""
                 };
                 let detail = format!(
-                    "实测：本机系统解析器 {} → {}{}{}；core 内部 DNS 未观测",
+                    "系统解析：{} → {}{}{}",
                     target.host,
                     ips.iter()
                         .take(3)
@@ -433,7 +433,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                         .collect::<Vec<_>>()
                         .join(", "),
                     server
-                        .map(|s| format!(" · 配置预览: {} ({})", s.tag, s.display_address()))
+                        .map(|s| format!(" · 匹配服务器：{} ({})", s.tag, s.display_address()))
                         .unwrap_or_default(),
                     fake
                 );
@@ -527,12 +527,9 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     publish(service, session)?;
     sleep(110).await;
     let route_detail = if preview.needs_core && !running {
-        format!("依赖 geo/rule-set，core 未运行；按默认出站预览 · {action_label}")
+        format!("依赖规则集数据（内核未运行），按默认出站预览 · {action_label}")
     } else {
-        format!(
-            "本地配置预览（非运行中 core 实测）：{} · {}",
-            preview.explanation, action_label
-        )
+        format!("规则预览：{} · {}", preview.explanation, action_label)
     };
     session.rule = preview.rule.as_ref().map(|r| r.name.clone());
     session.set(
@@ -722,7 +719,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             {
                 step.status = TraceStatus::Ok;
                 step.detail = format!(
-                    "core 关联观测：{rule} → {}",
+                    "实际匹配：{rule} → {}",
                     session
                         .group_name
                         .clone()
@@ -761,9 +758,9 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 TraceStatus::Ok
             },
             if chain.is_empty() {
-                "core 未提供出站链".into()
+                "内核未提供出站链".into()
             } else {
-                format!("core 关联观测：{chain}")
+                format!("实际出站：{chain}")
             },
             None,
         );
@@ -815,7 +812,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             TraceStepKind::Response,
             TraceStatus::Ok,
             format!(
-                "{} → Xross · 返回路径推导，非逐跳测量 · 探测 {response_ms} ms",
+                "{} → Xross · 耗时 {response_ms} ms",
                 if actual_direct {
                     "目标 → 直连".into()
                 } else {

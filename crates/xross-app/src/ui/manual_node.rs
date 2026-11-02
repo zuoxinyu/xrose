@@ -294,8 +294,8 @@ impl AppView {
                         &p,
                         self.tr("手动添加节点", "Add node manually"),
                         self.tr(
-                            "与订阅并行：保存后自动加入默认出站组，凭据不会上传",
-                            "Independent of subscriptions: saved into the default groups, credentials stay local",
+                            "手动配置代理节点参数，保存后自动加入默认出站组",
+                            "Configure node parameters manually and add to default outbound groups",
                         ),
                     ))
                     .child(

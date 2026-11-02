@@ -25,48 +25,41 @@ impl AppView {
 
         if dirty {
             body = body.child(
-                card(&p)
-                    .border_color(p.warning)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(p.fg)
-                                            .child(self.tr(
-                                                "路由已修改，尚未生效",
-                                                "Routing changed, not applied",
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .child(self.tr(
-                                                "xray / sing-box 都不支持热加载路由，应用会重启 core（切换节点除外）",
-                                                "Neither core hot-reloads routing. Applying restarts the core (node switching excepted).",
-                                            )),
-                                    ),
-                            )
-                            .child(
-                                Button::new("routing-apply")
-                                    .compact()
-                                    .warning()
-                                    .label(self.tr("应用配置", "Apply"))
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        this.service.apply_config();
-                                    })),
-                            ),
-                    ),
+                card(&p).border_color(p.warning).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.fg)
+                                        .child(self.tr(
+                                            "路由已修改，尚未生效",
+                                            "Routing changed, not applied",
+                                        )),
+                                )
+                                .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                                    "应用路由变更将重启内核以生效",
+                                    "Applying routing changes will restart the core.",
+                                ))),
+                        )
+                        .child(
+                            Button::new("routing-apply")
+                                .compact()
+                                .warning()
+                                .label(self.tr("应用配置", "Apply"))
+                                .on_click(cx.listener(|this, _, _, _| {
+                                    this.service.apply_config();
+                                })),
+                        ),
+                ),
             );
         }
 
@@ -77,8 +70,8 @@ impl AppView {
                     &p,
                     self.tr("路由模板", "Routing presets"),
                     self.tr(
-                        "以用户意图建模；“绕过大陆”会自动展开为域名/GeoIP 规则",
-                        "Intent-based presets; “Bypass mainland” expands into domain/GeoIP rules",
+                        "选择预设分流模式，或配置自定义分流规则",
+                        "Select a routing preset or configure custom rules",
                     ),
                 ))
                 .child(div().flex().flex_wrap().gap_2().children(
@@ -515,8 +508,8 @@ impl AppView {
                             &p,
                             self.tr("规则集 / Geo 数据", "Rule sets / Geo data"),
                             self.tr(
-                                "sing-box 使用 .srs rule-set（新版已移除 geoip/geosite 字段）；Xray 使用原生 geo 字段",
-                                "sing-box uses .srs rule-sets (legacy geoip/geosite fields were removed); Xray uses native geo fields",
+                                "管理路由与 DNS 规则引用的本地规则集与 Geo 数据",
+                                "Manage local rule-sets and Geo data referenced by routing and DNS rules",
                             ),
                         ))
                         .child(
