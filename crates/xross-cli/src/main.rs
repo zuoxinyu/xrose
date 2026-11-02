@@ -4,10 +4,11 @@
 use std::path::PathBuf;
 
 use xross_core::adapters::{self, CompileContext};
-use xross_core::model::{CoreKind, Node, Protocol};
+use xross_core::model::{CoreKind, Node, NodeDraft, Protocol, TransportKind};
 use xross_core::paths::AppPaths;
 use xross_core::subscription::parse_subscription;
 use xross_core::system;
+use xross_core::system::privilege;
 use xross_core::AppService;
 
 fn main() {
@@ -18,11 +19,13 @@ fn main() {
         Some("parse") => parse(&args[1..]),
         Some("import") => import(&args[1..]),
         Some("export") => export(&args[1..]),
+        Some("add-node") => add_node(&args[1..]),
         Some("doctor") => doctor(&args[1..]),
         Some("seed-demo") => seed_demo(&args[1..]),
         Some("core") => core_command(&args[1..]),
         Some("fetch-core") => fetch_core(&args[1..]),
         Some("run") => run_core(&args[1..]),
+        Some("helper") => helper_command(&args[1..]),
         Some("trace") => trace_link(&args[1..]),
         Some("demo") => demo(),
         Some("version") | Some("--version") | Some("-V") => {
@@ -50,6 +53,17 @@ fn usage() {
   xross-cli parse <file|->          解析订阅并打印摘要
   xross-cli import <file|->         导入节点到当前配置
   xross-cli export [--all]          导出分享链接
+  xross-cli add-node --server HOST [--name N] [--protocol vless] [--port 443]
+                     [--uuid U] [--password P] [--method aes-256-gcm]
+                     [--transport ws|grpc|h2|httpupgrade|tcp] [--path /ws]
+                     [--host H] [--service-name S] [--sni S] [--alpn h2]
+                     [--reality-pbk KEY] [--reality-sid ID] [--no-tls]
+                     [--insecure] [--tags a,b] [--home DIR]
+  xross-cli helper status           提权助手状态（JSON）
+  xross-cli helper install          安装并启动提权助手（会请求管理员权限）
+  xross-cli helper start|restart    启动/重启已安装的提权助手
+  xross-cli helper uninstall        卸载提权助手
+  xross-cli helper run              前台运行助手（需要 root/管理员）
   xross-cli doctor                  输出 TUN/端口/权限检查
   xross-cli seed-demo               写入演示节点/订阅/规则（用于截图或试用）
   xross-cli core install --core xray --path <bin> --version 1.8.24
@@ -220,6 +234,143 @@ fn import(args: &[String]) -> Result<(), String> {
     let added = service.import_content(&content);
     println!("已导入 {added} 个节点");
     Ok(())
+}
+
+fn value_arg(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|arg| arg == flag)
+}
+
+fn add_node(args: &[String]) -> Result<(), String> {
+    let (_, _, home, _) = parse_args(args);
+    let mut draft = NodeDraft::default();
+    if let Some(name) = value_arg(args, "--name") {
+        draft.name = name;
+    }
+    if let Some(protocol) = value_arg(args, "--protocol") {
+        draft.protocol = Protocol::parse(&protocol).ok_or_else(|| {
+            format!("未知协议：{protocol}（可用 vmess/vless/trojan/ss/hysteria2/tuic/socks/http）")
+        })?;
+    }
+    draft.server =
+        value_arg(args, "--server").ok_or_else(|| "缺少 --server <主机或 IP>".to_string())?;
+    if let Some(port) = value_arg(args, "--port") {
+        draft.port = port
+            .parse::<u16>()
+            .map_err(|_| format!("端口无效：{port}（应为 1-65535）"))?;
+    }
+    if let Some(value) = value_arg(args, "--uuid") {
+        draft.uuid = value;
+    }
+    if let Some(value) = value_arg(args, "--password") {
+        draft.password = value;
+    }
+    if let Some(value) = value_arg(args, "--username") {
+        draft.username = value;
+    }
+    if let Some(value) = value_arg(args, "--method") {
+        draft.method = value;
+    }
+    if let Some(value) = value_arg(args, "--flow") {
+        draft.flow = value;
+    }
+    if let Some(value) = value_arg(args, "--sni") {
+        draft.sni = value;
+    }
+    if let Some(value) = value_arg(args, "--alpn") {
+        draft.alpn = value;
+    }
+    if let Some(value) = value_arg(args, "--fingerprint") {
+        draft.fingerprint = value;
+    }
+    if let Some(value) = value_arg(args, "--path") {
+        draft.transport_path = value;
+    }
+    if let Some(value) = value_arg(args, "--host") {
+        draft.transport_host = value;
+    }
+    if let Some(value) = value_arg(args, "--service-name") {
+        draft.transport_service_name = value;
+    }
+    if let Some(value) = value_arg(args, "--reality-pbk") {
+        draft.reality_public_key = value;
+    }
+    if let Some(value) = value_arg(args, "--reality-sid") {
+        draft.reality_short_id = value;
+    }
+    if let Some(value) = value_arg(args, "--tags") {
+        draft.tags = value;
+    }
+    if let Some(transport) = value_arg(args, "--transport") {
+        draft.transport = TransportKind::parse(&transport)
+            .ok_or_else(|| format!("未知传输：{transport}（tcp/ws/grpc/h2/httpupgrade）"))?;
+    }
+    draft.tls_enabled = !has_flag(args, "--no-tls");
+    draft.insecure = has_flag(args, "--insecure");
+    draft.udp = !has_flag(args, "--no-udp");
+
+    let service = service(home)?;
+    let id = service.add_manual_node(draft).map_err(|e| e.to_string())?;
+    match service.model().node(&id).cloned() {
+        Some(node) => println!(
+            "已添加节点：{}（{} {}:{}）",
+            node.name,
+            node.protocol.display_name(),
+            node.server,
+            node.port
+        ),
+        None => println!("已添加节点 {id}"),
+    }
+    Ok(())
+}
+
+fn helper_command(args: &[String]) -> Result<(), String> {
+    let run_flag = |flag: &str| {
+        privilege::helper_main(&[flag.to_string()])
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    match args.first().map(String::as_str) {
+        Some("status") => run_flag(privilege::STATUS_ARG),
+        Some("install") => {
+            println!("{}", privilege::install().map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Some("uninstall") => {
+            println!("{}", privilege::uninstall().map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Some("start") => {
+            println!("{}", privilege::start().map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Some("restart") => {
+            println!("{}", privilege::restart().map_err(|e| e.to_string())?);
+            Ok(())
+        }
+        Some("stop") => {
+            privilege::request_shutdown().map_err(|e| e.to_string())?;
+            println!("已请求提权助手退出");
+            Ok(())
+        }
+        Some("run") => {
+            let mut full = vec![privilege::HELPER_ARG.to_string()];
+            full.extend(args[1..].iter().cloned());
+            privilege::helper_main(&full)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        _ => {
+            eprintln!("用法：xross-cli helper status|install|start|restart|stop|uninstall|run");
+            std::process::exit(2);
+        }
+    }
 }
 
 fn export(args: &[String]) -> Result<(), String> {

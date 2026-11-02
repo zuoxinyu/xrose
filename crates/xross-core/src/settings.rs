@@ -98,6 +98,10 @@ pub struct Settings {
     pub tun_enabled: bool,
     pub autostart: bool,
     pub start_minimized: bool,
+    /// Minimizing the window hides it into the tray instead of the taskbar.
+    pub minimize_to_tray: bool,
+    /// Closing the window hides it into the tray instead of quitting.
+    pub close_to_tray: bool,
     pub single_instance: bool,
     pub log_level: LogLevel,
     pub log_max_bytes: u64,
@@ -132,6 +136,8 @@ impl Default for Settings {
             tun_enabled: false,
             autostart: false,
             start_minimized: false,
+            minimize_to_tray: true,
+            close_to_tray: true,
             single_instance: true,
             log_level: LogLevel::Info,
             log_max_bytes: 10 * 1024 * 1024,

@@ -14,7 +14,7 @@ use crate::core::logs::{LogBus, LogEntry, LogStream};
 use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
 use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
-use crate::model::{AppModel, CoreKind, InboundKind, Node, RoutePreset, RouteRule};
+use crate::model::{AppModel, CoreKind, InboundKind, Node, NodeDraft, RoutePreset, RouteRule};
 use crate::paths::AppPaths;
 use crate::runtime::{
     ClashClient, ClashConnection, ClashProxy, TrafficHistory, TrafficSample, XrayStatsClient,
@@ -23,6 +23,7 @@ use crate::settings::LogLevel;
 use crate::settings::Settings;
 use crate::storage::{LatencyEntry, ProfileMeta, Store};
 use crate::subscription::{parse_subscription, qr_ascii, Subscription, SubscriptionUsage};
+use crate::system::privilege::{self, HelperRequest, HelperStatus};
 use crate::system::{self, DoctorCheck, PacServer, ProxyManager};
 use crate::trace::{self, TraceSession};
 use crate::updates::{self, AppUpdate, RuleSetUpdate, UpdateCandidate};
@@ -54,6 +55,10 @@ pub struct PlatformInfo {
     pub proxy_backend: String,
     pub elevated: bool,
     pub helper_available: bool,
+    pub helper_installed: bool,
+    pub helper_supported: bool,
+    pub helper_detail: String,
+    pub helper_path: Option<String>,
     pub log_dir: String,
     pub data_dir: String,
 }
@@ -133,6 +138,7 @@ struct Inner {
     updates: Mutex<UpdateStatus>,
     doctor: RwLock<Vec<DoctorCheck>>,
     recovery_note: RwLock<Option<String>>,
+    helper: RwLock<HelperStatus>,
     rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
@@ -227,6 +233,7 @@ impl AppService {
             updates: Mutex::new(UpdateStatus::default()),
             doctor: RwLock::new(Vec::new()),
             recovery_note: RwLock::new(None),
+            helper: RwLock::new(privilege::initial_status()),
             rule_set_updates: RwLock::new(Vec::new()),
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
@@ -305,6 +312,7 @@ impl AppService {
         let proxy_backend = self.inner.proxy.lock().backend().label().to_string();
         let doctor = self.inner.doctor.read().clone();
         let validation = self.inner.validation.read().clone();
+        let helper = self.inner.helper.read().clone();
         let runtime = RuntimeView {
             connections: self.inner.connections.read().clone(),
             proxies: self.inner.proxies.read().clone(),
@@ -342,8 +350,12 @@ impl AppService {
                 os: std::env::consts::OS.into(),
                 arch: std::env::consts::ARCH.into(),
                 proxy_backend,
-                elevated: system::privilege::is_elevated(),
-                helper_available: system::privilege::helper_available(),
+                elevated: helper.elevated,
+                helper_available: helper.running,
+                helper_installed: helper.installed,
+                helper_supported: helper.supported,
+                helper_detail: helper.detail.clone(),
+                helper_path: helper.executable.clone(),
                 log_dir: self.inner.paths.logs_dir().display().to_string(),
                 data_dir: self.inner.paths.data_dir.display().to_string(),
             },
@@ -806,6 +818,34 @@ impl AppService {
         added
     }
 
+    /// Adds a node entered in the manual form. Validation lives in
+    /// [`crate::model::NodeDraft::into_node`]; the returned id can be used to
+    /// test or select the node right away.
+    pub fn add_manual_node(&self, draft: NodeDraft) -> Result<String> {
+        let core = self.inner.settings.read().core;
+        let node = draft.into_node(core)?;
+        let fingerprint = node.fingerprint();
+        {
+            let mut model = self.inner.model.write();
+            if model.nodes.iter().any(|n| n.fingerprint() == fingerprint) {
+                return Err(Error::other(
+                    "已存在相同节点（协议 / 地址 / 端口 / 凭据一致）",
+                ));
+            }
+            if model.add_nodes([node.clone()]) == 0 {
+                return Err(Error::other("节点未加入配置（可能已存在）"));
+            }
+        }
+        self.persist_model()?;
+        self.refresh_doctor();
+        self.mark_dirty();
+        self.toast(
+            ToastLevel::Success,
+            format!("已添加节点“{}”（{}:{}）", node.name, node.server, node.port),
+        );
+        Ok(node.id)
+    }
+
     // ------------------------------------------------------------------
     // Nodes and groups
     // ------------------------------------------------------------------
@@ -1150,6 +1190,12 @@ impl AppService {
                 service.toast(ToastLevel::Error, err);
                 return;
             }
+            if let Some(warning) = service.prepare_tun_via_helper().await {
+                service.toast(
+                    ToastLevel::Warning,
+                    format!("提权助手未能准备 TUN：{warning}"),
+                );
+            }
             let result = service
                 .inner
                 .core
@@ -1197,6 +1243,7 @@ impl AppService {
         self.spawn(async move {
             let result = service.inner.core.stop().await;
             service.set_busy("core", false);
+            service.cleanup_tun_via_helper().await;
             match result {
                 Ok(()) => {
                     service.inner.traffic.lock().reset();
@@ -1693,6 +1740,125 @@ impl AppService {
         });
     }
 
+    // ------------------------------------------------------------------
+    // Privilege helper
+    // ------------------------------------------------------------------
+
+    /// Cached helper status. Never blocks: the monitor probes the pipe from a
+    /// worker thread and stores the result here.
+    pub fn helper_status(&self) -> HelperStatus {
+        self.inner.helper.read().clone()
+    }
+
+    /// Re-probes the helper in the background and updates the snapshot.
+    pub fn refresh_helper_status(&self) {
+        let service = self.clone();
+        self.spawn(async move {
+            let status = tokio::task::spawn_blocking(privilege::status).await;
+            if let Ok(status) = status {
+                *service.inner.helper.write() = status;
+            }
+        });
+    }
+
+    pub fn install_helper(&self) {
+        self.run_helper_action("安装提权助手", privilege::install);
+    }
+
+    pub fn uninstall_helper(&self) {
+        self.run_helper_action("卸载提权助手", privilege::uninstall);
+    }
+
+    pub fn restart_helper(&self) {
+        self.run_helper_action("重启提权助手", privilege::restart);
+    }
+
+    pub fn start_helper(&self) {
+        self.run_helper_action("启动提权助手", privilege::start);
+    }
+
+    /// Runs install/uninstall/start in a blocking task: they may show an OS
+    /// elevation prompt and must never block the render thread.
+    fn run_helper_action(&self, label: &'static str, action: fn() -> Result<String>) {
+        if self.is_busy("helper") {
+            return;
+        }
+        self.set_busy("helper", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                privilege::invalidate_status();
+                let outcome = action();
+                // Refresh before returning so the settings card updates
+                // immediately instead of waiting for the next monitor tick.
+                (outcome, privilege::status())
+            })
+            .await;
+            service.set_busy("helper", false);
+            match result {
+                Ok((Ok(message), status)) => {
+                    *service.inner.helper.write() = status;
+                    service.toast(ToastLevel::Success, format!("{label}完成：{message}"));
+                }
+                Ok((Err(err), status)) => {
+                    *service.inner.helper.write() = status;
+                    service.toast(ToastLevel::Error, format!("{label}失败：{err}"));
+                }
+                Err(err) => {
+                    service.toast(ToastLevel::Error, format!("{label}任务异常：{err}"));
+                }
+            }
+        });
+    }
+
+    /// TUN interface name from the model, used for helper requests.
+    fn tun_interface(&self) -> String {
+        self.inner
+            .model
+            .read()
+            .inbounds
+            .iter()
+            .find(|inbound| inbound.kind == InboundKind::Tun && inbound.enabled)
+            .and_then(|inbound| inbound.tun.interface_name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "xross-tun".to_string())
+    }
+
+    /// Asks the helper to prepare privileges for TUN. Returns a warning only
+    /// when the helper is running but the request failed; a missing helper is
+    /// not an error because the core still creates its own device.
+    async fn prepare_tun_via_helper(&self) -> Option<String> {
+        if !self.inner.settings.read().effective_tun() || !privilege::status().running {
+            return None;
+        }
+        let request = HelperRequest::PrepareTun {
+            interface: self.tun_interface(),
+        };
+        match tokio::task::spawn_blocking(move || privilege::call(&request)).await {
+            Ok(Ok(response)) if response.is_ok() => {
+                self.inner.core.logs().push(
+                    LogStream::App,
+                    LogLevel::Info,
+                    format!("提权助手：{}", response.message()),
+                );
+                None
+            }
+            Ok(Ok(response)) => Some(response.message().to_string()),
+            Ok(Err(err)) => Some(err.to_string()),
+            Err(err) => Some(format!("调用提权助手失败：{err}")),
+        }
+    }
+
+    async fn cleanup_tun_via_helper(&self) {
+        if !self.inner.settings.read().effective_tun() || !privilege::status().running {
+            return;
+        }
+        let request = HelperRequest::RemoveTun {
+            interface: self.tun_interface(),
+        };
+        let _ = tokio::task::spawn_blocking(move || privilege::call(&request)).await;
+    }
+
     pub fn refresh_doctor(&self) {
         let model = self.inner.model.read().clone();
         let settings = self.inner.settings.read().clone();
@@ -2053,6 +2219,14 @@ impl AppService {
                 let service = AppService {
                     inner: inner.clone(),
                 };
+                // Probe the privilege helper off the UI thread. The status is
+                // cached inside `privilege::status`, so this is cheap unless
+                // the cache expired.
+                if tick % 3 == 0 {
+                    if let Ok(status) = tokio::task::spawn_blocking(privilege::status).await {
+                        *inner.helper.write() = status;
+                    }
+                }
                 let state = service.inner.core.state();
                 if state.phase == crate::core::ProcessPhase::Failed
                     && last_phase != crate::core::ProcessPhase::Failed
@@ -2136,6 +2310,12 @@ impl AppService {
         let _ = self.inner.rt.block_on(async move {
             let _ = core.stop().await;
         });
+        if self.inner.settings.read().effective_tun() && self.inner.helper.read().running {
+            let request = HelperRequest::RemoveTun {
+                interface: self.tun_interface(),
+            };
+            let _ = privilege::call_with_timeout(&request, std::time::Duration::from_secs(1));
+        }
     }
 
     /// Re-applies the system proxy with the current PAC/port settings.

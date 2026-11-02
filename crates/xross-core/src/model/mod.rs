@@ -8,8 +8,8 @@ pub mod route;
 pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
 pub use node::{
-    Credentials, GroupKind, Network, Node, NodeSource, OutboundGroup, Protocol, RealityOptions,
-    TlsOptions, Transport,
+    Credentials, GroupKind, Network, Node, NodeDraft, NodeSource, OutboundGroup, Protocol,
+    RealityOptions, TlsOptions, Transport, TransportKind,
 };
 pub use route::{
     DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule, RoutingConfig,
