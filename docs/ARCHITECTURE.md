@@ -65,9 +65,36 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 4. `xray run -test` / `sing-box check`；失败则显示行号且不启动。
 5. 启动进程；stdout/stderr 进入 LogBus；watchdog 监控退出并退避重启。
 
+## 托盘与最小化
+
+```
+托盘菜单点击 ──▶ WndProc/NSMenu 回调只入队 TrayAction
+                          │
+         GPUI tick (200 ms) 取出动作
+                          │
+        AppService 变更 ◀──┴──▶ TrayCommand::ShowWindow / Quit
+                          │
+          Win32 ShowWindow / AppKit orderOut
+```
+
+- `tray::dashboard::build` 从同一份 `UiSnapshot` 生成状态行、实时速率与节点列表，
+  Windows 原生菜单与 macOS `NSMenu` 使用同一套数据来源。
+- 关闭窗口走 `on_window_should_close`：`close_to_tray` 且托盘可用时隐藏窗口并返回
+  `false`；`minimize_to_tray` 由 tick 检测 `IsIconic` / `isMiniaturized` 后隐藏。
+- 退出必须经托盘菜单或 `Cmd/Ctrl+Q`，它会先置 `quitting` 标志，避免被“关闭到托盘”拦截。
+- 托盘不可用（Linux 无后端、Windows 低完整性宿主被 shell 拒绝）时退化为关闭即退出，
+  绝不留下一个无法恢复的隐藏窗口。
+
 ## 安全边界
 
 - 桌面 UI 以普通用户运行；TUN 路由由 sing-box 或特权 helper 完成。
-- helper 协议为单行 JSON，仅暴露 TUN/DNS/透明代理规则等必要操作。
+- helper 协议为单行 JSON，只暴露 TUN 准备、系统 DNS、透明代理规则等必要操作。
+- helper 由系统服务/计划任务以管理员身份运行；GUI 通过本地 socket 调用。
+  Unix 端校验 `SO_PEERCRED`/`LOCAL_PEERCRED` 的 euid（安装用户或 root），
+  Windows 依赖命名管道的默认 DACL（创建者用户 + Administrators）。
+- 安装/卸载/启动通过 UAC（`ShellExecuteEx runas` 等待子进程）、
+  `osascript ... with administrator privileges`、`pkexec` 完成，不提供 setuid 包装。
+- `--helper` 在 `xross-app`/`xross-cli` 的 `main` 最前面处理，早于数据库和 GUI；
+  helper 进程不会打开用户配置库。
 - 密钥文件 0600；数据库字段以 `enc:v1:` 前缀区分。
 - 代理快照用于崩溃恢复：启动时发现残留即还原，避免用户断网。

@@ -8624,6 +8624,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "cocoa",
+ "embed-resource",
  "env_logger",
  "gpui-base",
  "gpui-kit",
@@ -8634,6 +8635,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tokio",
+ "windows-sys 0.59.0",
  "xross-core",
 ]
 

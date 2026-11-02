@@ -32,7 +32,7 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("连接", "Connections"),
+                            self.tr("实时连接", "Live connections"),
                             self.tr(
                                 "来自 Clash API（/connections）。Xray 的 StatsService 只能给流量，不能列连接。",
                                 "Sourced from the Clash API (/connections). Xray's StatsService only exposes traffic counters.",

@@ -34,7 +34,7 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("DNS", "DNS"),
+                            self.tr("DNS 策略", "DNS policy"),
                             self.tr(
                                 "最容易出错的一层：fake-ip、DoH/DoT、按域名分流、hosts、dns-hijack",
                                 "The most error-prone layer: fake-ip, DoH/DoT, split DNS, hosts, DNS hijack",

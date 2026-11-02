@@ -122,6 +122,16 @@ impl AppView {
                                         let core = this.snapshot.settings.core;
                                         this.service.install_core_update(core);
                                     })),
+                            )
+                            .child(
+                                Button::new("wizard-manual")
+                                    .compact()
+                                    .label(self.tr("手动添加节点", "Add manually"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_manual_form = true;
+                                        this.manual_error = None;
+                                        cx.notify();
+                                    })),
                             ),
                     ),
             );
@@ -130,90 +140,90 @@ impl AppView {
         // P0: Standard Segmented Control for Outbound Groups / Modes.
         if !groups.is_empty() {
             body = body.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .w_full()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
+                div().flex().flex_col().gap_2().w_full().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .p_1()
+                                .rounded_lg()
+                                .bg(p.panel)
+                                .border_1()
+                                .border_color(p.border)
+                                .children(groups.iter().map(|g| {
+                                    let selected = active_group.as_deref() == Some(g.id.as_str());
+                                    let gid = g.id.clone();
+                                    div()
+                                        .id(SharedString::from(format!("group-{}", g.id)))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_1p5()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .when(selected, |d| {
+                                            d.bg(p.bg).shadow_sm().border_1().border_color(p.border)
+                                        })
+                                        .when(!selected, |d| {
+                                            d.hover(|h| h.bg(p.panel_alt.opacity(0.4)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.selected_group = Some(gid.clone());
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(if selected {
+                                                    FontWeight::MEDIUM
+                                                } else {
+                                                    FontWeight::NORMAL
+                                                })
+                                                .text_color(if selected {
+                                                    p.fg
+                                                } else {
+                                                    p.muted_fg
+                                                })
+                                                .child(g.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .text_xs()
+                                                .bg(if selected { p.accent } else { p.panel_alt })
+                                                .text_color(if selected {
+                                                    p.primary
+                                                } else {
+                                                    p.muted_fg
+                                                })
+                                                .child(g.kind.display_name()),
+                                        )
+                                })),
+                        )
+                        .when(is_xray, |d| {
+                            d.child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap_1()
-                                    .p_1()
-                                    .rounded_lg()
-                                    .bg(p.panel)
-                                    .border_1()
-                                    .border_color(p.border)
-                                    .children(groups.iter().map(|g| {
-                                        let selected = active_group.as_deref() == Some(g.id.as_str());
-                                        let gid = g.id.clone();
-                                        div()
-                                            .id(SharedString::from(format!("group-{}", g.id)))
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .px_3()
-                                            .py_1p5()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .when(selected, |d| {
-                                                d.bg(p.bg)
-                                                    .shadow_sm()
-                                                    .border_1()
-                                                    .border_color(p.border)
-                                            })
-                                            .when(!selected, |d| {
-                                                d.hover(|h| h.bg(p.panel_alt.opacity(0.4)))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.selected_group = Some(gid.clone());
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .font_weight(if selected {
-                                                        FontWeight::MEDIUM
-                                                    } else {
-                                                        FontWeight::NORMAL
-                                                    })
-                                                    .text_color(if selected { p.fg } else { p.muted_fg })
-                                                    .child(g.name.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .px_1p5()
-                                                    .py_0p5()
-                                                    .rounded_sm()
-                                                    .text_xs()
-                                                    .bg(if selected { p.accent } else { p.panel_alt })
-                                                    .text_color(if selected { p.primary } else { p.muted_fg })
-                                                    .child(g.kind.display_name()),
-                                            )
-                                    })),
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(p.warning)
+                                    .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
+                                    .child(self.tr(
+                                        "Xray core 模式：切换节点需重启 core",
+                                        "Xray core: switching node restarts core",
+                                    )),
                             )
-                            .when(is_xray, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .text_xs()
-                                        .text_color(p.warning)
-                                        .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
-                                        .child(self.tr(
-                                            "Xray core 模式：切换节点需重启 core",
-                                            "Xray core: switching node restarts core",
-                                        )),
-                                )
-                            }),
-                    ),
+                        }),
+                ),
             );
         }
 
@@ -302,6 +312,11 @@ impl AppView {
             );
         }
 
+        // P1b: full manual node form (protocol / credentials / TLS / transport).
+        if self.show_manual_form {
+            body = body.child(self.manual_node_card(cx));
+        }
+
         // Filter and sort nodes.
         let group_id_for_select = active_group.clone();
         let group_kind = group
@@ -319,7 +334,10 @@ impl AppView {
                 } else {
                     n.name.to_lowercase().contains(&search_query)
                         || n.endpoint().to_lowercase().contains(&search_query)
-                        || n.protocol.display_name().to_lowercase().contains(&search_query)
+                        || n.protocol
+                            .display_name()
+                            .to_lowercase()
+                            .contains(&search_query)
                 }
             })
             .cloned()
@@ -397,6 +415,7 @@ impl AppView {
                         .items_center()
                         .justify_between()
                         .gap_3()
+                        .flex_wrap()
                         .child(
                             div()
                                 .flex()
@@ -427,7 +446,9 @@ impl AppView {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
+                                .justify_end()
                                 .gap_1p5()
                                 .child(
                                     div()
@@ -549,6 +570,23 @@ impl AppView {
                                         .loading(this_busy(&self.snapshot.busy, "latency"))
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.service.test_latency(LatencyScope::All);
+                                        })),
+                                )
+                                // Add manually
+                                .child(
+                                    Button::new("toggle-manual-form")
+                                        .compact()
+                                        .when(self.show_manual_form, |b| b.primary())
+                                        .when(!self.show_manual_form, |b| b.ghost())
+                                        .label(self.tr("✎ 手动", "✎ Manual"))
+                                        .tooltip(self.tr(
+                                            "手动填写协议、凭据、TLS 与传输层",
+                                            "Enter protocol, credentials, TLS and transport by hand",
+                                        ))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_manual_form = !this.show_manual_form;
+                                            this.manual_error = None;
+                                            cx.notify();
                                         })),
                                 )
                                 // Add node
@@ -1110,7 +1148,11 @@ fn render_node_row(
                             .h(px(20.))
                             .rounded_sm()
                             .border_1()
-                            .border_color(if is_batch_checked { p.primary } else { p.muted_fg })
+                            .border_color(if is_batch_checked {
+                                p.primary
+                            } else {
+                                p.muted_fg
+                            })
                             .bg(if is_batch_checked { p.primary } else { p.bg })
                             .flex()
                             .items_center()
@@ -1122,17 +1164,11 @@ fn render_node_row(
                     )
                 })
                 // Left accent bar
-                .child(
-                    div()
-                        .w(px(3.))
-                        .h(px(22.))
-                        .rounded_full()
-                        .bg(if selected {
-                            p.primary
-                        } else {
-                            hsla(0., 0., 0., 0.)
-                        }),
-                )
+                .child(div().w(px(3.)).h(px(22.)).rounded_full().bg(if selected {
+                    p.primary
+                } else {
+                    hsla(0., 0., 0., 0.)
+                }))
                 // Row start: Radio button indicating selected active node.
                 .child(
                     div()
@@ -1144,13 +1180,11 @@ fn render_node_row(
                         .flex()
                         .items_center()
                         .justify_center()
-                        .child(
-                            if selected {
-                                div().size(px(10.)).rounded_full().bg(p.primary)
-                            } else {
-                                div()
-                            },
-                        ),
+                        .child(if selected {
+                            div().size(px(10.)).rounded_full().bg(p.primary)
+                        } else {
+                            div()
+                        }),
                 )
                 // Node metadata
                 .child(
@@ -1175,11 +1209,7 @@ fn render_node_row(
                                     d.child(pill("⚡ 最快", p.success, p.accent))
                                 })
                                 .when(is_node_busy, |d| {
-                                    d.child(pill(
-                                        "切换中…",
-                                        p.warning,
-                                        p.accent,
-                                    ))
+                                    d.child(pill("切换中…", p.warning, p.accent))
                                 }),
                         )
                         .child(
@@ -1193,16 +1223,8 @@ fn render_node_row(
                                     p.primary,
                                     p.panel,
                                 ))
-                                .child(
-                                    div()
-                                        .text_color(p.muted_fg)
-                                        .child(endpoint_display),
-                                )
-                                .child(
-                                    div()
-                                        .text_color(p.muted_fg.opacity(0.6))
-                                        .child("·"),
-                                )
+                                .child(div().text_color(p.muted_fg).child(endpoint_display))
+                                .child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
                                 .child(
                                     div()
                                         .text_color(p.muted_fg)
@@ -1245,9 +1267,8 @@ fn render_node_row(
                                 .tooltip("测试 TCP 延迟")
                                 .loading(is_latency_busy)
                                 .on_click(cx.listener(move |this, _, _, _| {
-                                    this.service.test_latency(LatencyScope::Node(
-                                        node_id_tcp.clone(),
-                                    ));
+                                    this.service
+                                        .test_latency(LatencyScope::Node(node_id_tcp.clone()));
                                 })),
                         )
                         .child(
@@ -1257,36 +1278,31 @@ fn render_node_row(
                                 .label("⋯")
                                 .tooltip("更多操作 (真连/分享/二维码/删除)")
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.node_menu_open = if this.node_menu_open.as_deref()
-                                        == Some(&node_id_menu)
-                                    {
-                                        None
-                                    } else {
-                                        Some(node_id_menu.clone())
-                                    };
+                                    this.node_menu_open =
+                                        if this.node_menu_open.as_deref() == Some(&node_id_menu) {
+                                            None
+                                        } else {
+                                            Some(node_id_menu.clone())
+                                        };
                                     cx.notify();
                                 })),
                         ),
                 )
                 // Row end: Enabled toggle switch, isolated with a left border divider.
                 .child(
-                    div()
-                        .pl_2()
-                        .border_l_1()
-                        .border_color(p.border)
-                        .child(
-                            toggle(
-                                SharedString::from(format!("enabled-{node_id}")),
-                                "",
-                                node.enabled,
-                            )
-                            .on_change(cx.listener(
-                                move |this, checked, _, cx| {
-                                    this.service.set_node_enabled(&node_id, *checked);
-                                    this.sync(cx);
-                                },
-                            )),
-                        ),
+                    div().pl_2().border_l_1().border_color(p.border).child(
+                        toggle(
+                            SharedString::from(format!("enabled-{node_id}")),
+                            "",
+                            node.enabled,
+                        )
+                        .on_change(cx.listener(
+                            move |this, checked, _, cx| {
+                                this.service.set_node_enabled(&node_id, *checked);
+                                this.sync(cx);
+                            },
+                        )),
+                    ),
                 ),
         )
         // Expanded '⋯' menu tray
@@ -1317,20 +1333,14 @@ fn render_node_row(
                             .label("↗ 复制链接")
                             .tooltip("复制节点分享链接")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                let link = this
-                                    .service
-                                    .export_links(&[node_id_share.clone()]);
+                                let link = this.service.export_links(&[node_id_share.clone()]);
                                 if link.is_empty() {
-                                    this.service.toast(
-                                        ToastLevel::Warning,
-                                        "该协议暂不支持导出链接",
-                                    );
+                                    this.service
+                                        .toast(ToastLevel::Warning, "该协议暂不支持导出链接");
                                 } else {
                                     cx.write_to_clipboard(ClipboardItem::new_string(link));
-                                    this.service.toast(
-                                        ToastLevel::Success,
-                                        "分享链接已复制到剪贴板",
-                                    );
+                                    this.service
+                                        .toast(ToastLevel::Success, "分享链接已复制到剪贴板");
                                 }
                             })),
                     )

@@ -16,6 +16,8 @@ Chinese with English available through `tr(lang, zh, en)`.
 | Populate a throwaway profile | `cargo run -p xross-cli -- seed-demo --home <dir>` |
 | Compile the saved profile | `cargo run -p xross-cli -- compile --core sing-box -o c.json --home <dir>` |
 | Validate with a real core | `cargo run -p xross-cli -- check --core sing-box --home <dir>` |
+| Add a manual node | `cargo run -p xross-cli -- add-node --server h --protocol vless --uuid <uuid>` |
+| Privilege helper | `cargo run -p xross-cli -- helper status` / `install` / `start` / `uninstall` |
 
 `compile` on an empty profile fails with `没有可编译的出站节点` — run `seed-demo` first, or use
 `demo`, which builds both configs from a built-in sample without touching any state.
@@ -25,8 +27,8 @@ Isolate all state with `XROSS_HOME` so you never touch the user's real profile:
 - PowerShell: `$env:XROSS_HOME = "$env:TEMP\xross-demo"; cargo run -p xross-app`
 - bash: `XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`
 
-`xross-cli` also has `parse`, `import`, `export`, `doctor`, `core`, `fetch-core`, `run` and
-`trace` subcommands — prefer it over the GUI when verifying core logic.
+`xross-cli` also has `parse`, `import`, `export`, `add-node`, `doctor`, `core`, `fetch-core`,
+`run`, `helper` and `trace` subcommands — prefer it over the GUI when verifying core logic.
 
 Formatting: `cargo fmt --all --check` currently reports pre-existing diffs, so format only the
 files you changed (`rustfmt <file>`). `cargo clippy` is available but not enforced.
@@ -36,7 +38,7 @@ files you changed (`rustfmt <file>`). `cargo clippy` is available but not enforc
 | Crate | Responsibility |
 | --- | --- |
 | `crates/xross-core` | Everything that is not UI: model, adapters, core binaries/process, subscriptions, storage, runtime APIs, system integration, `service.rs` facade |
-| `crates/xross-app` | GPUI Kit UI (`ui/`), macOS tray (`tray.rs`), assets |
+| `crates/xross-app` | GPUI Kit UI (`ui/`), tray dashboard (`tray/`: macOS `NSMenu`, Windows `Shell_NotifyIcon`), assets |
 | `crates/xross-cli` | Headless entry points for the same core |
 
 `xross-core/src/`: `model/` (intent), `adapters/` (compile to core JSON), `core/` (binaries,
@@ -75,6 +77,10 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
   verbatim, so make messages actionable.
 - Serialized enums use `#[serde(rename_all = "snake_case")]`; config structs keep
   `#[serde(default)]` so older files still load.
+- Flex rows with variable-length text: give the growing child `.min_w(px(0.))` plus
+  `.truncate()` / `.line_clamp(n)`, and `.flex_shrink_0()` on fixed-width controls or badges.
+  Without that, long log lines, rule summaries and node names push past the card at 150% DPI.
+  Prefer wrapping whole toolbars (`flex_wrap`) over a single row of buttons.
 - Dependencies are declared once under `[workspace.dependencies]` and pulled in with
   `.workspace = true`; platform-only crates sit behind `[target.'cfg(...)'.dependencies]`.
 - Commits follow conventional style with a lowercase scope, e.g. `feat(ui,macos): …`;
@@ -96,14 +102,37 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 - `system::single_instance::tests::second_acquire_fails` **fails on Windows**: the lock itself
   works, but `existing_pid()` cannot read the file while the lock is held (Windows byte-range
   locks are mandatory, so the read-back is a sharing violation). Use
-  `cargo test -p xross-core -- --skip second_acquire_fails`; 87 tests pass.
+  `cargo test -p xross-core -- --skip second_acquire_fails`; 98 tests pass.
+- If the workspace tree carries a **Low mandatory integrity label** (the sandbox applied one
+  earlier in this session), a process launched from `target\debug\xross-app.exe` inherits that
+  Low IL. Low IL cannot call `Shell_NotifyIconW` against the Medium IL shell
+  (`ERROR_ACCESS_DENIED`, and `%TEMP%` writes fail too). Restore the label with
+  `icacls C:\Users\iamzu\xross /setintegritylevel (OI)(CI)M` and verify with `icacls`; inherited
+  labels on children update automatically. The tree is currently Medium again. While it was Low,
+  tests needed `$env:TEMP`/`$env:TMP` pointed at the workspace; that workaround is no longer
+  needed. The app still degrades to “close quits” and logs the reason if the tray is refused —
+  do not force `available()` to `true` in production code.
+- The tray is implemented for **macOS and Windows**; `tray/unsupported.rs` makes
+  `available()` false elsewhere, so closing the window still quits.
+- Windows main window class is `Zed::Window` (GPUI), not `GPUIWindow`; `tray/windows.rs`
+  locates the main HWND by that class name. The tray message window is `XrossTrayWindow`
+  on the same GPUI main thread, so its messages are dispatched by GPUI's message loop.
+  `Shell_NotifyIcon` also needs the app to run at the same or higher integrity than the shell.
+- GPUI's **Windows backend ignores `WindowOptions.icon`**: it loads icon resource **ID 1** from
+  the executable for the window class. `crates/xross-app/build.rs` generates `xross-app.ico`
+  from `assets/app-icon-256.png` and embeds it as ID 1 — keep that ID. macOS Dock icon is set at
+  runtime in `app_icon.rs` (`NSApplication.setApplicationIconImage`); Linux gets the image via
+  `WindowOptions.icon` plus the shipped `io.xross.Xross.desktop` (`Icon=xross`).
 - `rust-toolchain.toml` is deleted in the current working tree even though the README still
   mentions it. `Cargo.toml` declares `rust-version = "1.92"`; the installed toolchain is stable
   1.99.
 - Baseline `cargo build --workspace` emits two warnings (`unused import PathBuf` in
   `system/autostart.rs`, `fn run is never used` in `system/proxy.rs`). Treat new warnings as
   regressions; leave those two alone unless the task is about them.
-- The tray is macOS-only; `tray.rs` compiles to a no-op stub elsewhere.
+- `crates/xross-app/build.rs` raises the **Windows main-thread stack to 16 MiB**. GPUI lays a page
+  out as one deep `Div` tree; in debug builds the settings page alone gets close to the 1 MiB
+  Windows default and aborts with a stack overflow once a core version row is added. Keep the
+  linker arg when touching the build; `XROSS_PAGE=settings` reproduces the old crash quickly.
 - The window backdrop (macOS vibrancy / Windows acrylic) only shows through where the UI is
   transparent: `window_effects::make_surface_translucent` keeps `theme.tokens.background` clear,
   and GPUI Kit's root plugin would otherwise paint it over the whole window. Anything that calls
@@ -128,6 +157,9 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 | Persistence/schema | `storage/mod.rs` (bump `SCHEMA_VERSION`, add a migration) |
 | Proxy/PAC/autostart/TUN | `system/*` |
 | Rule preview, tracer | `route.rs`, `trace.rs` |
+| Manual node form | `model/node.rs` (`NodeDraft`), `ui/manual_node.rs`, `ui/nodes.rs` |
+| Tray dashboard / window hide-show | `crates/xross-app/src/tray/` (`dashboard.rs` is shared; `macos.rs` / `windows.rs` are backends) |
+| Privilege helper install/IPC | `system/privilege.rs`, `xross-app/src/main.rs` (`helper_main` runs first), `xross-cli/src/main.rs` |
 | Window backdrop, sidebar material | `crates/xross-app/src/window_effects.rs`, `system/window_effects.rs`, `ui/theme.rs` (`Palette::sidebar`) |
 | UI page | new file in `crates/xross-app/src/ui/`, then `Page` variant + `icon()` + `zh()`/`en()` + `page_content()` arm in `ui/mod.rs` |
 | CLI subcommand | `crates/xross-cli/src/main.rs` |

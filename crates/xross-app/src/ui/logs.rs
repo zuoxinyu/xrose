@@ -27,7 +27,7 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("日志", "Logs"),
+                            self.tr("实时日志", "Live logs"),
                             self.tr(
                                 "实时收集 core 的 stdout/stderr，并按大小滚动写入日志文件",
                                 "Collects core stdout/stderr and rotates a log file by size",
@@ -103,16 +103,21 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
+                        .gap_3()
                         .text_xs()
                         .text_color(p.muted_fg)
-                        .child(format!(
+                        .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
                             "{} {} · {}：{}",
                             logs.len(),
                             self.tr("条", "entries"),
                             self.tr("日志目录", "log dir"),
                             self.snapshot.platform.log_dir
-                        ))
-                        .child(self.tr("最新日志在前", "Newest first")),
+                        )))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .child(self.tr("最新日志在前", "Newest first")),
+                        ),
                 ),
         );
 
@@ -121,6 +126,8 @@ impl AppView {
             .flex_col()
             .gap_1()
             .p_3()
+            .w_full()
+            .overflow_hidden()
             .rounded_md()
             .bg(p.bg)
             .border_1()
@@ -157,24 +164,37 @@ impl AppView {
                     .flex()
                     .items_start()
                     .gap_2()
+                    .w_full()
+                    .min_w(px(0.))
+                    .overflow_hidden()
                     .text_xs()
-                    .child(div().w(px(64.)).text_color(p.muted_fg).child(timestamp))
+                    .child(
+                        div()
+                            .w(px(64.))
+                            .flex_shrink_0()
+                            .text_color(p.muted_fg)
+                            .child(timestamp),
+                    )
                     .child(
                         div()
                             .w(px(48.))
+                            .flex_shrink_0()
                             .text_color(color)
                             .child(entry.level.as_str().to_uppercase()),
                     )
                     .child(
                         div()
                             .w(px(48.))
+                            .flex_shrink_0()
                             .text_color(p.muted_fg)
                             .child(entry.stream.label()),
                     )
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .text_color(color)
+                            .line_clamp(4)
                             .child(entry.message.clone()),
                     ),
             );

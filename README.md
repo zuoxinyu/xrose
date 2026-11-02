@@ -84,6 +84,10 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   **Clash YAML**（含 proxy-groups）、**SIP008**、**sing-box JSON**。
 - 统一 `Node` 模型；分享链接**双向转换**（导入/导出）；二维码（终端块字符渲染）；
   指纹去重；订阅分组导入；排序字段。
+- **手动添加节点**：协议（VMess / VLESS / Trojan / Shadowsocks / Hysteria2 / TUIC /
+  SOCKS / HTTP）、凭据、TLS / Reality（pbk + shortId）、uTLS 指纹、ALPN、
+  传输层（TCP / WebSocket / gRPC / HTTP/2 / HTTPUpgrade）、UDP、标签。
+  校验规则集中在 `NodeDraft::into_node`，界面、CLI 与测试共用同一套错误文案。
 - 解析 `subscription-userinfo` 响应头，展示已用/总量/到期时间，并可视化进度。
 
 ### 4. 路由与 DNS
@@ -106,9 +110,16 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 ### 6. 系统集成
 
 - TUN 使用 sing-box 原生实现；启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
-- 特权层：定义最小权限 IPC 协议（Unix socket / Windows named pipe 由
-  `interprocess` 统一），包含 helper server 骨架；GUI 永不要求 root。
-- 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键。
+- **托盘**（Windows `/ macOS`）：状态栏/通知区域 dashboard，包含运行状态、实时速率、
+  出站节点与延迟、系统代理、启停 core、全部测速、显示主窗口与退出。
+  Windows 用 `Shell_NotifyIcon` + 原生菜单，macOS 用 `NSMenu`；
+  **最小化到托盘**与**关闭到托盘**可在设置中分别开关，关闭窗口不再等于退出。
+- **提权助手**：GUI 永不提权。安装为 Windows 计划任务（登录时最高权限）/
+  macOS LaunchDaemon / Linux systemd service，通过本地 socket（Unix socket /
+  Windows 命名管道）以单行 JSON 执行少量操作：TUN 准备、系统 DNS、Linux tproxy 规则。
+  Unix 端校验 peer UID；安装/卸载走系统授权（UAC / osascript / pkexec）。
+  未安装时 TUN 仍由 core 自行创建，界面明确提示助手状态。
+- 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；支持 `--minimized`。
 - 单实例锁（文件锁 + PID）。
 
 ### 7. 运行时
@@ -133,6 +144,11 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 
 - 两栏式布局：可折叠左侧菜单（节点/订阅/路由/DNS/连接/日志/设置），
   右侧内容区；深/浅色主题、跟随系统；中英文切换。
+- 托盘 dashboard 与主界面共用同一份快照；菜单动作在 GPUI 主线程 tick 中执行，
+  窗口隐藏/恢复不依赖平台私有 API。
+- 应用/任务栏图标：Windows 由 `build.rs` 从 256px PNG 生成 `.ico` 并以资源 ID 1 内嵌
+  （GPUI 的 Windows 后端按该 ID 加载），macOS 在启动时设置 Dock 图标，Linux 使用
+  `WindowOptions.icon` 与随附的 `.desktop` 图标。
 - 左侧栏使用系统材质：Windows 为 acrylic（借 GPUI 的 `Blurred` 背景 +
   `theme.tokens.background` 置空，由系统合成器模糊窗口后方内容），macOS 为
   vibrancy，其余平台为不透明面板。系统关闭“透明效果”或版本过低
@@ -150,15 +166,18 @@ Core 版本：sing-box **1.12+**（推荐 1.14），Xray **1.8+**。
 
 ```bash
 cargo run -p xross-app          # 启动 GUI
-cargo test -p xross-core        # 82 个单元测试
+cargo test -p xross-core        # 98 个单元测试
 cargo run -p xross-cli -- demo  # 查看编译出的两套配置
 ```
 
 首次运行：
 
-1. **订阅** 页添加机场订阅，或在 **节点** 页粘贴分享链接。
+1. **订阅** 页添加机场订阅，或在 **节点** 页粘贴分享链接 / 点击 **手动** 填写节点。
 2. **设置 → Core 管理** 下载 xray 或 sing-box（自动校验 SHA-256）。
 3. 右上角 **启动**。修改路由/DNS 后点击 **应用配置**（会重启 core）。
+
+关闭窗口默认最小化到托盘；需要彻底退出请用托盘菜单的 **退出 Xross**，
+或在 **设置 → 通用** 关闭“关闭到托盘”（Linux 目前没有托盘，关闭即退出）。
 
 隔离数据目录：
 
@@ -176,6 +195,12 @@ xross-cli import ./sub.yaml                 # 导入当前配置
 xross-cli compile --core sing-box -o c.json # 仅编译（不启动）
 xross-cli check --core sing-box             # 用真实 core 做 check
 xross-cli export                            # 导出分享链接
+xross-cli add-node --server hk.example.com --protocol vless \
+  --uuid 11111111-2222-3333-4444-555555555555 --sni hk.example.com \
+  --transport ws --path /ws                       # 手动添加节点
+xross-cli helper status                     # 提权助手状态（JSON）
+xross-cli helper install                    # 安装并启动助手（会请求管理员权限）
+xross-cli helper start|restart|uninstall    # 启停/卸载已安装的助手
 xross-cli doctor                            # TUN/端口/权限检查
 ```
 
@@ -187,7 +212,8 @@ cargo test -p xross-core
 
 覆盖：链接解析/导出往返、Clash/SIP008/sing-box 解析、去重、规则匹配、CIDR、
 DNS 校验、加密落库、SQLite 迁移与备份、PAC HTTP 服务、日志轮转、进程退出归因、
-单实例锁、订阅合并、Profile 切换、两套 adapter 的结构约束、tar.gz 魔数解压等。
+单实例锁、订阅合并、Profile 切换、两套 adapter 的结构约束、tar.gz 魔数解压、
+手动节点草稿校验（UUID/Reality/传输组合）、提权助手协议与状态标签等。
 
 另外做了真实二进制验证：
 
@@ -199,16 +225,23 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 
 ## 已知限制 / 路线图
 
-- **托盘菜单**：未实现；关闭窗口即退出（代理会自动还原）。
+- **托盘**：仅 Windows 与 macOS 实现。Linux 暂无 StatusNotifier/AppIndicator
+  后端，`available()` 返回 false，关闭窗口仍会退出。
+- **Windows 托盘与权限**：`Shell_NotifyIcon` 要求进程完整性级别不低于任务栏。若 exe 位于带
+  Low 完整性标签的目录（例如受限构建沙盒），进程会继承 Low IL，向 Medium IL 的任务栏注册
+  托盘会得到 `ERROR_ACCESS_DENIED`；应用会退化为“关闭即退出”并记录原因。把程序放到普通
+  目录/安装包路径运行即可；若需要就地恢复，可执行
+  `icacls <目录> /setintegritylevel (OI)(CI)M`（需要修改 SACL 的权限）后用 `icacls` 确认。
 - **移动端**：未实现（无 VPN service / 前台通知 / 快捷磁贴）。
-- **特权助手**：IPC 协议与 server 骨架已就绪，但尚未提供 Windows 服务 /
-  macOS LaunchDaemon / Linux setcap 的安装器；TUN 目前依赖 sing-box 自身权限。
+- **提权助手**：安装器已实现（Windows 计划任务 / macOS LaunchDaemon /
+  Linux systemd），但 Linux tproxy 规则与 macOS `networksetup` DNS 路径尚未在
+  真机上端到端验证；安装/卸载会弹出系统管理员授权。
 - **Xray 连接列表**：StatsService 只提供计数，无法列出连接。
 - **流量面板**：sing-box 使用 `/connections` 累计值差分；没有连接时图表为空。
 - **系统代理**：仅在 GNOME/KDE、macOS、Windows 上生效；其他桌面会明确报错。
-- **平台验证**：本次开发与验证在 Linux（KDE Wayland / X11）完成。Windows 注册表、
-  `InternetSetOption`、macOS `networksetup`、LaunchAgent 等代码按平台 API 编写，
-  但尚未在真机 CI 上验证。
+- **平台验证**：核心逻辑与 Windows 托盘窗口/菜单/隐藏恢复路径已在本机验证；
+  Windows 注册表、`InternetSetOption`、macOS `networksetup`、LaunchDaemon 等代码
+  按平台 API 编写，但尚未在真机 CI 上验证。
 - **sing-box 版本**：编译器只生成 1.12+ 的 typed DNS；1.11 及更早版本会校验失败。
   这是有意取舍，避免同时维护两套 DNS schema。
 - **App 自更新**：只做版本检查与下载页跳转，不做二进制自替换。
@@ -227,10 +260,12 @@ crates/
     src/subscription/   # 解析、抓取、分享链接、二维码
     src/runtime/        # Clash API、Xray stats、延迟测试
     src/storage/        # SQLite、迁移、加密
-    src/system/         # 系统代理、PAC、自启、单实例、特权 IPC、TUN 检查
+    src/system/         # 系统代理、PAC、自启、单实例、特权助手、TUN 检查
     src/service.rs      # UI 唯一入口（AppService / UiSnapshot）
-  xross-app/            # GPUI Kit 界面
-  xross-cli/            # 无界面工具
+  xross-app/
+    src/ui/             # GPUI 页面（节点/订阅/路由/DNS/连接/日志/设置）
+    src/tray/           # dashboard.rs + macos.rs / windows.rs / unsupported.rs
+  xross-cli/            # 无界面工具（含 add-node / helper）
 ```
 
 ## 许可

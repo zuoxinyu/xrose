@@ -1,11 +1,13 @@
-#[cfg(target_os = "macos")]
-mod macos {
+//! macOS tray backend: AppKit status item and NSMenu dashboard.
+//!
+//! The status-item menu is unchanged from the original implementation; the
+//! wrapper at the bottom maps it onto the cross-platform `tray` interface.
+
+mod imp {
     use std::ffi::{c_char, CStr};
     use std::sync::Once;
 
-    use cocoa::appkit::{
-        NSApplication, NSStatusBar, NSVariableStatusItemLength,
-    };
+    use cocoa::appkit::{NSApplication, NSStatusBar, NSVariableStatusItemLength};
     use cocoa::base::{id, nil, BOOL, YES};
     use cocoa::foundation::{NSAutoreleasePool, NSString};
     use objc::declare::ClassDecl;
@@ -21,17 +23,7 @@ mod macos {
     static mut TARGET_INSTANCE: id = nil;
 
     extern "C" fn show_window(_this: &Object, _sel: Sel, _sender: id) {
-        unsafe {
-            let app = NSApplication::sharedApplication(nil);
-            let _: () = msg_send![app, activateIgnoringOtherApps: YES];
-            let windows: id = msg_send![app, windows];
-            let count: usize = msg_send![windows, count];
-            for i in 0..count {
-                let win: id = msg_send![windows, objectAtIndex: i];
-                let _: () = msg_send![win, makeKeyAndOrderFront: nil];
-                let _: () = msg_send![win, setIsVisible: YES];
-            }
-        }
+        show_main_window();
     }
 
     extern "C" fn toggle_core(_this: &Object, _sel: Sel, _sender: id) {
@@ -69,6 +61,7 @@ mod macos {
 
     extern "C" fn quit_app(_this: &Object, _sel: Sel, _sender: id) {
         unsafe {
+            crate::tray::request_quit();
             let app = NSApplication::sharedApplication(nil);
             let _: () = msg_send![app, terminate: nil];
         }
@@ -89,18 +82,12 @@ mod macos {
                     sel!(toggleCore:),
                     toggle_core as extern "C" fn(&Object, Sel, id),
                 );
-                decl.add_method(
-                    sel!(testAll:),
-                    test_all as extern "C" fn(&Object, Sel, id),
-                );
+                decl.add_method(sel!(testAll:), test_all as extern "C" fn(&Object, Sel, id));
                 decl.add_method(
                     sel!(selectNode:),
                     select_node as extern "C" fn(&Object, Sel, id),
                 );
-                decl.add_method(
-                    sel!(quitApp:),
-                    quit_app as extern "C" fn(&Object, Sel, id),
-                );
+                decl.add_method(sel!(quitApp:), quit_app as extern "C" fn(&Object, Sel, id));
             }
             let cls = decl.register();
             unsafe {
@@ -201,7 +188,9 @@ mod macos {
                 .default_group_id()
                 .or_else(|| model.groups.first().map(|g| g.id.clone()))
                 .and_then(|id| model.group(&id).cloned());
-            let active_node_id = default_group.as_ref().and_then(|g| g.active_node().cloned());
+            let active_node_id = default_group
+                .as_ref()
+                .and_then(|g| g.active_node().cloned());
 
             unsafe {
                 let pool = NSAutoreleasePool::new(nil);
@@ -249,7 +238,12 @@ mod macos {
                             .and_then(|l| l.delay_ms)
                             .map(|ms| format!(" ({ms}ms)"))
                             .unwrap_or_default();
-                        let item_title = format!("{} {}{}", if is_active { "●" } else { "○" }, node.name, latency_text);
+                        let item_title = format!(
+                            "{} {}{}",
+                            if is_active { "●" } else { "○" },
+                            node.name,
+                            latency_text
+                        );
 
                         let node_id_ns = NSString::alloc(nil).init_str(&node.id);
                         add_menu_item(
@@ -265,15 +259,40 @@ mod macos {
                 }
 
                 // 3. Actions: Toggle Core, Test latency
-                let toggle_label = if running { "⏹ 停止 Core" } else { "▶ 启动 Core" };
-                add_menu_item(menu, toggle_label, Some(sel!(toggleCore:)), true, false, nil);
+                let toggle_label = if running {
+                    "⏹ 停止 Core"
+                } else {
+                    "▶ 启动 Core"
+                };
+                add_menu_item(
+                    menu,
+                    toggle_label,
+                    Some(sel!(toggleCore:)),
+                    true,
+                    false,
+                    nil,
+                );
 
-                add_menu_item(menu, "⚡ 全部节点测速", Some(sel!(testAll:)), true, false, nil);
+                add_menu_item(
+                    menu,
+                    "⚡ 全部节点测速",
+                    Some(sel!(testAll:)),
+                    true,
+                    false,
+                    nil,
+                );
 
                 add_separator(menu);
 
                 // 4. Show window and quit
-                add_menu_item(menu, "🪟 显示主窗口", Some(sel!(showWindow:)), true, false, nil);
+                add_menu_item(
+                    menu,
+                    "🪟 显示主窗口",
+                    Some(sel!(showWindow:)),
+                    true,
+                    false,
+                    nil,
+                );
                 add_menu_item(menu, "✕ 退出 Xross", Some(sel!(quitApp:)), true, false, nil);
 
                 let _: () = msg_send![self.status_item, setMenu: menu];
@@ -294,7 +313,8 @@ mod macos {
         let empty_key = NSString::alloc(nil).init_str("");
         let item: id = msg_send![class!(NSMenuItem), alloc];
         let sel_action = action.unwrap_or_else(|| sel!(showWindow:));
-        let item: id = msg_send![item, initWithTitle: title_ns action: sel_action keyEquivalent: empty_key];
+        let item: id =
+            msg_send![item, initWithTitle: title_ns action: sel_action keyEquivalent: empty_key];
         let _: () = msg_send![item, setTarget: TARGET_INSTANCE];
         let _: () = msg_send![item, setEnabled: if enabled { YES } else { cocoa::base::NO }];
         if checked {
@@ -417,21 +437,86 @@ mod macos {
             }
         }
     }
+
+    fn each_window(mut visit: impl FnMut(id)) {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let windows: id = msg_send![app, windows];
+            let count: usize = msg_send![windows, count];
+            for index in 0..count {
+                visit(msg_send![windows, objectAtIndex: index]);
+            }
+        }
+    }
+
+    /// Orders every app window out, which is the AppKit equivalent of hiding
+    /// into the tray (the window stays alive and can be shown again).
+    pub fn hide_main_window() {
+        each_window(|window| unsafe {
+            let _: () = msg_send![window, orderOut: nil];
+        });
+    }
+
+    pub fn show_main_window() {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+        }
+        each_window(|window| unsafe {
+            let miniaturized: BOOL = msg_send![window, isMiniaturized];
+            if miniaturized == YES {
+                let _: () = msg_send![window, deminiaturize: nil];
+            }
+            let _: () = msg_send![window, makeKeyAndOrderFront: nil];
+            let _: () = msg_send![window, setIsVisible: YES];
+        });
+    }
+
+    pub fn main_window_minimized() -> bool {
+        let mut minimized = false;
+        each_window(|window| unsafe {
+            let miniaturized: BOOL = msg_send![window, isMiniaturized];
+            if miniaturized == YES {
+                minimized = true;
+            }
+        });
+        minimized
+    }
 }
 
-#[cfg(target_os = "macos")]
-pub use macos::{setup_macos_window, TrayManager};
+pub struct Backend {
+    tray: imp::TrayManager,
+}
 
-#[cfg(not(target_os = "macos"))]
-pub fn setup_macos_window() {}
-
-#[cfg(not(target_os = "macos"))]
-pub struct TrayManager;
-
-#[cfg(not(target_os = "macos"))]
-impl TrayManager {
-    pub fn new(_service: xross_core::AppService) -> Self {
-        Self
+impl Backend {
+    pub fn new(service: &xross_core::AppService) -> Option<Self> {
+        Some(Self {
+            tray: imp::TrayManager::new(service.clone()),
+        })
     }
-    pub fn tick(&mut self, _service: &xross_core::AppService) {}
+
+    pub fn tick(&mut self, service: &xross_core::AppService) -> Option<super::TrayCommand> {
+        self.tray.tick(service);
+        None
+    }
+}
+
+pub fn available() -> bool {
+    true
+}
+
+pub fn hide_main_window() {
+    imp::hide_main_window();
+}
+
+pub fn show_main_window() {
+    imp::show_main_window();
+}
+
+pub fn main_window_minimized() -> bool {
+    imp::main_window_minimized()
+}
+
+pub fn setup_window() {
+    imp::setup_macos_window();
 }

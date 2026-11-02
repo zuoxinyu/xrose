@@ -27,7 +27,7 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("订阅", "Subscriptions"),
+                            self.tr("订阅列表", "Subscription list"),
                             self.tr(
                                 "定时更新，支持 ETag / If-Modified-Since 增量拉取",
                                 "Scheduled refresh with ETag / If-Modified-Since",

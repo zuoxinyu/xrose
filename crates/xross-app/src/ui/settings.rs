@@ -32,6 +32,7 @@ impl AppView {
         let platform = self.snapshot.platform.clone();
         let doctor = self.snapshot.doctor.clone();
         let running = self.snapshot.process.phase.is_alive();
+        let helper_busy = self.snapshot.busy.iter().any(|b| b == "helper");
 
         let mut body = div().flex().flex_col().gap_4().w_full();
 
@@ -196,73 +197,209 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .flex_wrap()
-                        .gap_6()
+                        .items_center()
+                        .gap_3()
                         .child(
-                            toggle(
-                                "allow-lan",
-                                self.tr("允许局域网连接", "Allow LAN"),
-                                settings.allow_lan,
-                            )
-                            .on_change(cx.listener(
-                                |this, checked, _, cx| {
-                                    this.modify_settings(cx, |s| s.allow_lan = *checked);
-                                },
-                            )),
+                            div()
+                                .w(px(120.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("网络", "Network")),
                         )
                         .child(
-                            toggle(
-                                "autostart",
-                                self.tr("开机自启", "Autostart"),
-                                settings.autostart,
-                            )
-                            .on_change(cx.listener(
-                                |this, checked, _, cx| {
-                                    this.modify_settings(cx, |s| s.autostart = *checked);
-                                },
-                            )),
-                        )
-                        .child(
-                            toggle(
-                                "watchdog",
-                                self.tr("watchdog 自动拉起", "Watchdog"),
-                                settings.watchdog,
-                            )
-                            .on_change(cx.listener(
-                                |this, checked, _, cx| {
-                                    this.modify_settings(cx, |s| s.watchdog = *checked);
-                                },
-                            )),
-                        )
-                        .child(
-                            toggle("tun", "TUN", settings.tun_enabled).on_change(cx.listener(
-                                |this, checked, _, cx| {
-                                    this.modify_settings(cx, |s| s.tun_enabled = *checked);
-                                },
-                            )),
-                        )
-                        .child(
-                            toggle(
-                                "system-proxy",
-                                self.tr("系统代理", "System proxy"),
-                                settings.system_proxy,
-                            )
-                            .on_change(cx.listener(
-                                |this, checked, _, _| {
-                                    this.service.set_system_proxy(*checked);
-                                },
-                            )),
-                        )
-                        .child(
-                            toggle("pac", "PAC", settings.pac_enabled).on_change(cx.listener(
-                                |this, checked, _, cx| {
-                                    this.modify_settings(cx, |s| s.pac_enabled = *checked);
-                                    this.service.reapply_system_proxy();
-                                    cx.notify();
-                                },
-                            )),
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_5()
+                                .child(
+                                    toggle(
+                                        "allow-lan",
+                                        self.tr("允许局域网连接", "Allow LAN"),
+                                        settings.allow_lan,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.allow_lan = *checked
+                                            });
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle("tun", "TUN", settings.tun_enabled).on_change(
+                                        cx.listener(
+                                            |this, checked, _, cx| {
+                                                this.modify_settings(cx, |s| {
+                                                    s.tun_enabled = *checked
+                                                });
+                                            },
+                                        ),
+                                    ),
+                                ),
                         ),
                 )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("代理", "Proxy")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_5()
+                                .child(
+                                    toggle(
+                                        "system-proxy",
+                                        self.tr("系统代理", "System proxy"),
+                                        settings.system_proxy,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, _| {
+                                            this.service.set_system_proxy(*checked);
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle("pac", "PAC", settings.pac_enabled).on_change(
+                                        cx.listener(
+                                            |this, checked, _, cx| {
+                                                this.modify_settings(cx, |s| {
+                                                    s.pac_enabled = *checked
+                                                });
+                                                this.service.reapply_system_proxy();
+                                                cx.notify();
+                                            },
+                                        ),
+                                    ),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("启动", "Startup")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_5()
+                                .child(
+                                    toggle(
+                                        "autostart",
+                                        self.tr("开机自启", "Autostart"),
+                                        settings.autostart,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.autostart = *checked
+                                            });
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle(
+                                        "watchdog",
+                                        self.tr("watchdog 自动拉起", "Watchdog"),
+                                        settings.watchdog,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.watchdog = *checked
+                                            });
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle(
+                                        "start-minimized",
+                                        self.tr("启动时最小化", "Start minimized"),
+                                        settings.start_minimized,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.start_minimized = *checked
+                                            });
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            div()
+                                .w(px(120.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("窗口", "Window")),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_5()
+                                .child(
+                                    toggle(
+                                        "minimize-to-tray",
+                                        self.tr("最小化到托盘", "Minimize to tray"),
+                                        settings.minimize_to_tray,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.minimize_to_tray = *checked
+                                            });
+                                        },
+                                    )),
+                                )
+                                .child(
+                                    toggle(
+                                        "close-to-tray",
+                                        self.tr("关闭到托盘", "Close to tray"),
+                                        settings.close_to_tray,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.close_to_tray = *checked
+                                            });
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+                .when(!crate::tray::available(), |d| {
+                    d.child(div().text_xs().text_color(p.warning).child(self.tr(
+                        "托盘不可用（平台无实现，或系统拒绝注册）：关闭窗口仍会退出",
+                        "Tray unavailable (no backend on this platform, or the shell refused it): closing the window still quits",
+                    )))
+                })
                 .child(
                     div()
                         .flex()
@@ -660,6 +797,165 @@ impl AppView {
                                 })),
                         ),
                 ),
+        );
+
+        // Privilege helper ---------------------------------------------
+        let helper_label = if platform.helper_available {
+            self.tr("运行中", "Running")
+        } else if platform.helper_installed {
+            self.tr("已安装，未运行", "Installed, not running")
+        } else {
+            self.tr("未安装", "Not installed")
+        };
+        let helper_color = if platform.helper_available {
+            p.success
+        } else if platform.helper_installed {
+            p.warning
+        } else {
+            p.muted_fg
+        };
+        body = body.child(
+            card(&p)
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .child(section_title(
+                            &p,
+                            self.tr("提权助手", "Privilege helper"),
+                            self.tr(
+                                "以最小权限代替 GUI 执行 TUN 准备、系统 DNS 与透明代理规则；GUI 本身永不提权",
+                                "Runs TUN preparation, system DNS and transparent rules as a minimal-privilege helper; the GUI itself never elevates",
+                            ),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(dot(helper_color))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(p.fg)
+                                        .child(helper_label),
+                                )
+                                .child(pill(
+                                    if platform.helper_supported {
+                                        self.tr("受支持", "supported")
+                                    } else {
+                                        self.tr("不支持", "unsupported")
+                                    },
+                                    p.muted_fg,
+                                    p.panel_alt,
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(p.muted_fg)
+                        .child(platform.helper_detail.clone())
+                        .when(platform.helper_path.is_some(), |d| {
+                            d.child(format!(
+                                "{}：{}",
+                                self.tr("可执行文件", "Executable"),
+                                platform.helper_path.clone().unwrap_or_default()
+                            ))
+                        })
+                        .when(!platform.elevated, |d| {
+                            d.child(self.tr(
+                                "安装、启动与卸载会弹出系统管理员授权（UAC / osascript / pkexec）",
+                                "Install, start and uninstall go through the OS elevation prompt (UAC / osascript / pkexec)",
+                            ))
+                        })
+                        .child(self.tr(
+                            "TUN 未安装助手时仍由 core 自行创建；助手额外提供系统 DNS 与 Linux tproxy 规则",
+                            "Without the helper the core still creates TUN itself; the helper adds system DNS and Linux tproxy rules",
+                        )),
+                )
+                .when(platform.helper_supported, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .when(!platform.helper_installed, |d| {
+                                d.child(
+                                    Button::new("install-helper")
+                                        .compact()
+                                        .primary()
+                                        .label(self.tr("安装并启动", "Install & start"))
+                                        .loading(helper_busy)
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.install_helper();
+                                        })),
+                                )
+                            })
+                            .when(
+                                platform.helper_installed && !platform.helper_available,
+                                |d| {
+                                    d.child(
+                                        Button::new("start-helper")
+                                            .compact()
+                                            .primary()
+                                            .label(self.tr("启动", "Start"))
+                                            .loading(helper_busy)
+                                            .on_click(cx.listener(|this, _, _, _| {
+                                                this.service.start_helper();
+                                            })),
+                                    )
+                                },
+                            )
+                            .when(platform.helper_installed, |d| {
+                                d.child(
+                                    Button::new("restart-helper")
+                                        .compact()
+                                        .label(self.tr("重启", "Restart"))
+                                        .loading(helper_busy)
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.restart_helper();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("uninstall-helper")
+                                        .compact()
+                                        .danger()
+                                        .label(self.tr("卸载", "Uninstall"))
+                                        .loading(helper_busy)
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.uninstall_helper();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("refresh-helper")
+                                    .compact()
+                                    .ghost()
+                                    .label(self.tr("刷新状态", "Refresh"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.service.refresh_doctor();
+                                        this.service.refresh_helper_status();
+                                        this.sync(cx);
+                                    })),
+                            ),
+                    )
+                })
+                .when(!platform.helper_supported, |d| {
+                    d.child(empty_hint(
+                        &p,
+                        self.tr(
+                            "该平台暂不支持提权助手；TUN 仍由 core 自身权限处理",
+                            "The helper is not available on this platform; TUN relies on the core's own rights",
+                        ),
+                    ))
+                }),
         );
 
         // Diagnostics ---------------------------------------------------

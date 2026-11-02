@@ -1,6 +1,7 @@
 mod connections;
 mod dns;
 mod logs;
+mod manual_node;
 mod nodes;
 mod routing;
 mod settings;
@@ -23,6 +24,7 @@ use xross_core::settings::{Language, LogLevel};
 use xross_core::trace::{TracePhase, TraceStepKind};
 use xross_core::AppService;
 
+use self::manual_node::ManualNodeForm;
 use self::theme::{palette, Palette};
 use self::title_controls::WindowControls;
 use self::widgets::*;
@@ -134,6 +136,9 @@ pub struct AppView {
     pub(crate) focus_handle: FocusHandle,
     pub(crate) node_search: Entity<InputState>,
     pub(crate) show_import_box: bool,
+    pub(crate) show_manual_form: bool,
+    pub(crate) manual_form: ManualNodeForm,
+    pub(crate) manual_error: Option<String>,
     pub(crate) hide_ips: bool,
     pub(crate) node_menu_open: Option<String>,
     pub(crate) sort_by_latency: bool,
@@ -222,6 +227,7 @@ impl AppView {
                 )
                 .default_value("https://www.gstatic.com/generate_204")
         });
+        let manual_form = ManualNodeForm::new(window, cx);
 
         let initial_page = match std::env::var("XROSS_PAGE").unwrap_or_default().as_str() {
             "subscriptions" => Page::Subscriptions,
@@ -232,6 +238,8 @@ impl AppView {
             "settings" => Page::Settings,
             _ => Page::Nodes,
         };
+        // Debug hook used by the screenshot/regression workflow.
+        let show_manual_form = std::env::var_os("XROSS_MANUAL").is_some();
         let view = Self {
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
@@ -241,6 +249,9 @@ impl AppView {
             focus_handle: cx.focus_handle(),
             node_search,
             show_import_box: false,
+            show_manual_form,
+            manual_form,
+            manual_error: None,
             hide_ips: false,
             node_menu_open: None,
             sort_by_latency: false,
@@ -496,14 +507,20 @@ impl AppView {
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let running = self.snapshot.process.phase.is_alive();
+        let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
         let status_color = if running { p.success } else { p.muted_fg };
+        let action_bg = if running { p.danger } else { p.primary };
+        let action_hover = if running {
+            p.danger.opacity(0.85)
+        } else {
+            p.primary.opacity(0.85)
+        };
         div()
             .id("header-bar")
             .pt(if cfg!(target_os = "macos") { px(32.) } else { px(0.) })
             .h(px(if cfg!(target_os = "macos") { 86. } else { 54. }))
             .flex()
             .items_center()
-            .justify_between()
             .border_b_1()
             .border_color(p.border)
             .bg(p.bg)
@@ -511,15 +528,14 @@ impl AppView {
                 // Dragging (and double-click to maximize) is owned by the
                 // platform: on Windows the `Drag` region answers `WM_NCHITTEST`
                 // with `HTCAPTION`, on macOS the window is moved through AppKit.
-                // Keep interactive controls out of this element.
+                // The page name lives in the sidebar, so this area stays empty.
                 div()
                     .id("header-drag")
                     .flex()
                     .items_center()
                     .h_full()
                     .flex_1()
-                    .pl_6()
-                    .gap_3()
+                    .min_w(px(0.))
                     .when(cfg!(target_os = "windows"), |d| {
                         d.window_control_area(WindowControlArea::Drag)
                     })
@@ -529,44 +545,114 @@ impl AppView {
                         } else {
                             window.start_window_move();
                         }
-                    })
-                    .child(
-                        div()
-                            .text_xl()
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(p.fg)
-                            .child(self.tr(self.page.zh(), self.page.en())),
-                    ),
+                    }),
             )
             .child(
+                // The status pill is the visual anchor of the header: equal
+                // flex_1 spacers on both sides keep it centered regardless of
+                // how wide the traffic/control cluster on the right becomes.
                 div()
+                    .id("header-status")
                     .flex()
                     .items_center()
-                    .gap_4()
-                    .pr_6()
+                    .flex_shrink_0()
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap_0p5()
+                            .items_center()
+                            .h(px(28.))
+                            .rounded_full()
+                            .overflow_hidden()
+                            .bg(p.panel)
+                            .border_1()
+                            .border_color(p.border)
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .pl_3()
+                                    .pr_2p5()
+                                    .child(dot(status_color))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(if running { p.fg } else { p.muted_fg })
+                                            .child(self.snapshot.process.phase.label()),
+                                    ),
+                            )
+                            .child(
+                                // The button is the right half of the pill: no
+                                // own radius/padding wrapper, clipped by the
+                                // parent's rounded_full + overflow_hidden.
+                                div()
+                                    .id("toggle-core")
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h_full()
+                                    .px_3()
+                                    .bg(action_bg)
+                                    .cursor_pointer()
+                                    .hover(move |style| style.bg(action_hover))
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.toggle_core();
+                                    }))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(p.primary_fg)
+                                            .child(if core_busy {
+                                                "…".to_string()
+                                            } else if running {
+                                                self.tr("停止", "Stop").to_string()
+                                            } else {
+                                                self.tr("启动", "Start").to_string()
+                                            }),
+                                    ),
+                            ),
+                    ),
+            )
+            .child(
+                // Traffic figures live at the far right and stay right-aligned
+                // both inside the block and against the caption buttons.
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .flex_shrink_0()
+                            .gap_0p5()
+                            .when(cfg!(target_os = "macos"), |d| d.pr_6())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .gap_2()
                                     .text_xs()
                                     .font_family(cx.theme().mono_font_family.clone())
-                                    .child(
-                                        div()
-                                            .text_color(p.primary)
-                                            .child(format!("↓ {}", xross_core::util::format_speed(self.snapshot.runtime.down_speed))),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(p.info)
-                                            .child(format!("↑ {}", xross_core::util::format_speed(self.snapshot.runtime.up_speed))),
-                                    ),
+                                    .child(div().text_color(p.primary).child(format!(
+                                        "↓ {}",
+                                        xross_core::util::format_speed(
+                                            self.snapshot.runtime.down_speed
+                                        )
+                                    )))
+                                    .child(div().text_color(p.info).child(format!(
+                                        "↑ {}",
+                                        xross_core::util::format_speed(
+                                            self.snapshot.runtime.up_speed
+                                        )
+                                    ))),
                             )
                             .child(div().text_xs().text_color(p.muted_fg).child(format!(
                                 "{} {}",
@@ -577,45 +663,8 @@ impl AppView {
                                 )
                             ))),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pl_3()
-                            .pr_1()
-                            .py_1()
-                            .rounded_full()
-                            .bg(p.panel)
-                            .border_1()
-                            .border_color(p.border)
-                            .child(dot(status_color))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(if running { p.fg } else { p.muted_fg })
-                                    .child(self.snapshot.process.phase.label()),
-                            )
-                            .child(div().w(px(1.)).h(px(12.)).bg(p.border))
-                            .child(
-                                Button::new("toggle-core")
-                                    .compact()
-                                    .when(running, |b| b.ghost())
-                                    .when(!running, |b| b.primary())
-                                    .label(if running {
-                                        self.tr("停止", "Stop")
-                                    } else {
-                                        self.tr("启动", "Start")
-                                    })
-                                    .loading(self.snapshot.busy.iter().any(|b| b == "core"))
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        this.service.toggle_core();
-                                    })),
-                            ),
-                    ),
+                    .child(WindowControls::new(p)),
             )
-            .child(WindowControls::new(p))
     }
 
     fn config_dirty_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -819,6 +868,7 @@ impl Render for AppView {
                             cx.notify();
                         }
                         "q" => {
+                            crate::tray::request_quit();
                             cx.quit();
                         }
                         _ => {}

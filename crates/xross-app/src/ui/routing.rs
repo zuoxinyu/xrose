@@ -107,8 +107,9 @@ impl AppView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
-                        .gap_6()
+                        .gap_4()
                         .child(
                             div()
                                 .flex()
@@ -433,22 +434,27 @@ impl AppView {
                         .items_center()
                         .gap_3()
                         .p_3()
+                        .w_full()
+                        .min_w(px(0.))
+                        .overflow_hidden()
                         .rounded_md()
                         .bg(p.bg)
                         .border_1()
                         .border_color(p.border)
                         .child(
-                            toggle(
-                                SharedString::from(format!("rule-enabled-{}", rule.id)),
-                                "",
-                                enabled,
-                            )
-                            .on_change(cx.listener(
-                                move |this, checked, _, cx| {
-                                    this.service.set_rule_enabled(&rule_id_toggle, *checked);
-                                    this.sync(cx);
-                                },
-                            )),
+                            div().flex_shrink_0().child(
+                                toggle(
+                                    SharedString::from(format!("rule-enabled-{}", rule.id)),
+                                    "",
+                                    enabled,
+                                )
+                                .on_change(cx.listener(
+                                    move |this, checked, _, cx| {
+                                        this.service.set_rule_enabled(&rule_id_toggle, *checked);
+                                        this.sync(cx);
+                                    },
+                                )),
+                            ),
                         )
                         .child(
                             div()
@@ -456,20 +462,23 @@ impl AppView {
                                 .flex_col()
                                 .gap_0p5()
                                 .flex_1()
+                                .min_w(px(0.))
                                 .child(
                                     div()
                                         .text_sm()
                                         .text_color(if enabled { p.fg } else { p.muted_fg })
+                                        .truncate()
                                         .child(rule.name.clone()),
                                 )
                                 .child(
                                     div()
                                         .text_xs()
                                         .text_color(p.muted_fg)
-                                        .child(rule.matchers.summary()),
+                                        .line_clamp(2)
+                                        .child(rule.matchers.summary().replace(',', ", ")),
                                 ),
                         )
-                        .child(pill(
+                        .child(div().flex_shrink_0().child(pill(
                             action_label(&model, &rule.action),
                             p.primary_fg,
                             match rule.action.kind {
@@ -477,16 +486,18 @@ impl AppView {
                                 RouteActionKind::Direct => p.success,
                                 RouteActionKind::Block => p.danger,
                             },
-                        ))
+                        )))
                         .child(
-                            Button::new(SharedString::from(format!("delete-rule-{}", rule_id)))
-                                .compact()
-                                .ghost()
-                                .label("✕")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.service.delete_rule(&rule_id_delete);
-                                    this.sync(cx);
-                                })),
+                            div().flex_shrink_0().child(
+                                Button::new(SharedString::from(format!("delete-rule-{}", rule_id)))
+                                    .compact()
+                                    .ghost()
+                                    .label("✕")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.delete_rule(&rule_id_delete);
+                                        this.sync(cx);
+                                    })),
+                            ),
                         )
                 })),
         );
@@ -530,13 +541,29 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_sm().text_color(p.fg).child(set.tag.clone()))
-                                .child(pill(set.format.as_str(), p.muted_fg, p.panel_alt)),
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .text_sm()
+                                        .text_color(p.fg)
+                                        .truncate()
+                                        .child(set.tag.clone()),
+                                )
+                                .child(
+                                    div().flex_shrink_0().child(pill(
+                                        set.format.as_str(),
+                                        p.muted_fg,
+                                        p.panel_alt,
+                                    )),
+                                ),
                         )
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(p.muted_fg)
+                                .truncate()
                                 .child(set.url.clone()),
                         )
                 }))
