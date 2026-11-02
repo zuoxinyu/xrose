@@ -6,6 +6,7 @@ mod routing;
 mod settings;
 mod subscriptions;
 mod theme;
+mod title_controls;
 mod widgets;
 
 use std::time::Duration;
@@ -23,6 +24,7 @@ use xross_core::trace::{TracePhase, TraceStepKind};
 use xross_core::AppService;
 
 use self::theme::{palette, Palette};
+use self::title_controls::WindowControls;
 use self::widgets::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,7 +373,7 @@ impl AppView {
             .h_full()
             .flex()
             .flex_col()
-            .bg(if cfg!(target_os = "macos") { hsla(0., 0., 0., 0.) } else { p.panel })
+            .bg(p.sidebar())
             .border_r_1()
             .border_color(p.border)
             .when(cfg!(target_os = "macos"), |d| {
@@ -398,6 +400,9 @@ impl AppView {
                     .items_center()
                     .justify_start()
                     .gap_3()
+                    .when(cfg!(target_os = "windows"), |d| {
+                        d.window_control_area(WindowControlArea::Drag)
+                    })
                     .on_mouse_down(MouseButton::Left, |ev, window, _| {
                         if ev.click_count == 2 {
                             window.titlebar_double_click();
@@ -496,25 +501,35 @@ impl AppView {
             .id("header-bar")
             .pt(if cfg!(target_os = "macos") { px(32.) } else { px(0.) })
             .h(px(if cfg!(target_os = "macos") { 86. } else { 54. }))
-            .px_6()
             .flex()
             .items_center()
             .justify_between()
             .border_b_1()
             .border_color(p.border)
             .bg(p.bg)
-            .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                if ev.click_count == 2 {
-                    window.titlebar_double_click();
-                } else {
-                    window.start_window_move();
-                }
-            })
             .child(
+                // Dragging (and double-click to maximize) is owned by the
+                // platform: on Windows the `Drag` region answers `WM_NCHITTEST`
+                // with `HTCAPTION`, on macOS the window is moved through AppKit.
+                // Keep interactive controls out of this element.
                 div()
+                    .id("header-drag")
                     .flex()
                     .items_center()
+                    .h_full()
+                    .flex_1()
+                    .pl_6()
                     .gap_3()
+                    .when(cfg!(target_os = "windows"), |d| {
+                        d.window_control_area(WindowControlArea::Drag)
+                    })
+                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                        if ev.click_count == 2 {
+                            window.titlebar_double_click();
+                        } else {
+                            window.start_window_move();
+                        }
+                    })
                     .child(
                         div()
                             .text_xl()
@@ -528,6 +543,7 @@ impl AppView {
                     .flex()
                     .items_center()
                     .gap_4()
+                    .pr_6()
                     .child(
                         div()
                             .flex()
@@ -599,6 +615,7 @@ impl AppView {
                             ),
                     ),
             )
+            .child(WindowControls::new(p))
     }
 
     fn config_dirty_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -811,7 +828,11 @@ impl Render for AppView {
             .relative()
             .flex()
             .size_full()
-            .bg(if cfg!(target_os = "macos") { hsla(0., 0., 0., 0.) } else { p.bg })
+            .bg(if crate::window_effects::blur_backdrop() {
+                hsla(0., 0., 0., 0.)
+            } else {
+                p.bg
+            })
             .text_color(p.fg)
             .font_family(cx.theme().font_family.clone())
             .child(self.sidebar(cx))

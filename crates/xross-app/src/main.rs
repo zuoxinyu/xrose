@@ -2,6 +2,7 @@ mod brand_assets;
 mod i18n;
 mod tray;
 mod ui;
+mod window_effects;
 
 use std::sync::Arc;
 
@@ -52,10 +53,7 @@ fn main() {
                 ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
                 ThemeMode::System => {}
             }
-            #[cfg(target_os = "macos")]
-            Theme::update(cx, |theme| {
-                theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
-            });
+            window_effects::make_surface_translucent(cx);
             let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
             let window_icon = image::load_from_memory(include_bytes!("../assets/app-icon-256.png"))
                 .ok()
@@ -71,11 +69,7 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(14.), px(16.))),
                     }),
-                    window_background: if cfg!(target_os = "macos") {
-                        WindowBackgroundAppearance::Blurred
-                    } else {
-                        WindowBackgroundAppearance::Opaque
-                    },
+                    window_background: window_effects::window_background(),
                     app_owns_titlebar_drag: false,
                     ..Default::default()
                 },
@@ -84,10 +78,7 @@ fn main() {
                     if matches!(theme_mode, ThemeMode::System) {
                         Theme::sync_system_appearance(Some(window), cx);
                     }
-                    #[cfg(target_os = "macos")]
-                    Theme::update(cx, |theme| {
-                        theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
-                    });
+                    window_effects::make_surface_translucent(cx);
                     let service = window_service.clone();
                     cx.new(|cx| ui::AppView::new(service, window, cx))
                 },

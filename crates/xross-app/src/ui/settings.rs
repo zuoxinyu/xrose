@@ -143,6 +143,9 @@ impl AppView {
                                                         )
                                                     }
                                                 }
+                                                // Applying a theme rewrites the root surface
+                                                // color; keep it clear so the backdrop shows.
+                                                crate::window_effects::make_surface_translucent(cx);
                                                 this.sync(cx);
                                             }))
                                             .child(label)

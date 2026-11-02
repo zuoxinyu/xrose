@@ -1,4 +1,5 @@
-//! OS integration: system proxy, PAC, autostart, single instance, privileges, TUN checks.
+//! OS integration: system proxy, PAC, autostart, single instance, privileges, TUN checks,
+//! window backdrops.
 
 pub mod autostart;
 pub mod pac;
@@ -6,6 +7,7 @@ pub mod privilege;
 pub mod proxy;
 pub mod single_instance;
 pub mod tun;
+pub mod window_effects;
 
 pub use pac::{build_pac, PacServer, PacServerInfo};
 pub use proxy::{detect_backend, ProxyBackend, ProxyManager, ProxySnapshot};
