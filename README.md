@@ -112,10 +112,14 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 ### 6. 系统集成
 
 - TUN 使用 sing-box 原生实现；启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
-- **托盘**（Windows `/ macOS`）：状态栏/通知区域 dashboard，包含运行状态、实时速率、
-  出站节点与延迟、系统代理、启停 core、全部测速、显示主窗口与退出。
-  Windows 用 `Shell_NotifyIcon` + 原生菜单，macOS 用 `NSMenu`；
-  **最小化到托盘**与**关闭到托盘**可在设置中分别开关，关闭窗口不再等于退出。
+- **托盘浮窗**（Windows / macOS / Linux）：使用 GPUI Kit 绘制独立卡片式 dashboard，
+  包含运行状态、实时速率与累计流量、可滚动的组内节点与延迟、系统代理、启停 core、
+  TUN 开关、路由预设下拉框、全部测速、设置、显示主窗口与退出；再次点击图标、失焦或按 Esc 收起。
+  浮窗使用紧凑字号；路由下拉框与主界面同步，运行中切换会校验并重启 Core，停止时只保存。
+  Windows 从任务栏方向滑入/滑出，支持中途反转并遵循系统“动画效果”开关；
+  TUN 在 Core 运行时通过校验、重启生效，停止时只保存设置，Xray 下不可启用。
+  Windows 使用 `Shell_NotifyIcon`，macOS 使用 AppKit status item，Linux 使用 StatusNotifierItem。
+  **最小化到托盘**与**关闭到托盘**可在设置中分别开关；Linux 使用最小化/激活恢复，保留任务栏入口。
 - **提权助手**：GUI 永不提权。安装为 Windows 计划任务（登录时最高权限）/
   macOS LaunchDaemon / Linux systemd service，通过本地 socket（Unix socket /
   Windows 命名管道）以单行 JSON 执行少量操作：TUN 准备、系统 DNS、Linux tproxy 规则。
@@ -154,15 +158,16 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - 节点列表工具栏、标记与操作菜单统一使用与侧栏一致的线性图标。
 - 节点支持通过拖动手柄排序并保存；测速、菜单和启用开关不会触发节点切换。
   标题行的“添加节点”统一提供链接导入和手动填写入口。
-- 托盘 dashboard 与主界面共用同一份快照；菜单动作在 GPUI 主线程 tick 中执行，
-  窗口隐藏/恢复不依赖平台私有 API。
+- 托盘 dashboard 与主界面共用 AppService 快照，400 ms 更新；原生回调只排队窗口命令，
+  服务动作在 GPUI 线程执行。主窗口句柄单独记录，浮窗的创建/销毁不会影响主窗口隐藏恢复。
 - 应用/任务栏图标：Windows 由 `build.rs` 从 256px PNG 生成 `.ico` 并以资源 ID 1 内嵌
   （GPUI 的 Windows 后端按该 ID 加载），macOS 在启动时设置 Dock 图标，Linux 使用
   `WindowOptions.icon` 与随附的 `.desktop` 图标。
-- 左侧栏使用系统材质：Windows 为 acrylic（借 GPUI 的 `Blurred` 背景 +
-  `theme.tokens.background` 置空，由系统合成器模糊窗口后方内容），macOS 为
-  vibrancy，其余平台为不透明面板。系统关闭“透明效果”或版本过低
-  （Windows 10 1809 以下）时自动回退，不会出现透出桌面却无模糊的情况。
+- **设置 → 通用 → 窗口材质**即时作用于主窗口侧栏和托盘浮窗并持久保存：Windows 可选
+  自动 / Mica / Mica Alt / Acrylic / 纯色，macOS 可选自动 / 毛玻璃（vibrancy）/ 纯色，
+  Linux 可选自动 / 纯色。自动优先 Windows 11 22H2+ 的 Mica Alt，再回退 Acrylic；
+  切换时清理旧 accent policy 并重新扩展 DWM 客户区，Mica 表面保持透明以显示系统材质。
+  系统关闭透明效果、原生调用失败或平台不支持时回退纯色。Linux 不假定合成器支持模糊。
 - 首次启动向导卡片（三步上手）。
 - App / core / geo 数据检查与更新；App 更新提供下载页跳转（不做自替换安装）。
 - Core 更新：下载 → SHA-256 → 解压 → 安装 → 切换版本，全程不阻塞界面。
@@ -187,7 +192,7 @@ cargo run -p xross-cli -- demo  # 查看编译出的两套配置
 3. 右上角 **启动**。修改路由/DNS 后点击 **应用配置**（会重启 core）。
 
 关闭窗口默认最小化到托盘；需要彻底退出请用托盘菜单的 **退出 Xross**，
-或在 **设置 → 通用** 关闭“关闭到托盘”（Linux 目前没有托盘，关闭即退出）。
+或在 **设置 → 通用** 关闭“关闭到托盘”（托盘宿主不可用时关闭即退出）。
 
 隔离数据目录：
 
@@ -235,8 +240,10 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 
 ## 已知限制 / 路线图
 
-- **托盘**：仅 Windows 与 macOS 实现。Linux 暂无 StatusNotifier/AppIndicator
-  后端，`available()` 返回 false，关闭窗口仍会退出。
+- **Linux 托盘**：需要 StatusNotifierItem 宿主（如 KDE Plasma 或 GNOME AppIndicator 扩展）。
+  不支持直接 Activate 的宿主通过简短原生菜单打开 GPUI 浮窗。Wayland 不允许客户端保证全局位置，
+  浮窗位置由合成器决定；关闭到托盘使用最小化，保留任务栏入口。没有宿主时关闭窗口仍会退出。
+- **跨平台验证**：macOS status item/vibrancy 与 Linux 桌面交互仍需相应桌面环境实机验证。
 - **Windows 托盘与权限**：`Shell_NotifyIcon` 要求进程完整性级别不低于任务栏。若 exe 位于带
   Low 完整性标签的目录（例如受限构建沙盒），进程会继承 Low IL，向 Medium IL 的任务栏注册
   托盘会得到 `ERROR_ACCESS_DENIED`；应用会退化为“关闭即退出”并记录原因。把程序放到普通

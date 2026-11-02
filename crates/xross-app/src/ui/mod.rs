@@ -6,7 +6,7 @@ mod nodes;
 mod routing;
 mod settings;
 mod subscriptions;
-mod theme;
+pub(crate) mod theme;
 mod title_controls;
 mod widgets;
 
@@ -1046,6 +1046,11 @@ impl Render for AppView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 let mods = event.keystroke.modifiers;
                 let key = event.keystroke.key.as_str();
+                // Development shortcut for repeated flyout lifecycle checks.
+                #[cfg(debug_assertions)]
+                if (mods.control || mods.platform) && mods.shift && key == "t" {
+                    crate::tray::queue_command(crate::tray::TrayCommand::TogglePopup);
+                }
                 if mods.platform {
                     match key {
                         "," => {

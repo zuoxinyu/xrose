@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 smallvec = "1"
 env_logger = "0.11"
 parking_lot.workspace = true
+raw-window-handle.workspace = true
 
 [build-dependencies]
 embed-resource = "3"
@@ -29,7 +30,13 @@ objc = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true

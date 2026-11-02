@@ -39,6 +39,19 @@ pub enum ThemeMode {
     Dark,
 }
 
+/// Window material preference; unsupported materials degrade to an opaque surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackdropStyle {
+    #[default]
+    Auto,
+    Mica,
+    MicaAlt,
+    Acrylic,
+    Vibrancy,
+    Opaque,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
@@ -87,6 +100,7 @@ pub struct Settings {
     pub core: CoreKind,
     pub language: Language,
     pub theme: ThemeMode,
+    pub backdrop: BackdropStyle,
     pub listen_host: String,
     pub mixed_port: u16,
     pub allow_lan: bool,
@@ -125,6 +139,7 @@ impl Default for Settings {
             core: CoreKind::SingBox,
             language: Language::Zh,
             theme: ThemeMode::System,
+            backdrop: BackdropStyle::Auto,
             listen_host: "127.0.0.1".into(),
             mixed_port: 7890,
             allow_lan: false,
@@ -187,5 +202,29 @@ impl Settings {
     /// TUN streaming on Xray needs an external stack; UI and validator call this.
     pub fn effective_tun(&self) -> bool {
         self.tun_enabled && self.core.capabilities().native_tun
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_settings_keep_defaults_and_material_preference_roundtrips() {
+        let old: Settings = serde_json::from_str(r#"{"language":"en","mixed_port":8899}"#).unwrap();
+        assert_eq!(old.language, Language::En);
+        assert_eq!(old.mixed_port, 8899);
+        assert_eq!(old.backdrop, BackdropStyle::Auto);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let settings = Settings {
+            backdrop: BackdropStyle::MicaAlt,
+            ..old
+        };
+        settings.save(&path).unwrap();
+        let restored = Settings::load(&path).unwrap();
+        assert_eq!(restored, settings);
+        let json = std::fs::read_to_string(path).unwrap();
+        assert!(json.contains("mica_alt"));
     }
 }

@@ -53,8 +53,9 @@ fn main() {
     };
 
     let theme_mode = service.settings().theme;
-    let start_minimized = service.settings().start_minimized
-        || args.iter().any(|arg| arg == "--minimized");
+    window_effects::configure(service.settings().backdrop);
+    let start_minimized =
+        service.settings().start_minimized || args.iter().any(|arg| arg == "--minimized");
     let window_service = service.clone();
     let app_service = service.clone();
     let close_service = service.clone();
@@ -69,10 +70,12 @@ fn main() {
                 ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
                 ThemeMode::System => {}
             }
-            let tray = Arc::new(parking_lot::Mutex::new(tray::TrayManager::new(
-                &app_service,
-            )));
-            let hide_on_start = start_minimized && tray::available();
+            let mut tray = tray::TrayManager::new(&app_service);
+            // Development preview for visual regression checks with an isolated profile.
+            if cfg!(debug_assertions) && std::env::var_os("XROSS_TRAY_PREVIEW").is_some() {
+                tray::queue_command(tray::TrayCommand::TogglePopup);
+            }
+            let hide_on_start = start_minimized;
             window_effects::make_surface_translucent(cx);
             let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
             let window_icon = image::load_from_memory(include_bytes!("../assets/app-icon-256.png"))
@@ -99,19 +102,36 @@ fn main() {
                         Theme::sync_system_appearance(Some(window), cx);
                     }
                     window_effects::make_surface_translucent(cx);
+                    tray::register_main_window(window);
+                    window_effects::apply(window, cx);
+                    let appearance_service = window_service.clone();
+                    window
+                        .observe_window_appearance(move |window, cx| {
+                            if appearance_service.settings().theme == ThemeMode::System {
+                                Theme::sync_system_appearance(Some(window), cx);
+                                window_effects::apply(window, cx);
+                            }
+                        })
+                        .detach();
                     let close_service = close_service.clone();
-                    window.on_window_should_close(cx, move |_window, _cx| {
+                    window.on_window_should_close(cx, move |window, cx| {
                         if tray::quitting() {
                             return true;
                         }
                         if close_service.settings().close_to_tray && tray::available() {
+                            #[cfg(target_os = "linux")]
+                            window.minimize_window();
+                            #[cfg(not(target_os = "linux"))]
+                            let _ = window;
                             tray::hide_main_window();
                             close_service.toast(
                                 ToastLevel::Info,
-                                "已最小化到托盘：单击托盘图标恢复，托盘菜单可退出",
+                                "已最小化到托盘：单击图标打开浮窗，可显示主窗口或退出",
                             );
                             false
                         } else {
+                            tray::request_quit();
+                            cx.quit();
                             true
                         }
                     });
@@ -120,19 +140,20 @@ fn main() {
                 },
             );
             tray::setup_platform_window();
-            let tray_for_loop = tray.clone();
             let service_for_loop = app_service.clone();
 
             match result {
-                Ok((_, view)) => {
+                Ok((main_window, view)) => {
                     let view = view.downgrade();
                     cx.spawn(async move |cx| {
                         let mut macos_configured = false;
                         let mut hide_on_start = hide_on_start;
+                        let mut backdrop = service_for_loop.settings().backdrop;
                         loop {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(200))
-                                .await;
+                            tokio::select! {
+                                _ = tray::wait_for_command() => {}
+                                _ = cx.background_executor().timer(std::time::Duration::from_millis(200)) => {}
+                            }
                             if !macos_configured {
                                 tray::setup_platform_window();
                                 macos_configured = true;
@@ -140,13 +161,32 @@ fn main() {
                             if hide_on_start && tray::available() {
                                 hide_on_start = false;
                                 tray::hide_main_window();
+                                #[cfg(target_os = "linux")]
+                                let _ =
+                                    main_window.update(cx, |_, window, _| window.minimize_window());
                             }
-                            if let Some(command) = tray_for_loop.lock().tick(&service_for_loop) {
+                            let new_backdrop = service_for_loop.settings().backdrop;
+                            if backdrop != new_backdrop {
+                                backdrop = new_backdrop;
+                                cx.update(|cx| window_effects::refresh_all(backdrop, cx));
+                            }
+                            let command = cx.update(|cx| tray.tick(&service_for_loop, cx));
+                            if let Some(command) = command {
                                 match command {
-                                    tray::TrayCommand::ShowWindow => {
+                                    tray::TrayCommand::ShowWindow
+                                    | tray::TrayCommand::ShowSettings => {
+                                        if command == tray::TrayCommand::ShowSettings {
+                                            let _ = view.update(cx, |view, cx| {
+                                                view.page = ui::Page::Settings;
+                                                cx.notify();
+                                            });
+                                        }
                                         tray::show_main_window();
+                                        let _ = main_window
+                                            .update(cx, |_, window, _| window.activate_window());
                                         cx.update(|cx| cx.activate(true));
                                     }
+                                    tray::TrayCommand::TogglePopup => {}
                                     tray::TrayCommand::Quit => {
                                         tray::request_quit();
                                         service_for_loop.shutdown();

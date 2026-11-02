@@ -42,6 +42,8 @@ semver = "1"
 qrcode = { version = "0.14", default-features = false }
 interprocess = "2"
 bytes = "1"
+raw-window-handle = "0.6"
+ksni = { version = "0.3.7", features = ["blocking"] }
 
 [profile.release]
 strip = true
