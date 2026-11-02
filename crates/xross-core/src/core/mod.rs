@@ -1,6 +1,8 @@
 //! Binary store, process supervision, config validation and lifecycle.
 
 pub mod binary;
+#[cfg(windows)]
+pub mod job;
 pub mod logs;
 pub mod process;
 

@@ -102,7 +102,7 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
 - `system::single_instance::tests::second_acquire_fails` **fails on Windows**: the lock itself
   works, but `existing_pid()` cannot read the file while the lock is held (Windows byte-range
   locks are mandatory, so the read-back is a sharing violation). Use
-  `cargo test -p xross-core -- --skip second_acquire_fails`; 98 tests pass.
+  `cargo test -p xross-core -- --skip second_acquire_fails`; 99 tests pass.
 - If the workspace tree carries a **Low mandatory integrity label** (the sandbox applied one
   earlier in this session), a process launched from `target\debug\xross-app.exe` inherits that
   Low IL. Low IL cannot call `Shell_NotifyIconW` against the Medium IL shell
@@ -114,6 +114,11 @@ process, logs), `subscription/`, `storage/` (SQLite + crypto), `runtime/` (Clash
   do not force `available()` to `true` in production code.
 - The tray is implemented for **macOS and Windows**; `tray/unsupported.rs` makes
   `available()` false elsewhere, so closing the window still quits.
+- Windows cores are adopted into a `KILL_ON_JOB_CLOSE` job object
+  (`crates/xross-core/src/core/job.rs`), so a crashed or force-killed GUI cannot leave a core
+  running. A stray `sing-box.exe` keeps `data/cache.db` locked and every later start fails with
+  `initialize cache-file: timeout`; kill the leftover process once if an older build left one
+  behind.
 - Windows main window class is `Zed::Window` (GPUI), not `GPUIWindow`; `tray/windows.rs`
   locates the main HWND by that class name. The tray message window is `XrossTrayWindow`
   on the same GPUI main thread, so its messages are dispatched by GPUI's message loop.

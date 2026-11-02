@@ -401,6 +401,22 @@ fn spawn_child(ctx: &RunContext) -> std::io::Result<tokio::process::Child> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command.spawn()?;
+    #[cfg(windows)]
+    {
+        if let Some(handle) = child.raw_handle() {
+            if let Err(err) = super::job::adopt(handle) {
+                if super::job::take_warning() {
+                    ctx.logs.push(
+                        LogStream::App,
+                        LogLevel::Warn,
+                        format!(
+                            "无法把 core 纳入 Windows 作业对象：{err}（应用异常退出时可能残留 core 进程）"
+                        ),
+                    );
+                }
+            }
+        }
+    }
     if let Some(stdout) = child.stdout.take() {
         spawn_reader(stdout, LogStream::Stdout, ctx);
     }
@@ -489,6 +505,8 @@ pub fn human_failure_reason(info: &ExitInfo, tail: &[String]) -> String {
         Some("配置文件无效")
     } else if lower.contains("dns query loopback") {
         Some("DNS 解析回环：节点域名无法在不经过代理的情况下解析")
+    } else if lower.contains("initialize cache-file") {
+        Some("core 缓存文件被另一个实例占用（可能存在残留的 sing-box 进程）")
     } else if lower.contains("initialize rule-set") || lower.contains("start service") {
         Some("启动阶段初始化失败（规则集下载或网络不可用）")
     } else if lower.contains("certificate") || lower.contains("tls") {
@@ -578,6 +596,21 @@ mod tests {
         };
         let tail = vec!["listen tcp 127.0.0.1:7890: bind: address already in use".into()];
         assert!(human_failure_reason(&info, &tail).contains("端口已被占用"));
+    }
+
+    #[test]
+    fn reason_detects_stale_cache_lock() {
+        let info = ExitInfo {
+            code: Some(1),
+            signal: None,
+            reason: "退出码 1".into(),
+            detail: None,
+            at: 0,
+        };
+        let tail = vec!["FATAL[0009] start service: initialize cache-file: timeout".into()];
+        let reason = human_failure_reason(&info, &tail);
+        assert!(reason.contains("残留"), "{reason}");
+        assert!(!reason.contains("规则集下载"), "{reason}");
     }
 
     #[test]
