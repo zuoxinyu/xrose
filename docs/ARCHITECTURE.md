@@ -82,22 +82,44 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 ## 托盘与最小化
 
 ```
-托盘菜单点击 ──▶ WndProc/NSMenu 回调只入队 TrayAction
+Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
+                          │ 回调只排队 TrayCommand
+         GPUI 立即唤醒（200 ms 兜底）打开 / 收起独立 PopUp 窗口
                           │
-         GPUI tick (200 ms) 取出动作
+         GPUI Kit dashboard (400 ms 快照刷新)
                           │
-        AppService 变更 ◀──┴──▶ TrayCommand::ShowWindow / Quit
-                          │
-          Win32 ShowWindow / AppKit orderOut
+          AppService ◀── 用户动作 ──▶ 主窗口 / 设置 / 退出
 ```
 
-- `tray::dashboard::build` 从同一份 `UiSnapshot` 生成状态行、实时速率与节点列表，
-  Windows 原生菜单与 macOS `NSMenu` 使用同一套数据来源。
-- 关闭窗口走 `on_window_should_close`：`close_to_tray` 且托盘可用时隐藏窗口并返回
-  `false`；`minimize_to_tray` 由 tick 检测 `IsIconic` / `isMiniaturized` 后隐藏。
-- 退出必须经托盘菜单或 `Cmd/Ctrl+Q`，它会先置 `quitting` 标志，避免被“关闭到托盘”拦截。
-- 托盘不可用（Linux 无后端、Windows 低完整性宿主被 shell 拒绝）时退化为关闭即退出，
-  绝不留下一个无法恢复的隐藏窗口。
+- `tray::popup` 是三个平台共用的 GPUI Kit 浮窗。状态、流量、节点、测速与错误反馈均来自
+  `tray::dashboard::build` / AppService；render 不读取磁盘或访问网络。
+- 浮窗尺寸受显示器工作区约束，节点区域可滚动。Windows 按托盘图标所在显示器的 DPI 换算位置，
+  macOS 将 status item 的 AppKit 坐标转换到 GPUI 坐标；Wayland 由合成器决定实际位置。
+- 再次点击托盘图标、Esc 或失焦收起浮窗；Windows/macOS 隐藏并复用原生窗口，避免无障碍提供者
+  引用失效句柄。点击 Windows/macOS 图标导致失焦时延迟到图标动作处理，
+  避免先关闭又重新打开。显示主窗口与打开设置均先收起浮窗。
+  原生显示/隐藏操作经 Win32 自定义消息 / AppKit 下一轮 run loop 执行，避免同步回调重入 GPUI。
+- Windows flyout 使用原生消息窗口的非阻塞定时器，以任务栏所在边缘为滑入/滑出方向：
+  250 ms Direct Entrance、167 ms Gentle Exit，中途反转从当前位置继续；
+  `SPI_GETCLIENTAREAANIMATION` / `SPI_GETUIEFFECTS` 关闭时直接完成。动画期间取消 topmost，
+  让窗口从任务栏后方出现，收起完成后保留窗口和无障碍句柄。
+- 路由下拉框使用 GPUI Kit Select，同一窗口内绘制菜单，跟随快照同步当前预设和语言；
+  `switch_route_preset` 复用已有预设模型，Core 运行时经 `apply_config` 校验/重启，停止时只保存，
+  Core 忙时不接受切换。同一预设的重复选择不覆盖已有规则。
+- TUN 开关通过 `AppService::set_tun_enabled` 持久化并同步模型，Core 运行时调用已有
+  `apply_config` 校验/重启流程；停止时不启动 Core。Xray 不可启用，Core 忙时不接受切换。
+- 主窗口原生句柄在创建时记录，Windows 不再枚举同类窗口，macOS 不再对所有窗口隐藏/恢复。
+  `close_to_tray` / `minimize_to_tray` 在 Windows/macOS 隐藏主窗口；Linux 使用 GPUI 的
+  minimize/activate，保留任务栏入口，避免依赖 Wayland 不提供的隐藏/全局定位接口。
+- Linux D-Bus 注册与更新在专用线程执行，通过有界通道接收快照；只有注册成功且宿主在线时
+  `available()` 为 true。没有托盘宿主或 Windows shell 拒绝注册时，关闭窗口直接退出。
+- `Settings.backdrop` 只描述外观偏好，不影响代理模型或 `config_dirty`。UI 按平台提供材质选项；
+  主窗口/浮窗即时应用，主题切换后重新应用。Windows 切换材质时同时清理 accent policy 与旧 DWM
+  材质，扩展客户区并回读 DWM 属性确认请求成功；Mica 根表面不再覆盖额外的 tint。
+  不支持的材质退化为不透明面板。Linux 当前使用不透明背景。
+
+开发验证可在隔离的 `XROSS_HOME` 下设置 `XROSS_TRAY_PREVIEW=1`，启动后自动打开浮窗；
+debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开，用于检查隐藏后的复用路径。
 
 ## 安全边界
 

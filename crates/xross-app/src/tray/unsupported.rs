@@ -30,3 +30,18 @@ pub fn main_window_minimized() -> bool {
 }
 
 pub fn setup_window() {}
+
+pub fn register_main_window(_window: &gpui_kit::Window) {}
+pub fn popup_anchor() -> Option<super::PopupAnchor> {
+    None
+}
+pub fn pointer_on_icon() -> bool {
+    false
+}
+
+pub fn hide_popup(window: &mut gpui_kit::Window) {
+    window.remove_window();
+}
+pub fn show_popup(window: &mut gpui_kit::Window, _bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+    window.activate_window();
+}

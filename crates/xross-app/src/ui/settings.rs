@@ -4,7 +4,7 @@ use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::CoreKind;
-use xross_core::settings::{Language, LogLevel, Settings, ThemeMode};
+use xross_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMode};
 use xross_core::system::CheckLevel;
 
 use super::theme::palette;
@@ -147,12 +147,37 @@ impl AppView {
                                                 }
                                                 // Applying a theme rewrites the root surface
                                                 // color; keep it clear so the backdrop shows.
-                                                crate::window_effects::make_surface_translucent(cx);
+                                                crate::window_effects::refresh_all(this.service.settings().backdrop, cx);
                                                 this.sync(cx);
                                             }))
                                             .child(label)
                                     }),
                                 ),
+                        )
+                        .child(
+                            div().flex().items_start().gap_3()
+                                .child(div().w(px(120.)).flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("窗口材质", "Backdrop")))
+                                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap_2()
+                                    .child(div().flex().flex_wrap().gap_2().children(
+                                        backdrop_choices().into_iter().map(|(style, zh, en)| {
+                                            let selected = settings.backdrop == style;
+                                            div().id(SharedString::from(format!("backdrop-{style:?}")))
+                                                .px_2().py_1().rounded_md().text_xs().border_1()
+                                                .border_color(if selected { p.primary } else { p.border })
+                                                .bg(if selected { p.accent } else { p.bg }).cursor_pointer()
+                                                .child(self.tr(zh, en))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.service.set_backdrop(style);
+                                                    crate::window_effects::refresh_all(this.service.settings().backdrop, cx);
+                                                    this.sync(cx);
+                                                }))
+                                        })
+                                    ))
+                                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                                        "同时应用到主窗口和托盘浮窗；系统不支持时使用纯色背景。",
+                                        "Applies to both windows. Uses a solid background when unavailable."
+                                    )))
+                                )
                         )
                         .child(
                             div()
@@ -238,9 +263,8 @@ impl AppView {
                                     settings_toggle("tun", "TUN", settings.tun_enabled).on_change(
                                         cx.listener(
                                             |this, checked, _, cx| {
-                                                this.modify_settings(cx, |s| {
-                                                    s.tun_enabled = *checked
-                                                });
+                                                this.service.set_tun_enabled(*checked);
+                                                this.sync(cx);
                                             },
                                         ),
                                     ),
@@ -1152,4 +1176,21 @@ fn settings_toggle(
         .w(px(216.))
         .min_h(px(32.))
         .flex_shrink_0()
+}
+
+/// Offer native materials only on the platforms that implement them.
+fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
+    let mut choices = vec![(BackdropStyle::Auto, "自动", "Auto")];
+    if cfg!(windows) {
+        choices.extend([
+            (BackdropStyle::Mica, "Mica", "Mica"),
+            (BackdropStyle::MicaAlt, "Mica Alt", "Mica Alt"),
+            (BackdropStyle::Acrylic, "Acrylic", "Acrylic"),
+        ]);
+    }
+    if cfg!(target_os = "macos") {
+        choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Vibrancy"));
+    }
+    choices.push((BackdropStyle::Opaque, "纯色", "Solid"));
+    choices
 }

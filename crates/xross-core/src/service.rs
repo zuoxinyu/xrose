@@ -1341,6 +1341,10 @@ impl AppService {
     /// Stops (if needed) and starts with the current model. This is the
     /// "apply changes" path: neither core supports config hot reload.
     pub fn apply_config(&self) {
+        self.apply_config_with_tun_cleanup(false);
+    }
+
+    fn apply_config_with_tun_cleanup(&self, cleanup_old_tun: bool) {
         if self.is_busy("core") {
             return;
         }
@@ -1367,6 +1371,17 @@ impl AppService {
                 }
                 service.inner.traffic.lock().reset();
                 service.inner.connections.write().clear();
+            }
+            if was_running {
+                if cleanup_old_tun {
+                    service.cleanup_tun_interface_via_helper().await;
+                }
+                if let Some(warning) = service.prepare_tun_via_helper().await {
+                    service.toast(
+                        ToastLevel::Warning,
+                        format!("提权助手未能准备 TUN：{warning}"),
+                    );
+                }
             }
             let result = if was_running {
                 service
@@ -1525,10 +1540,50 @@ impl AppService {
         let _ = self.save_settings(&settings);
     }
 
+    pub fn set_backdrop(&self, backdrop: crate::settings::BackdropStyle) {
+        let mut settings = self.settings();
+        settings.backdrop = backdrop;
+        if let Err(err) = self.save_settings(&settings) {
+            self.toast(ToastLevel::Error, format!("保存窗口材质失败：{err}"));
+        }
+    }
+
     pub fn set_core(&self, core: CoreKind) {
         let mut settings = self.settings();
         settings.core = core;
         self.update_settings(settings);
+    }
+
+    /// Apply a TUN preference through the same validated restart path as the UI.
+    pub fn set_tun_enabled(&self, enabled: bool) {
+        let mut settings = self.settings();
+        let old_tun = settings.effective_tun();
+        if enabled && !settings.core.capabilities().native_tun {
+            self.toast(
+                ToastLevel::Warning,
+                "当前 Core 不支持 TUN，请先切换到 sing-box",
+            );
+            return;
+        }
+        if self.is_busy("core") {
+            self.toast(ToastLevel::Info, "Core 正在处理，请稍后再切换 TUN");
+            return;
+        }
+        if settings.tun_enabled == enabled {
+            return;
+        }
+        let running = self.is_running();
+        settings.tun_enabled = enabled;
+        self.update_settings(settings);
+        if self.settings().tun_enabled != enabled {
+            return;
+        }
+        if running {
+            self.toast(ToastLevel::Info, "正在重启 Core 以应用 TUN 设置");
+            self.apply_config_with_tun_cleanup(old_tun);
+        } else {
+            self.toast(ToastLevel::Info, "TUN 设置已保存，下次启动 Core 时生效");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1547,6 +1602,25 @@ impl AppService {
             ToastLevel::Info,
             format!("路由模板已切换为“{}”，应用配置后生效", preset.label()),
         );
+    }
+
+    /// Quick routing switch used by the tray, applying through a validated restart.
+    pub fn switch_route_preset(&self, preset: RoutePreset) {
+        if self.is_busy("core") {
+            self.toast(ToastLevel::Info, "Core 正在处理，请稍后再切换路由");
+            return;
+        }
+        if self.model().routing.preset == preset {
+            return;
+        }
+        let running = self.is_running();
+        self.set_route_preset(preset);
+        if running {
+            self.toast(ToastLevel::Info, "正在重启 Core 以应用路由设置");
+            self.apply_config();
+        } else {
+            self.toast(ToastLevel::Info, "路由设置已保存，下次启动 Core 时生效");
+        }
     }
 
     pub fn upsert_rule(&self, rule: RouteRule) {
@@ -1921,7 +1995,14 @@ impl AppService {
     }
 
     async fn cleanup_tun_via_helper(&self) {
-        if !self.inner.settings.read().effective_tun() || !privilege::status().running {
+        if !self.inner.settings.read().effective_tun() {
+            return;
+        }
+        self.cleanup_tun_interface_via_helper().await;
+    }
+
+    async fn cleanup_tun_interface_via_helper(&self) {
+        if !privilege::status().running {
             return;
         }
         let request = HelperRequest::RemoveTun {
@@ -2778,6 +2859,65 @@ proxy-groups:
     }
 
     #[test]
+    fn backdrop_preference_persists_without_dirtying_core_config() {
+        let (service, _dir) = service();
+        let was_dirty = service.snapshot().config_dirty;
+        service.set_backdrop(crate::settings::BackdropStyle::Opaque);
+        assert_eq!(
+            service.snapshot().settings.backdrop,
+            crate::settings::BackdropStyle::Opaque
+        );
+        assert_eq!(service.snapshot().config_dirty, was_dirty);
+        let saved = crate::settings::Settings::load(&service.paths().settings_file()).unwrap();
+        assert_eq!(saved.backdrop, crate::settings::BackdropStyle::Opaque);
+    }
+
+    #[test]
+    fn tun_toggle_persists_and_updates_model_without_starting_a_stopped_core() {
+        let (service, _dir) = service();
+        service.set_tun_enabled(true);
+        assert!(service.settings().effective_tun());
+        assert!(service
+            .model()
+            .inbounds
+            .iter()
+            .any(|inbound| inbound.kind == InboundKind::Tun && inbound.enabled));
+        assert!(
+            Settings::load(&service.paths().settings_file())
+                .unwrap()
+                .tun_enabled
+        );
+        assert!(!service.is_running());
+        assert!(!service.is_busy("core"));
+        service.set_tun_enabled(false);
+        assert!(!service.settings().tun_enabled);
+        assert!(service
+            .model()
+            .inbounds
+            .iter()
+            .filter(|inbound| inbound.kind == InboundKind::Tun)
+            .all(|inbound| !inbound.enabled));
+    }
+
+    #[test]
+    fn tun_toggle_rejects_unsupported_cores_and_busy_restarts() {
+        let (service, _dir) = service();
+        service.set_core(CoreKind::Xray);
+        service.set_tun_enabled(true);
+        assert!(!service.settings().tun_enabled);
+        assert!(service
+            .snapshot()
+            .toasts
+            .iter()
+            .any(|toast| toast.message.contains("不支持 TUN")));
+        service.set_core(CoreKind::SingBox);
+        service.set_busy("core", true);
+        service.set_tun_enabled(true);
+        assert!(!service.settings().tun_enabled);
+        service.set_busy("core", false);
+    }
+
+    #[test]
     fn snapshots_are_consistent() {
         let (service, _dir) = service();
         let snapshot = service.snapshot();
@@ -2910,6 +3050,38 @@ proxy-groups:
         assert!(service.model().routing.rules.is_empty());
         service.set_route_preset(RoutePreset::BypassMainland);
         assert!(!service.model().routing.rules.is_empty());
+    }
+
+    #[test]
+    fn quick_route_switch_persists_without_starting_a_stopped_core() {
+        let (service, _dir) = service();
+        service.switch_route_preset(RoutePreset::Global);
+        assert_eq!(service.model().routing.preset, RoutePreset::Global);
+        assert!(service.model().routing.rules.is_empty());
+        let profile_id = service.store().active_profile_id().unwrap();
+        let saved = service.store().load_profile(&profile_id).unwrap().unwrap();
+        assert_eq!(saved.model.routing.preset, RoutePreset::Global);
+        assert!(!service.is_running());
+        assert!(!service.is_busy("core"));
+        service.switch_route_preset(RoutePreset::BypassMainland);
+        assert!(!service.model().routing.rules.is_empty());
+    }
+
+    #[test]
+    fn quick_route_switch_preserves_same_preset_rules_and_ignores_busy_core() {
+        let (service, _dir) = service();
+        let mut model = service.model();
+        model.routing.preset = RoutePreset::Custom;
+        *service.inner.model.write() = model.clone();
+        service.switch_route_preset(RoutePreset::Custom);
+        assert_eq!(
+            service.model().routing.rules.len(),
+            model.routing.rules.len()
+        );
+        service.set_busy("core", true);
+        service.switch_route_preset(RoutePreset::Global);
+        assert_eq!(service.model().routing.preset, RoutePreset::Custom);
+        service.set_busy("core", false);
     }
 
     #[test]

@@ -1,57 +1,81 @@
-//! Win32 tray backend.
-//!
-//! A hidden top-level window owns the `Shell_NotifyIcon` callback and the
-//! native popup menu. Menu commands are queued and executed by
-//! [`super::TrayManager::tick`] on the GPUI main thread, never from the window
-//! procedure itself.
-//!
-//! The menu mirrors the macOS status-item dashboard: app/core status, live
-//! traffic, the first enabled nodes with latency and a checked marker, then
-//! system proxy / core toggle / latency test / show window / quit.
+//! Windows notification icon; clicks queue the shared GPUI flyout.
 
+use super::motion::{Edge, Motion, Placement};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
-use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use gpui_kit::{point, px, Bounds, Window};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER,
-    BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    ClientToScreen, CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO,
+    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, EnumWindows, GetClassNameW, GetCursorPos, GetSystemMetrics,
-    GetWindowThreadProcessId, IsIconic, IsWindow, LoadCursorW, PeekMessageW, PostMessageW,
-    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow, TrackPopupMenu, HICON,
-    ICONINFO, IDC_ARROW, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, PM_NOREMOVE,
-    SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
-    WM_APP, WM_COMMAND, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-    WNDCLASSW, WS_OVERLAPPED,
+    CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GetClientRect,
+    GetCursorPos, GetSystemMetrics, GetWindowRect, IsIconic, IsWindow, LoadCursorW, PeekMessageW,
+    PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow, HICON,
+    ICONINFO, IDC_ARROW, MSG, PM_NOREMOVE, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP,
+    WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
 };
 
-use super::dashboard::{self, Dashboard, TrayAction, TrayCommand};
+use super::dashboard::{self, Dashboard};
 use super::TrayCommand as Command;
-use xross_core::util::format_speed;
 use xross_core::AppService;
 
 const WM_TRAY: u32 = WM_APP + 1;
+const WM_POPUP: u32 = WM_APP + 2;
+const FLYOUT_TIMER: usize = 0x5852;
+static FLYOUT: Mutex<Option<Flyout>> = Mutex::new(None);
+struct Flyout {
+    hwnd: usize,
+    placement: Placement,
+    motion: Option<Motion>,
+}
+
+static POPUP_OPS: Mutex<Vec<PopupOp>> = Mutex::new(Vec::new());
+
+enum PopupOp {
+    Hide(usize),
+    Show {
+        hwnd: usize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        work: [i32; 4],
+        edge: Edge,
+    },
+}
+
+fn post_popup(operation: PopupOp) {
+    POPUP_OPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(operation);
+    if let Some((owner, _, _)) = icon_snapshot() {
+        unsafe {
+            PostMessageW(owner as HWND, WM_POPUP, 0, 0);
+        }
+    }
+}
+
 const TRAY_UID: u32 = 1;
 const CLASS_NAME: &str = "XrossTrayWindow";
-const ID_PROXY: u32 = 10;
-const ID_TOGGLE_CORE: u32 = 11;
-const ID_TEST_ALL: u32 = 12;
-const ID_SHOW: u32 = 13;
-const ID_QUIT: u32 = 14;
-
+static NEEDS_READD: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
-static PENDING: OnceLock<Mutex<Vec<TrayAction>>> = OnceLock::new();
-static MENU_ACTIONS: OnceLock<Mutex<Vec<(u32, TrayAction)>>> = OnceLock::new();
-static DASHBOARD: OnceLock<Mutex<Option<Dashboard>>> = OnceLock::new();
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<Mutex<usize>> = OnceLock::new();
 static ICON: OnceLock<Mutex<IconState>> = OnceLock::new();
@@ -181,6 +205,11 @@ impl Backend {
     }
 
     pub fn tick(&mut self, service: &AppService) -> Option<Command> {
+        if NEEDS_READD.swap(false, Ordering::Relaxed) {
+            self.added = false;
+            self.retry_ticks = 0;
+            READY.store(false, Ordering::SeqCst);
+        }
         if !self.added {
             if self.retry_ticks > 0 {
                 self.retry_ticks -= 1;
@@ -197,42 +226,18 @@ impl Backend {
             }
         }
         let dashboard = dashboard::build(service);
-        *DASHBOARD
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(dashboard.clone());
         if self.added {
             self.refresh_tooltip(&dashboard);
             self.refresh_icon(&dashboard);
         }
-        let pending: Vec<TrayAction> = PENDING
-            .get_or_init(|| Mutex::new(Vec::new()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .drain(..)
-            .collect();
-        let mut command = None;
-        for action in pending {
-            if let Some(next) = dashboard::dispatch(action, service) {
-                command = Some(match next {
-                    TrayCommand::ShowWindow => Command::ShowWindow,
-                    TrayCommand::Quit => Command::Quit,
-                });
-            }
-        }
-        command
+        None
     }
 
     fn refresh_tooltip(&mut self, dashboard: &Dashboard) {
-        let tip = if dashboard.running {
-            format!(
-                "◈ Xross · ↓{} ↑{}",
-                format_speed(dashboard.down_speed),
-                format_speed(dashboard.up_speed)
-            )
-        } else {
-            "◇ Xross · 已停止".to_string()
-        };
+        let tip = dashboard
+            .traffic_line
+            .clone()
+            .unwrap_or_else(|| dashboard.status_line.clone());
         if tip == self.last_tip {
             return;
         }
@@ -376,43 +381,57 @@ fn notify_data(hwnd: HWND, icon: HICON, tip: &str) -> NOTIFYICONDATAW {
     data
 }
 
-fn queue(action: TrayAction) {
-    PENDING
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(action);
-}
-
-fn menu_action(id: u32) -> Option<TrayAction> {
-    MENU_ACTIONS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .iter()
-        .find(|(action_id, _)| *action_id == id)
-        .map(|(_, action)| action.clone())
-}
-
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == WM_TRAY {
-        let event = (lparam as usize & 0xFFFF) as u32;
-        match event {
-            WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => popup_menu(hwnd),
-            WM_LBUTTONDBLCLK => queue(TrayAction::ShowWindow),
-            _ => {}
+    if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER && wparam == FLYOUT_TIMER {
+        advance_flyout(hwnd);
+        return 0;
+    }
+    if message == WM_POPUP {
+        // Native visibility/geometry messages can synchronously re-enter GPUI.
+        // Run them from our message window, after the GPUI update has finished.
+        let operations = std::mem::take(&mut *POPUP_OPS.lock().unwrap_or_else(|e| e.into_inner()));
+        for operation in operations {
+            match operation {
+                PopupOp::Hide(target) if IsWindow(target as HWND) != 0 => {
+                    animate_hide(hwnd, target)
+                }
+                PopupOp::Show {
+                    hwnd: target,
+                    x,
+                    y,
+                    width,
+                    height,
+                    work,
+                    edge,
+                } if IsWindow(target as HWND) != 0 => {
+                    animate_show(
+                        hwnd,
+                        target,
+                        Placement {
+                            origin: [x, y],
+                            size: [width, height],
+                            work,
+                            edge,
+                        },
+                    );
+                }
+                _ => {}
+            }
         }
         return 0;
     }
-    if message == WM_COMMAND {
-        let id = (wparam & 0xFFFF) as u32;
-        if let Some(action) = menu_action(id) {
-            queue(action);
+    if message == WM_TRAY {
+        let event = (lparam as usize & 0xFFFF) as u32;
+        match event {
+            WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => {
+                super::queue_command(Command::TogglePopup)
+            }
+            _ => {}
         }
         return 0;
     }
@@ -421,132 +440,10 @@ unsafe extern "system" fn wnd_proc(
         .map(|registered| *registered == message)
         .unwrap_or(false)
     {
-        readd_icon();
+        NEEDS_READD.store(true, Ordering::Relaxed);
         return 0;
     }
     DefWindowProcW(hwnd, message, wparam, lparam)
-}
-
-unsafe fn readd_icon() {
-    if let Some((hwnd, icon, tip)) = icon_snapshot() {
-        let data = notify_data(hwnd as HWND, icon as HICON, &tip);
-        Shell_NotifyIconW(NIM_ADD, &data);
-    }
-}
-
-unsafe fn popup_menu(hwnd: HWND) {
-    let dashboard = DASHBOARD
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let Some(dashboard) = dashboard else { return };
-    let (menu, actions) = build_menu(&dashboard);
-    *MENU_ACTIONS
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = actions;
-    let mut point = POINT { x: 0, y: 0 };
-    GetCursorPos(&mut point);
-    SetForegroundWindow(hwnd);
-    TrackPopupMenu(
-        menu,
-        TPM_RIGHTBUTTON | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-        point.x,
-        point.y,
-        0,
-        hwnd,
-        std::ptr::null(),
-    );
-    DestroyMenu(menu);
-    PostMessageW(hwnd, WM_NULL, 0, 0);
-}
-
-unsafe fn append_item(menu: *mut c_void, label: &str, flags: u32, id: u32) {
-    if flags & MF_SEPARATOR != 0 {
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        return;
-    }
-    let text = wide(label);
-    AppendMenuW(menu, flags, id as usize, text.as_ptr());
-}
-
-unsafe fn build_menu(dashboard: &Dashboard) -> (*mut c_void, Vec<(u32, TrayAction)>) {
-    let menu = CreatePopupMenu();
-    let mut actions = Vec::new();
-    append_item(menu, &dashboard.status_line, MF_STRING | MF_GRAYED, 0);
-    if let Some(line) = &dashboard.traffic_line {
-        append_item(menu, line, MF_STRING | MF_GRAYED, 0);
-    }
-    append_item(menu, "", MF_SEPARATOR, 0);
-    if !dashboard.nodes.is_empty() {
-        let header = format!(
-            "{} [{}]:",
-            crate::i18n::tr(dashboard.language, "出站节点", "Outbound nodes"),
-            dashboard.group_name
-        );
-        append_item(menu, &header, MF_STRING | MF_GRAYED, 0);
-        for (index, node) in dashboard.nodes.iter().enumerate() {
-            let id = 1000 + index as u32;
-            let flags = MF_STRING | if node.active { MF_CHECKED } else { 0 };
-            append_item(menu, &node.label, flags, id);
-            actions.push((
-                id,
-                TrayAction::SelectNode {
-                    group_id: dashboard
-                        .group_id
-                        .clone()
-                        .unwrap_or_else(|| "proxy".to_string()),
-                    node_id: node.id.clone(),
-                },
-            ));
-        }
-        append_item(menu, "", MF_SEPARATOR, 0);
-    }
-    let proxy_label = format!(
-        "{} {}",
-        if dashboard.system_proxy { "✓" } else { "○" },
-        crate::i18n::tr(dashboard.language, "系统代理", "System proxy")
-    );
-    append_item(
-        menu,
-        &proxy_label,
-        MF_STRING
-            | if dashboard.system_proxy {
-                MF_CHECKED
-            } else {
-                0
-            },
-        ID_PROXY,
-    );
-    actions.push((ID_PROXY, TrayAction::ToggleSystemProxy));
-    let core_label = crate::i18n::tr(
-        dashboard.language,
-        if dashboard.running {
-            "⏹ 停止 Core"
-        } else {
-            "▶ 启动 Core"
-        },
-        if dashboard.running {
-            "⏹ Stop core"
-        } else {
-            "▶ Start core"
-        },
-    )
-    .to_string();
-    append_item(menu, &core_label, MF_STRING, ID_TOGGLE_CORE);
-    actions.push((ID_TOGGLE_CORE, TrayAction::ToggleCore));
-    let test_label = crate::i18n::tr(dashboard.language, "⚡ 全部节点测速", "⚡ Test all nodes");
-    append_item(menu, &test_label, MF_STRING, ID_TEST_ALL);
-    actions.push((ID_TEST_ALL, TrayAction::TestAll));
-    append_item(menu, "", MF_SEPARATOR, 0);
-    let show_label = crate::i18n::tr(dashboard.language, "🪟 显示主窗口", "🪟 Show window");
-    append_item(menu, &show_label, MF_STRING, ID_SHOW);
-    actions.push((ID_SHOW, TrayAction::ShowWindow));
-    let quit_label = crate::i18n::tr(dashboard.language, "✕ 退出 Xross", "✕ Quit Xross");
-    append_item(menu, &quit_label, MF_STRING, ID_QUIT);
-    actions.push((ID_QUIT, TrayAction::Quit));
-    (menu, actions)
 }
 
 /// Builds a small HICON from the bundled PNG, with a status dot in the
@@ -645,46 +542,332 @@ fn main_hwnd() -> Option<HWND> {
             return Some(hwnd);
         }
     }
-    let found = find_main_hwnd()?;
-    *cache.lock().unwrap_or_else(|e| e.into_inner()) = found as usize;
-    Some(found)
+    None
 }
 
-fn find_main_hwnd() -> Option<HWND> {
-    struct Search {
-        pid: u32,
-        found: HWND,
+/// Capture the exact GPUI main window before any flyout can be created.
+pub fn register_main_window(window: &Window) {
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(raw) = handle.as_raw() {
+            *MAIN_HWND
+                .get_or_init(|| Mutex::new(0))
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = raw.hwnd.get() as usize;
+        }
     }
-    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
-        let search = &mut *(lparam as *mut Search);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid != search.pid {
-            return 1;
-        }
-        let mut class = [0u16; 64];
-        let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
-        if len <= 0 {
-            return 1;
-        }
-        if String::from_utf16_lossy(&class[..len as usize]) == "Zed::Window" {
-            search.found = hwnd;
-            return 0;
-        }
-        1
-    }
+}
 
-    let mut search = Search {
-        pid: std::process::id(),
-        found: std::ptr::null_mut(),
-    };
-    // SAFETY: the callback only writes into `search`, which outlives the call.
+/// Return logical coordinates on the icon's monitor, respecting per-monitor DPI.
+pub fn popup_anchor() -> Option<super::PopupAnchor> {
+    let (hwnd, _, _) = icon_snapshot()?;
     unsafe {
-        EnumWindows(Some(enum_proc), &mut search as *mut Search as LPARAM);
+        let mut cursor = POINT { x: 0, y: 0 };
+        GetCursorPos(&mut cursor);
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: hwnd as HWND,
+            uID: TRAY_UID,
+            guidItem: std::mem::zeroed(),
+        };
+        let mut rect: RECT = std::mem::zeroed();
+        let has_rect = Shell_NotifyIconGetRect(&identifier, &mut rect) >= 0;
+        let at = if has_rect {
+            POINT {
+                x: (rect.left + rect.right) / 2,
+                y: (rect.top + rect.bottom) / 2,
+            }
+        } else {
+            cursor
+        };
+        let monitor = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return None;
+        }
+        let mut dpi_x = 96;
+        let mut dpi_y = 96;
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+        let scale = dpi_x.max(96) as f32 / 96.;
+        let work = info.rcWork;
+        Some(super::PopupAnchor {
+            position: point(px(at.x as f32 / scale), px(at.y as f32 / scale)),
+            work_area: Some(Bounds::from_corners(
+                point(px(work.left as f32 / scale), px(work.top as f32 / scale)),
+                point(
+                    px(work.right as f32 / scale),
+                    px(work.bottom as f32 / scale),
+                ),
+            )),
+        })
     }
-    if search.found.is_null() {
-        None
+}
+
+pub fn pointer_on_icon() -> bool {
+    let Some((hwnd, _, _)) = icon_snapshot() else {
+        return false;
+    };
+    unsafe {
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: hwnd as HWND,
+            uID: TRAY_UID,
+            guidItem: std::mem::zeroed(),
+        };
+        let mut rect: RECT = std::mem::zeroed();
+        let mut cursor = POINT { x: 0, y: 0 };
+        Shell_NotifyIconGetRect(&identifier, &mut rect) >= 0
+            && GetCursorPos(&mut cursor) != 0
+            && cursor.x >= rect.left
+            && cursor.x < rect.right
+            && cursor.y >= rect.top
+            && cursor.y < rect.bottom
+    }
+}
+
+/// Hide rather than destroy: AccessKit providers may outlive an accessibility query.
+pub fn hide_popup(window: &mut Window) {
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(raw) = handle.as_raw() {
+            post_popup(PopupOp::Hide(raw.hwnd.get() as usize));
+        }
+    }
+}
+
+pub fn show_popup(window: &mut Window, bounds: Bounds<gpui_kit::Pixels>) {
+    if let Ok(handle) = HasWindowHandle::window_handle(window) {
+        if let RawWindowHandle::Win32(raw) = handle.as_raw() {
+            let hwnd = raw.hwnd.get() as HWND;
+            unsafe {
+                let mut cursor = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut cursor);
+                // The tray icon's current monitor, rather than the old popup DPI.
+                if let Some((owner, _, _)) = icon_snapshot() {
+                    let identifier = NOTIFYICONIDENTIFIER {
+                        cbSize: std::mem::size_of::<NOTIFYICONIDENTIFIER>() as u32,
+                        hWnd: owner as HWND,
+                        uID: TRAY_UID,
+                        guidItem: std::mem::zeroed(),
+                    };
+                    let mut icon: RECT = std::mem::zeroed();
+                    if Shell_NotifyIconGetRect(&identifier, &mut icon) >= 0 {
+                        cursor = POINT {
+                            x: (icon.left + icon.right) / 2,
+                            y: (icon.top + icon.bottom) / 2,
+                        };
+                    }
+                }
+                let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+                let (mut dx, mut dy) = (96, 96);
+                GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+                let scale = dx.max(96) as f32 / 96.;
+                let mut info: MONITORINFO = std::mem::zeroed();
+                info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+                if GetMonitorInfoW(monitor, &mut info) == 0 {
+                    return;
+                }
+                let rect_array = |r: RECT| [r.left, r.top, r.right, r.bottom];
+                let work = rect_array(info.rcWork);
+                let edge = Edge::detect(rect_array(info.rcMonitor), work, [cursor.x, cursor.y]);
+                let mut outer: RECT = std::mem::zeroed();
+                let mut client: RECT = std::mem::zeroed();
+                let mut origin = POINT { x: 0, y: 0 };
+                let ratio = scale / window.scale_factor();
+                let (left, top, extra_width, extra_height) = if GetWindowRect(hwnd, &mut outer) != 0
+                    && GetClientRect(hwnd, &mut client) != 0
+                    && ClientToScreen(hwnd, &mut origin) != 0
+                {
+                    (
+                        ((origin.x - outer.left) as f32 * ratio).round() as i32,
+                        ((origin.y - outer.top) as f32 * ratio).round() as i32,
+                        ((outer.right - outer.left - client.right) as f32 * ratio).round() as i32,
+                        ((outer.bottom - outer.top - client.bottom) as f32 * ratio).round() as i32,
+                    )
+                } else {
+                    (0, 0, 0, 0)
+                };
+                post_popup(PopupOp::Show {
+                    hwnd: hwnd as usize,
+                    x: (f32::from(bounds.origin.x) * scale).round() as i32 - left,
+                    y: (f32::from(bounds.origin.y) * scale).round() as i32 - top,
+                    width: (f32::from(bounds.size.width) * scale).round() as i32 + extra_width,
+                    height: (f32::from(bounds.size.height) * scale).round() as i32 + extra_height,
+                    work,
+                    edge,
+                });
+            }
+        }
+    }
+}
+
+fn animations_enabled() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS,
+    };
+    let (mut client, mut effects) = (0_i32, 0_i32);
+    unsafe {
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &mut client as *mut _ as _, 0) != 0
+            && SystemParametersInfoW(SPI_GETUIEFFECTS, 0, &mut effects as *mut _ as _, 0) != 0
+            && client != 0
+            && effects != 0
+    }
+}
+
+unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    };
+    let mut current: RECT = std::mem::zeroed();
+    let from =
+        if IsWindowVisible(hwnd as HWND) != 0 && GetWindowRect(hwnd as HWND, &mut current) != 0 {
+            [current.left, current.top]
+        } else {
+            placement.hidden_origin()
+        };
+    let enabled = animations_enabled();
+    let origin = if enabled { from } else { placement.origin };
+    let motion = enabled.then(|| Motion::new(true, from, placement, Instant::now()));
+    *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
+        hwnd,
+        placement,
+        motion,
+    });
+    // Slide below the topmost taskbar rather than painting over its icons.
+    SetWindowPos(
+        hwnd as HWND,
+        HWND_NOTOPMOST,
+        origin[0],
+        origin[1],
+        placement.size[0],
+        placement.size[1],
+        SWP_NOACTIVATE | SWP_SHOWWINDOW,
+    );
+    SetForegroundWindow(hwnd as HWND);
+    debug_log(&format!(
+        "flyout opening ({hwnd}, {:?}, animate={enabled})",
+        placement.edge
+    ));
+    if !enabled || !start_flyout_timer(owner) {
+        finish_flyout(owner, true);
+    }
+}
+
+unsafe fn animate_hide(owner: HWND, hwnd: usize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let placement = {
+        let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(flyout) = controller.as_ref().filter(|flyout| flyout.hwnd == hwnd) else {
+            ShowWindow(hwnd as HWND, SW_HIDE);
+            return;
+        };
+        if flyout.motion.is_some_and(|motion| !motion.showing) {
+            return;
+        }
+        flyout.placement
+    };
+    if IsWindowVisible(hwnd as HWND) == 0 {
+        return;
+    }
+    let mut current: RECT = std::mem::zeroed();
+    let from = if GetWindowRect(hwnd as HWND, &mut current) != 0 {
+        [current.left, current.top]
     } else {
-        Some(search.found)
+        placement.origin
+    };
+    let enabled = animations_enabled();
+    let motion = enabled.then(|| Motion::new(false, from, placement, Instant::now()));
+    *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
+        hwnd,
+        placement,
+        motion,
+    });
+    SetWindowPos(
+        hwnd as HWND,
+        HWND_NOTOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+    );
+    debug_log(&format!("flyout closing ({hwnd}, animate={enabled})"));
+    if !enabled || !start_flyout_timer(owner) {
+        finish_flyout(owner, false);
     }
+}
+
+unsafe fn start_flyout_timer(owner: HWND) -> bool {
+    windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(owner, FLYOUT_TIMER, 10, None) != 0
+}
+
+unsafe fn advance_flyout(owner: HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let frame = {
+        let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+        controller.as_ref().and_then(|flyout| {
+            flyout.motion.map(|motion| {
+                let (position, done) = motion.sample(Instant::now());
+                (flyout.hwnd, position, done, motion.showing)
+            })
+        })
+    };
+    let Some((hwnd, position, done, showing)) = frame else {
+        return;
+    };
+    if IsWindow(hwnd as HWND) == 0 {
+        finish_flyout(owner, false);
+        return;
+    }
+    if SetWindowPos(
+        hwnd as HWND,
+        std::ptr::null_mut(),
+        position[0],
+        position[1],
+        0,
+        0,
+        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+    ) == 0
+        || done
+    {
+        finish_flyout(owner, showing);
+    }
+}
+
+unsafe fn finish_flyout(owner: HWND, showing: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        KillTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
+    };
+    KillTimer(owner, FLYOUT_TIMER);
+    let target = {
+        let mut controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+        controller.as_mut().map(|flyout| {
+            flyout.motion = None;
+            (flyout.hwnd, flyout.placement.origin)
+        })
+    };
+    let Some((hwnd, origin)) = target else { return };
+    if IsWindow(hwnd as HWND) == 0 {
+        return;
+    }
+    if !showing {
+        ShowWindow(hwnd as HWND, SW_HIDE);
+    }
+    SetWindowPos(
+        hwnd as HWND,
+        if showing {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        },
+        origin[0],
+        origin[1],
+        0,
+        0,
+        SWP_NOACTIVATE | SWP_NOSIZE,
+    );
+    debug_log(&format!("flyout settled ({hwnd}, visible={showing})"));
 }

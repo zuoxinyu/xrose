@@ -22,6 +22,18 @@ pub fn blur_backdrop_available() -> bool {
     }
 }
 
+/// Public DWM system materials require Windows 11 22H2 and transparency effects.
+pub fn mica_backdrop_available() -> bool {
+    #[cfg(windows)]
+    {
+        windows_impl::mica_available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
@@ -36,6 +48,10 @@ mod windows_impl {
             && build_number()
                 .map(|build| build >= MIN_BUILD)
                 .unwrap_or(false)
+    }
+
+    pub(super) fn mica_available() -> bool {
+        transparency_effects_enabled() && build_number().is_some_and(|build| build >= 22_621)
     }
 
     /// With transparency effects switched off DWM ignores the accent policy, so

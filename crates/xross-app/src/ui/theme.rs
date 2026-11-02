@@ -20,14 +20,13 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// Surface of the left sidebar. macOS lets the window's vibrancy show
-    /// through a clear sidebar, Windows paints a translucent tint over the
-    /// acrylic backdrop, and every other platform stays opaque.
+    /// Mica and macOS vibrancy supply their own tint through a clear sidebar.
+    /// Acrylic uses a light UI tint; unsupported platforms stay opaque.
     pub fn sidebar(&self) -> Hsla {
         if !crate::window_effects::blur_backdrop() {
             return self.panel;
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") || crate::window_effects::uses_mica() {
             return gpui_kit::hsla(0., 0., 0., 0.);
         }
         self.panel.opacity(if self.is_dark { 0.78 } else { 0.70 })
