@@ -74,10 +74,25 @@ impl LogBus {
         }
     }
 
+    /// Disk logging is best-effort: a read-only or otherwise unwritable data
+    /// directory must never abort startup, so a failure degrades to in-memory
+    /// logs plus a warning in the log viewer.
     pub fn with_file(dir: PathBuf, base: &str, max_bytes: u64, keep: usize) -> Self {
         let bus = Self::new(5000);
-        let rolling = RollingFile::new(dir, base, max_bytes, keep);
-        *bus.file.lock() = Some(rolling);
+        match RollingFile::new(dir.clone(), base, max_bytes, keep) {
+            Ok(rolling) => *bus.file.lock() = Some(rolling),
+            Err(err) => {
+                let path = dir.join(format!("{base}.log"));
+                let message = format!(
+                    "无法写入日志文件 {}：{err}；本次运行仅保留内存日志",
+                    path.display()
+                );
+                if std::env::var_os("XROSS_DEBUG").is_some() {
+                    eprintln!("[debug] {message}");
+                }
+                bus.push(LogStream::App, LogLevel::Warn, message);
+            }
+        }
         bus
     }
 
@@ -254,24 +269,23 @@ pub struct RollingFile {
 }
 
 impl RollingFile {
-    pub fn new(dir: PathBuf, base: &str, max_bytes: u64, keep: usize) -> Self {
-        let _ = std::fs::create_dir_all(&dir);
+    pub fn new(dir: PathBuf, base: &str, max_bytes: u64, keep: usize) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{base}.log"));
         let current = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
-            .or_else(|_| File::create(&path))
-            .expect("cannot create log file");
+            .or_else(|_| File::create(&path))?;
         let current_size = current.metadata().map(|m| m.len()).unwrap_or(0);
-        Self {
+        Ok(Self {
             dir,
             base: base.into(),
             max_bytes: max_bytes.max(1024),
             keep: keep.max(1),
             current,
             current_size,
-        }
+        })
     }
 
     fn path(&self, index: usize) -> PathBuf {
@@ -356,9 +370,28 @@ mod tests {
     }
 
     #[test]
+    fn unwritable_log_dir_degrades_to_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where the log directory should be makes
+        // `create_dir_all` fail, mimicking a read-only data directory.
+        let blocked = dir.path().join("logs");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let bus = LogBus::with_file(blocked, "xross", 4096, 2);
+        bus.push(LogStream::App, LogLevel::Info, "still works");
+        assert_eq!(bus.len(), 2);
+        assert_eq!(
+            bus.recent(10, LogLevel::Warn, "")
+                .iter()
+                .filter(|e| e.message.contains("无法写入日志文件"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn rolling_file_rotates() {
         let dir = tempfile::tempdir().unwrap();
-        let mut file = RollingFile::new(dir.path().to_path_buf(), "xross", 1024, 3);
+        let mut file = RollingFile::new(dir.path().to_path_buf(), "xross", 1024, 3).unwrap();
         for i in 0..20 {
             let entry = LogEntry {
                 timestamp: "t".into(),

@@ -64,9 +64,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Context-free I/O helper used around paths.
 pub fn io_context(path: &std::path::Path, err: std::io::Error) -> Error {
+    let hint = if err.kind() == std::io::ErrorKind::PermissionDenied {
+        "（没有访问权限：请检查目录归属，或把 XROSS_HOME 指向可写目录）"
+    } else {
+        ""
+    };
     Error::Io(std::io::Error::new(
         err.kind(),
-        format!("{}: {err}", path.display()),
+        format!("{}: {err}{hint}", path.display()),
     ))
 }
 
