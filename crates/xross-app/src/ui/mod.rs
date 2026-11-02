@@ -593,6 +593,8 @@ impl AppView {
                                     .justify_center()
                                     .h_full()
                                     .px_3()
+                                    .rounded_tr(px(13.))
+                                    .rounded_br(px(13.))
                                     .bg(action_bg)
                                     .cursor_pointer()
                                     .hover(move |style| style.bg(action_hover))
