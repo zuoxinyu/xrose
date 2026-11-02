@@ -3,13 +3,13 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 
 use super::{
-    action_tag, dns_server_rule, network_str, proxy_group_tag, split_dns_domains, CompileContext,
-    CompiledConfig, CompiledInbound, CoreAdapter,
+    action_tag, dns_server_rule, network_str, proxy_group_tag, resolve_rule_set, split_dns_domains,
+    CompileContext, CompiledConfig, CompiledInbound, CoreAdapter,
 };
 use crate::error::{Error, Result};
 use crate::model::{
     AppModel, CoreKind, DomainStrategy, GroupKind, Inbound, InboundKind, Node, Protocol, RuleSet,
-    RuleSetFormat, Transport,
+    Transport,
 };
 use crate::settings::Settings;
 
@@ -597,20 +597,6 @@ fn transport_json(node: &Node) -> Option<Value> {
     }
 }
 
-fn default_rule_set_url(tag: &str) -> Option<String> {
-    if let Some(name) = tag.strip_prefix("geosite-") {
-        Some(format!(
-            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{name}.srs"
-        ))
-    } else if let Some(code) = tag.strip_prefix("geoip-") {
-        Some(format!(
-            "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs"
-        ))
-    } else {
-        None
-    }
-}
-
 fn build_rule_sets(
     model: &AppModel,
     tags: &[String],
@@ -620,18 +606,7 @@ fn build_rule_sets(
 ) -> Vec<Value> {
     let mut result = Vec::new();
     for tag in tags {
-        if let Some(configured) = model.routing.rule_sets.iter().find(|r| &r.tag == tag) {
-            result.push(rule_set_json(configured, ctx, default_group));
-            continue;
-        }
-        if let Some(url) = default_rule_set_url(tag) {
-            let set = RuleSet {
-                tag: tag.clone(),
-                url,
-                format: RuleSetFormat::Binary,
-                download_detour: false,
-                update_interval_hours: 168,
-            };
+        if let Some(set) = resolve_rule_set(model, tag) {
             result.push(rule_set_json(&set, ctx, default_group));
         } else {
             warnings.push(format!(
@@ -1076,5 +1051,51 @@ mod tests {
         let outbounds = compiled.json["outbounds"].as_array().unwrap();
         assert!(outbounds.iter().any(|o| o["type"] == "selector"));
         assert!(outbounds.iter().any(|o| o["type"] == "urltest"));
+    }
+
+    #[test]
+    fn gfwlist_uses_a_published_rule_set_and_shares_the_download_source() {
+        let (mut model, settings, ctx) = sample();
+        model.apply_preset(crate::model::RoutePreset::GfwList);
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let set = compiled.json["route"]["rule_set"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|set| set["tag"] == "geosite-gfw")
+            .unwrap();
+        assert_eq!(
+            set["url"],
+            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/gfw.srs"
+        );
+        let downloads = super::super::required_rule_sets(&model);
+        assert_eq!(
+            set["url"],
+            downloads
+                .iter()
+                .find(|set| set.tag == "geosite-gfw")
+                .unwrap()
+                .url
+        );
+        assert!(compiled.json["route"]["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| rule["rule_set"] == json!(["geosite-gfw"])));
+        let mut legacy = super::super::default_rule_set("geosite-gfw").unwrap();
+        legacy.url =
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs"
+                .into();
+        model.routing.rule_sets.push(legacy);
+        assert_eq!(
+            resolve_rule_set(&model, "geosite-gfw").unwrap().url,
+            set["url"].as_str().unwrap()
+        );
+        model.routing.rule_sets.last_mut().unwrap().url =
+            "https://example.com/custom-gfw.srs".into();
+        assert_eq!(
+            resolve_rule_set(&model, "geosite-gfw").unwrap().url,
+            "https://example.com/custom-gfw.srs"
+        );
     }
 }

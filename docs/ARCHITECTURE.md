@@ -25,6 +25,7 @@
 | fallback / loadbalance | leastPing / random | 无 | sing-box 映射为 urltest/selector + 警告 |
 | block | blackhole 出站 | `action: reject` | 不生成 legacy block 出站 |
 | geoip/geosite | 原生字段 | 1.8 起移除 | 自动生成 `.srs` rule-set 引用 |
+| GFWList 来源 | `geosite:gfw`（需对应资产） | `geosite-gfw` rule-set | 使用 MetaCubeX `gfw.srs`；编译、预下载、手动更新共用来源解析 |
 | fake-ip | 不支持 | 原生（1.12+ typed DNS） | Xray 跳过 DNS fakeip server |
 | DNS schema | `servers[].address` | 1.12+ typed server + domain_resolver | 只生成新式 DNS |
 | 连接列表 | 无 | Clash API | 界面区分 core 能力 |

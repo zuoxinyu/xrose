@@ -16,6 +16,7 @@ use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
 use crate::model::{AppModel, CoreKind, InboundKind, Node, NodeDraft, RoutePreset, RouteRule};
 use crate::paths::AppPaths;
+use crate::runtime::location::{self, NodeLocation};
 use crate::runtime::{
     ClashClient, ClashConnection, ClashProxy, TrafficHistory, TrafficSample, XrayStatsClient,
 };
@@ -96,6 +97,8 @@ pub struct UiSnapshot {
     pub active_profile: Option<String>,
     pub runtime: RuntimeView,
     pub latency: BTreeMap<String, LatencyEntry>,
+    #[serde(default)]
+    pub node_locations: BTreeMap<String, NodeLocation>,
     pub validation: Option<ValidationReport>,
     pub compiled_warnings: Vec<String>,
     pub compiled_json: Option<String>,
@@ -113,6 +116,47 @@ pub struct UiSnapshot {
     pub trace: Option<TraceSession>,
 }
 
+impl UiSnapshot {
+    pub fn rule_sets(&self) -> Vec<crate::model::RuleSet> {
+        crate::adapters::required_rule_sets(&self.model)
+    }
+
+    /// Resolve the same group as the node list, including live automatic choices.
+    pub fn selected_node(&self, group_id: Option<&str>) -> Option<&Node> {
+        let group = group_id.and_then(|id| self.model.group(id)).or_else(|| {
+            self.model
+                .default_group_id()
+                .and_then(|id| self.model.group(&id))
+        })?;
+        if self.process.phase.is_alive()
+            && self.settings.core == CoreKind::SingBox
+            && group.kind != crate::model::GroupKind::Selector
+        {
+            if let Some(tag) = self
+                .runtime
+                .proxies
+                .get(&group.tag())
+                .and_then(|p| p.now.as_ref())
+            {
+                if let Some(node) = self
+                    .model
+                    .nodes
+                    .iter()
+                    .find(|n| group.members.contains(&n.id) && n.outbound_tag() == *tag)
+                {
+                    return Some(node);
+                }
+            }
+        }
+        group.active_node().and_then(|id| self.model.node(id))
+    }
+
+    pub fn node_location(&self, node: &Node) -> Option<&NodeLocation> {
+        self.node_locations
+            .get(&location::cache_key(&node.server, self.settings.language))
+    }
+}
+
 struct Inner {
     paths: AppPaths,
     settings: RwLock<Settings>,
@@ -127,6 +171,7 @@ struct Inner {
     connections: RwLock<Vec<ClashConnection>>,
     proxies: RwLock<BTreeMap<String, ClashProxy>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
+    node_locations: RwLock<BTreeMap<String, NodeLocation>>,
     busy: RwLock<BTreeSet<String>>,
     toasts: Mutex<Vec<Toast>>,
     proxy: Mutex<ProxyManager>,
@@ -137,6 +182,7 @@ struct Inner {
     config_dirty: AtomicBool,
     updates: Mutex<UpdateStatus>,
     doctor: RwLock<Vec<DoctorCheck>>,
+    doctor_generation: AtomicU64,
     recovery_note: RwLock<Option<String>>,
     helper: RwLock<HelperStatus>,
     rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
@@ -222,6 +268,7 @@ impl AppService {
             connections: RwLock::new(Vec::new()),
             proxies: RwLock::new(BTreeMap::new()),
             latency: RwLock::new(latency),
+            node_locations: RwLock::new(BTreeMap::new()),
             busy: RwLock::new(BTreeSet::new()),
             toasts: Mutex::new(Vec::new()),
             proxy: Mutex::new(proxy),
@@ -232,6 +279,7 @@ impl AppService {
             config_dirty: AtomicBool::new(false),
             updates: Mutex::new(UpdateStatus::default()),
             doctor: RwLock::new(Vec::new()),
+            doctor_generation: AtomicU64::new(0),
             recovery_note: RwLock::new(None),
             helper: RwLock::new(privilege::initial_status()),
             rule_set_updates: RwLock::new(Vec::new()),
@@ -334,6 +382,7 @@ impl AppService {
             active_profile: self.inner.active_profile.read().clone(),
             runtime,
             latency: self.inner.latency.read().clone(),
+            node_locations: self.inner.node_locations.read().clone(),
             validation,
             compiled_warnings: self
                 .inner
@@ -368,6 +417,43 @@ impl AppService {
             rule_set_updates: self.inner.rule_set_updates.read().clone(),
             trace: self.inner.trace.read().clone(),
         }
+    }
+
+    /// Schedule a cached lookup; safe to call while refreshing a UI snapshot.
+    pub fn request_node_location(&self, node_id: &str) {
+        let Some(server) = self
+            .inner
+            .model
+            .read()
+            .node(node_id)
+            .map(|n| n.server.clone())
+        else {
+            return;
+        };
+        let language = self.inner.settings.read().language;
+        let key = location::cache_key(&server, language);
+        {
+            let mut locations = self.inner.node_locations.write();
+            if locations
+                .get(&key)
+                .is_some_and(|entry| !entry.needs_refresh(now_unix()))
+            {
+                return;
+            }
+            locations.entry(key.clone()).or_default().pending = true;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            let label = location::lookup(&server, language).await;
+            service.inner.node_locations.write().insert(
+                key,
+                NodeLocation {
+                    label,
+                    pending: false,
+                    checked_at: now_unix(),
+                },
+            );
+        });
     }
 
     fn spawn<F>(&self, future: F)
@@ -850,6 +936,17 @@ impl AppService {
     // Nodes and groups
     // ------------------------------------------------------------------
 
+    pub fn move_node_to(&self, node_id: &str, target_id: &str) {
+        let moved = self.inner.model.write().move_node_to(node_id, target_id);
+        if moved {
+            if let Err(err) = self.persist_model() {
+                self.toast(ToastLevel::Error, format!("保存节点顺序失败：{err}"));
+                return;
+            }
+            self.mark_dirty();
+        }
+    }
+
     pub fn select_node(&self, group_id: &str, node_id: &str) {
         let group_tag;
         {
@@ -1095,42 +1192,10 @@ impl AppService {
             return Ok(());
         }
         let model = self.inner.model.read().clone();
-        let mut sets: BTreeMap<String, crate::model::RuleSet> = BTreeMap::new();
-        for set in &model.routing.rule_sets {
-            sets.entry(set.tag.clone()).or_insert_with(|| set.clone());
-        }
-        for rule in model.routing.rules.iter().filter(|r| r.enabled) {
-            for geosite in &rule.matchers.geosites {
-                let tag = format!("geosite-{geosite}");
-                if let Some(set) = default_rule_set(&tag) {
-                    sets.entry(tag).or_insert(set);
-                }
-            }
-            for geoip in &rule.matchers.geoips {
-                let tag = format!("geoip-{geoip}");
-                if let Some(set) = default_rule_set(&tag) {
-                    sets.entry(tag).or_insert(set);
-                }
-            }
-        }
-        for server in &model.dns.servers {
-            let split = crate::adapters::split_dns_domains(&server.domains);
-            for geosite in split.geosites {
-                let tag = format!("geosite-{geosite}");
-                if let Some(set) = default_rule_set(&tag) {
-                    sets.entry(tag).or_insert(set);
-                }
-            }
-        }
-        // The compiler always references these two.
-        for tag in ["geosite-cn", "geoip-cn"] {
-            if let Some(set) = default_rule_set(tag) {
-                sets.entry(tag.to_string()).or_insert(set);
-            }
-        }
+        let sets = crate::adapters::required_rule_sets(&model);
         let dir = self.inner.paths.rule_sets_dir();
         let missing: Vec<crate::model::RuleSet> = sets
-            .into_values()
+            .into_iter()
             .filter(|set| !dir.join(format!("{}.srs", set.tag)).exists())
             .collect();
         if missing.is_empty() {
@@ -1862,8 +1927,23 @@ impl AppService {
     pub fn refresh_doctor(&self) {
         let model = self.inner.model.read().clone();
         let settings = self.inner.settings.read().clone();
-        let checks = system::diagnose_tun(&model, &settings);
-        *self.inner.doctor.write() = checks;
+        let state = self.inner.core.state();
+        let pid = state.phase.is_alive().then_some(state.pid).flatten();
+        let generation = self.inner.doctor_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        self.set_busy("doctor", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let checks = tokio::task::spawn_blocking(move || {
+                system::tun::diagnose_for_process(&model, &settings, pid)
+            })
+            .await;
+            if service.inner.doctor_generation.load(Ordering::SeqCst) == generation {
+                if let Ok(checks) = checks {
+                    *service.inner.doctor.write() = checks;
+                }
+                service.set_busy("doctor", false);
+            }
+        });
     }
 
     // ------------------------------------------------------------------
@@ -2089,7 +2169,8 @@ impl AppService {
         self.spawn(async move {
             let model = service.inner.model.read().clone();
             let dir = service.inner.paths.rule_sets_dir();
-            let results = updates::sync_rule_sets(&model.routing.rule_sets, &dir).await;
+            let results =
+                updates::sync_rule_sets(&crate::adapters::required_rule_sets(&model), &dir).await;
             let updated = results.iter().filter(|r| r.status == "updated").count();
             let failed = results.iter().filter(|r| r.status == "failed").count();
             let unchanged = results
@@ -2234,6 +2315,9 @@ impl AppService {
                     if let Some(exit) = &state.last_exit {
                         service.toast(ToastLevel::Error, format!("core 已退出：{}", exit.reason));
                     }
+                }
+                if state.phase != last_phase {
+                    service.refresh_doctor();
                 }
                 last_phase = state.phase;
                 if !state.phase.is_alive() {
@@ -2444,32 +2528,6 @@ pub enum LatencyScope {
     Group(String),
 }
 
-fn default_rule_set(tag: &str) -> Option<crate::model::RuleSet> {
-    if let Some(name) = tag.strip_prefix("geosite-") {
-        return Some(crate::model::RuleSet {
-            tag: tag.into(),
-            url: format!(
-                "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{name}.srs"
-            ),
-            format: crate::model::RuleSetFormat::Binary,
-            download_detour: false,
-            update_interval_hours: 168,
-        });
-    }
-    if let Some(code) = tag.strip_prefix("geoip-") {
-        return Some(crate::model::RuleSet {
-            tag: tag.into(),
-            url: format!(
-                "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs"
-            ),
-            format: crate::model::RuleSetFormat::Binary,
-            download_detour: false,
-            update_interval_hours: 168,
-        });
-    }
-    None
-}
-
 fn pretty_host(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
@@ -2535,6 +2593,96 @@ proxy-groups:
         assert!(!snapshot.profiles.is_empty());
         assert_eq!(snapshot.active_profile, service.store().active_profile_id());
         assert_eq!(snapshot.settings.core, service.settings().core);
+    }
+
+    #[test]
+    fn node_order_survives_profile_reload() {
+        let (service, _dir) = service();
+        service.import_content("vless://11111111-2222-3333-4444-555555555555@a.example.com:443#A\nvless://11111111-2222-3333-4444-555555555555@b.example.com:443#B");
+        let model = service.model();
+        let first = model.nodes[0].id.clone();
+        let second = model.nodes[1].id.clone();
+        service.move_node_to(&first, &second);
+        let profile_id = service.store().active_profile_id().unwrap();
+        let profile = service.store().load_profile(&profile_id).unwrap().unwrap();
+        assert_eq!(profile.model.nodes[0].id, second);
+        assert_eq!(profile.model.nodes[1].id, first);
+    }
+
+    #[test]
+    fn selected_node_follows_group_selection_and_live_automatic_choice() {
+        use crate::model::{GroupKind, OutboundGroup};
+
+        let (service, _dir) = service();
+        let mut snapshot = service.snapshot();
+        assert!(snapshot.selected_node(None).is_none());
+
+        let a = Node::new("节点 A", Protocol::Vless, "a.example.com", 443);
+        let b = Node::new("节点 B", Protocol::Vless, "b.example.com", 443);
+        let mut manual = OutboundGroup::new("手动", GroupKind::Selector);
+        manual.members = vec![a.id.clone(), b.id.clone()];
+        manual.selected = Some(a.id.clone());
+        let mut auto = OutboundGroup::new("自动", GroupKind::UrlTest);
+        auto.members = manual.members.clone();
+        auto.selected = Some(b.id.clone());
+        snapshot.model.nodes = vec![a.clone(), b.clone()];
+        snapshot.model.groups = vec![manual.clone(), auto.clone()];
+        snapshot.model.default_group = Some(manual.id.clone());
+        assert_eq!(snapshot.selected_node(None).unwrap().id, a.id);
+        assert_eq!(
+            snapshot.selected_node(Some("stale-group")).unwrap().id,
+            a.id
+        );
+        assert_eq!(snapshot.selected_node(Some(&auto.id)).unwrap().id, b.id);
+
+        snapshot.runtime.proxies.insert(
+            auto.tag(),
+            ClashProxy {
+                now: Some(a.outbound_tag()),
+                ..Default::default()
+            },
+        );
+        snapshot.settings.core = CoreKind::SingBox;
+        snapshot.process.phase = crate::core::ProcessPhase::Running;
+        assert_eq!(snapshot.selected_node(Some(&auto.id)).unwrap().id, a.id);
+        snapshot.runtime.proxies.insert(
+            manual.tag(),
+            ClashProxy {
+                now: Some(b.outbound_tag()),
+                ..Default::default()
+            },
+        );
+        // A just-clicked selector must not be overwritten by stale API data.
+        assert_eq!(snapshot.selected_node(Some(&manual.id)).unwrap().id, a.id);
+        snapshot.process.phase = crate::core::ProcessPhase::Stopped;
+        assert_eq!(snapshot.selected_node(Some(&auto.id)).unwrap().id, b.id);
+        snapshot.process.phase = crate::core::ProcessPhase::Running;
+        snapshot.settings.core = CoreKind::Xray;
+        assert_eq!(snapshot.selected_node(Some(&auto.id)).unwrap().id, b.id);
+    }
+
+    #[test]
+    fn location_snapshot_is_scoped_to_server_and_language() {
+        let (service, _dir) = service();
+        let mut snapshot = service.snapshot();
+        let mut node = Node::new("节点", Protocol::Vless, "example.com", 443);
+        snapshot.settings.language = crate::settings::Language::Zh;
+        snapshot.node_locations.insert(
+            location::cache_key(&node.server, snapshot.settings.language),
+            NodeLocation {
+                label: Some("新加坡".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            snapshot.node_location(&node).unwrap().label.as_deref(),
+            Some("新加坡")
+        );
+        node.server = "changed.example.com".into();
+        assert!(snapshot.node_location(&node).is_none());
+        node.server = "example.com".into();
+        snapshot.settings.language = crate::settings::Language::En;
+        assert!(snapshot.node_location(&node).is_none());
     }
 
     #[test]

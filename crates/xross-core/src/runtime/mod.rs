@@ -2,6 +2,7 @@
 
 pub mod clash;
 pub mod latency;
+pub mod location;
 pub mod xray_stats;
 
 pub use clash::{ClashClient, ClashConnection, ClashProxy, ConnectionsResponse};

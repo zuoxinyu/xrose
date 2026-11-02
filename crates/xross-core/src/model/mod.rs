@@ -239,6 +239,39 @@ impl AppModel {
         added
     }
 
+    /// Moves a node to another row's position without changing any group's active choice.
+    pub fn move_node_to(&mut self, node_id: &str, target_id: &str) -> bool {
+        let Some(from) = self.nodes.iter().position(|n| n.id == node_id) else {
+            return false;
+        };
+        let Some(to) = self.nodes.iter().position(|n| n.id == target_id) else {
+            return false;
+        };
+        if from == to {
+            return false;
+        }
+        let node = self.nodes.remove(from);
+        self.nodes.insert(to, node);
+        let order: std::collections::HashMap<_, _> = self
+            .nodes
+            .iter_mut()
+            .enumerate()
+            .map(|(index, node)| {
+                node.sort = index as i64;
+                (node.id.clone(), index)
+            })
+            .collect();
+        for group in &mut self.groups {
+            let selected = group.active_node().cloned();
+            group
+                .members
+                .sort_by_key(|id| order.get(id).copied().unwrap_or(usize::MAX));
+            group.selected = selected;
+        }
+        self.updated_at = now_unix();
+        true
+    }
+
     pub fn remove_node(&mut self, node_id: &str) -> bool {
         let before = self.nodes.len();
         self.nodes.retain(|n| n.id != node_id);
@@ -487,5 +520,40 @@ mod tests {
             .rules
             .iter()
             .any(|r| !r.matchers.geoips.is_empty()));
+    }
+
+    #[test]
+    fn reordering_nodes_preserves_active_choices_and_group_members() {
+        let mut model = AppModel::default();
+        let a = Node::new("A", Protocol::Vless, "a.example.com", 443);
+        let b = Node::new("B", Protocol::Vless, "b.example.com", 443);
+        let c = Node::new("C", Protocol::Vless, "c.example.com", 443);
+        model.add_nodes(vec![a.clone(), b.clone(), c.clone()]);
+        let selected: Vec<_> = model
+            .groups
+            .iter()
+            .map(|g| g.active_node().cloned())
+            .collect();
+        assert!(model.move_node_to(&a.id, &c.id));
+        assert_eq!(
+            model
+                .nodes
+                .iter()
+                .map(|n| n.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![b.id.as_str(), c.id.as_str(), a.id.as_str()]
+        );
+        assert_eq!(
+            model.nodes.iter().map(|n| n.sort).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        for (group, selection) in model.groups.iter().zip(&selected) {
+            assert_eq!(group.active_node(), selection.as_ref());
+            assert_eq!(group.members.len(), 3);
+        }
+        assert!(model.move_node_to(&a.id, &b.id));
+        assert_eq!(model.nodes[0].id, a.id);
+        assert!(!model.move_node_to(&a.id, &a.id));
+        assert!(!model.move_node_to("missing", &a.id));
     }
 }

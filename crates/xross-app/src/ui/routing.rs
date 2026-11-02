@@ -17,6 +17,7 @@ impl AppView {
         let lang = self.lang();
         let model = self.snapshot.model.clone();
         let routing = model.routing.clone();
+        let rule_sets = self.snapshot.rule_sets();
         let dirty = self.snapshot.config_dirty;
         let running = self.snapshot.process.phase.is_alive();
 
@@ -528,7 +529,7 @@ impl AppView {
                                 })),
                         ),
                 )
-                .children(routing.rule_sets.iter().map(|set| {
+                .children(rule_sets.iter().map(|set| {
                     div()
                         .flex()
                         .flex_col()

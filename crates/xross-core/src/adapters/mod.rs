@@ -4,6 +4,7 @@
 pub mod singbox;
 pub mod xray;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -13,13 +14,85 @@ use serde_json::Value;
 use crate::core::process::run_capture;
 use crate::error::Result;
 use crate::model::{
-    AppModel, CoreKind, DnsServer, Matchers, RouteAction, RouteActionKind, RuleSet,
+    AppModel, CoreKind, DnsServer, Matchers, RouteAction, RouteActionKind, RuleSet, RuleSetFormat,
 };
 use crate::settings::LogLevel;
 use crate::settings::Settings;
 
 pub use singbox::SingBoxAdapter;
 pub use xray::XrayAdapter;
+
+/// Built-in sing-box asset sources, shared by compilation and downloads.
+pub(crate) fn default_rule_set(tag: &str) -> Option<RuleSet> {
+    let url = if tag == "geosite-gfw" {
+        // SagerNet follows domain-list-community, which does not publish gfw.
+        "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/gfw.srs".into()
+    } else if let Some(name) = tag.strip_prefix("geosite-") {
+        format!(
+            "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{name}.srs"
+        )
+    } else if let Some(code) = tag.strip_prefix("geoip-") {
+        format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs")
+    } else {
+        return None;
+    };
+    Some(RuleSet {
+        tag: tag.into(),
+        url,
+        format: RuleSetFormat::Binary,
+        download_detour: false,
+        update_interval_hours: 168,
+    })
+}
+
+pub(crate) fn resolve_rule_set(model: &AppModel, tag: &str) -> Option<RuleSet> {
+    if let Some(set) = model.routing.rule_sets.iter().find(|set| set.tag == tag) {
+        // Repair only the old built-in URL; user mirrors retain precedence.
+        if tag != "geosite-gfw" || set.url != "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs" {
+            return Some(set.clone());
+        }
+    }
+    default_rule_set(tag)
+}
+
+/// Includes implicit route/DNS references so manual retries match startup.
+pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
+    let mut sets = BTreeMap::new();
+    let mut add = |tag: &str| {
+        if let Some(set) = resolve_rule_set(model, tag) {
+            sets.entry(tag.to_string()).or_insert(set);
+        }
+    };
+    for set in &model.routing.rule_sets {
+        add(&set.tag);
+    }
+    for rule in model.routing.rules.iter().filter(|rule| rule.enabled) {
+        for tag in &rule.matchers.rule_sets {
+            add(tag);
+        }
+        for name in &rule.matchers.geosites {
+            add(&format!("geosite-{name}"));
+        }
+        for code in &rule.matchers.geoips {
+            add(&format!("geoip-{code}"));
+        }
+    }
+    if model.dns.enabled {
+        for server in &model.dns.servers {
+            let split = split_dns_domains(&server.domains);
+            for name in split.geosites {
+                add(&format!("geosite-{name}"));
+            }
+            for tag in split.rule_sets {
+                add(&tag);
+            }
+        }
+    }
+    for tag in ["geosite-cn", "geoip-cn"] {
+        add(tag);
+    }
+    sets.into_values().collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct CompileContext {

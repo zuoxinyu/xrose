@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
+
+use gpui_base::SelectableText;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::ActiveTheme;
@@ -37,6 +42,36 @@ impl AppView {
                             div()
                                 .flex()
                                 .gap_2()
+                                .child(
+                                    Button::new("copy-logs")
+                                        .compact()
+                                        .icon(IconName::Copy)
+                                        .label(self.tr("复制日志", "Copy logs"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let query =
+                                                this.log_search.read(cx).value().to_string();
+                                            let logs = this.service.logs_filtered(
+                                                this.log_level,
+                                                &query,
+                                                400,
+                                            );
+                                            let text = logs
+                                                .iter()
+                                                .rev()
+                                                .map(|entry| {
+                                                    format!(
+                                                        "{} {} {} {}",
+                                                        entry.timestamp,
+                                                        entry.level.as_str().to_uppercase(),
+                                                        entry.stream.label(),
+                                                        entry.message
+                                                    )
+                                                })
+                                                .collect::<Vec<_>>()
+                                                .join("\n");
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        })),
+                                )
                                 .child(
                                     Button::new("export-logs")
                                         .compact()
@@ -140,7 +175,20 @@ impl AppView {
                 self.tr("没有匹配的日志", "No matching logs"),
             ));
         }
+        let mut occurrences = HashMap::new();
         for entry in logs.iter().rev() {
+            let mut hasher = DefaultHasher::new();
+            (
+                &entry.timestamp,
+                entry.level.as_str(),
+                entry.stream.label(),
+                &entry.message,
+            )
+                .hash(&mut hasher);
+            let hash = hasher.finish();
+            let occurrence = occurrences.entry(hash).or_insert(0usize);
+            let key = format!("log-{hash:x}-{occurrence}");
+            *occurrence += 1;
             let color = match entry.level {
                 LogLevel::Trace | LogLevel::Debug => p.muted_fg,
                 LogLevel::Info => p.fg,
@@ -161,6 +209,7 @@ impl AppView {
                 .unwrap_or_else(|| entry.timestamp.clone());
             list = list.child(
                 div()
+                    .id(SharedString::from(key.clone()))
                     .flex()
                     .items_start()
                     .gap_2()
@@ -173,29 +222,37 @@ impl AppView {
                             .w(px(64.))
                             .flex_shrink_0()
                             .text_color(p.muted_fg)
-                            .child(timestamp),
+                            .child(SelectableText::new(
+                                SharedString::from(format!("{key}-time")),
+                                timestamp,
+                            )),
                     )
-                    .child(
-                        div()
-                            .w(px(48.))
-                            .flex_shrink_0()
-                            .text_color(color)
-                            .child(entry.level.as_str().to_uppercase()),
-                    )
+                    .child(div().w(px(48.)).flex_shrink_0().text_color(color).child(
+                        SelectableText::new(
+                            SharedString::from(format!("{key}-level")),
+                            entry.level.as_str().to_uppercase(),
+                        ),
+                    ))
                     .child(
                         div()
                             .w(px(48.))
                             .flex_shrink_0()
                             .text_color(p.muted_fg)
-                            .child(entry.stream.label()),
+                            .child(SelectableText::new(
+                                SharedString::from(format!("{key}-stream")),
+                                entry.stream.label(),
+                            )),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.))
                             .text_color(color)
-                            .line_clamp(4)
-                            .child(entry.message.clone()),
+                            .whitespace_normal()
+                            .child(SelectableText::new(
+                                SharedString::from(format!("{key}-message")),
+                                entry.message.clone(),
+                            )),
                     ),
             );
         }

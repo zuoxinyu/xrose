@@ -288,6 +288,8 @@ impl AppView {
             qr_node: None,
             show_qr: false,
         };
+        view.refresh_header_location();
+        view.localize_inputs(window, cx);
         view
     }
 
@@ -299,9 +301,81 @@ impl AppView {
         self.snapshot.settings.language
     }
 
+    fn localize_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        for (input, placeholder) in [
+            (
+                &self.node_search,
+                self.tr("按名称或地址过滤节点…", "Filter nodes by name or address…"),
+            ),
+            (&self.log_search, self.tr("搜索日志…", "Search logs…")),
+            (
+                &self.import_input,
+                self.tr(
+                    "粘贴 vmess:// / vless:// / trojan:// / ss:// 链接",
+                    "Paste vmess:// / vless:// / trojan:// / ss:// links",
+                ),
+            ),
+            (
+                &self.sub_name,
+                self.tr("订阅名称（可选）", "Subscription name (optional)"),
+            ),
+            (&self.rule_name, self.tr("规则名称", "Rule name")),
+            (
+                &self.rule_value,
+                self.tr(
+                    "example.com, 或 cn（Geo），或 10.0.0.0/8",
+                    "example.com, cn (Geo), or 10.0.0.0/8",
+                ),
+            ),
+            (
+                &self.dns_tag,
+                self.tr("tag，例如 remote", "Tag, e.g. remote"),
+            ),
+            (
+                &self.dns_address,
+                self.tr(
+                    "1.1.1.1 或 https://1.1.1.1/dns-query",
+                    "1.1.1.1 or https://1.1.1.1/dns-query",
+                ),
+            ),
+            (
+                &self.dns_domains,
+                self.tr(
+                    "域名条件，例如 geosite:geolocation-!cn（逗号分隔）",
+                    "Domain conditions, e.g. geosite:geolocation-!cn (comma separated)",
+                ),
+            ),
+            (
+                &self.endpoint_input,
+                self.tr(
+                    "自定义 core 可执行文件路径（留空使用已安装版本）",
+                    "Custom core executable path (leave empty to use installed version)",
+                ),
+            ),
+            (
+                &self.trace_input,
+                self.tr(
+                    "https://example.com 或 tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
+                    "https://example.com or tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
+                ),
+            ),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
         self.snapshot = self.service.snapshot();
+        self.refresh_header_location();
         cx.notify();
+    }
+
+    fn refresh_header_location(&self) {
+        if let Some(node) = self.snapshot.selected_node(self.selected_group.as_deref()) {
+            self.service.request_node_location(&node.id);
+        }
     }
 
     /// Called by the main-thread tick task. Polls state, advances the trace
@@ -356,6 +430,7 @@ impl AppView {
             {
                 self.selected_group = self.snapshot.model.default_group_id();
             }
+            self.refresh_header_location();
             cx.notify();
         } else if changed {
             cx.notify();
@@ -421,11 +496,7 @@ impl AppView {
                             window.start_window_move();
                         }
                     })
-                    .child(
-                        img(self.logo_badge.clone())
-                            .w(px(28.))
-                            .h(px(28.)),
-                    )
+                    .child(img(self.logo_badge.clone()).w(px(28.)).h(px(28.)))
                     .child(
                         div()
                             .text_base()
@@ -453,11 +524,11 @@ impl AppView {
                             this.page = page;
                             cx.notify();
                         }))
-                        .child(
-                            Icon::new(page.icon())
-                                .size(px(18.))
-                                .text_color(if active { p.primary } else { p.muted_fg }),
-                        )
+                        .child(Icon::new(page.icon()).size(px(18.)).text_color(if active {
+                            p.primary
+                        } else {
+                            p.muted_fg
+                        }))
                         .child(
                             div()
                                 .text_sm()
@@ -490,16 +561,11 @@ impl AppView {
                             } else {
                                 p.muted_fg
                             }))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(p.muted_fg)
-                                    .child(format!(
-                                        "v{} · {}",
-                                        self.snapshot.app_version,
-                                        self.snapshot.settings.core.display_name()
-                                    )),
-                            ),
+                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                "v{} · {}",
+                                self.snapshot.app_version,
+                                self.snapshot.settings.core.display_name()
+                            ))),
                     ),
             )
     }
@@ -515,9 +581,39 @@ impl AppView {
         } else {
             p.primary.opacity(0.85)
         };
+        let node = self.snapshot.selected_node(self.selected_group.as_deref());
+        let latency = node.and_then(|n| self.snapshot.latency.get(&n.id));
+        let delay = latency
+            .map(|entry| {
+                entry
+                    .delay_ms
+                    .map(|ms| format!("{ms} ms"))
+                    .unwrap_or_else(|| self.tr("超时", "Timeout").to_string())
+            })
+            .unwrap_or_else(|| self.tr("未测速", "Untested").to_string());
+        let delay_color = match latency.and_then(|entry| entry.delay_ms) {
+            Some(ms) if ms < 150 => p.success,
+            Some(ms) if ms < 350 => p.warning,
+            Some(_) => p.danger,
+            None => p.muted_fg,
+        };
+        let location = node.and_then(|n| self.snapshot.node_location(n));
+        let location_label = location
+            .and_then(|entry| entry.label.clone())
+            .unwrap_or_else(|| {
+                if location.is_none_or(|entry| entry.pending) {
+                    self.tr("归属地查询中…", "Looking up location…").to_string()
+                } else {
+                    self.tr("归属地未知", "Location unknown").to_string()
+                }
+            });
         div()
             .id("header-bar")
-            .pt(if cfg!(target_os = "macos") { px(32.) } else { px(0.) })
+            .pt(if cfg!(target_os = "macos") {
+                px(32.)
+            } else {
+                px(0.)
+            })
             .h(px(if cfg!(target_os = "macos") { 86. } else { 54. }))
             .flex()
             .items_center()
@@ -525,14 +621,12 @@ impl AppView {
             .border_color(p.border)
             .bg(p.bg)
             .child(
-                // Dragging (and double-click to maximize) is owned by the
-                // platform: on Windows the `Drag` region answers `WM_NCHITTEST`
-                // with `HTCAPTION`, on macOS the window is moved through AppKit.
-                // The page name lives in the sidebar, so this area stays empty.
+                // Noninteractive node metadata shares the caption drag region.
                 div()
                     .id("header-drag")
                     .flex()
                     .items_center()
+                    .px_4()
                     .h_full()
                     .flex_1()
                     .min_w(px(0.))
@@ -545,7 +639,65 @@ impl AppView {
                         } else {
                             window.start_window_move();
                         }
-                    }),
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .min_w(px(0.))
+                            .w_full()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_w(px(0.))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.fg)
+                                            .child(node.map(|n| n.name.clone()).unwrap_or_else(
+                                                || {
+                                                    self.tr("未选择节点", "No node selected")
+                                                        .to_string()
+                                                },
+                                            )),
+                                    )
+                                    .when(node.is_some(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .text_color(delay_color)
+                                                .font_family(cx.theme().mono_font_family.clone())
+                                                .child(delay),
+                                        )
+                                    }),
+                            )
+                            .when(node.is_some(), |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .min_w(px(0.))
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(
+                                            Icon::new(IconName::MapPin)
+                                                .size(px(12.))
+                                                .flex_shrink_0(),
+                                        )
+                                        .child(
+                                            div().min_w(px(0.)).truncate().child(location_label),
+                                        ),
+                                )
+                            }),
+                    ),
             )
             .child(
                 // The status pill is the visual anchor of the header: equal
@@ -579,7 +731,23 @@ impl AppView {
                                             .text_xs()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(if running { p.fg } else { p.muted_fg })
-                                            .child(self.snapshot.process.phase.label()),
+                                            .child(match self.snapshot.process.phase {
+                                                xross_core::core::ProcessPhase::Stopped => {
+                                                    self.tr("已停止", "Stopped")
+                                                }
+                                                xross_core::core::ProcessPhase::Starting => {
+                                                    self.tr("启动中", "Starting")
+                                                }
+                                                xross_core::core::ProcessPhase::Running => {
+                                                    self.tr("运行中", "Running")
+                                                }
+                                                xross_core::core::ProcessPhase::Stopping => {
+                                                    self.tr("停止中", "Stopping")
+                                                }
+                                                xross_core::core::ProcessPhase::Failed => {
+                                                    self.tr("启动失败", "Failed")
+                                                }
+                                            }),
                                     ),
                             )
                             .child(
@@ -621,19 +789,51 @@ impl AppView {
                 // Traffic figures live at the far right and stay right-aligned
                 // both inside the block and against the caption buttons.
                 div()
+                    .id("header-traffic")
                     .flex()
                     .items_center()
                     .justify_end()
                     .flex_1()
                     .min_w(px(0.))
-                    .gap_4()
+                    .h_full()
                     .child(
                         div()
+                            .id("header-traffic-drag")
+                            .flex_1()
+                            .min_w(px(8.))
+                            .h_full()
+                            .when(cfg!(target_os = "windows"), |d| {
+                                d.window_control_area(WindowControlArea::Drag)
+                            })
+                            .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                                if ev.click_count == 2 {
+                                    window.titlebar_double_click();
+                                } else {
+                                    window.start_window_move();
+                                }
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("header-traffic-figures")
                             .flex()
                             .flex_col()
                             .items_end()
+                            .justify_center()
+                            .h_full()
                             .flex_shrink_0()
+                            .pr_4()
                             .gap_0p5()
+                            .when(cfg!(target_os = "windows"), |d| {
+                                d.window_control_area(WindowControlArea::Drag)
+                            })
+                            .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                                if ev.click_count == 2 {
+                                    window.titlebar_double_click();
+                                } else {
+                                    window.start_window_move();
+                                }
+                            })
                             .when(cfg!(target_os = "macos"), |d| d.pr_6())
                             .child(
                                 div()
@@ -734,6 +934,7 @@ impl AppView {
             .right(px(18.))
             .bottom(px(18.))
             .w(px(420.))
+            .max_w_full()
             .flex()
             .flex_col()
             .gap_2()
@@ -748,6 +949,8 @@ impl AppView {
                 div()
                     .flex()
                     .items_start()
+                    .w_full()
+                    .min_w(px(0.))
                     .gap_2()
                     .p_3()
                     .rounded_md()
@@ -755,11 +958,22 @@ impl AppView {
                     .border_1()
                     .border_color(color)
                     .shadow_md()
-                    .child(dot(color))
+                    .child(
+                        div()
+                            .h(px(20.))
+                            .flex()
+                            .items_center()
+                            .flex_shrink_0()
+                            .child(dot(color)),
+                    )
                     .child(
                         div()
                             .flex_1()
+                            .min_w(px(0.))
                             .text_sm()
+                            .line_height(px(20.))
+                            .whitespace_normal()
+                            .overflow_hidden()
                             .text_color(p.fg)
                             .child(toast.message.clone()),
                     )
@@ -767,7 +981,8 @@ impl AppView {
                         Button::new(SharedString::from(format!("toast-{id}")))
                             .compact()
                             .ghost()
-                            .label("×")
+                            .icon(IconName::X)
+                            .flex_shrink_0()
                             .on_click(cx.listener(move |this, _, _, _| {
                                 this.service.dismiss_toast(id);
                             })),
@@ -866,7 +1081,8 @@ impl Render for AppView {
                             cx.notify();
                         }
                         "r" => {
-                            this.service.test_latency(xross_core::service::LatencyScope::All);
+                            this.service
+                                .test_latency(xross_core::service::LatencyScope::All);
                             cx.notify();
                         }
                         "q" => {

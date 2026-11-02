@@ -72,7 +72,8 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；没有 TUN；不支持 Hysteria2/TUIC。
 - **sing-box**：内建 TUN、`selector` / `urltest`、`.srs` rule-set、
   新版路由动作（`sniff`、`hijack-dns`、`reject`）、typed DNS + fake-ip、Clash API。
-  旧版 `geoip`/`geosite` 字段已移除，编译器自动生成 SagerNet rule-set 引用；
+  旧版 `geoip`/`geosite` 字段已移除，编译器自动生成 rule-set 引用
+  （通常使用 SagerNet；GFWList 使用 MetaCubeX 提供的 `gfw.srs`）；
   没有 fallback/loadbalance 出站时映射为 urltest/selector 并给出警告。
   启动前预下载缺失的 rule-set，避免 core 在启动阶段因网络问题崩溃。
 - 编译结果包含 **warnings**：哪些节点被跳过、哪些语义被降级，都会显示在界面上。
@@ -96,6 +97,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   进程名 / 端口 / 网络 / rule-set / inbound；动作：直连 / 代理 / 阻止。
 - 预设：绕过中国大陆、GFWList、全局、仅代理指定应用、自定义。
 - 规则集下载与更新：`.srs` 落盘、ETag 增量、SHA-256 记录、本地优先引用。
+  手动更新也包含路由和 DNS 隐式引用的规则集，旧内置 GFWList 地址会自动修正。
 - DNS：fake-ip、DoH/DoT/DoQ、按域名分流、hosts、dns-hijack、final server、
   独立的 DNS 校验器（重复 tag、非法网段、final 不存在等）。
 
@@ -131,6 +133,8 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   连接列表不可得，界面会明确说明。
 - 延迟测试：并发 TCP 握手测速、结果缓存（SQLite）、走代理的真实延迟。
 - 日志查看器、速率/累计流量曲线（快照轮询）。
+- 日志支持鼠标跨行选择、Ctrl+C 复制，以及复制当前筛选结果。
+- 端口诊断识别当前 core 的监听 PID，区分正常使用与其他进程占用。
 
 ### 8. 持久化与安全
 
@@ -144,6 +148,12 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 
 - 两栏式布局：可折叠左侧菜单（节点/订阅/路由/DNS/连接/日志/设置），
   右侧内容区；深/浅色主题、跟随系统；中英文切换。
+- 标题栏左侧展示当前组所选节点的名称、缓存延迟与服务器 IP 归属地；
+  归属地通过 HTTPS 向 `ipwho.is` 查询（只发送服务器 IP），异步更新并在内存中缓存，
+  查询失败显示“归属地未知”。节点信息区与运行状态右侧空白区均支持拖动窗口。
+- 节点列表工具栏、标记与操作菜单统一使用与侧栏一致的线性图标。
+- 节点支持通过拖动手柄排序并保存；测速、菜单和启用开关不会触发节点切换。
+  标题行的“添加节点”统一提供链接导入和手动填写入口。
 - 托盘 dashboard 与主界面共用同一份快照；菜单动作在 GPUI 主线程 tick 中执行，
   窗口隐藏/恢复不依赖平台私有 API。
 - 应用/任务栏图标：Windows 由 `build.rs` 从 256px PNG 生成 `.ico` 并以资源 ID 1 内嵌

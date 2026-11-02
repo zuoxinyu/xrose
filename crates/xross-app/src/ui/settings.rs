@@ -81,9 +81,10 @@ impl AppView {
                                             })
                                             .bg(if selected { p.accent } else { p.bg })
                                             .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                            .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.service.set_language(language);
                                                 this.sync(cx);
+                                                this.localize_inputs(window, cx);
                                             }))
                                             .child(language.label())
                                     },
@@ -197,11 +198,15 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_3()
                         .child(
                             div()
                                 .w(px(120.))
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
                                 .text_sm()
                                 .text_color(p.muted_fg)
                                 .child(self.tr("网络", "Network")),
@@ -210,10 +215,13 @@ impl AppView {
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .items_center()
-                                .gap_5()
+                                .gap_x_6()
+                                .gap_y_2()
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "allow-lan",
                                         self.tr("允许局域网连接", "Allow LAN"),
                                         settings.allow_lan,
@@ -227,7 +235,7 @@ impl AppView {
                                     )),
                                 )
                                 .child(
-                                    toggle("tun", "TUN", settings.tun_enabled).on_change(
+                                    settings_toggle("tun", "TUN", settings.tun_enabled).on_change(
                                         cx.listener(
                                             |this, checked, _, cx| {
                                                 this.modify_settings(cx, |s| {
@@ -242,11 +250,15 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_3()
                         .child(
                             div()
                                 .w(px(120.))
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
                                 .text_sm()
                                 .text_color(p.muted_fg)
                                 .child(self.tr("代理", "Proxy")),
@@ -255,10 +267,13 @@ impl AppView {
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .items_center()
-                                .gap_5()
+                                .gap_x_6()
+                                .gap_y_2()
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "system-proxy",
                                         self.tr("系统代理", "System proxy"),
                                         settings.system_proxy,
@@ -270,7 +285,7 @@ impl AppView {
                                     )),
                                 )
                                 .child(
-                                    toggle("pac", "PAC", settings.pac_enabled).on_change(
+                                    settings_toggle("pac", "PAC", settings.pac_enabled).on_change(
                                         cx.listener(
                                             |this, checked, _, cx| {
                                                 this.modify_settings(cx, |s| {
@@ -287,11 +302,15 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_3()
                         .child(
                             div()
                                 .w(px(120.))
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
                                 .text_sm()
                                 .text_color(p.muted_fg)
                                 .child(self.tr("启动", "Startup")),
@@ -300,10 +319,13 @@ impl AppView {
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .items_center()
-                                .gap_5()
+                                .gap_x_6()
+                                .gap_y_2()
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "autostart",
                                         self.tr("开机自启", "Autostart"),
                                         settings.autostart,
@@ -317,7 +339,7 @@ impl AppView {
                                     )),
                                 )
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "watchdog",
                                         self.tr("watchdog 自动拉起", "Watchdog"),
                                         settings.watchdog,
@@ -331,7 +353,7 @@ impl AppView {
                                     )),
                                 )
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "start-minimized",
                                         self.tr("启动时最小化", "Start minimized"),
                                         settings.start_minimized,
@@ -349,11 +371,15 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_3()
                         .child(
                             div()
                                 .w(px(120.))
+                                .h(px(32.))
+                                .flex()
+                                .items_center()
+                                .flex_shrink_0()
                                 .text_sm()
                                 .text_color(p.muted_fg)
                                 .child(self.tr("窗口", "Window")),
@@ -362,10 +388,13 @@ impl AppView {
                             div()
                                 .flex()
                                 .flex_wrap()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .items_center()
-                                .gap_5()
+                                .gap_x_6()
+                                .gap_y_2()
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "minimize-to-tray",
                                         self.tr("最小化到托盘", "Minimize to tray"),
                                         settings.minimize_to_tray,
@@ -379,7 +408,7 @@ impl AppView {
                                     )),
                                 )
                                 .child(
-                                    toggle(
+                                    settings_toggle(
                                         "close-to-tray",
                                         self.tr("关闭到托盘", "Close to tray"),
                                         settings.close_to_tray,
@@ -1024,6 +1053,7 @@ impl AppView {
                 .child(
                     Button::new("refresh-doctor")
                         .compact()
+                        .loading(self.snapshot.busy.iter().any(|key| key == "doctor"))
                         .label(self.tr("重新检查", "Re-check"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.service.refresh_doctor();
@@ -1110,4 +1140,16 @@ impl AppView {
         let _ = (lang, &window);
         body
     }
+}
+
+/// Keep each setting in an aligned column while allowing whole switches to wrap.
+fn settings_toggle(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    checked: bool,
+) -> gpui_kit::component::switch::Switch {
+    toggle(id, label, checked)
+        .w(px(216.))
+        .min_h(px(32.))
+        .flex_shrink_0()
 }

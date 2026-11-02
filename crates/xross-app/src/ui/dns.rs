@@ -68,7 +68,12 @@ impl AppView {
                                     this.service.set_dns_preset(preset);
                                     this.sync(cx);
                                 }))
-                                .child(preset.label())
+                                .child(match preset {
+                                    DnsPreset::SplitFakeIp => self.tr("分流 + fake-ip（推荐 sing-box）", "Split + fake-ip (sing-box)"),
+                                    DnsPreset::Split => self.tr("分流 DNS（兼容 Xray）", "Split DNS (Xray compatible)"),
+                                    DnsPreset::Encrypted => self.tr("全加密 DNS（DoH/DoT）", "Encrypted DNS (DoH/DoT)"),
+                                    DnsPreset::System => self.tr("系统 DNS", "System DNS"),
+                                })
                         })),
                 )
                 .child(

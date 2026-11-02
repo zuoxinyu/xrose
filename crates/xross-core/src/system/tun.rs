@@ -53,6 +53,14 @@ pub fn is_port_free(port: u16) -> bool {
 /// Runs local, side-effect-free checks. Results never block starting; the
 /// caller decides what to do with warnings.
 pub fn diagnose(model: &AppModel, settings: &Settings) -> Vec<DoctorCheck> {
+    diagnose_for_process(model, settings, None)
+}
+
+pub(crate) fn diagnose_for_process(
+    model: &AppModel,
+    settings: &Settings,
+    core_pid: Option<u32>,
+) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let caps = settings.core.capabilities();
 
@@ -113,28 +121,27 @@ pub fn diagnose(model: &AppModel, settings: &Settings) -> Vec<DoctorCheck> {
         if inbound.kind == InboundKind::Tun || inbound.port == 0 {
             continue;
         }
-        if is_port_free(inbound.port) {
-            checks.push(DoctorCheck::ok(
-                &format!("端口 {}", inbound.tag),
-                format!("{} 可用", inbound.port),
-            ));
-        } else {
-            checks.push(DoctorCheck::warn(
-                &format!("端口 {}", inbound.tag),
-                format!("{} 已被占用，启动可能失败", inbound.port),
-            ));
-        }
-    }
-    if !is_port_free(settings.api_port) {
-        checks.push(DoctorCheck::warn(
-            "Clash API 端口",
-            format!("{} 已被占用，流量/连接面板将不可用", settings.api_port),
+        checks.push(check_port(
+            &format!("端口 {}", inbound.tag),
+            inbound.port,
+            core_pid,
+            "启动可能失败",
         ));
     }
-    if settings.core == crate::model::CoreKind::Xray && !is_port_free(settings.stats_port) {
-        checks.push(DoctorCheck::warn(
+    if settings.core == crate::model::CoreKind::SingBox {
+        checks.push(check_port(
+            "Clash API 端口",
+            settings.api_port,
+            core_pid,
+            "流量/连接面板将不可用",
+        ));
+    }
+    if settings.core == crate::model::CoreKind::Xray {
+        checks.push(check_port(
             "Xray Stats 端口",
-            format!("{} 已被占用，流量统计将不可用", settings.stats_port),
+            settings.stats_port,
+            core_pid,
+            "流量统计将不可用",
         ));
     }
 
@@ -163,6 +170,16 @@ pub fn diagnose(model: &AppModel, settings: &Settings) -> Vec<DoctorCheck> {
     checks
 }
 
+fn check_port(name: &str, port: u16, core_pid: Option<u32>, conflict: &str) -> DoctorCheck {
+    if is_port_free(port) {
+        DoctorCheck::ok(name, format!("{port} 可用"))
+    } else if let Some(pid) = core_pid.filter(|pid| super::port_owner::owns_listener(*pid, port)) {
+        DoctorCheck::ok(name, format!("{port} 由当前 core 使用（PID {pid}）"))
+    } else {
+        DoctorCheck::warn(name, format!("{port} 已被其他进程占用，{conflict}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +190,29 @@ mod tests {
         let settings = Settings::default();
         let checks = diagnose(&model, &settings);
         assert!(checks.iter().any(|c| c.name.contains("端口")));
+    }
+
+    #[test]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    fn distinguishes_our_api_listener_from_a_conflict() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let settings = Settings {
+            api_port: listener.local_addr().unwrap().port(),
+            ..Default::default()
+        };
+        let model = AppModel::default();
+        let own = diagnose_for_process(&model, &settings, Some(std::process::id()));
+        let check = own.iter().find(|c| c.name == "Clash API 端口").unwrap();
+        assert_eq!(check.level, CheckLevel::Ok);
+        assert!(check.detail.contains("当前 core"));
+        let other = diagnose_for_process(&model, &settings, Some(u32::MAX));
+        assert_eq!(
+            other
+                .iter()
+                .find(|c| c.name == "Clash API 端口")
+                .unwrap()
+                .level,
+            CheckLevel::Warn
+        );
     }
 }

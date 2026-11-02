@@ -51,7 +51,7 @@ pub fn pill(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> impl IntoEleme
 }
 
 pub fn dot(color: Hsla) -> impl IntoElement {
-    div().size(px(8.)).rounded_full().bg(color)
+    div().size(px(8.)).flex_shrink_0().rounded_full().bg(color)
 }
 
 pub fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool) -> Switch {
