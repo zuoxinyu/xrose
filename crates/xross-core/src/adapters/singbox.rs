@@ -262,7 +262,9 @@ impl CoreAdapter for SingBoxAdapter {
         let mut route = json!({
             "rules": rules,
             "final": final_tag,
-            "auto_detect_interface": true
+            "auto_detect_interface": true,
+            // Populate connection process metadata even without process rules.
+            "find_process": cfg!(any(target_os = "linux", target_os = "windows", target_os = "macos"))
         });
         if model.dns.enabled {
             // sing-box 1.12+ requires an explicit resolver for outbound server
@@ -1025,6 +1027,14 @@ mod tests {
         assert!(servers.iter().all(|s| s.get("address").is_none()));
         assert_eq!(json["route"]["default_domain_resolver"], "local");
         assert!(json["route"].get("rule_set").is_some());
+        assert_eq!(
+            json["route"]["find_process"],
+            cfg!(any(
+                target_os = "linux",
+                target_os = "windows",
+                target_os = "macos"
+            ))
+        );
         let outbounds = json["outbounds"].as_array().unwrap();
         assert!(outbounds.iter().all(|o| o["tag"] != "block"));
         assert!(!json.to_string().contains("geoip\""));

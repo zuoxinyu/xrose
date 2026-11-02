@@ -7,6 +7,7 @@
 
 pub mod adapters;
 pub mod core;
+pub mod diagnostics;
 pub mod dns;
 pub mod error;
 pub mod model;

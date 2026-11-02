@@ -12,6 +12,7 @@ use tokio::runtime::Runtime;
 use crate::adapters::{CompiledConfig, ValidationReport};
 use crate::core::logs::{LogBus, LogEntry, LogStream};
 use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
+use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarget};
 use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
 use crate::model::{AppModel, CoreKind, InboundKind, Node, NodeDraft, RoutePreset, RouteRule};
@@ -114,6 +115,8 @@ pub struct UiSnapshot {
     pub recovery_note: Option<String>,
     pub rule_set_updates: Vec<RuleSetUpdate>,
     pub trace: Option<TraceSession>,
+    #[serde(default)]
+    pub recording: DiagnosticRecording,
 }
 
 impl UiSnapshot {
@@ -188,6 +191,7 @@ struct Inner {
     rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
+    recording: Mutex<DiagnosticRecording>,
     toast_seq: AtomicU64,
 }
 
@@ -285,6 +289,7 @@ impl AppService {
             rule_set_updates: RwLock::new(Vec::new()),
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
+            recording: Mutex::new(DiagnosticRecording::default()),
             toast_seq: AtomicU64::new(1),
         });
         let service = Self {
@@ -416,6 +421,7 @@ impl AppService {
             recovery_note: self.inner.recovery_note.read().clone(),
             rule_set_updates: self.inner.rule_set_updates.read().clone(),
             trace: self.inner.trace.read().clone(),
+            recording: self.inner.recording.lock().clone(),
         }
     }
 
@@ -2224,6 +2230,111 @@ impl AppService {
     // Runtime monitoring
     // ------------------------------------------------------------------
 
+    pub fn start_recording(&self) {
+        let connections = self.inner.connections.read();
+        let mut recording = self.inner.recording.lock();
+        if recording.active {
+            return;
+        }
+        let now = now_unix();
+        recording.start(now);
+        recording.observe(&connections, now);
+        self.toast(
+            ToastLevel::Info,
+            "已开始录制连接元数据和测试结果；不采集请求正文",
+        );
+    }
+
+    pub fn stop_recording(&self) {
+        self.inner.recording.lock().stop(now_unix());
+        self.toast(ToastLevel::Info, "录制已停止，记录保留到清空或退出应用");
+    }
+
+    pub fn clear_recording(&self) {
+        *self.inner.recording.lock() = DiagnosticRecording::default();
+    }
+
+    pub fn export_recording(&self) {
+        if self.is_busy("recording-export") {
+            return;
+        }
+        self.set_busy("recording-export", true);
+        let recording = self.inner.recording.lock().clone();
+        let path = self.inner.paths.logs_dir().join(format!(
+            "connections-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S-%3f")
+        ));
+        let service = self.clone();
+        self.spawn(async move {
+            let result = async {
+                let json = serde_json::to_vec_pretty(&recording)?;
+                tokio::fs::write(&path, json).await?;
+                Ok::<_, Error>(())
+            }
+            .await;
+            match result {
+                Ok(()) => service.toast(
+                    ToastLevel::Success,
+                    format!("录制已导出：{}", path.display()),
+                ),
+                Err(err) => service.toast(ToastLevel::Error, format!("导出录制失败：{err}")),
+            }
+            service.set_busy("recording-export", false);
+        });
+    }
+
+    fn update_connections(&self, connections: Vec<ClashConnection>) {
+        let mut current = self.inner.connections.write();
+        self.inner
+            .recording
+            .lock()
+            .observe(&connections, now_unix());
+        *current = connections;
+    }
+
+    /// Insert an exact diagnostic override before broader preset rules.
+    pub fn add_diagnostic_rule(
+        &self,
+        target: &DiagnosticTarget,
+        kind: DiagnosticRuleKind,
+        action: crate::model::RouteAction,
+    ) -> Result<()> {
+        let matchers = target.matchers(kind)?;
+        let mut model = self.inner.model.write();
+        if let Some(group) = &action.group {
+            if model.group(group).is_none() {
+                return Err(Error::config("所选策略组已不存在，请重新选择"));
+            }
+        }
+        let mut next = model.clone();
+        if let Some(index) = next
+            .routing
+            .rules
+            .iter()
+            .position(|rule| rule.matchers == matchers && rule.action == action)
+        {
+            let mut rule = next.routing.rules.remove(index);
+            rule.enabled = true;
+            next.routing.rules.insert(0, rule);
+        } else {
+            next.routing.rules.insert(
+                0,
+                RouteRule::new(format!("诊断 · {}", target.value(kind)), matchers, action),
+            );
+        }
+        next.routing.preset = RoutePreset::Custom;
+        next.updated_at = now_unix();
+        let profile = self.inner.store.save_active_profile(&next)?;
+        *self.inner.active_profile.write() = Some(profile);
+        *model = next;
+        self.mark_dirty();
+        self.toast(
+            ToastLevel::Success,
+            "规则已置顶保存，点击应用配置后重新测试",
+        );
+        Ok(())
+    }
+
     pub fn refresh_connections(&self) {
         let settings = self.inner.settings.read().clone();
         if !self.is_running() || settings.core != CoreKind::SingBox {
@@ -2239,7 +2350,7 @@ impl AppService {
                         .traffic
                         .lock()
                         .sample(response.upload_total, response.download_total);
-                    *service.inner.connections.write() = response.connections;
+                    service.update_connections(response.connections);
                 }
                 Err(err) => service.inner.core.logs().push(
                     LogStream::App,
@@ -2264,6 +2375,12 @@ impl AppService {
                 Ok(()) => {
                     service.toast(ToastLevel::Info, "连接已断开");
                     service.inner.connections.write().retain(|c| c.id != id);
+                    let connections = service.inner.connections.read().clone();
+                    service
+                        .inner
+                        .recording
+                        .lock()
+                        .observe(&connections, now_unix());
                 }
                 Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
             }
@@ -2281,7 +2398,7 @@ impl AppService {
             let client = ClashClient::new(settings.api_port, "");
             match client.close_all_connections().await {
                 Ok(()) => {
-                    service.inner.connections.write().clear();
+                    service.update_connections(Vec::new());
                     service.toast(ToastLevel::Info, "所有连接已断开");
                 }
                 Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
@@ -2321,6 +2438,7 @@ impl AppService {
                 }
                 last_phase = state.phase;
                 if !state.phase.is_alive() {
+                    service.update_connections(Vec::new());
                     tick += 1;
                     continue;
                 }
@@ -2332,7 +2450,7 @@ impl AppService {
                             .traffic
                             .lock()
                             .sample(response.upload_total, response.download_total);
-                        *inner.connections.write() = response.connections;
+                        service.update_connections(response.connections);
                     }
                     if tick % 5 == 0 {
                         if let Ok(proxies) = client.proxies().await {
@@ -2479,6 +2597,7 @@ impl AppService {
                 );
             }
             *guard = Some(session.clone());
+            self.inner.recording.lock().observe_trace(session);
         } else if std::env::var_os("XROSS_DEBUG_TRACE").is_some() {
             eprintln!(
                 "[trace] drop publish id {} current {:?}",
@@ -2497,6 +2616,22 @@ impl AppService {
 
     pub fn trace_snapshot(&self) -> Option<TraceSession> {
         self.inner.trace.read().clone()
+    }
+
+    pub fn inspect_recorded_trace(&self, id: u64) {
+        let trace = self
+            .inner
+            .recording
+            .lock()
+            .traces
+            .iter()
+            .find(|trace| trace.id == id)
+            .cloned();
+        if let Some(mut trace) = trace {
+            // A fresh id prevents a cancelled probe from publishing into replay.
+            trace.id = self.inner.trace_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            *self.inner.trace.write() = Some(trace);
+        }
     }
 
     pub fn open_url(&self, url: &str) {
@@ -2545,6 +2680,63 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         let service = AppService::with_paths(paths).unwrap();
         (service, dir)
+    }
+
+    #[test]
+    fn diagnostic_rules_are_exact_prioritized_deduplicated_and_persisted() {
+        use crate::model::RouteAction;
+        let (service, dir) = service();
+        let target = DiagnosticTarget {
+            domain: "Example.com".into(),
+            ..Default::default()
+        };
+        let count = service.model().routing.rules.len();
+        service
+            .add_diagnostic_rule(&target, DiagnosticRuleKind::Domain, RouteAction::direct())
+            .unwrap();
+        service
+            .add_diagnostic_rule(&target, DiagnosticRuleKind::Domain, RouteAction::direct())
+            .unwrap();
+        let model = service.model();
+        assert_eq!(model.routing.rules.len(), count + 1);
+        assert_eq!(model.routing.rules[0].matchers.domains, ["example.com"]);
+        assert_eq!(model.routing.rules[0].action, RouteAction::direct());
+        let reloaded = Store::open(&AppPaths::from_root(dir.path()))
+            .unwrap()
+            .load_profile(&service.snapshot().active_profile.unwrap())
+            .unwrap();
+        assert_eq!(
+            reloaded.unwrap().model.routing.rules[0],
+            model.routing.rules[0]
+        );
+        assert!(service
+            .add_diagnostic_rule(&target, DiagnosticRuleKind::Process, RouteAction::direct())
+            .is_err());
+    }
+
+    #[test]
+    fn recording_captures_finished_traces_and_replay_cancels_old_publishers() {
+        let (service, _dir) = service();
+        service.start_recording();
+        let target = trace::parse_target("tcp://192.0.2.1:443").unwrap();
+        let mut session = TraceSession::new(1, &target);
+        service.inner.trace_generation.store(1, Ordering::SeqCst);
+        *service.inner.trace.write() = Some(session.clone());
+        service.publish_trace(&session);
+        assert!(service.snapshot().recording.traces.is_empty());
+        session.phase = trace::TracePhase::Failed;
+        session.finished_at = Some(now_unix());
+        session.success = Some(false);
+        service.publish_trace(&session);
+        service.publish_trace(&session);
+        assert_eq!(service.snapshot().recording.traces.len(), 1);
+        service.stop_recording();
+        service.inspect_recorded_trace(1);
+        assert_ne!(service.trace_snapshot().unwrap().id, 1);
+        service.publish_trace(&session);
+        assert_ne!(service.trace_snapshot().unwrap().id, 1);
+        service.clear_recording();
+        assert!(service.snapshot().recording.traces.is_empty());
     }
 
     #[test]

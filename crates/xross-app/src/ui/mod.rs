@@ -18,10 +18,11 @@ use gpui_kit::component::input::InputState;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xross_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
 use xross_core::settings::{Language, LogLevel};
-use xross_core::trace::{TracePhase, TraceStepKind};
+use xross_core::trace::TraceStepKind;
 use xross_core::AppService;
 
 use self::manual_node::ManualNodeForm;
@@ -161,7 +162,13 @@ pub struct AppView {
     pub(crate) port_input: Entity<InputState>,
     pub(crate) endpoint_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
-    pub(crate) trace_anim: f32,
+    pub(crate) connection_search: Entity<InputState>,
+    pub(crate) connection_filter: ConnectionFilterKind,
+    pub(crate) show_recorded_connections: bool,
+    pub(crate) selected_connection: Option<xross_core::runtime::ClashConnection>,
+    pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
+    pub(crate) diagnostic_rule_action: RouteActionKind,
+    pub(crate) expanded_trace_step: Option<TraceStepKind>,
     pub(crate) auto_trace_started: bool,
     pub(crate) last_refresh: std::time::Instant,
 
@@ -274,7 +281,13 @@ impl AppView {
             port_input,
             endpoint_input,
             trace_input,
-            trace_anim: 0.0,
+            connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
+            connection_filter: ConnectionFilterKind::All,
+            show_recorded_connections: false,
+            selected_connection: None,
+            diagnostic_rule_kind: DiagnosticRuleKind::Domain,
+            diagnostic_rule_action: RouteActionKind::Proxy,
+            expanded_trace_step: None,
             auto_trace_started: false,
             last_refresh: std::time::Instant::now(),
             show_subscription_form: false,
@@ -308,6 +321,10 @@ impl AppView {
                 self.tr("按名称或地址过滤节点…", "Filter nodes by name or address…"),
             ),
             (&self.log_search, self.tr("搜索日志…", "Search logs…")),
+            (
+                &self.connection_search,
+                self.tr("过滤域名、IP 或进程…", "Filter domain, IP or process…"),
+            ),
             (
                 &self.import_input,
                 self.tr(
@@ -378,8 +395,7 @@ impl AppView {
         }
     }
 
-    /// Called by the main-thread tick task. Polls state, advances the trace
-    /// animation and repaints only when something changed.
+    /// Poll state without starving live connections while a trace is active.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
         if !self.auto_trace_started {
             self.auto_trace_started = true;
@@ -391,10 +407,6 @@ impl AppView {
         }
         let now = std::time::Instant::now();
         let current = self.service.trace_snapshot();
-        let active = current
-            .as_ref()
-            .map(|trace| !matches!(trace.phase, TracePhase::Done | TracePhase::Failed))
-            .unwrap_or(false);
         let changed = match (&current, &self.snapshot.trace) {
             (Some(new), Some(old)) => {
                 new.phase != old.phase
@@ -410,14 +422,7 @@ impl AppView {
             (None, Some(_)) => true,
             (None, None) => false,
         };
-        if current.is_some() {
-            self.snapshot.trace = current;
-        }
-        if active {
-            self.trace_anim = (self.trace_anim + 0.018) % 1.0;
-            cx.notify();
-            return;
-        }
+        self.snapshot.trace = current;
         let refresh_due = now.duration_since(self.last_refresh) >= Duration::from_millis(400);
         if refresh_due {
             self.snapshot = self.service.snapshot();

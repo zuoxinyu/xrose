@@ -29,7 +29,20 @@
 | fake-ip | 不支持 | 原生（1.12+ typed DNS） | Xray 跳过 DNS fakeip server |
 | DNS schema | `servers[].address` | 1.12+ typed server + domain_resolver | 只生成新式 DNS |
 | 连接列表 | 无 | Clash API | 界面区分 core 能力 |
+| 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
+
+连接诊断由 `AppService` 统一提供：后台监控采样维护有界的会话录制，
+`UiSnapshot.recording` 提供回看数据，导出在后台完成。录制不采集正文，
+记录连接的首次/末次观测、关闭时间和最终测试结果；停止后冻结，开始新录制会替换旧记录。
+Xray 可录制测试结果，不能提供连接列表。最多保留 2000 条连接和 100 次测试，溢出时淘汰最旧记录。
+
+测试的本机 DNS 预解析与模型路由预览不等于 core 实际决策。运行中测试通过本地代理入站交给 core，
+没有对应入站则报错，不静默退回直连。Clash 元数据关联需要目标主机和端口匹配，TCP 还匹配源端口；
+HTTP 排除测试前已有连接，但同时访问相同目标时仍可能无法唯一归因，因此界面标为关联观测。
+core 不暴露连接 DNS 解析器时明确显示不可得；返回路径是根据已使用的连接推导，时间仅表示端到端探测耗时。
+诊断规则使用精确域名、单 IP（/32 或 /128）或进程名，去重后在用户规则中置顶保存，
+内置 LAN/中国 IP 绕过仍优先，不自动重启 core。
 
 ## 生命周期
 

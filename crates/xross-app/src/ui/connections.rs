@@ -1,306 +1,292 @@
+//! Live connections and interactive request diagnostics.
+
+use gpui_base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::model::CoreKind;
+use xross_core::diagnostics::{
+    connection_test_target, ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget,
+};
+use xross_core::model::{CoreKind, RouteAction, RouteActionKind};
+use xross_core::runtime::ClashConnection;
+use xross_core::service::ToastLevel;
+use xross_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
 use xross_core::util::{format_bytes, format_speed};
 
-use super::theme::palette;
+use super::theme::{palette, Palette};
 use super::widgets::*;
 use super::AppView;
 
 impl AppView {
     pub(crate) fn page_connections(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let lang = self.lang();
-        let settings = self.snapshot.settings.clone();
         let runtime = self.snapshot.runtime.clone();
+        let recording = self.snapshot.recording.clone();
+        let supported = self.snapshot.settings.core == CoreKind::SingBox;
         let running = self.snapshot.process.phase.is_alive();
-        let supported = settings.core == CoreKind::SingBox;
-
-        let mut body = div().flex().flex_col().gap_4().w_full();
-
-        body = body.child(self.trace_card(cx));
-
-        body = body.child(
-            card(&p)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("实时连接", "Live connections"),
-                            self.tr(
-                                "来自 Clash API（/connections）。Xray 的 StatsService 只能给流量，不能列连接。",
-                                "Sourced from the Clash API (/connections). Xray's StatsService only exposes traffic counters.",
-                            ),
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("refresh-connections")
-                                        .compact()
-                                        .label(self.tr("刷新", "Refresh"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.refresh_connections();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("kill-all")
-                                        .compact()
-                                        .danger()
-                                        .label(self.tr("全部断开", "Close all"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.kill_all_connections();
-                                        })),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_xl()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(p.fg)
-                                        .child(format!(
-                                            "↓ {}   ↑ {}",
-                                            format_speed(runtime.down_speed),
-                                            format_speed(runtime.up_speed)
-                                        )),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(format!(
-                                            "{}：{}  ·  {}：{}",
-                                            self.tr("累计下行", "down total"),
-                                            format_bytes(runtime.down_total),
-                                            self.tr("累计上行", "up total"),
-                                            format_bytes(runtime.up_total)
-                                        )),
-                                ),
-                        )
-                        .child(pill(
-                            format!("{} {}", runtime.connections.len(), self.tr("活动连接", "active")),
-                            p.muted_fg,
-                            p.panel_alt,
-                        )),
-                )
-                .child(self.sparkline(&p)),
-        );
-
-        if !running {
-            body = body.child(card(&p).child(empty_hint(
+        let query = self.connection_search.read(cx).value().to_string();
+        let mut connections: Vec<_> = if self.show_recorded_connections {
+            recording
+                .connections
+                .iter()
+                .rev()
+                .map(|e| (e.connection.clone(), e.closed_at.is_some()))
+                .collect()
+        } else {
+            runtime
+                .connections
+                .iter()
+                .map(|c| (c.clone(), false))
+                .collect()
+        };
+        let total = connections.len();
+        connections.retain(|(c, _)| self.connection_filter.matches(c, &query));
+        let count = connections.len();
+        if let Some(selected) = self
+            .selected_connection
+            .as_mut()
+            .filter(|_| !self.show_recorded_connections)
+        {
+            if let Some(latest) = runtime
+                .connections
+                .iter()
+                .find(|c| c.id == selected.id && c.start == selected.start)
+            {
+                *selected = latest.clone();
+            }
+        }
+        let header = card(&p)
+            .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
+                .child(section_title(&p, self.tr("实时连接", "Live connections"), self.tr("查看请求发起方、规则与出站，录制后可复盘已结束的连接", "Inspect sources, rules and outbounds; record to review closed connections")))
+                .child(div().flex().items_center().gap_2().flex_wrap()
+                    .child(Button::new("record-connections").compact().when(recording.active, |b| b.danger())
+                        .label(if recording.active { self.tr("● 停止录制", "● Stop recording") } else { self.tr("● 开始录制", "● Record") })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if this.snapshot.recording.active { this.service.stop_recording(); } else { this.service.start_recording(); }
+                            this.sync(cx);
+                        })))
+                    .child(Button::new("export-recording").compact().label(self.tr("导出录制", "Export recording"))
+                        .disabled(recording.started_at.is_none()).loading(self.snapshot.busy.iter().any(|key| key == "recording-export"))
+                        .on_click(cx.listener(|this, _, _, _| this.service.export_recording())))
+                    .child(Button::new("refresh-connections").compact().label(self.tr("刷新", "Refresh")).disabled(!running || !supported)
+                        .on_click(cx.listener(|this, _, _, _| this.service.refresh_connections())))
+                    .child(Button::new("kill-all").compact().danger().label(self.tr("全部断开", "Close all")).disabled(!running || !supported)
+                        .on_click(cx.listener(|this, _, _, _| this.service.kill_all_connections())))))
+            .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
+                .child(div().flex().flex_col().gap_1()
+                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(format!("↓ {}   ↑ {}", format_speed(runtime.down_speed), format_speed(runtime.up_speed))))
+                    .child(div().text_xs().text_color(p.muted_fg).child(format!("{} {} · {} {}", self.tr("累计下行", "Downloaded"), format_bytes(runtime.down_total), self.tr("累计上行", "Uploaded"), format_bytes(runtime.up_total)))))
+                .child(pill(format!("{} {}", runtime.connections.len(), self.tr("活动连接", "active")), p.primary, p.primary.opacity(0.12))))
+            .child(self.sparkline(&p))
+            .child(div().flex().items_center().gap_2().flex_wrap()
+                .children([(ConnectionFilterKind::All, self.tr("全部", "All")), (ConnectionFilterKind::Domain, self.tr("域名", "Domain")), (ConnectionFilterKind::Ip, self.tr("IP", "IP")), (ConnectionFilterKind::Process, self.tr("进程", "Process"))].into_iter().enumerate().map(|(i, (kind, label))| {
+                    chip(format!("connection-filter-{i}"), label, self.connection_filter == kind, &p)
+                        .on_click(cx.listener(move |this, _, _, cx| { this.connection_filter = kind; cx.notify(); }))
+                }))
+                .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.connection_search)))
+                .child(Button::new("clear-connection-filter").compact().ghost().label(self.tr("重置", "Reset"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.connection_search.update(cx, |input, cx| input.set_value("", window, cx));
+                        this.connection_filter = ConnectionFilterKind::All; cx.notify();
+                    }))))
+            .child(div().flex().items_center().gap_2().flex_wrap()
+                .child(chip("connection-live", self.tr("实时", "Live"), !self.show_recorded_connections, &p)
+                    .on_click(cx.listener(|this, _, _, cx| { this.show_recorded_connections = false; cx.notify(); })))
+                .child(chip("connection-recorded", format!("{} {}", self.tr("录制", "Recorded"), recording.connections.len()), self.show_recorded_connections, &p)
+                    .on_click(cx.listener(|this, _, _, cx| { this.show_recorded_connections = true; cx.notify(); })))
+                .child(div().text_xs().text_color(if recording.active { p.danger } else { p.muted_fg }).child(format!("{} · {} {} · {count} / {total}", if recording.active { self.tr("录制中", "Recording") } else { self.tr("录制已停止", "Recording off") }, recording.traces.len(), self.tr("次测试", "tests"))))
+                .when(recording.started_at.is_some(), |d| d.child(Button::new("clear-recording").compact().ghost().label(self.tr("清空录制", "Clear recording"))
+                    .on_click(cx.listener(|this, _, _, cx| { this.service.clear_recording(); this.sync(cx); })))))
+            .when(recording.started_at.is_some(), |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅保留本次会话元数据，不采集正文；最多 2000 条连接 / 100 次测试，新录制替换旧记录。短于采样间隔的连接可能遗漏。", "Session metadata only, no bodies; up to 2,000 connections / 100 tests. A new recording replaces the previous one. Short-lived connections may be missed."))))
+            .when(recording.evicted_connections + recording.evicted_traces > 0, |d| d.child(div().text_xs().text_color(p.warning).child(format!("{} {} / {}", self.tr("容量限制已移除旧连接/测试：", "Older connections/tests evicted:"), recording.evicted_connections, recording.evicted_traces))));
+        let mut rows = div().flex().flex_col().gap_2().w_full();
+        if !self.show_recorded_connections && (!running || !supported) {
+            rows = rows.child(empty_hint(&p, if !running { self.tr("core 未运行，启动后可查看连接；仍可在下方测试链接", "Start the core to inspect connections; link tests remain available below") } else { self.tr("Xray 仅提供流量统计，连接列表需要 sing-box；可录制下方测试结果", "Xray exposes counters only. Use sing-box for connections; tests can still be recorded below") }));
+        } else if count == 0 {
+            rows = rows.child(empty_hint(
                 &p,
-                self.tr(
-                    "core 未运行，启动后可查看连接",
-                    "Start the core to see connections",
-                ),
-            )));
-        } else if !supported {
-            body = body.child(
-                card(&p).child(section_title(
-                    &p,
-                    self.tr("Xray 不提供连接列表", "Xray has no connection list"),
-                    self.tr(
-                        "切换到 sing-box 后可查看按进程/域名的连接并一键断开；Xray 仅提供流量统计。",
-                        "Switch to sing-box for per-process/domain connections and one-click close; Xray only exposes counters.",
-                    ),
-                )),
-            );
-        }
-
-        if running && supported {
-            let mut rows = div().flex().flex_col().gap_1().w_full();
-            if runtime.connections.is_empty() {
-                rows = rows.child(empty_hint(
-                    &p,
-                    self.tr("当前没有活动连接", "No active connections"),
-                ));
-            }
-            for connection in runtime.connections.iter().take(300) {
-                let id = connection.id.clone();
-                let host = connection.host();
-                let process = connection.process_name();
-                let network = format!(
-                    "{}/{}",
-                    connection.metadata.network, connection.metadata.kind
-                );
-                let destination = format!(
-                    "{}:{}",
-                    connection.metadata.destination_ip, connection.metadata.destination_port
-                );
-                let chain = connection
-                    .chains
-                    .last()
-                    .cloned()
-                    .unwrap_or_else(|| "—".into());
-                let rule = if connection.rule.is_empty() {
-                    "—".to_string()
-                } else if connection.rule_payload.is_empty() {
-                    connection.rule.clone()
+                if query.trim().is_empty() {
+                    self.tr("暂无连接记录", "No connections yet")
                 } else {
-                    format!("{} ({})", connection.rule, connection.rule_payload)
-                };
-                rows =
-                    rows.child(
-                        div()
-                            .id(SharedString::from(format!("conn-{id}")))
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .p_2()
-                            .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .flex_1()
-                                    .child(div().text_sm().text_color(p.fg).child(host))
-                                    .child(
-                                        div().text_xs().text_color(p.muted_fg).child(format!(
-                                            "{process} · {network} · {destination}"
-                                        )),
-                                    ),
-                            )
-                            .child(pill(chain, p.muted_fg, p.panel_alt))
-                            .child(
-                                div()
-                                    .w(px(150.))
-                                    .text_xs()
-                                    .text_color(p.muted_fg)
-                                    .child(rule),
-                            )
-                            .child(div().w(px(120.)).text_xs().text_color(p.muted_fg).child(
-                                format!(
-                                    "↓{} ↑{}",
-                                    format_bytes(connection.download),
-                                    format_bytes(connection.upload)
-                                ),
-                            ))
-                            .child(
-                                Button::new(SharedString::from(format!("kill-{id}")))
-                                    .compact()
-                                    .ghost()
-                                    .label("✕")
-                                    .on_click(cx.listener(move |this, _, _, _| {
-                                        this.service.kill_connection(&id);
-                                    })),
-                            ),
-                    );
-            }
-            body = body.child(card(&p).child(rows));
+                    self.tr("没有符合筛选条件的连接", "No matching connections")
+                },
+            ));
         }
-
-        let _ = lang;
-        body
-    }
-    fn trace_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        let trace = self.service.trace_snapshot();
-        let active = trace
-            .as_ref()
-            .map(|t| {
-                !matches!(
-                    t.phase,
-                    xross_core::trace::TracePhase::Done | xross_core::trace::TracePhase::Failed
-                )
-            })
-            .unwrap_or(false);
-        let summary = trace.as_ref().and_then(|t| t.summary.clone());
-        let success = trace.as_ref().and_then(|t| t.success).unwrap_or(false);
-        let target_label = trace
-            .as_ref()
-            .map(|t| format!("{} · {}", t.protocol.label(), t.target))
-            .unwrap_or_default();
-
-        let examples = [
-            ("HTTPS", "https://www.gstatic.com/generate_204"),
-            ("TCP", "tcp://1.1.1.1:443"),
-            ("UDP", "udp://8.8.8.8:53"),
-            ("ICMP", "icmp://1.1.1.1"),
-        ];
-
-        card(&p)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
+        for (connection, closed) in connections.into_iter().take(100) {
+            rows = rows.child(self.connection_row(connection, closed, &p, cx));
+        }
+        if count > 100 {
+            rows = rows.child(div().text_xs().text_color(p.muted_fg).child(self.tr("显示前 100 条，请使用筛选定位连接；导出包含完整录制", "Showing 100 entries. Filter to narrow the list; export includes the full recording")));
+        }
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .w_full()
+            .child(header)
+            .child(card(&p).child(rows));
+        if let Some(connection) = self.selected_connection.clone() {
+            body = body.child(self.connection_inspector(&connection, cx));
+        }
+        body = body.child(self.trace_card(cx));
+        if !recording.traces.is_empty() {
+            body = body.child(
+                card(&p)
                     .child(section_title(
                         &p,
-                        self.tr("测试链接", "Test a link"),
+                        self.tr("录制的测试", "Recorded tests"),
                         self.tr(
-                            "真实发起请求，动态展示 请求源 → 入站 → DNS → 路由 → 节点 → 目标 → 响应 链路",
-                            "Runs a real request and animates source → inbound → DNS → route → node → target → response",
+                            "选择记录查看完整链路及失败阶段",
+                            "Select a recording to review its path and failure stage",
                         ),
                     ))
-                    .when(trace.is_some(), |d| {
-                        d.child(pill(
-                            target_label.clone(),
-                            p.muted_fg,
-                            p.panel_alt,
-                        ))
-                    }),
-            )
+                    .children(recording.traces.iter().rev().map(|trace| {
+                        let id = trace.id;
+                        Button::new(SharedString::from(format!("replay-trace-{id}")))
+                            .compact()
+                            .ghost()
+                            .label(format!(
+                                "{} · {}",
+                                if trace.success == Some(true) {
+                                    "✓"
+                                } else {
+                                    "!"
+                                },
+                                trace.target
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(trace) =
+                                    this.snapshot.recording.traces.iter().find(|t| t.id == id)
+                                {
+                                    let target = trace.target.clone();
+                                    this.trace_input.update(cx, |input, cx| {
+                                        input.set_value(target, window, cx)
+                                    });
+                                }
+                                this.service.inspect_recorded_trace(id);
+                                this.sync(cx);
+                            }))
+                    })),
+            );
+        }
+        body
+    }
+
+    fn connection_row(
+        &self,
+        connection: ClashConnection,
+        closed: bool,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = self
+            .selected_connection
+            .as_ref()
+            .is_some_and(|c| c.id == connection.id && c.start == connection.start);
+        let id = connection.id.clone();
+        let inspect = connection.clone();
+        let test = connection.clone();
+        let process = connection.process_name();
+        div()
+            .id(SharedString::from(format!("conn-{id}")))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .bg(p.bg)
+            .border_1()
+            .border_color(if selected { p.primary } else { p.border })
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.trace_input)))
+                    .gap_3()
+                    .flex_wrap()
+                    .child(dot(if closed { p.muted_fg } else { p.success }))
                     .child(
-                        Button::new("trace-start")
-                            .compact()
-                            .primary()
-                            .label(if trace.is_some() {
-                                self.tr("重新测试", "Run again")
-                            } else {
-                                self.tr("开始测试", "Start test")
-                            })
-                            .loading(active)
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                let target = this.trace_input.read(cx).value().to_string();
-                                match this.service.start_trace(&target) {
-                                    Ok(()) => {
-                                        this.trace_anim = 0.0;
-                                    }
-                                    Err(err) => this.service.toast(
-                                        xross_core::service::ToastLevel::Error,
-                                        err.to_string(),
-                                    ),
-                                }
-                                this.sync(cx);
-                            })),
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(p.fg)
+                                    .truncate()
+                                    .child(connection.host()),
+                            )
+                            .child(div().text_xs().text_color(p.muted_fg).truncate().child(
+                                format!(
+                                    "{} · {} / {} · {}:{}",
+                                    if process.is_empty() {
+                                        self.tr("进程未提供", "Process unavailable").to_string()
+                                    } else {
+                                        process
+                                    },
+                                    connection.metadata.network,
+                                    connection.metadata.kind,
+                                    connection.metadata.destination_ip,
+                                    connection.metadata.destination_port
+                                ),
+                            )),
                     )
                     .child(
-                        Button::new("trace-clear")
-                            .compact()
-                            .ghost()
-                            .label(self.tr("清除", "Clear"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.service.clear_trace();
-                                this.sync(cx);
-                            })),
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .child(format!(
+                                "↓{} ↑{}",
+                                format_bytes(connection.download),
+                                format_bytes(connection.upload)
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .child(
+                                Button::new(SharedString::from(format!("inspect-{id}")))
+                                    .compact()
+                                    .ghost()
+                                    .label(self.tr("链路 / 规则", "Path / rule"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_connection = Some(inspect.clone());
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("test-{id}")))
+                                    .compact()
+                                    .label(self.tr("测试目标", "Test target"))
+                                    .disabled(connection_test_target(&connection).is_none())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(target) = connection_test_target(&test) {
+                                            this.trace_input.update(cx, |input, cx| {
+                                                input.set_value(target.clone(), window, cx)
+                                            });
+                                            this.selected_connection = Some(test.clone());
+                                            this.run_trace(&target, cx);
+                                        }
+                                    })),
+                            )
+                            .when(!closed && !self.show_recorded_connections, |d| {
+                                d.child(
+                                    Button::new(SharedString::from(format!("kill-{id}")))
+                                        .compact()
+                                        .ghost()
+                                        .label("✕")
+                                        .on_click(cx.listener(move |this, _, _, _| {
+                                            this.service.kill_connection(&id)
+                                        })),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -309,72 +295,299 @@ impl AppView {
                     .items_center()
                     .gap_2()
                     .flex_wrap()
+                    .child(pill(
+                        if closed {
+                            self.tr("已结束", "Closed")
+                        } else if self.show_recorded_connections && !self.snapshot.recording.active
+                        {
+                            self.tr("录制停止时活动", "Active at stop")
+                        } else {
+                            self.tr("活动", "Active")
+                        },
+                        p.muted_fg,
+                        p.panel_alt,
+                    ))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w(px(0.))
                             .text_xs()
                             .text_color(p.muted_fg)
-                            .child(self.tr("示例：", "Examples:")),
-                    )
-                    .children(examples.into_iter().map(|(label, value)| {
-                        let value = value.to_string();
-                        div()
-                            .id(SharedString::from(format!("trace-example-{label}")))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_full()
-                            .bg(p.panel_alt)
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let value = value.clone();
-                                this.trace_input.update(cx, |input, cx| {
-                                    input.set_value(value, window, cx);
-                                });
+                            .truncate()
+                            .child(format!(
+                                "{} → {}",
+                                rule_label(
+                                    &connection,
+                                    self.tr("core 未提供规则", "Rule unavailable").as_ref()
+                                ),
+                                self.connection_chain(&connection)
+                            )),
+                    ),
+            )
+    }
+
+    fn connection_chain(&self, connection: &ClashConnection) -> String {
+        if connection.chains.is_empty() {
+            return self
+                .tr("core 未提供出站链", "Outbound chain unavailable")
+                .to_string();
+        }
+        connection
+            .chains
+            .iter()
+            .map(|tag| {
+                self.snapshot
+                    .model
+                    .nodes
+                    .iter()
+                    .find(|n| n.outbound_tag() == *tag)
+                    .map(|n| n.name.clone())
+                    .or_else(|| {
+                        self.snapshot
+                            .model
+                            .groups
+                            .iter()
+                            .find(|g| g.tag() == *tag)
+                            .map(|g| g.name.clone())
+                    })
+                    .unwrap_or_else(|| tag.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(" → ")
+    }
+
+    fn connection_inspector(
+        &self,
+        c: &ClashConnection,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = palette(cx);
+        let m = &c.metadata;
+        let process = c.process_name();
+        let fields = [
+            (self.tr("01 · 谁发起", "01 · Source"), format!("{}\n{}:{}\n{}", if process.is_empty() { self.tr("进程未提供", "Process unavailable").to_string() } else { process }, m.source_ip, m.source_port, m.process_path)),
+            (self.tr("02 · 协议 / 入站", "02 · Protocol / inbound"), format!("{} · {}", m.network.to_uppercase(), m.kind)),
+            (self.tr("03 · 谁解析", "03 · DNS resolver"), self.tr("core 未提供 DNS 解析器信息；下方测试可观测本机预解析", "The core does not expose the DNS resolver; the test below observes local pre-resolution").to_string()),
+            (self.tr("04 · 命中规则", "04 · Matched rule"), rule_label(c, self.tr("core 未提供规则", "Rule unavailable").as_ref())),
+            (self.tr("05 · 出站链", "05 · Outbound chain"), self.connection_chain(c)),
+            (self.tr("06 · 目标 / 返回", "06 · Target / return"), format!("{} → {}:{}\n{}\n↓{} · ↑{}", c.host(), m.destination_ip, m.destination_port, self.tr("沿已建立的连接返回发起方（路径推导）", "Returns over the established connection (inferred)"), format_bytes(c.download), format_bytes(c.upload))),
+        ];
+        card(&p)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(section_title(
+                        &p,
+                        self.tr("连接透视", "Connection inspector"),
+                        self.tr(
+                            "来自 core 的连接元数据；缺失信息会明确标注",
+                            "Core connection metadata; unavailable fields are labeled",
+                        ),
+                    ))
+                    .child(
+                        Button::new("close-connection-inspector")
+                            .compact()
+                            .ghost()
+                            .label("✕")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.selected_connection = None;
                                 cx.notify();
-                            }))
-                            .child(label)
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(fields.into_iter().map(|(label, value)| {
+                        div()
+                            .flex_1()
+                            .min_w(px(220.))
+                            .p_3()
+                            .rounded_lg()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .child(div().text_xs().text_color(p.primary).child(label))
+                            .child(div().mt_2().text_sm().text_color(p.fg).child(value))
                     })),
             )
-            .child(self.trace_graph(trace.as_ref(), cx))
-            .when(trace.is_some(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(if success { p.success } else { p.warning })
-                                .child(summary.unwrap_or_default()),
-                        )
-                        .when(trace.as_ref().and_then(|t| t.request_ms).is_some(), |d| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(p.muted_fg)
-                                    .child(format!(
-                                        "{} {} ms · {} {} ms",
-                                        self.tr("请求", "request"),
-                                        trace.as_ref().and_then(|t| t.request_ms).unwrap_or(0),
-                                        self.tr("响应", "response"),
-                                        trace.as_ref().and_then(|t| t.response_ms).unwrap_or(0)
-                                    )),
+            .child(self.diagnostic_rule_bar(DiagnosticTarget::from_connection(c), "connection", cx))
+    }
+
+    fn diagnostic_rule_bar(
+        &self,
+        target: DiagnosticTarget,
+        prefix: &'static str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = palette(cx);
+        let kind = self.diagnostic_rule_kind;
+        let value = target.value(kind).to_string();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .bg(p.primary.opacity(0.06))
+            .border_1()
+            .border_color(p.primary.opacity(0.25))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.fg)
+                            .child(self.tr("一键增加规则", "Add a rule")),
+                    )
+                    .children(
+                        [
+                            (DiagnosticRuleKind::Domain, self.tr("域名", "Domain")),
+                            (DiagnosticRuleKind::Ip, self.tr("IP", "IP")),
+                            (DiagnosticRuleKind::Process, self.tr("进程", "Process")),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (k, label))| {
+                            chip(format!("{prefix}-rule-kind-{i}"), label, kind == k, &p).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.diagnostic_rule_kind = k;
+                                    cx.notify();
+                                }),
                             )
                         }),
-                )
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .truncate()
+                            .child(if value.is_empty() {
+                                self.tr("当前匹配条件不可用", "This match is unavailable")
+                                    .to_string()
+                            } else {
+                                value.clone()
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .children(
+                        [
+                            (RouteActionKind::Proxy, self.tr("代理", "Proxy")),
+                            (RouteActionKind::Direct, self.tr("直连", "Direct")),
+                            (RouteActionKind::Block, self.tr("拦截", "Block")),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (action, label))| {
+                            chip(
+                                format!("{prefix}-rule-action-{i}"),
+                                label,
+                                self.diagnostic_rule_action == action,
+                                &p,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.diagnostic_rule_action = action;
+                                    cx.notify();
+                                },
+                            ))
+                        }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("{prefix}-add-rule")))
+                            .compact()
+                            .primary()
+                            .label(self.tr("置顶添加", "Add at top"))
+                            .disabled(value.is_empty())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let action = RouteAction {
+                                    kind: this.diagnostic_rule_action,
+                                    group: None,
+                                };
+                                if let Err(err) = this.service.add_diagnostic_rule(
+                                    &target,
+                                    this.diagnostic_rule_kind,
+                                    action,
+                                ) {
+                                    this.service.toast(ToastLevel::Error, err.to_string());
+                                }
+                                this.sync(cx);
+                            })),
+                    )
+                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                        "精确匹配 · 用户规则置顶，内置绕过仍优先 · 应用后生效",
+                        "Exact match · first user rule, built-in bypasses still apply · activate by applying configuration",
+                    ))),
+            )
+    }
+
+    fn run_trace(&mut self, target: &str, cx: &mut Context<Self>) {
+        match self.service.start_trace(target) {
+            Ok(()) => {
+                self.expanded_trace_step = None;
+            }
+            Err(err) => self.service.toast(ToastLevel::Error, err.to_string()),
+        }
+        self.sync(cx);
+    }
+
+    fn trace_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let trace = self.snapshot.trace.clone();
+        let active = trace
+            .as_ref()
+            .is_some_and(|t| matches!(t.phase, TracePhase::Request | TracePhase::Response));
+        let success = trace.as_ref().and_then(|t| t.success);
+        card(&p)
+            .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
+                .child(section_title(&p, self.tr("测试链接", "Test a link"), self.tr("由 Xross 发起新请求，检查解析、路由、节点和返回；不复现原进程身份", "Xross sends a new request to inspect DNS, routing, nodes and return; the original process identity is not reproduced")))
+                .child(pill(if active { self.tr("● 探测中", "● Probing") } else if success == Some(true) { self.tr("✓ 请求完成", "✓ Completed") } else if success == Some(false) { self.tr("! 发现问题", "! Issue found") } else { self.tr("链路实验室", "Path lab") }, if success == Some(false) { p.danger } else { p.primary }, p.primary.opacity(0.1))))
+            .child(div().flex().items_center().gap_2().flex_wrap()
+                .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.trace_input)))
+                .child(Button::new("trace-start").compact().primary().label(if trace.is_some() { self.tr("重新测试", "Run again") } else { self.tr("开始测试", "Start test") }).loading(active)
+                    .on_click(cx.listener(|this, _, _, cx| { let target = this.trace_input.read(cx).value().to_string(); this.run_trace(&target, cx); })))
+                .child(Button::new("trace-clear").compact().ghost().label(self.tr("清除", "Clear"))
+                    .on_click(cx.listener(|this, _, _, cx| { this.service.clear_trace(); this.expanded_trace_step = None; this.sync(cx); }))))
+            .child(div().flex().items_center().gap_2().flex_wrap()
+                .children([("HTTPS", "https://www.gstatic.com/generate_204"), ("TCP", "tcp://1.1.1.1:443"), ("UDP", "udp://8.8.8.8:53"), ("ICMP", "icmp://1.1.1.1")].into_iter().map(|(label, value)| chip(format!("trace-example-{label}"), label, false, &p)
+                    .on_click(cx.listener(move |this, _, window, cx| { this.trace_input.update(cx, |input, cx| input.set_value(value, window, cx)); cx.notify(); }))))
+                .child(div().text_xs().text_color(p.muted_fg).child(self.tr("点击阶段查看完整详情", "Select a stage for full details"))))
+            .child(self.trace_graph(trace.as_ref(), cx))
+            .when_some(trace.as_ref(), |d, trace| {
+                let failed = trace.steps.iter().find(|s| s.status == TraceStatus::Error);
+                let focused = self.expanded_trace_step.and_then(|kind| trace.step(kind)).or(failed);
+                d.when_some(focused, |d, step| d.child(div().flex().flex_col().gap_2().p_3().rounded_lg().bg(p.bg).border_l_2().border_color(status_color(step.status, &p))
+                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(status_color(step.status, &p)).child(self.trace_step_label(step.kind)))
+                    .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))))
+                    .when_some(trace.error.as_ref().filter(|error| focused.is_none_or(|step| step.detail != **error)), |d, error| d.child(div().text_sm().text_color(p.danger).child(error.clone())))
+                    .child(div().text_xs().text_color(if trace.success == Some(false) { p.danger } else { p.muted_fg }).child(trace.summary.clone().unwrap_or_default()))
+                    .child(self.diagnostic_rule_bar(DiagnosticTarget::from_trace(trace), "trace", cx))
             })
     }
 
     fn trace_graph(
         &self,
-        trace: Option<&xross_core::trace::TraceSession>,
+        trace: Option<&TraceSession>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        use xross_core::trace::{TracePhase, TraceStatus, TraceStepKind};
-
         let p = palette(cx);
         let kinds = [
             TraceStepKind::Source,
@@ -384,221 +597,303 @@ impl AppView {
             TraceStepKind::Outbound,
             TraceStepKind::Remote,
         ];
-        let centers = [62.0f32, 214.0, 366.0, 518.0, 670.0, 822.0];
-        let node_w = 122.0f32;
-        let node_h = 92.0f32;
-        let node_top = 36.0f32;
-        let req_y = 82.0f32;
-        let resp_y = 238.0f32;
-        let width = 900.0f32;
-        let height = 300.0f32;
-
-        let mut nodes = Vec::new();
-        let mut statuses = Vec::new();
-        for (index, kind) in kinds.iter().enumerate() {
-            let step = trace.and_then(|t| t.step(*kind));
-            let status = step.map(|s| s.status).unwrap_or(TraceStatus::Pending);
-            statuses.push(status);
-            let color = match status {
-                TraceStatus::Ok => p.success,
-                TraceStatus::Active => p.primary,
-                TraceStatus::Warn => p.warning,
-                TraceStatus::Error => p.danger,
-                TraceStatus::Skipped => p.muted_fg,
-                TraceStatus::Pending => p.border,
-            };
-            let detail = step
-                .map(|s| truncate_trace(&s.detail, 26))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| self.tr("等待测试…", "waiting…").to_string());
-            let duration = step
-                .and_then(|s| s.duration_ms)
-                .map(|ms| format!("{ms} ms"))
-                .unwrap_or_default();
-            nodes.push(
-                div()
-                    .absolute()
-                    .left(px(centers[index] - node_w / 2.0))
-                    .top(px(node_top))
-                    .w(px(node_w))
-                    .h(px(node_h))
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .rounded_md()
-                    .bg(if status == TraceStatus::Active {
-                        p.accent
-                    } else {
-                        p.bg
-                    })
-                    .border_1()
-                    .border_color(color)
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_1()
-                            .child(
-                                div().flex().items_center().gap_1().child(dot(color)).child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(p.fg)
-                                        .child(self.trace_step_label(*kind)),
-                                ),
-                            )
-                            .when(!duration.is_empty(), |d| {
-                                d.child(div().text_xs().text_color(color).child(duration))
-                            }),
-                    )
-                    .child(div().text_xs().text_color(p.muted_fg).child(detail)),
-            );
-        }
-
-        let line_colors: Vec<Hsla> = statuses
+        let colors: Vec<_> = kinds
             .iter()
-            .map(|status| match status {
-                TraceStatus::Ok => p.success,
-                TraceStatus::Active => p.primary,
-                TraceStatus::Warn => p.warning,
-                TraceStatus::Error => p.danger,
-                _ => p.border,
+            .map(|kind| {
+                status_color(
+                    trace
+                        .and_then(|t| t.step(*kind))
+                        .map_or(TraceStatus::Pending, |s| s.status),
+                    &p,
+                )
             })
             .collect();
-        let anim = self.trace_anim;
-        let phase = trace.map(|t| t.phase).unwrap_or(TracePhase::Request);
-        let has_trace = trace.is_some();
-        let response_status = trace
-            .and_then(|t| t.step(TraceStepKind::Response))
-            .map(|s| s.status)
-            .unwrap_or(TraceStatus::Pending);
-        let response_color = match response_status {
-            TraceStatus::Ok => p.success,
-            TraceStatus::Active => p.primary,
-            TraceStatus::Warn => p.warning,
-            TraceStatus::Error => p.danger,
-            TraceStatus::Skipped => p.muted_fg,
-            TraceStatus::Pending => p.border,
-        };
-        let response_detail = trace
-            .and_then(|t| t.step(TraceStepKind::Response))
-            .map(|s| truncate_trace(&s.detail, 96))
+        let active =
+            trace.is_some_and(|t| matches!(t.phase, TracePhase::Request | TracePhase::Response));
+        let phase = trace.map(|t| t.phase);
+        let animation_phase = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
+        let paint_phase = animation_phase.clone();
+        let response = trace.and_then(|t| t.step(TraceStepKind::Response));
+        let response_color = response.map_or(p.border, |s| status_color(s.status, &p));
+        let detail = response
+            .map(|s| s.detail.clone())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| {
                 self.tr(
-                    "响应会沿节点原路返回 Xross",
-                    "Response travels back through the node",
+                    "返回路径将在请求完成后显示",
+                    "The return path appears after the request completes",
                 )
                 .to_string()
             });
-
         let graph = canvas(
-            move |_bounds, _window, _cx| (),
-            move |bounds, _, window, _cx| {
-                let origin = bounds.origin;
-                let at = |x: f32, y: f32| point(origin.x + px(x), origin.y + px(y));
-                for index in 0..5 {
-                    let mut builder = PathBuilder::stroke(px(1.5));
-                    let x1 = centers[index] + node_w / 2.0;
-                    let x2 = centers[index + 1] - node_w / 2.0;
-                    builder.move_to(at(x1, req_y));
-                    builder.curve_to(at(x2, req_y), at((x1 + x2) / 2.0, req_y - 16.0));
-                    if let Ok(path) = builder.build() {
-                        window.paint_path(path, line_colors[index]);
+            move |_, _, _| (),
+            move |bounds, _, window, _| {
+                let anim = paint_phase.get();
+                let cell = (f32::from(bounds.size.width) + 24.) / 6.;
+                let node_w = cell - 24.;
+                let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+                for index in 0..6 {
+                    let x = index as f32 * cell + node_w / 2.;
+                    let mut line = PathBuilder::stroke(px(1.));
+                    line.move_to(at(x, 12.));
+                    line.line_to(at(x, 222.));
+                    if let Ok(path) = line.build() {
+                        window.paint_path(path, p.border.opacity(0.3));
                     }
                 }
-                let mut response = PathBuilder::stroke(px(1.5)).dash_array(&[px(6.0), px(5.0)]);
-                response.move_to(at(centers[5], node_top + node_h));
-                response.cubic_bezier_to(
-                    at(centers[0], resp_y),
-                    at(centers[5] - 120.0, resp_y + 26.0),
-                    at(centers[0] + 80.0, resp_y),
-                );
-                if let Ok(path) = response.build() {
-                    window.paint_path(path, response_color);
-                }
-                if has_trace {
-                    let request_x = if matches!(phase, TracePhase::Request) {
-                        centers[0] + (centers[5] - centers[0]) * anim
-                    } else {
-                        centers[5]
-                    };
-                    let request =
-                        Bounds::new(at(request_x - 4.0, req_y - 4.0), size(px(8.0), px(8.0)));
-                    window.paint_quad(fill(request, p.primary).corner_radii(Corners::all(px(4.0))));
-                    if matches!(
-                        phase,
-                        TracePhase::Response | TracePhase::Done | TracePhase::Failed
-                    ) {
-                        let response_x = if matches!(phase, TracePhase::Done | TracePhase::Failed) {
-                            centers[0]
-                        } else {
-                            centers[5] - (centers[5] - centers[0]) * anim
-                        };
-                        let dot =
-                            Bounds::new(at(response_x - 4.0, resp_y - 4.0), size(px(8.0), px(8.0)));
+                for index in 0..5 {
+                    let x1 = index as f32 * cell + node_w;
+                    let x2 = (index + 1) as f32 * cell;
+                    for (stroke, opacity) in [(7., 0.06), (3., 0.15), (1.5, 0.8)] {
+                        let mut line = PathBuilder::stroke(px(stroke));
+                        line.move_to(at(x1, 104.));
+                        line.line_to(at(x2, 104.));
+                        if let Ok(path) = line.build() {
+                            window.paint_path(path, colors[index].opacity(opacity));
+                        }
+                    }
+                    if active && phase == Some(TracePhase::Request) {
+                        let x = x1 + (x2 - x1) * ((anim + index as f32 * 0.17) % 1.);
                         window.paint_quad(
-                            fill(dot, response_color).corner_radii(Corners::all(px(4.0))),
+                            fill(Bounds::new(at(x - 3., 101.), size(px(6.), px(6.))), p.info)
+                                .corner_radii(Corners::all(px(3.))),
                         );
                     }
+                }
+                let start = node_w / 2.;
+                let end = 5. * cell + node_w / 2.;
+                let mut path = PathBuilder::stroke(px(1.5)).dash_array(&[px(5.), px(5.)]);
+                path.move_to(at(end, 184.));
+                path.cubic_bezier_to(at(start, 184.), at(end, 244.), at(start, 244.));
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, response_color.opacity(0.8));
+                }
+                if active && phase == Some(TracePhase::Response) {
+                    let t = anim;
+                    let inv = 1. - t;
+                    let x = inv.powi(3) * end
+                        + 3. * inv.powi(2) * t * end
+                        + 3. * inv * t.powi(2) * start
+                        + t.powi(3) * start;
+                    let y = inv.powi(3) * 184.
+                        + 3. * inv.powi(2) * t * 244.
+                        + 3. * inv * t.powi(2) * 244.
+                        + t.powi(3) * 184.;
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(at(x - 4., y - 4.), size(px(8.), px(8.))),
+                            response_color,
+                        )
+                        .corner_radii(Corners::all(px(4.))),
+                    );
                 }
             },
         )
         .absolute()
-        .left(px(0.0))
-        .top(px(0.0))
-        .w(px(width))
-        .h(px(height));
-
-        div().w_full().overflow_x_scrollbar().child(
-            div()
-                .w(px(width))
-                .h(px(height))
-                .relative()
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(16.0))
-                        .top(px(8.0))
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(self.tr("请求路径", "Request path")),
+        .inset_0()
+        .w_full()
+        .h_full();
+        let graph = if active {
+            graph
+                .with_animation(
+                    "trace-flow",
+                    Animation::new(std::time::Duration::from_millis(1600))
+                        .repeat()
+                        .with_max_fps(30.),
+                    move |canvas, phase| {
+                        animation_phase.set(phase);
+                        canvas
+                    },
                 )
-                .child(
+                .into_any_element()
+        } else {
+            graph.into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .child(
+                div().w_full().overflow_x_scrollbar().child(
                     div()
-                        .absolute()
-                        .left(px(16.0))
-                        .top(px(200.0))
-                        .w(px(width - 32.0))
-                        .text_xs()
-                        .text_color(response_color)
-                        .child(response_detail),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(16.0))
-                        .top(px(220.0))
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(self.tr("响应路径", "Response path")),
-                )
-                .child(graph)
-                .children(nodes),
-        )
+                        .relative()
+                        .w_full()
+                        .min_w(px(980.))
+                        .h(px(246.))
+                        .rounded_lg()
+                        .bg(p.info.opacity(0.045))
+                        .child(graph)
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(8.))
+                                .left(px(12.))
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("请求 →", "REQUEST →")),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(36.))
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .gap(px(24.))
+                                .children(kinds.into_iter().enumerate().map(|(index, kind)| {
+                                    let step = trace.and_then(|t| t.step(kind));
+                                    let status = step.map_or(TraceStatus::Pending, |s| s.status);
+                                    let color = status_color(status, &p);
+                                    let detail = step
+                                        .map(|s| s.detail.clone())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or_else(|| {
+                                            self.tr("等待测试", "Awaiting test").to_string()
+                                        });
+                                    div()
+                                        .id(SharedString::from(format!("trace-stage-{index}")))
+                                        .flex_1()
+                                        .min_w(px(0.))
+                                        .h(px(148.))
+                                        .flex()
+                                        .flex_col()
+                                        .gap_2()
+                                        .p_3()
+                                        .rounded_lg()
+                                        .bg(if status == TraceStatus::Active {
+                                            p.accent
+                                        } else {
+                                            p.bg
+                                        })
+                                        .border_1()
+                                        .border_color(color.opacity(0.7))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.expanded_trace_step = Some(kind);
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_1()
+                                                .child(div().text_xs().text_color(color).child(
+                                                    format!(
+                                                        "{:02}  {}",
+                                                        index + 1,
+                                                        match status {
+                                                            TraceStatus::Ok => "✓",
+                                                            TraceStatus::Active => "●",
+                                                            TraceStatus::Error
+                                                            | TraceStatus::Warn => "!",
+                                                            TraceStatus::Skipped => "–",
+                                                            TraceStatus::Pending => "○",
+                                                        }
+                                                    ),
+                                                ))
+                                                .when_some(
+                                                    step.and_then(|s| s.duration_ms),
+                                                    |d, ms| {
+                                                        d.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(p.muted_fg)
+                                                                .child(format!("{ms} ms")),
+                                                        )
+                                                    },
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(p.fg)
+                                                .child(self.trace_step_label(kind)),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w(px(0.))
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .line_clamp(3)
+                                                .child(detail),
+                                        )
+                                })),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom(px(4.))
+                                .left(px(12.))
+                                .text_xs()
+                                .text_color(response_color)
+                                .child(self.tr("← 响应返回", "← RESPONSE")),
+                        ),
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(response_color.opacity(0.06))
+                    .child(dot(response_color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .child(detail),
+                    ),
+            )
     }
 }
 
-fn truncate_trace(value: &str, max: usize) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() <= max {
-        value.to_string()
+fn chip(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    p: &Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .px_2()
+        .py_1()
+        .rounded_full()
+        .flex_shrink_0()
+        .text_xs()
+        .cursor_pointer()
+        .bg(if selected {
+            p.primary.opacity(0.15)
+        } else {
+            p.panel_alt
+        })
+        .text_color(if selected { p.primary } else { p.muted_fg })
+        .child(label.into())
+}
+
+fn status_color(status: TraceStatus, p: &Palette) -> Hsla {
+    match status {
+        TraceStatus::Ok => p.success,
+        TraceStatus::Active => p.info,
+        TraceStatus::Warn => p.warning,
+        TraceStatus::Error => p.danger,
+        TraceStatus::Skipped => p.muted_fg,
+        TraceStatus::Pending => p.border,
+    }
+}
+
+fn rule_label(c: &ClashConnection, fallback: &str) -> String {
+    if c.rule.is_empty() {
+        fallback.to_string()
+    } else if c.rule_payload.is_empty() {
+        c.rule.clone()
     } else {
-        let mut out: String = chars.into_iter().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
+        format!("{} · {}", c.rule, c.rule_payload)
     }
 }
