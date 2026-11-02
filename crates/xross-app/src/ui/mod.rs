@@ -2,6 +2,7 @@ mod connections;
 mod dns;
 mod logs;
 mod manual_node;
+mod mesh;
 mod nodes;
 mod routing;
 mod settings;
@@ -32,6 +33,7 @@ use self::widgets::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Mesh,
     Nodes,
     Subscriptions,
     Routing,
@@ -42,12 +44,13 @@ pub enum Page {
 }
 
 impl Page {
-    fn all() -> [Page; 7] {
+    fn all() -> [Page; 8] {
         [
             Page::Nodes,
             Page::Subscriptions,
             Page::Routing,
             Page::Dns,
+            Page::Mesh,
             Page::Connections,
             Page::Logs,
             Page::Settings,
@@ -56,6 +59,7 @@ impl Page {
 
     fn icon(&self) -> IconName {
         match self {
+            Page::Mesh => IconName::Network,
             Page::Nodes => IconName::Server,
             Page::Subscriptions => IconName::Rss,
             Page::Routing => IconName::Route,
@@ -68,6 +72,7 @@ impl Page {
 
     fn zh(&self) -> &'static str {
         match self {
+            Page::Mesh => "组网",
             Page::Nodes => "节点",
             Page::Subscriptions => "订阅",
             Page::Routing => "路由",
@@ -80,6 +85,7 @@ impl Page {
 
     fn en(&self) -> &'static str {
         match self {
+            Page::Mesh => "Mesh networks",
             Page::Nodes => "Nodes",
             Page::Subscriptions => "Subscriptions",
             Page::Routing => "Routing",
@@ -128,6 +134,7 @@ fn text_input(
 }
 
 pub struct AppView {
+    mesh_form: mesh::MeshForm,
     pub(crate) service: AppService,
     pub(crate) snapshot: UiSnapshot,
     pub(crate) logo_badge: std::sync::Arc<gpui_kit::RenderImage>,
@@ -152,6 +159,7 @@ pub struct AppView {
     pub(crate) sub_url: Entity<InputState>,
     pub(crate) import_input: Entity<InputState>,
     pub(crate) log_search: Entity<InputState>,
+    log_list: logs::LogListState,
     pub(crate) rule_name: Entity<InputState>,
     pub(crate) rule_value: Entity<InputState>,
     pub(crate) dns_tag: Entity<InputState>,
@@ -237,6 +245,7 @@ impl AppView {
         let manual_form = ManualNodeForm::new(window, cx);
 
         let initial_page = match std::env::var("XROSS_PAGE").unwrap_or_default().as_str() {
+            "mesh" => Page::Mesh,
             "subscriptions" => Page::Subscriptions,
             "routing" => Page::Routing,
             "dns" => Page::Dns,
@@ -248,6 +257,7 @@ impl AppView {
         // Debug hook used by the screenshot/regression workflow.
         let show_manual_form = std::env::var_os("XROSS_MANUAL").is_some();
         let view = Self {
+            mesh_form: mesh::MeshForm::new(window, cx),
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
             logo_hero: crate::brand_assets::logo_hero(),
@@ -271,6 +281,7 @@ impl AppView {
             sub_url,
             import_input,
             log_search,
+            log_list: logs::LogListState::new(),
             rule_name,
             rule_value,
             dns_tag,
@@ -929,6 +940,7 @@ impl AppView {
             Page::Connections => self.page_connections(cx).into_any_element(),
             Page::Logs => self.page_logs(cx).into_any_element(),
             Page::Settings => self.page_settings(window, cx).into_any_element(),
+            Page::Mesh => self.page_mesh(cx).into_any_element(),
         }
     }
 
@@ -1130,8 +1142,12 @@ impl Render for AppView {
                         div()
                             .id("content-scroll")
                             .flex_1()
+                            .min_h(px(0.))
                             .w_full()
-                            .overflow_y_scroll()
+                            .when(self.page == Page::Logs, |d| {
+                                d.flex().flex_col().overflow_hidden()
+                            })
+                            .when(self.page != Page::Logs, |d| d.overflow_y_scroll())
                             .p_6()
                             .child(self.page_content(window, cx)),
                     ),

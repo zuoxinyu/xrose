@@ -17,7 +17,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -151,6 +151,9 @@ impl Store {
                 "#,
             )?;
         }
+        if version < 3 {
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS mesh_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL);")?;
+        }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -192,6 +195,31 @@ impl Store {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    pub fn mesh_profiles(&self) -> Result<Vec<crate::mesh::MeshProfile>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT payload FROM mesh_profiles ORDER BY updated_at, id")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            profiles.push(serde_json::from_str(&self.secrets.decrypt(&row?)?)?);
+        }
+        Ok(profiles)
+    }
+
+    pub fn save_mesh_profile(&self, profile: &crate::mesh::MeshProfile) -> Result<()> {
+        profile.validate()?;
+        let payload = self.secrets.encrypt(&serde_json::to_string(profile)?);
+        self.conn.lock().execute("INSERT INTO mesh_profiles (id,payload,updated_at) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at", params![profile.id, payload, now_unix()])?;
+        Ok(())
+    }
+
+    pub fn delete_mesh_profile(&self, id: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .execute("DELETE FROM mesh_profiles WHERE id=?1", [id])?;
+        Ok(())
     }
 
     // -- profiles ---------------------------------------------------------
@@ -555,5 +583,66 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn mesh_payload_is_encrypted_and_independent_of_proxy_profile() {
+        let (store, _dir) = store();
+        let proxy_id = store.active_profile_id();
+        let profile = crate::mesh::MeshProfile {
+            network_name: "test-net".into(),
+            network_secret: crate::mesh::MeshSecret("fake-mesh-secret".into()),
+            peers: vec!["tcp://192.0.2.1:11010".into()],
+            ..Default::default()
+        };
+        store.save_mesh_profile(&profile).unwrap();
+        let raw: String = store
+            .conn
+            .lock()
+            .query_row(
+                "SELECT payload FROM mesh_profiles WHERE id=?1",
+                [&profile.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(SecretBox::is_encrypted(&raw));
+        assert!(!raw.contains("fake-mesh-secret"));
+        assert!(!raw.contains("test-net"));
+        assert_eq!(store.mesh_profiles().unwrap(), vec![profile.clone()]);
+        assert_eq!(store.active_profile_id(), proxy_id);
+        store.delete_mesh_profile(&profile.id).unwrap();
+        assert!(store.mesh_profiles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn upgrades_v2_without_rewriting_proxy_profile() {
+        let (store, dir) = store();
+        let id = store.active_profile_id().unwrap();
+        let before: String = store
+            .conn
+            .lock()
+            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .execute_batch(
+                "DROP TABLE mesh_profiles; PRAGMA user_version=2; PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        drop(store);
+        let upgraded = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        assert!(upgraded.mesh_profiles().unwrap().is_empty());
+        let after: String = upgraded
+            .conn
+            .lock()
+            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(upgraded.active_profile_id(), Some(id));
     }
 }

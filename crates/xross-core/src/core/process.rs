@@ -128,7 +128,7 @@ struct RunContext {
     stop: watch::Receiver<bool>,
     stop_requested: Arc<AtomicBool>,
     tail: Arc<Mutex<VecDeque<String>>>,
-    watchdog: WatchdogConfig,
+    watchdog: Arc<Mutex<WatchdogConfig>>,
 }
 
 /// Runs the core process and keeps it alive. Restarting after a crash reuses
@@ -141,7 +141,7 @@ pub struct ProcessSupervisor {
     logs: LogBus,
     tail: Arc<Mutex<VecDeque<String>>>,
     spec: Mutex<Option<SpawnSpec>>,
-    watchdog: Mutex<WatchdogConfig>,
+    watchdog: Arc<Mutex<WatchdogConfig>>,
     generation: Arc<AtomicBool>,
 }
 
@@ -154,7 +154,7 @@ impl ProcessSupervisor {
             logs,
             tail: Arc::new(Mutex::new(VecDeque::with_capacity(40))),
             spec: Mutex::new(None),
-            watchdog: Mutex::new(WatchdogConfig::default()),
+            watchdog: Arc::new(Mutex::new(WatchdogConfig::default())),
             generation: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -209,7 +209,7 @@ impl ProcessSupervisor {
             stop: rx,
             stop_requested: self.stop_requested.clone(),
             tail: self.tail.clone(),
-            watchdog,
+            watchdog: self.watchdog.clone(),
         };
         tokio::spawn(run_loop(ctx));
         Ok(())
@@ -346,7 +346,8 @@ async fn run_loop(mut ctx: RunContext) {
             state.pid = None;
             state.last_exit = Some(info.clone());
         }
-        if ctx.watchdog.enabled && attempt < ctx.watchdog.max_retries {
+        let watchdog = *ctx.watchdog.lock();
+        if watchdog.enabled && attempt < watchdog.max_retries {
             attempt += 1;
             let backoff = Duration::from_millis(500 * 2u64.min(attempt as u64).pow(2) as u64);
             ctx.logs.push(
@@ -354,7 +355,7 @@ async fn run_loop(mut ctx: RunContext) {
                 LogLevel::Warn,
                 format!(
                     "watchdog：{:?} 后自动重启（第 {}/{} 次）",
-                    backoff, attempt, ctx.watchdog.max_retries
+                    backoff, attempt, watchdog.max_retries
                 ),
             );
             {
@@ -584,6 +585,46 @@ pub fn now_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn watchdog_can_be_reenabled_after_transaction_verification() {
+        let supervisor = ProcessSupervisor::new(LogBus::new(50));
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut spec = SpawnSpec::new(CoreKind::SingBox, shell);
+        spec.args = vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "Start-Sleep -Milliseconds 600; exit 1".into(),
+        ];
+        supervisor
+            .start(
+                spec,
+                WatchdogConfig {
+                    enabled: false,
+                    max_retries: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while supervisor.state().phase == ProcessPhase::Starting && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(supervisor.state().phase, ProcessPhase::Running);
+        supervisor.set_watchdog(WatchdogConfig {
+            enabled: true,
+            max_retries: 1,
+        });
+        while supervisor.state().restarts == 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
+        let retried = supervisor.state().restarts;
+        supervisor.stop().await.unwrap();
+        assert_eq!(retried, 1);
+    }
 
     #[test]
     fn reason_detects_port_conflict() {

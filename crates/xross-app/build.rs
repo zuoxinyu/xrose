@@ -20,7 +20,11 @@ use std::path::PathBuf;
 const STACK_BYTES: u64 = 16 * 1024 * 1024;
 const ICON_PNG: &str = "assets/app-icon-256.png";
 
+#[path = "../../build_support/easytier_native.rs"]
+mod easytier_native;
+
 fn main() {
+    easytier_native::configure();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={ICON_PNG}");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {

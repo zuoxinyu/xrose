@@ -15,6 +15,31 @@ use crate::settings::Settings;
 
 pub struct SingBoxAdapter;
 
+/// Standalone mesh configuration; does not require a proxy profile or nodes.
+pub fn compile_mesh(
+    profile: &crate::mesh::MeshProfile,
+    directory: &Path,
+    api_port: u16,
+    secret: &str,
+) -> crate::Result<Value> {
+    profile.validate()?;
+    let mut routes = vec!["100.64.0.0/10".to_string(), "fd7a:115c:a1e0::/48".into()];
+    routes.extend(profile.remote_subnets.clone());
+    Ok(json!({
+        "log":{"level":"error"},
+        "endpoints":[{"type":"tailscale","tag":"mesh-ts","state_directory":directory.join("identity"),"hostname":profile.hostname,
+            "control_url":profile.control_url,"system_interface":false,
+            "accept_routes":!profile.remote_subnets.is_empty(),"advertise_routes":[],"advertise_exit_node":false}],
+        "services":[{"type":"api","listen":"127.0.0.1","listen_port":api_port,"secret":secret,"dashboard":false}],
+        "inbounds":[{"type":"direct","tag":"mesh-dns","listen":"127.0.0.153","listen_port":53},
+            {"type":"tun","tag":"mesh-tun","interface_name":format!("xross-mesh-ts-{}",&profile.id[..8]),"address":[crate::mesh::TAILSCALE_TUN_ADDRESS,crate::mesh::TAILSCALE_TUN_IPV6_ADDRESS],"mtu":1280,"stack":"gvisor","auto_route":true,"strict_route":false,"route_address":routes}],
+        "outbounds":[{"type":"direct","tag":"direct"}],
+        "route":{"auto_detect_interface":true,"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
+        "dns":{"servers":[{"type":"local","tag":"local"},{"type":"tailscale","tag":"mesh-dns","endpoint":"mesh-ts","accept_default_resolvers":false}],
+            "rules":[{"inbound":"mesh-dns","action":"route","server":"mesh-dns"}],"final":"local"}
+    }))
+}
+
 impl CoreAdapter for SingBoxAdapter {
     fn kind(&self) -> CoreKind {
         CoreKind::SingBox
@@ -41,7 +66,20 @@ impl CoreAdapter for SingBoxAdapter {
         for inbound in model.inbounds.iter().filter(|i| i.enabled) {
             match inbound.kind {
                 InboundKind::Tun => {
-                    inbounds.push(tun_inbound(inbound));
+                    let mut tun = tun_inbound(inbound);
+                    if ctx.mesh.active {
+                        let mut excludes = inbound.tun.route_exclude_addresses.clone();
+                        excludes.extend(ctx.mesh.routes.iter().map(|r| r.cidr.clone()));
+                        excludes.push("127.0.0.153/32".into());
+                        excludes.sort();
+                        excludes.dedup();
+                        tun["route_exclude_address"] = json!(excludes);
+                        if cfg!(windows) && inbound.tun.strict_route {
+                            tun["strict_route"] = json!(false);
+                            warnings.push("异地组网运行期间暂时关闭 TUN strict_route，严格 DNS 防泄漏过滤已放宽；断开全部组网后恢复".into());
+                        }
+                    }
+                    inbounds.push(tun);
                     compiled_inbounds.push(CompiledInbound {
                         tag: inbound.tag.clone(),
                         kind: "tun".into(),
@@ -238,6 +276,16 @@ impl CoreAdapter for SingBoxAdapter {
 
         // --- route -------------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
+        if !ctx.mesh.dns.is_empty() {
+            // MagicDNS returns real addresses before the ordinary fake-IP rules.
+            rules.push(json!({"domain_suffix":ctx.mesh.dns.iter().map(|d| &d.suffix).collect::<Vec<_>>(),"action":"resolve","server":"xross-mesh-dns-0"}));
+            rules.push(json!({"ip_cidr":["127.0.0.153/32"],"action":"route","outbound":"direct"}));
+        }
+        for (index, route) in ctx.mesh.routes.iter().enumerate() {
+            let tag = format!("xross-mesh-{index}");
+            outbounds.push(json!({"type":"direct","tag":tag,"bind_interface":route.interface}));
+            rules.push(json!({"ip_cidr":[route.cidr],"action":"route","outbound":tag}));
+        }
         if model.dns.enabled {
             rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
         }
@@ -301,6 +349,24 @@ impl CoreAdapter for SingBoxAdapter {
         );
         if model.dns.enabled {
             root.insert("dns".into(), dns_section);
+        }
+        if !ctx.mesh.dns.is_empty() {
+            let dns = root.entry("dns").or_insert_with(
+                || json!({"servers":[{"type":"local","tag":"local"}],"final":"local"}),
+            );
+            let mut mesh_rules = Vec::new();
+            for (index, resolver) in ctx.mesh.dns.iter().enumerate() {
+                let tag = format!("xross-mesh-dns-{index}");
+                dns["servers"].as_array_mut().unwrap().push(
+                    json!({"type":"udp","tag":tag,"server":resolver.address,"server_port":53}),
+                );
+                mesh_rules
+                    .push(json!({"domain_suffix":[resolver.suffix],"action":"route","server":tag}));
+            }
+            if let Some(existing) = dns["rules"].as_array() {
+                mesh_rules.extend(existing.iter().cloned());
+            }
+            dns["rules"] = json!(mesh_rules);
         }
         root.insert("inbounds".into(), json!(inbounds));
         root.insert("outbounds".into(), json!(outbounds));
@@ -1039,6 +1105,84 @@ mod tests {
         assert!(outbounds.iter().all(|o| o["tag"] != "block"));
         assert!(!json.to_string().contains("geoip\""));
         assert!(!json.to_string().contains("geosite\""));
+    }
+
+    #[test]
+    fn mesh_precedes_fake_ip_and_preserves_original_tun_intent() {
+        use crate::mesh::coexist::{CoexistencePlan, MeshDns, MeshRoute};
+        let (mut model, settings, mut ctx) = sample();
+        let tun = model
+            .inbounds
+            .iter_mut()
+            .find(|i| i.kind == InboundKind::Tun)
+            .unwrap();
+        tun.enabled = true;
+        tun.tun.strict_route = true;
+        tun.tun.route_exclude_addresses.push("192.0.2.0/24".into());
+        let original = serde_json::to_value(&model).unwrap();
+        ctx.mesh = CoexistencePlan {
+            active: true,
+            routes: vec![MeshRoute {
+                cidr: "100.64.0.0/10".into(),
+                interface: "xross-mesh-ts-test".into(),
+            }],
+            dns: vec![MeshDns {
+                suffix: "example.ts.net".into(),
+                address: "127.0.0.153".into(),
+            }],
+        };
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let tun = compiled.json["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["type"] == "tun")
+            .unwrap();
+        assert!(tun["route_exclude_address"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("100.64.0.0/10")));
+        assert!(tun["route_exclude_address"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("192.0.2.0/24")));
+        assert_eq!(tun["strict_route"], json!(!cfg!(windows)));
+        assert_eq!(
+            compiled.json["dns"]["rules"][0]["server"],
+            "xross-mesh-dns-0"
+        );
+        assert_eq!(compiled.json["route"]["rules"][0]["action"], "resolve");
+        assert_eq!(serde_json::to_value(&model).unwrap(), original);
+        ctx.mesh = Default::default();
+        let restored = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let tun = restored.json["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["type"] == "tun")
+            .unwrap();
+        assert_eq!(tun["strict_route"], true);
+    }
+
+    #[test]
+    fn tailscale_scopes_routes_before_starting_and_has_no_exit() {
+        let p = crate::mesh::MeshProfile {
+            provider: crate::mesh::MeshProvider::Tailscale,
+            remote_subnets: vec!["192.168.50.0/24".into()],
+            ..Default::default()
+        };
+        let json = compile_mesh(&p, Path::new("mesh-test"), 19090, "fake-key").unwrap();
+        assert_eq!(json["endpoints"][0]["system_interface"], false);
+        assert_eq!(json["endpoints"][0]["advertise_exit_node"], false);
+        assert_eq!(json["endpoints"][0]["advertise_routes"], json!([]));
+        let tun = &json["inbounds"][1];
+        assert_eq!(tun["strict_route"], false);
+        assert_eq!(
+            tun["route_address"],
+            json!(["100.64.0.0/10", "fd7a:115c:a1e0::/48", "192.168.50.0/24"])
+        );
+        assert_eq!(json["services"][0]["listen"], "127.0.0.1");
+        assert_eq!(json["services"][0]["secret"], "fake-key");
     }
 
     #[test]

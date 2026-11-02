@@ -199,6 +199,13 @@ impl CoreAdapter for XrayAdapter {
         // --- Routing -----------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
         rules.push(json!({"type": "field", "inboundTag": ["api-in"], "outboundTag": "api"}));
+        if !ctx.mesh.routes.is_empty() {
+            rules.push(json!({"type":"field","ip":ctx.mesh.routes.iter().map(|r| &r.cidr).collect::<Vec<_>>(),"outboundTag":"direct"}));
+        }
+        if !ctx.mesh.dns.is_empty() {
+            rules.push(json!({"type":"field","domain":ctx.mesh.dns.iter().map(|d|format!("domain:{}",d.suffix)).collect::<Vec<_>>(),"outboundTag":"direct"}));
+            rules.push(json!({"type":"field","ip":["127.0.0.153/32"],"outboundTag":"direct"}));
+        }
         if model.dns.enabled {
             rules.push(
                 json!({"type": "field", "network": "udp", "port": "53", "outboundTag": "dns-out"}),
@@ -325,6 +332,16 @@ impl CoreAdapter for XrayAdapter {
             root.insert("dns".into(), dns);
         }
 
+        if !ctx.mesh.dns.is_empty() {
+            let dns = root
+                .entry("dns")
+                .or_insert_with(|| json!({"servers":["localhost"]}));
+            let mut servers: Vec<Value> = ctx.mesh.dns.iter().map(|d|json!({"address":d.address,"port":53,"domains":[format!("domain:{}",d.suffix)],"skipFallback":true})).collect();
+            if let Some(existing) = dns["servers"].as_array() {
+                servers.extend(existing.iter().cloned());
+            }
+            dns["servers"] = json!(servers);
+        }
         let default_outbound = final_tag;
         Ok(CompiledConfig {
             core: CoreKind::Xray,
@@ -711,6 +728,33 @@ mod tests {
             std::path::PathBuf::from("/tmp/xross-test-run"),
         );
         (model, settings, ctx)
+    }
+
+    #[test]
+    fn mesh_domains_and_addresses_precede_proxy_rules() {
+        let (model, settings, mut ctx) = sample();
+        ctx.mesh.active = true;
+        ctx.mesh.routes.push(crate::mesh::coexist::MeshRoute {
+            cidr: "100.64.0.0/10".into(),
+            interface: "mesh-test".into(),
+        });
+        ctx.mesh.dns.push(crate::mesh::coexist::MeshDns {
+            suffix: "example.ts.net".into(),
+            address: "127.0.0.153".into(),
+        });
+        let config = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(
+            config.json["routing"]["rules"][1]["ip"],
+            json!(["100.64.0.0/10"])
+        );
+        assert_eq!(
+            config.json["routing"]["rules"][2]["domain"],
+            json!(["domain:example.ts.net"])
+        );
+        assert_eq!(
+            config.json["dns"]["servers"][0]["domains"],
+            json!(["domain:example.ts.net"])
+        );
     }
 
     #[test]

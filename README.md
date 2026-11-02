@@ -44,6 +44,17 @@ Xross 的核心设计不是"给某个 core 的 JSON 套一层界面"，而是维
 
 ## 已实现
 
+### 异地组网（Windows 首期）
+
+- EasyTier 2.6.4 Rust 库静态链接，由特权助手的独立 Xross 工作进程运行；不调用 EasyTier 外部程序。
+- Tailscale 使用独立的 sing-box 1.14.4，支持浏览器登录、自定义控制服务器、设备探测及完整 MagicDNS 域名。
+- 两种网络独立于代理配置，可同时连接；SQLite v3 加密保存配置，退出清理工作进程和所属 DNS 规则。
+- 自动生成代理直连、TUN 排除与 PAC 绕过；Windows 共存期间暂时关闭 `strict_route`，断开后恢复。
+- 新增“组网”页面及 `xross-cli mesh`。构建、权限、使用限制和测试边界见 [组网文档](docs/MESH.md)。
+
+Windows 首次构建使用 `powershell -NoProfile -File scripts/build-windows.ps1` 准备 protoc，另需安装 7-Zip。
+全流量 TUN 共存必须在独立 Windows 环境验收；macOS/Linux 首期仅保持源码兼容。
+
 ### 1. Core 管理（`crates/xross-core/src/core/`）
 
 - **二进制管理**：下载 GitHub Release、SHA-256 校验、多版本共存、按平台/架构选择、
@@ -120,10 +131,13 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   TUN 在 Core 运行时通过校验、重启生效，停止时只保存设置，Xray 下不可启用。
   Windows 使用 `Shell_NotifyIcon`，macOS 使用 AppKit status item，Linux 使用 StatusNotifierItem。
   **最小化到托盘**与**关闭到托盘**可在设置中分别开关；Linux 使用最小化/激活恢复，保留任务栏入口。
-- **提权助手**：GUI 永不提权。安装为 Windows 计划任务（登录时最高权限）/
+- **提权助手**：GUI 永不提权。安装为 Windows 计划任务（绑定当前用户，登录时最高权限）/
   macOS LaunchDaemon / Linux systemd service，通过本地 socket（Unix socket /
   Windows 命名管道）以单行 JSON 执行少量操作：TUN 准备、系统 DNS、Linux tproxy 规则。
   Unix 端校验 peer UID；安装/卸载走系统授权（UAC / osascript / pkexec）。
+  Windows GUI 及由它安装的助手在后台运行，不显示命令行窗口；UAC 授权提示保留。
+  Windows 安装器维护独立的助手程序副本与 High 完整性标签；GUI 保持普通权限。
+  更新程序后重新安装助手以同步其版本。
   未安装时 TUN 仍由 core 自行创建，界面明确提示助手状态。
 - 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；支持 `--minimized`。
 - 单实例锁（文件锁 + PID）。
@@ -153,7 +167,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - Profile 多配置：新建/切换/重命名/删除；导入/导出 JSON 备份。
 - 节点凭据与订阅 token 使用 **ChaCha20-Poly1305** 加密后落库
   （随机 32 字节密钥，0600 权限；也支持 `XROSS_SECRET_KEY`）。
-- 桌面通知未接入系统通知中心（当前使用应用内 toast）。
+- 桌面通知未接入系统通知中心（当前使用应用内 toast，见 [TODO](#todo)）。
 
 ### 9. UI 与更新
 
@@ -274,6 +288,49 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 - **i18n**：导航、页面标题、主要按钮支持中英双语；部分提示与错误文本仍为中文。
 - **WireGuard**：模型已预留协议位，但密钥字段未实现，编译时会给出警告并跳过。
 - 系统代理后端在非 GNOME/KDE 的 Linux 桌面上不可用（会明确提示）。
+
+## TODO
+
+### 协议与 core
+
+- [ ] 完善协议支持：AnyTLS 等（模型、手动添加、分享链接导入/导出、两套 adapter 同步补齐，
+      不支持时按既有约定降级并给出 warning）。
+- [ ] 优化操作连贯性：缺 core 时自动下载 core，缺 rule-set 时自动下载 rules，
+      需要提权时自动引导安装 helper，减少“先手动准备好再启动”的断点。
+
+### 系统集成
+
+- [ ] 系统 toast：接入 Windows 通知中心 / macOS UserNotifications / Linux 桌面通知，
+      替代当前仅有的应用内 toast。
+- [ ] 清理系统副作用：退出或卸载时回收提权计划任务 / systemd service / LaunchDaemon、
+      虚拟网卡、系统代理设置与 PAC 托管端口，避免端口被占用或残留规则。
+- [ ] 合并提权助手到健康检查界面：把 helper 的状态、安装、启动、卸载收进 `doctor`
+      式的检查列表，不再分散在设置页与 CLI。
+
+### 组网
+
+- [ ] **exit node**：选择某个组网节点作为出口。
+- [ ] **subnet**：宣告/访问子网路由。
+- [ ] **Tailscale / EasyTier 作为节点**：接入出站路由与出站组，而不只是独立开关。
+- [ ] **通过组网同步配置**：多设备经组网通道共享同一份 profile。
+
+### UI
+
+- [ ] 提高输入框的对比度（深/浅色主题下均需满足可读性）。
+- [ ] 提高边栏透明度，让窗口材质更明显。
+- [ ] 优化 macOS / Windows 下的标题栏布局（红绿灯与自绘控件的避让、拖动区域）。
+- [ ] 托盘显示 Tailscale / EasyTier 状态（连接状态与图标），与核心状态并列。
+
+### 文案与引导
+
+- [ ] 使用 Gemini Argon 润色文案：统一术语与语气，补齐错误/警告提示的中英双语。
+- [ ] 优化 Onboarding 体验：首次启动流程更连贯，按“下载 core → 添加订阅 → 启动”串成一条
+      引导路径，缺提权助手/缺 rule-set 时就地给出下一步动作，而不是让用户自己去找设置项。
+
+### 验证
+
+- [ ] macOS / Linux 实机验证：托盘（status item / StatusNotifierItem）、vibrancy 与
+      窗口材质、系统代理、提权助手（LaunchDaemon / systemd）、TUN 与组网路径。
 
 ## 目录结构
 

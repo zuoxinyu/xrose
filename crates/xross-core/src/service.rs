@@ -88,6 +88,8 @@ pub struct RuntimeView {
 /// Everything the UI needs for one frame. Cloned at ~3 Hz by the view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSnapshot {
+    #[serde(default)]
+    pub mesh: crate::mesh::MeshSnapshot,
     pub app_version: String,
     pub settings: Settings,
     pub model: AppModel,
@@ -161,6 +163,7 @@ impl UiSnapshot {
 }
 
 struct Inner {
+    mesh: crate::mesh::controller::MeshController,
     paths: AppPaths,
     settings: RwLock<Settings>,
     model: RwLock<AppModel>,
@@ -258,7 +261,9 @@ impl AppService {
             .build()
             .map_err(|e| Error::other(format!("无法创建异步运行时：{e}")))?;
 
+        let mesh = crate::mesh::controller::MeshController::new(paths.clone(), store.clone())?;
         let inner = Arc::new(Inner {
+            mesh,
             paths,
             settings: RwLock::new(settings),
             model: RwLock::new(model),
@@ -377,6 +382,7 @@ impl AppService {
             error: None,
         };
         UiSnapshot {
+            mesh: self.inner.mesh.snapshot(),
             app_version: APP_VERSION.into(),
             settings,
             model,
@@ -1826,6 +1832,7 @@ impl AppService {
                 );
                 match PacServer::start(pac, settings.pac_port) {
                     Ok(server) => {
+                        server.update_mesh(&service.inner.core.mesh_plan());
                         let url = server.info.url.clone();
                         *service.inner.pac.lock() = Some(server);
                         Some(url)
@@ -2487,6 +2494,159 @@ impl AppService {
         });
     }
 
+    pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
+        let id = self.inner.mesh.save(profile)?;
+        self.toast(ToastLevel::Success, "组网配置已加密保存");
+        Ok(id)
+    }
+
+    pub fn delete_mesh_profile(&self, id: &str) -> Result<()> {
+        self.inner.mesh.delete(id)
+    }
+
+    pub fn mesh_connect(&self, id: &str) {
+        self.mesh_action("connect", id.to_string(), None);
+    }
+    pub fn mesh_disconnect(&self, provider: crate::mesh::MeshProvider) {
+        self.mesh_action("disconnect", String::new(), Some(provider));
+    }
+    pub fn mesh_logout(&self, provider: crate::mesh::MeshProvider) {
+        self.mesh_action("logout", String::new(), Some(provider));
+    }
+    pub fn mesh_probe(&self, provider: crate::mesh::MeshProvider, ip: String) {
+        self.mesh_action("probe", ip, Some(provider));
+    }
+    pub fn mesh_install_tailscale(&self) {
+        self.mesh_action("install", String::new(), None);
+    }
+
+    fn mesh_action(
+        &self,
+        action: &'static str,
+        value: String,
+        provider: Option<crate::mesh::MeshProvider>,
+    ) {
+        if self.is_busy("mesh") {
+            return;
+        }
+        self.set_busy("mesh", true);
+        let service = self.clone();
+        self.spawn(async move {
+            let _operation = service.inner.mesh.operation.lock().await;
+            let result: Result<()> = async {
+                match action {
+                    "connect" => {
+                        if !cfg!(windows) {
+                            return Err(Error::other("异地组网当前仅在 Windows 启用"));
+                        }
+                        let mut preflight = service.inner.core.mesh_plan();
+                        preflight.active = true;
+                        service.inner.core.apply_mesh_plan(preflight).await?;
+                        if let Err(error) = service.inner.mesh.connect(&value).await {
+                            let _ = service.reconcile_mesh().await;
+                            return Err(error);
+                        }
+                    }
+                    "disconnect" => service.inner.mesh.disconnect(provider.unwrap()).await?,
+                    "logout" => service.inner.mesh.logout(provider.unwrap()).await?,
+                    "probe" => {
+                        service
+                            .inner
+                            .mesh
+                            .probe(provider.unwrap(), value.clone())
+                            .await?
+                    }
+                    "install" => service.inner.mesh.install().await?,
+                    _ => unreachable!(),
+                }
+                service.reconcile_mesh().await
+            }
+            .await;
+            service.set_busy("mesh", false);
+            match result {
+                Ok(()) if action == "connect" => {
+                    let state = service
+                        .inner
+                        .mesh
+                        .snapshot()
+                        .networks
+                        .into_iter()
+                        .find(|state| state.profile_id == value);
+                    match state {
+                        Some(state) if state.phase == crate::mesh::MeshPhase::NeedsLogin => service
+                            .toast(
+                                ToastLevel::Info,
+                                if state.login_url.is_some() {
+                                    "请点击“在浏览器登录”完成 Tailscale 设备授权"
+                                } else {
+                                    "Tailscale 正在等待登录或管理员批准"
+                                },
+                            ),
+                        _ => service.toast(ToastLevel::Success, "组网已连接"),
+                    }
+                }
+                Ok(()) => service.toast(
+                    ToastLevel::Success,
+                    match action {
+                        "disconnect" => "组网已断开，身份已保留",
+                        "logout" => "已请求注销组网身份",
+                        "install" => "Tailscale 组网组件已安装并验证",
+                        _ => "正在探测组网设备",
+                    },
+                ),
+                Err(error) => service.toast(ToastLevel::Error, error.to_string()),
+            }
+        });
+    }
+
+    async fn reconcile_mesh(&self) -> Result<()> {
+        let states = self.inner.mesh.snapshot().networks;
+        let plan = match crate::mesh::coexist::plan(&states, &[]) {
+            Ok(plan) => plan,
+            Err(error) => {
+                // Keep the previously applied network. Pause the backend that
+                // introduces a route absent from the last successful plan.
+                let previous = self.inner.core.mesh_plan();
+                let offender = states
+                    .iter()
+                    .find(|s| {
+                        s.routes.iter().any(|r| {
+                            !previous
+                                .routes
+                                .iter()
+                                .any(|old| old.cidr == *r && old.interface == s.interface)
+                        })
+                    })
+                    .or_else(|| states.last());
+                if let Some(state) = offender {
+                    self.inner.mesh.disconnect(state.provider).await?;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.inner.core.apply_mesh_plan(plan.clone()).await {
+            // Keep the proxy's verified configuration, and remove the new mesh
+            // connection rather than leaving traffic captured by the proxy TUN.
+            for state in states.iter().filter(|s| {
+                matches!(
+                    s.phase,
+                    crate::mesh::MeshPhase::Starting | crate::mesh::MeshPhase::Connected
+                )
+            }) {
+                let _ = self.inner.mesh.disconnect(state.provider).await;
+            }
+            return Err(error);
+        }
+        if let Some(compiled) = self.inner.core.last_compiled() {
+            *self.inner.compiled_json.write() = compiled.to_pretty_string().ok();
+            *self.inner.compiled.write() = Some(compiled);
+        }
+        if let Some(pac) = self.inner.pac.lock().as_ref() {
+            pac.update_mesh(&plan);
+        }
+        Ok(())
+    }
+
     fn start_monitor(&self) {
         let weak = Arc::downgrade(&self.inner);
         self.spawn(async move {
@@ -2504,6 +2664,16 @@ impl AppService {
                 if tick % 3 == 0 {
                     if let Ok(status) = tokio::task::spawn_blocking(privilege::status).await {
                         *inner.helper.write() = status;
+                    }
+                }
+                if tick % 2 == 0 && !service.is_busy("core") {
+                    if let Ok(_guard) = inner.mesh.operation.try_lock() {
+                        if let Err(error) = inner.mesh.refresh().await {
+                            service.toast(ToastLevel::Warning, error.to_string());
+                        }
+                        if let Err(error) = service.reconcile_mesh().await {
+                            service.toast(ToastLevel::Error, error.to_string());
+                        }
                     }
                 }
                 let state = service.inner.core.state();
@@ -2581,6 +2751,7 @@ impl AppService {
 
     /// Best-effort cleanup called by the UI on exit.
     pub fn shutdown(&self) {
+        self.inner.mesh.shutdown();
         let _ = self.persist_model();
         if self.inner.settings.read().system_proxy {
             let _ = self.inner.proxy.lock().restore();
@@ -2723,11 +2894,29 @@ impl AppService {
             #[cfg(target_os = "macos")]
             let program = "open";
             #[cfg(target_os = "windows")]
-            let program = "cmd";
-            #[cfg(target_os = "windows")]
-            let args = vec!["/C".to_string(), "start".to_string(), String::new(), url];
+            {
+                // Authentication URLs can contain shell metacharacters. Send
+                // the URL directly to Windows instead of passing it through cmd.
+                use std::os::windows::ffi::OsStrExt;
+                let target: Vec<u16> = std::ffi::OsStr::new(&url)
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect();
+                let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+                unsafe {
+                    windows_sys::Win32::UI::Shell::ShellExecuteW(
+                        std::ptr::null_mut(),
+                        verb.as_ptr(),
+                        target.as_ptr(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        1,
+                    );
+                }
+            }
             #[cfg(not(target_os = "windows"))]
             let args = vec![url];
+            #[cfg(not(target_os = "windows"))]
             let _ = tokio::process::Command::new(program).args(args).spawn();
         });
     }
@@ -2755,6 +2944,32 @@ fn pretty_host(url: &str) -> String {
 mod tests {
     use super::*;
     use crate::model::Protocol;
+
+    #[test]
+    fn mesh_reconciliation_preserves_pending_proxy_edits_and_profile() {
+        let (service, _dir) = service();
+        service.import_content("vless://11111111-2222-3333-4444-555555555555@pending.example.com:443?security=tls#pending");
+        // Represent edits made while a real core was running, without starting one.
+        service.inner.config_dirty.store(true, Ordering::SeqCst);
+        let before = serde_json::to_value(service.model()).unwrap();
+        assert!(service.snapshot().config_dirty);
+        let active = service.snapshot().active_profile;
+        service.inner.rt.block_on(async {
+            service
+                .inner
+                .core
+                .apply_mesh_plan(crate::mesh::coexist::CoexistencePlan {
+                    active: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            service.reconcile_mesh().await.unwrap();
+        });
+        assert_eq!(serde_json::to_value(service.model()).unwrap(), before);
+        assert_eq!(service.snapshot().active_profile, active);
+        assert!(service.snapshot().config_dirty);
+    }
 
     fn service() -> (AppService, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

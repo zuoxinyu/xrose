@@ -46,6 +46,9 @@ const SYSTEMD_UNIT: &str = "xross-helper.service";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HelperRequest {
+    Mesh {
+        request: Box<crate::mesh::ipc::MeshRequest>,
+    },
     Ping,
     Status,
     /// Create the TUN device ahead of time (Windows wintun helper).
@@ -156,7 +159,10 @@ impl HelperStatus {
 }
 
 fn socket_name() -> Result<interprocess::local_socket::Name<'static>> {
-    SOCKET_NAME
+    // A foreground test helper can use an isolated pipe without replacing the
+    // installed helper or accepting commands from the user's running GUI.
+    std::env::var("XROSS_HELPER_SOCKET")
+        .unwrap_or_else(|_| SOCKET_NAME.into())
         .to_ns_name::<GenericNamespaced>()
         .map_err(|e| Error::other(format!("无效的 helper socket 名：{e}")))
 }
@@ -193,8 +199,13 @@ where
     F: FnMut(HelperRequest) -> HelperResponse + Send + 'static,
 {
     let name = socket_name()?;
-    let listener = ListenerOptions::new()
-        .name(name)
+    let options = ListenerOptions::new().name(name);
+    #[cfg(windows)]
+    let options = {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        options.security_descriptor(helper_security_descriptor()?)
+    };
+    let listener = options
         .create_sync()
         .map_err(|e| Error::other(format!("创建 helper socket 失败：{e}")))?;
     let mut handler = handler;
@@ -212,14 +223,25 @@ where
         }
         let mut line = String::new();
         {
-            let mut reader = BufReader::new(&mut stream);
+            let mut reader = BufReader::new(std::io::Read::take(&mut stream, 262_145));
             if reader.read_line(&mut line).is_err() {
                 continue;
             }
         }
+        if line.len() > 262_144 {
+            continue;
+        }
         let response = match serde_json::from_str::<HelperRequest>(line.trim()) {
+            Ok(HelperRequest::Mesh { request }) => {
+                let peer_pid = stream.peer_creds().ok().and_then(|c| c.pid());
+                if peer_pid.map(|pid| pid as u32) != Some(request.owner_pid) {
+                    HelperResponse::error("组网调用进程身份校验失败")
+                } else {
+                    handler(HelperRequest::Mesh { request })
+                }
+            }
             Ok(request) => handler(request),
-            Err(err) => HelperResponse::error(format!("请求解析失败：{err}")),
+            Err(_) => HelperResponse::error("请求解析失败，请检查客户端与助手版本"),
         };
         let stop = matches!(response, HelperResponse::Stop { .. });
         let _ = stream.write_all(
@@ -236,6 +258,13 @@ where
 /// `xross-cli helper` so both behave identically.
 pub fn handle_request(request: HelperRequest) -> HelperResponse {
     match request {
+        HelperRequest::Mesh { request } => match crate::mesh::ipc::dispatch(&request) {
+            Ok(reply) => match serde_json::to_string(&reply) {
+                Ok(message) => HelperResponse::ok(message),
+                Err(_) => HelperResponse::error("组网响应编码失败"),
+            },
+            Err(err) => HelperResponse::error(err.to_string()),
+        },
         HelperRequest::Ping => HelperResponse::ok("pong"),
         HelperRequest::Status => HelperResponse::ok(format!(
             "Xross 提权助手 {}（{}，管理员权限）",
@@ -266,8 +295,7 @@ pub fn is_elevated() -> bool {
 fn detect_elevated() -> bool {
     #[cfg(windows)]
     {
-        // SAFETY: IsUserAnAdmin takes no arguments and has no preconditions.
-        unsafe { windows_sys::Win32::UI::Shell::IsUserAnAdmin() != 0 }
+        windows_elevated()
     }
     #[cfg(unix)]
     {
@@ -277,6 +305,74 @@ fn detect_elevated() -> bool {
     {
         false
     }
+}
+
+#[cfg(windows)]
+fn windows_elevated() -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Security::{
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+        UI::Shell::IsUserAnAdmin,
+    };
+    // An explicitly labelled executable can retain an enabled Administrators
+    // SID while being capped at Medium integrity. Such a token cannot use the
+    // privileges needed for Wintun, even though IsUserAnAdmin returns true.
+    unsafe {
+        let mut raw_token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw_token) == 0 {
+            return false;
+        }
+        let token = OwnedHandle::from_raw_handle(raw_token);
+        let mut size = 0;
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenIntegrityLevel,
+            std::ptr::null_mut(),
+            0,
+            &mut size,
+        );
+        if size == 0 {
+            return false;
+        }
+        let mut data = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+        if GetTokenInformation(
+            token.as_raw_handle(),
+            TokenIntegrityLevel,
+            data.as_mut_ptr().cast(),
+            size,
+            &mut size,
+        ) == 0
+        {
+            return false;
+        }
+        let sid = (*(data.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
+        let count = *GetSidSubAuthorityCount(sid);
+        if count == 0 {
+            return false;
+        }
+        windows_token_is_elevated(
+            IsUserAnAdmin() != 0,
+            *GetSidSubAuthority(sid, u32::from(count) - 1),
+        )
+    }
+}
+
+#[cfg(windows)]
+fn windows_token_is_elevated(administrator: bool, integrity: u32) -> bool {
+    administrator && integrity >= 0x3000
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn administrator_membership_at_medium_integrity_is_not_elevation() {
+    assert!(!windows_token_is_elevated(true, 0x2000));
+    assert!(!windows_token_is_elevated(false, 0x3000));
+    assert!(windows_token_is_elevated(true, 0x3000));
+    assert!(windows_token_is_elevated(true, 0x4000));
 }
 
 /// Cheap status used before the background monitor has probed the pipe. It
@@ -495,6 +591,10 @@ fn elevated_args(flag: &str) -> Vec<String> {
 /// Handles helper flags before the GUI starts. Returns `Ok(true)` when the
 /// flag was consumed and the process should exit.
 pub fn helper_main(args: &[String]) -> Result<bool> {
+    if args.first().map(String::as_str) == Some("--mesh-worker") {
+        crate::mesh::worker::main()?;
+        return Ok(true);
+    }
     let Some(flag) = args.first().map(String::as_str) else {
         return Ok(false);
     };
@@ -564,6 +664,11 @@ fn run_helper() -> Result<()> {
     ) {
         return Ok(());
     }
+    crate::mesh::platform::recover_dns(
+        &crate::paths::AppPaths::discover()
+            .data_dir
+            .join("mesh-state"),
+    )?;
     serve(handle_request)
 }
 
@@ -582,13 +687,66 @@ fn authorize(stream: &Stream) -> bool {
             Err(_) => false,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        // The Windows named pipe DACL already limits access to the installing
-        // user and administrators.
-        let _ = stream;
-        true
+        stream
+            .peer_creds()
+            .ok()
+            .and_then(|c| c.pid())
+            .is_some_and(|pid| crate::mesh::platform::OwnerProcess::open(pid as u32).is_ok())
     }
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> Result<String> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
+            TOKEN_USER,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+    unsafe {
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(Error::other("无法读取助手用户身份"));
+        }
+        let _token = OwnedHandle::from_raw_handle(token);
+        let mut size = 0;
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut size);
+        let mut data = vec![0usize; (size as usize).div_ceil(std::mem::size_of::<usize>())];
+        if GetTokenInformation(token, TokenUser, data.as_mut_ptr().cast(), size, &mut size) == 0 {
+            return Err(Error::other("无法读取助手用户身份"));
+        }
+        let mut text = std::ptr::null_mut();
+        if ConvertSidToStringSidW((*(data.as_ptr() as *const TOKEN_USER)).User.Sid, &mut text) == 0
+        {
+            return Err(Error::other("无法验证助手用户身份"));
+        }
+        let mut length = 0;
+        while *text.add(length) != 0 {
+            length += 1;
+        }
+        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+        LocalFree(text.cast());
+        Ok(sid)
+    }
+}
+
+#[cfg(windows)]
+fn helper_security_descriptor(
+) -> Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    let sid = current_user_sid()?;
+    // An elevated process's default pipe ACL/label rejects its own unelevated
+    // GUI. Explicitly admit that SID at Medium IL, then verify every peer PID.
+    let sddl = widestring::U16CString::from_str(format!(
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;{sid})S:(ML;;NW;;;ME)"
+    ))
+    .map_err(|_| Error::other("助手管道安全描述符无效"))?;
+    interprocess::os::windows::security_descriptor::SecurityDescriptor::deserialize(&sddl)
+        .map_err(|_| Error::other("无法设置助手管道用户访问权限"))
 }
 
 #[cfg(unix)]
@@ -636,9 +794,30 @@ mod platform {
     }
 
     pub fn install() -> Result<String> {
-        let exe =
+        let source =
             std::env::current_exe().map_err(|e| Error::other(format!("定位当前程序失败：{e}")))?;
-        let xml = task_xml(&exe);
+        let directory = crate::paths::AppPaths::discover().data_dir.join("helper");
+        crate::mesh::platform::secure_directory(&directory)?;
+        let exe = directory.join("xross-helper.exe");
+        if source != exe {
+            let _ = super::request_shutdown();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+            while super::helper_available() && std::time::Instant::now() < deadline {
+                super::invalidate_status();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let bytes = std::fs::read(&source)
+                .map_err(|_| Error::other("无法读取助手安装文件，请重新安装 Xross"))?;
+            crate::util::atomic_write(&exe, &bytes)
+                .map_err(|_| Error::other("无法更新助手程序，请停止提权助手后重新安装"))?;
+        }
+        // Only the installed helper receives a High label. A Medium-labelled
+        // development tree must not cap the task or its worker processes.
+        run_collect(
+            "icacls",
+            &[&exe.to_string_lossy(), "/setintegritylevel", "H"],
+        )?;
+        let xml = task_xml(&exe, &super::current_user_sid()?);
         let path = std::env::temp_dir().join("xross-helper-task.xml");
         write_utf16(&path, &xml)?;
         let path_text = path.display().to_string();
@@ -722,11 +901,12 @@ mod platform {
             .replace('"', "&quot;")
     }
 
-    /// Scheduled task XML: runs at logon for the Users group with the highest
-    /// available token, so the helper sees an elevated token without a UAC
-    /// prompt on every start.
-    fn task_xml(exe: &Path) -> String {
+    /// Bind both logon and on-demand activation to the installing user's
+    /// highest interactive token; a group principal does not identify the
+    /// individual whose GUI and driver operations this helper must serve.
+    fn task_xml(exe: &Path, user_sid: &str) -> String {
         let command = xml_escape(&exe.to_string_lossy());
+        let user_sid = xml_escape(user_sid);
         format!(
             r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -736,11 +916,13 @@ mod platform {
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
+      <UserId>{user_sid}</UserId>
     </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <GroupId>S-1-5-32-545</GroupId>
+      <UserId>{user_sid}</UserId>
+      <LogonType>InteractiveToken</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
@@ -774,6 +956,19 @@ mod platform {
         )
     }
 
+    #[cfg(test)]
+    #[test]
+    fn scheduled_helper_uses_the_installing_users_highest_interactive_token() {
+        let sid = "S-1-5-21-111-222-333-1001";
+        let xml = task_xml(Path::new(r"C:\Xross & test\xross-app.exe"), sid);
+        assert_eq!(xml.matches(&format!("<UserId>{sid}</UserId>")).count(), 2);
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("<RunLevel>HighestAvailable</RunLevel>"));
+        assert!(!xml.contains("<GroupId>"));
+        assert!(xml.contains(r"C:\Xross &amp; test\xross-app.exe"));
+        assert!(xml.contains("<Arguments>--helper</Arguments>"));
+    }
+
     pub fn run_elevated(args: &[String]) -> Result<()> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
@@ -782,7 +977,7 @@ mod platform {
         use windows_sys::Win32::UI::Shell::{
             ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
         };
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
         let exe =
             std::env::current_exe().map_err(|e| Error::other(format!("定位当前程序失败：{e}")))?;
@@ -805,7 +1000,8 @@ mod platform {
         info.lpVerb = verb.as_ptr();
         info.lpFile = file.as_ptr();
         info.lpParameters = params.as_ptr();
-        info.nShow = SW_SHOWNORMAL;
+        // Hide the helper operation's console, while preserving the UAC prompt.
+        info.nShow = SW_HIDE;
 
         // SAFETY: all pointers refer to live, null-terminated UTF-16 buffers
         // that outlive the call.
@@ -1530,6 +1726,23 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_pipe_accepts_and_authenticates_its_user() {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        let name = format!("io.xross.helper-test.{}", uuid::Uuid::new_v4())
+            .to_ns_name::<GenericNamespaced>()
+            .unwrap();
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .security_descriptor(helper_security_descriptor().unwrap())
+            .create_sync()
+            .unwrap();
+        let _client = Stream::connect(name).unwrap();
+        let accepted = listener.accept().unwrap();
+        assert!(authorize(&accepted));
+    }
 
     #[test]
     fn request_wire_format_is_stable() {

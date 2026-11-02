@@ -36,6 +36,9 @@ pub struct StartOutcome {
 /// Owns everything about the running core. UI-facing calls are limited to
 /// start/stop/restart/validate/apply and state snapshots.
 pub struct CoreManager {
+    operation: tokio::sync::Mutex<()>,
+    mesh: Mutex<crate::mesh::coexist::CoexistencePlan>,
+    applied: Mutex<Option<AppliedConfig>>,
     paths: AppPaths,
     binaries: BinaryManager,
     logs: LogBus,
@@ -46,11 +49,23 @@ pub struct CoreManager {
     last_core: Mutex<Option<CoreKind>>,
 }
 
+#[derive(Clone)]
+struct AppliedConfig {
+    model: AppModel,
+    settings: Settings,
+    core: CoreKind,
+    compiled: CompiledConfig,
+    path: PathBuf,
+}
+
 impl CoreManager {
     pub fn new(paths: AppPaths, logs: LogBus) -> Self {
         let binaries = BinaryManager::new(&paths);
         let supervisor = ProcessSupervisor::new(logs.clone());
         Self {
+            operation: tokio::sync::Mutex::new(()),
+            mesh: Mutex::new(Default::default()),
+            applied: Mutex::new(None),
             paths,
             binaries,
             logs,
@@ -135,12 +150,23 @@ impl CoreManager {
         settings: &Settings,
         core: CoreKind,
     ) -> Result<StartOutcome> {
+        let _guard = self.operation.lock().await;
+        self.prepare_locked(model, settings, core).await
+    }
+
+    async fn prepare_locked(
+        &self,
+        model: &AppModel,
+        settings: &Settings,
+        core: CoreKind,
+    ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
-        let ctx = adapters::CompileContext::new(
+        let mut ctx = adapters::CompileContext::new(
             settings,
             self.paths.data_dir.clone(),
             self.paths.runtime_dir.clone(),
         );
+        ctx.mesh = self.mesh.lock().clone();
         let compiled = adapters::adapter_for(core).compile(model, settings, &ctx)?;
         for warning in &compiled.warnings {
             self.logs
@@ -194,7 +220,8 @@ impl CoreManager {
         settings: &Settings,
         core: CoreKind,
     ) -> Result<StartOutcome> {
-        let mut outcome = self.prepare(model, settings, core).await?;
+        let _guard = self.operation.lock().await;
+        let mut outcome = self.prepare_locked(model, settings, core).await?;
         if !outcome.report.ok {
             return Ok(outcome);
         }
@@ -209,20 +236,148 @@ impl CoreManager {
             max_retries: settings.watchdog_max_retries,
         };
         self.supervisor.start(spec, watchdog).await?;
+        *self.applied.lock() = Some(AppliedConfig {
+            model: model.clone(),
+            settings: settings.clone(),
+            core,
+            compiled: outcome.compiled.clone(),
+            path: outcome.config_path.clone(),
+        });
         outcome.started = true;
         Ok(outcome)
     }
 
     pub async fn stop(&self) -> Result<()> {
+        let _guard = self.operation.lock().await;
         self.supervisor.stop().await
     }
 
     pub async fn restart(&self) -> Result<()> {
+        let _guard = self.operation.lock().await;
         self.supervisor.restart().await
     }
 
     pub fn last_tail(&self) -> Vec<String> {
         self.supervisor.last_tail()
+    }
+
+    pub fn mesh_plan(&self) -> crate::mesh::coexist::CoexistencePlan {
+        self.mesh.lock().clone()
+    }
+
+    /// Recompile the last applied intent, keeping unsaved UI edits completely separate.
+    /// Validate before stopping; retain the original bytes and restart them on failure.
+    pub async fn apply_mesh_plan(
+        &self,
+        plan: crate::mesh::coexist::CoexistencePlan,
+    ) -> Result<bool> {
+        let _guard = self.operation.lock().await;
+        if *self.mesh.lock() == plan {
+            return Ok(false);
+        }
+        if !self.state().phase.is_alive() {
+            *self.mesh.lock() = plan;
+            return Ok(false);
+        }
+        let old = self
+            .applied
+            .lock()
+            .clone()
+            .ok_or_else(|| Error::other("缺少已应用代理配置，请先重新应用配置"))?;
+        let mut ctx = adapters::CompileContext::new(
+            &old.settings,
+            self.paths.data_dir.clone(),
+            self.paths.runtime_dir.clone(),
+        );
+        ctx.mesh = plan.clone();
+        let compiled = adapters::adapter_for(old.core).compile(&old.model, &old.settings, &ctx)?;
+        let candidate = self.paths.runtime_dir.join("mesh-candidate.json");
+        atomic_write(&candidate, compiled.to_pretty_string()?.as_bytes())?;
+        let binary = self.resolve_binary(old.core, &old.settings)?;
+        let validation = adapters::validate(old.core, &binary, &candidate).await;
+        let _ = std::fs::remove_file(&candidate);
+        let report = validation?;
+        if !report.ok {
+            return Err(Error::config("组网共存配置校验失败，原代理继续运行"));
+        }
+        self.supervisor.stop().await?;
+        let next = AppliedConfig {
+            compiled: compiled.clone(),
+            ..old.clone()
+        };
+        replace_with_rollback(self.spawn_applied(&next), async {
+            self.supervisor.stop().await?;
+            self.spawn_applied(&old).await
+        })
+        .await?;
+        *self.mesh.lock() = plan;
+        *self.applied.lock() = Some(next);
+        *self.last_compiled.lock() = Some(compiled);
+        *self.last_validation.lock() = Some(report);
+        Ok(true)
+    }
+
+    async fn spawn_applied(&self, applied: &AppliedConfig) -> Result<()> {
+        atomic_write(
+            &applied.path,
+            applied.compiled.to_pretty_string()?.as_bytes(),
+        )?;
+        let mut spec = SpawnSpec::new(
+            applied.core,
+            self.resolve_binary(applied.core, &applied.settings)?,
+        );
+        spec.args = run_args(applied.core, &applied.path);
+        spec.workdir = Some(self.paths.data_dir.clone());
+        spec.config_path = Some(applied.path.clone());
+        // Do not let watchdog retries conceal a failed transaction.
+        self.supervisor
+            .start(
+                spec,
+                WatchdogConfig {
+                    enabled: false,
+                    max_retries: 0,
+                },
+            )
+            .await?;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if self.state().phase != ProcessPhase::Running {
+            return Err(Error::other("组网共存配置启动失败"));
+        }
+        #[cfg(windows)]
+        {
+            let ports: Vec<_> = applied
+                .compiled
+                .inbounds
+                .iter()
+                .filter(|inbound| {
+                    inbound.port != 0 && ["mixed", "http", "socks"].contains(&inbound.kind.as_str())
+                })
+                .map(|inbound| inbound.port)
+                .collect();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let state = self.state();
+                if state.phase != ProcessPhase::Running {
+                    return Err(Error::other("组网共存配置启动后异常退出"));
+                }
+                if state.pid.is_some_and(|pid| {
+                    ports
+                        .iter()
+                        .all(|port| crate::system::port_owner::owns_listener(pid, *port))
+                }) {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(Error::other("组网共存配置的代理监听端口未就绪"));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        self.supervisor.set_watchdog(WatchdogConfig {
+            enabled: applied.settings.watchdog,
+            max_retries: applied.settings.watchdog_max_retries,
+        });
+        Ok(())
     }
 
     /// Re-runs validation against the most recently written config.
@@ -272,6 +427,19 @@ impl CoreManager {
     }
 }
 
+async fn replace_with_rollback(
+    replace: impl std::future::Future<Output = Result<()>>,
+    restore: impl std::future::Future<Output = Result<()>>,
+) -> Result<()> {
+    if let Err(error) = replace.await {
+        restore.await.map_err(|_| {
+            Error::other("组网共存配置启动失败，原代理恢复失败；请停止组网并检查代理日志")
+        })?;
+        return Err(Error::other(format!("{error}；已恢复原代理配置")));
+    }
+    Ok(())
+}
+
 pub fn run_args(core: CoreKind, config_path: &Path) -> Vec<String> {
     match core {
         CoreKind::Xray => vec![
@@ -297,5 +465,46 @@ mod tests {
         let path = Path::new("/tmp/config.json");
         assert_eq!(run_args(CoreKind::Xray, path)[1], "-config");
         assert_eq!(run_args(CoreKind::SingBox, path)[1], "-c");
+    }
+
+    #[tokio::test]
+    async fn mesh_transaction_restores_on_start_failure() {
+        let value = std::cell::Cell::new("original");
+        let result = replace_with_rollback(
+            async {
+                value.set("candidate");
+                Err(Error::other("测试失败"))
+            },
+            async {
+                value.set("original");
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(value.get(), "original");
+        assert!(result.unwrap_err().to_string().contains("已恢复"));
+        replace_with_rollback(
+            async {
+                value.set("candidate");
+                Ok(())
+            },
+            async {
+                value.set("unexpected rollback");
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(value.get(), "candidate");
+    }
+
+    #[tokio::test]
+    async fn mesh_transaction_reports_failed_recovery() {
+        let error = replace_with_rollback(async { Err(Error::other("测试失败")) }, async {
+            Err(Error::other("恢复失败"))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("原代理恢复失败"));
     }
 }

@@ -1,3 +1,6 @@
+// The GUI also hosts the scheduled privilege helper; neither needs a console.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app_icon;
 mod brand_assets;
 mod i18n;

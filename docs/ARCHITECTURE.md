@@ -31,6 +31,20 @@
 | 连接列表 | 无 | Clash API | 界面区分 core 能力 |
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
+| 组网访问 | 优先 freedom 规则 + 专用 DNS | 绑定组网接口直连 + TUN 排除 + 专用 DNS | `CompileContext.mesh` 注入，不改变 AppModel；MagicDNS 优先于 fake-IP |
+| Windows 组网与 TUN 共存 | 无内建 TUN | 暂时关闭 `strict_route` | 明确提示 DNS 防泄漏过滤放宽，全部组网断开后恢复 |
+
+组网独立于 `CoreKind`：`mesh::MeshProfile` 表达网络身份、入口和远端网段意图，
+`MeshController` 通过带版本和调用者鉴权的助手 IPC 管理会话。EasyTier 2.6.4
+静态库只在 Xross `--mesh-worker` 初始化；Tailscale 使用固定 sing-box 1.14.4
+子进程及鉴权 gRPC。UI 只调用 AppService、读取 `UiSnapshot.mesh`。
+SQLite schema v3 的 `mesh_profiles` 全量加密，不与代理 profile 混写。
+
+`CoreManager` 独立保存最后已应用的模型、设置和编译结果。组网变化串行执行
+编译、校验、必要的重启及进程检查，失败回滚已保存配置，保留用户待应用编辑。
+Tailscale 使用用户态 endpoint 和仅包含批准路由的专用 TUN，避免 `accept_routes`
+把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 NRPT。
+详见 [异地组网边界与构建说明](MESH.md)。
 
 连接诊断由 `AppService` 统一提供：后台监控采样维护有界的会话录制，
 `UiSnapshot.recording` 提供回看数据，导出在后台完成。录制不采集正文，

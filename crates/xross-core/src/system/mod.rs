@@ -3,7 +3,7 @@
 
 pub mod autostart;
 pub mod pac;
-mod port_owner;
+pub(crate) mod port_owner;
 pub mod privilege;
 pub mod proxy;
 pub mod single_instance;

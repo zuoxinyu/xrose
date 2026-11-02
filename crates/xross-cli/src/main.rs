@@ -13,6 +13,14 @@ use xross_core::AppService;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    match privilege::helper_main(&args) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("提权助手：{err}");
+            std::process::exit(1);
+        }
+    }
     let result = match args.first().map(String::as_str) {
         Some("compile") => compile(&args[1..]),
         Some("check") => check(&args[1..]),
@@ -27,6 +35,7 @@ fn main() {
         Some("run") => run_core(&args[1..]),
         Some("helper") => helper_command(&args[1..]),
         Some("trace") => trace_link(&args[1..]),
+        Some("mesh") => mesh_command(&args[1..]),
         Some("demo") => demo(),
         Some("version") | Some("--version") | Some("-V") => {
             println!("xross-cli {}", env!("CARGO_PKG_VERSION"));
@@ -73,9 +82,239 @@ fn usage() {
   xross-cli trace <https://…|tcp://…|udp://…|icmp://…>   追踪测试链接
   xross-cli demo                    打印带示例节点的 sing-box + xray 配置
   xross-cli version
+  xross-cli mesh save <file|-> [--home DIR]    加密保存 JSON 配置；密钥只从文件/标准输入读取
+  xross-cli mesh list|status|doctor [--home DIR]
+  xross-cli mesh install [--home DIR]         下载并验证 Tailscale/Wintun 组件
+  xross-cli mesh check [--home DIR]           离线校验独立 Tailscale 配置，不启动网卡
+  xross-cli mesh connect <ID> [ID...] [--seconds N] [--home DIR]
+  xross-cli mesh probe <ID> <IP> [--home DIR]
+  xross-cli mesh disconnect|logout|delete <ID> [--home DIR]
 
 环境变量 XROSS_HOME 可指定配置/数据目录。"#
     );
+}
+
+fn mesh_command(args: &[String]) -> Result<(), String> {
+    use xross_core::mesh::{
+        self,
+        ipc::{MeshCommand, MeshRequest},
+        MeshProfile, MeshSecret,
+    };
+    let (_, _, home, positional) = parse_args(args);
+    let paths = home
+        .as_ref()
+        .map(|p| AppPaths::from_root(p))
+        .unwrap_or_else(AppPaths::discover);
+    paths.ensure().map_err(|e| e.to_string())?;
+    let action = positional.first().map(String::as_str).unwrap_or("status");
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    let request = |command| MeshRequest {
+        version: mesh::PROTOCOL_VERSION,
+        owner_pid: std::process::id(),
+        session: MeshSecret(format!("{:032x}{:032x}", rand_token(), rand_token())),
+        command,
+    };
+    match action {
+        "status" => {
+            let reply =
+                mesh::ipc::call(request(MeshCommand::Inspect)).map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())?
+            );
+        }
+        "doctor" => {
+            println!(
+                "EasyTier {}（静态库）；Tailscale sing-box {}",
+                mesh::EASYTIER_VERSION,
+                mesh::TAILSCALE_CORE_VERSION
+            );
+            println!("{}",serde_json::to_string_pretty(&serde_json::json!({"running":privilege::status().running,"elevated":privilege::is_elevated(),"detail":privilege::status().detail})).map_err(|e|e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &mesh::platform::baseline().map_err(|e| e.to_string())?
+                )
+                .map_err(|e| e.to_string())?
+            );
+        }
+        "probe" => {
+            let id = positional.get(1).ok_or("请指定组网配置 ID")?.clone();
+            let ip = positional.get(2).ok_or("请指定组网设备 IP")?.clone();
+            mesh::ipc::call(request(MeshCommand::ProbeProfile {
+                profile_id: id.clone(),
+                ip: ip.clone(),
+            }))
+            .map_err(|e| e.to_string())?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(18);
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let reply =
+                    mesh::ipc::call(request(MeshCommand::Inspect)).map_err(|e| e.to_string())?;
+                if let Some(probe) = reply
+                    .networks
+                    .iter()
+                    .find(|n| n.profile_id == id)
+                    .and_then(|n| n.probe.as_ref())
+                    .filter(|p| p.ip == ip)
+                {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(probe).map_err(|e| e.to_string())?
+                    );
+                    if !probe.success {
+                        return Err("设备探测失败".into());
+                    }
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("设备探测超时".into());
+                }
+            }
+        }
+        "install" => {
+            runtime
+                .block_on(async {
+                    mesh::tailscale::install(&paths).await?;
+                    mesh::driver::install(&paths).await?;
+                    Ok::<(), xross_core::Error>(())
+                })
+                .map_err(|e| e.to_string())?;
+            println!("组网组件已下载并通过 SHA-256 校验");
+        }
+        "api-check" => {
+            runtime
+                .block_on(mesh::tailscale::check_api(&paths))
+                .map_err(|e| e.to_string())?;
+            println!("Tailscale gRPC 版本、鉴权和状态订阅验证通过（未创建网卡或 DNS 规则）");
+        }
+        "check" => {
+            runtime
+                .block_on(mesh::tailscale::check_configuration(&paths))
+                .map_err(|e| e.to_string())?;
+            println!("独立 Tailscale 配置校验通过（未创建网卡）");
+        }
+        "disconnect" | "logout" => {
+            let id = positional.get(1).ok_or("请指定组网配置 ID")?.clone();
+            mesh::ipc::call(request(MeshCommand::DisconnectProfile {
+                profile_id: id,
+                logout: action == "logout",
+            }))
+            .map_err(|e| e.to_string())?;
+            println!("组网操作已提交");
+        }
+        "save" | "list" | "delete" => {
+            let store = xross_core::storage::Store::open(&paths).map_err(|e| e.to_string())?;
+            let controller =
+                mesh::controller::MeshController::new(paths, store).map_err(|e| e.to_string())?;
+            match action {
+                "save" => {
+                    let source = positional.get(1).ok_or("请指定配置文件或 -（标准输入）")?;
+                    let mut bytes = Vec::new();
+                    if source == "-" {
+                        use std::io::Read;
+                        std::io::stdin()
+                            .take(262_145)
+                            .read_to_end(&mut bytes)
+                            .map_err(|_| "读取配置失败")?;
+                    } else {
+                        bytes = std::fs::read(source).map_err(|_| "读取配置失败")?;
+                    }
+                    if bytes.len() > 262_144 {
+                        return Err("组网配置过大".into());
+                    }
+                    let profile: MeshProfile = serde_json::from_slice(&bytes)
+                        .map_err(|_| "组网 JSON 配置无效；请检查字段格式")?;
+                    println!("{}", controller.save(profile).map_err(|e| e.to_string())?);
+                }
+                "list" => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&controller.snapshot().profiles)
+                        .map_err(|e| e.to_string())?
+                ),
+                _ => {
+                    controller
+                        .delete(positional.get(1).ok_or("请指定组网配置 ID")?)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        "connect" => {
+            let svc = AppService::with_paths(paths).map_err(|e| e.to_string())?;
+            let ids = positional
+                .iter()
+                .skip(1)
+                .take_while(|v| !v.starts_with("--"))
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                return Err("请指定一个或两个组网配置 ID".into());
+            }
+            for id in ids {
+                svc.mesh_connect(id);
+                wait_mesh(&svc)?;
+            }
+            let seconds = args
+                .iter()
+                .position(|v| v == "--seconds")
+                .and_then(|i| args.get(i + 1))
+                .and_then(|v| v.parse::<u64>().ok());
+            println!("组网会话运行中；Ctrl+C 或结束进程会清理网卡。可用 mesh status 查询、mesh disconnect <ID> 断开。");
+            let result=runtime.block_on(async {
+                let deadline=tokio::time::sleep(std::time::Duration::from_secs(seconds.unwrap_or(86400*365)));
+                tokio::pin!(deadline);
+                let mut interval=tokio::time::interval(std::time::Duration::from_secs(2));
+                let mut login_opened=std::collections::HashSet::new();
+                loop {tokio::select!{
+                    _=tokio::signal::ctrl_c()=>break Ok(()),
+                    _=&mut deadline=>break Ok(()),
+                    _=interval.tick()=>{
+                        let state=svc.snapshot().mesh;
+                        for network in &state.networks {
+                            if let Some(url)=&network.login_url {if login_opened.insert(url.clone()){svc.open_url(url);println!("已打开浏览器，请完成 Tailscale 登录（独立设备身份）");}}
+                            if network.phase==mesh::MeshPhase::Failed {break;}
+                        }
+                        if state.networks.iter().any(|n|n.phase==mesh::MeshPhase::Failed){break Err("组网启动或运行失败，请用 mesh status 查看诊断".to_string());}
+                        if state.networks.is_empty(){break Ok(());}
+                    }
+                }}
+            });
+            svc.shutdown();
+            result?;
+        }
+        _ => return Err("未知 mesh 操作".into()),
+    }
+    Ok(())
+}
+
+fn rand_token() -> u128 {
+    // MeshProfile already generates an OS-random UUID without another CLI dependency.
+    u128::from_str_radix(
+        &xross_core::mesh::MeshProfile::default().id.replace('-', ""),
+        16,
+    )
+    .expect("UUID")
+}
+
+fn wait_mesh(service: &AppService) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while service.is_busy("mesh") {
+        if std::time::Instant::now() > deadline {
+            service.shutdown();
+            return Err("组网操作超时".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if let Some(error) = service
+        .snapshot()
+        .toasts
+        .iter()
+        .rev()
+        .find(|t| t.level == xross_core::service::ToastLevel::Error)
+    {
+        service.shutdown();
+        return Err(error.message.clone());
+    }
+    Ok(())
 }
 
 fn parse_args(

@@ -10,6 +10,7 @@ pub mod core;
 pub mod diagnostics;
 pub mod dns;
 pub mod error;
+pub mod mesh;
 pub mod model;
 pub mod paths;
 pub mod route;

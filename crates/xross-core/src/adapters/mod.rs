@@ -96,6 +96,7 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
 
 #[derive(Debug, Clone)]
 pub struct CompileContext {
+    pub mesh: crate::mesh::coexist::CoexistencePlan,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub api_port: u16,
@@ -108,6 +109,7 @@ pub struct CompileContext {
 impl CompileContext {
     pub fn new(settings: &Settings, data_dir: PathBuf, runtime_dir: PathBuf) -> Self {
         Self {
+            mesh: Default::default(),
             data_dir,
             runtime_dir,
             api_port: settings.api_port,
