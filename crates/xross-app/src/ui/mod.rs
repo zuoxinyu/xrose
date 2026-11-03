@@ -646,6 +646,7 @@ impl AppView {
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let hide = self.hide_ips;
+        let is_nodes_page = self.page == Page::Nodes;
         let running = self.snapshot.process.phase.is_alive();
         let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
         let status_color = if running { p.success } else { p.muted_fg };
@@ -729,83 +730,90 @@ impl AppView {
                             window.start_window_move();
                         }
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_start()
-                            .gap_0p5()
-                            .min_w(px(0.))
-                            .w_full()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .min_w(px(0.))
-                                    .w_full()
-                                    .child(
-                                        div()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(p.fg)
-                                            .child(node_name),
-                                    )
-                                    .when(node.is_some(), |d| {
-                                        d.child(
-                                            div()
-                                                .flex_shrink_0()
-                                                .text_xs()
-                                                .text_color(delay_color)
-                                                .when(delay_stale, |d| d.opacity(0.6))
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .child(delay),
-                                        )
-                                    }),
-                            )
-                            .when(node.is_some(), |d| {
-                                d.child(
+                    .when(!is_nodes_page, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .gap_0p5()
+                                .min_w(px(0.))
+                                .w_full()
+                                .child(
                                     div()
-                                        .id("header-location-toggle")
                                         .flex()
                                         .items_center()
-                                        .gap_1()
+                                        .gap_2()
                                         .min_w(px(0.))
-                                        .max_w_full()
-                                        .cursor_pointer()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .hover(move |s| s.text_color(p.fg))
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(location_tip.clone()).build(window, cx)
-                                        })
-                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                            cx.stop_propagation();
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.hide_ips = !this.hide_ips;
-                                            let mut settings = this.snapshot.settings.clone();
-                                            settings.privacy_mode = this.hide_ips;
-                                            this.service.update_settings(settings);
-                                            this.sync(cx);
-                                        }))
+                                        .w_full()
                                         .child(
-                                            Icon::new(if hide {
-                                                IconName::EyeOff
-                                            } else {
-                                                IconName::MapPin
-                                            })
-                                            .size(px(12.))
-                                            .flex_shrink_0(),
+                                            div()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_sm()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(p.fg)
+                                                .child(node_name),
                                         )
-                                        .child(
-                                            div().min_w(px(0.)).truncate().child(location_label),
-                                        ),
+                                        .when(node.is_some(), |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .text_color(delay_color)
+                                                    .when(delay_stale, |d| d.opacity(0.6))
+                                                    .font_family(
+                                                        cx.theme().mono_font_family.clone(),
+                                                    )
+                                                    .child(delay),
+                                            )
+                                        }),
                                 )
-                            }),
-                    ),
+                                .when(node.is_some(), |d| {
+                                    d.child(
+                                        div()
+                                            .id("header-location-toggle")
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .min_w(px(0.))
+                                            .max_w_full()
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .hover(move |s| s.text_color(p.fg))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(location_tip.clone()).build(window, cx)
+                                            })
+                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                cx.stop_propagation();
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.hide_ips = !this.hide_ips;
+                                                let mut settings = this.snapshot.settings.clone();
+                                                settings.privacy_mode = this.hide_ips;
+                                                this.service.update_settings(settings);
+                                                this.sync(cx);
+                                            }))
+                                            .child(
+                                                Icon::new(if hide {
+                                                    IconName::EyeOff
+                                                } else {
+                                                    IconName::MapPin
+                                                })
+                                                .size(px(12.))
+                                                .flex_shrink_0(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .min_w(px(0.))
+                                                    .truncate()
+                                                    .child(location_label),
+                                            ),
+                                    )
+                                }),
+                        )
+                    }),
             )
             .child(
                 // Centered status pill: 1px inner padding + rounded right corners on
@@ -964,48 +972,50 @@ impl AppView {
                                 }
                             }),
                     )
-                    .child(
-                        div()
-                            .id("header-traffic-figures")
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .justify_center()
-                            .h_full()
-                            .flex_shrink_0()
-                            .when(cfg!(target_os = "windows"), |d| d.pr_2())
-                            .when(!cfg!(target_os = "windows"), |d| d.pr_4())
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_end()
-                                    .gap_2()
-                                    .text_xs()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .child(div().text_color(p.data_down).child(format!(
-                                        "↓ {}",
-                                        xross_core::util::format_speed(
-                                            self.snapshot.runtime.down_speed
-                                        )
-                                    )))
-                                    .child(div().text_color(p.data_up).child(format!(
-                                        "↑ {}",
-                                        xross_core::util::format_speed(
-                                            self.snapshot.runtime.up_speed
-                                        )
-                                    ))),
-                            )
-                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                "{} {}",
-                                self.tr("累计", "Total"),
-                                xross_core::util::format_bytes(
-                                    self.snapshot.runtime.up_total
-                                        + self.snapshot.runtime.down_total
+                    .when(!is_nodes_page, |d| {
+                        d.child(
+                            div()
+                                .id("header-traffic-figures")
+                                .flex()
+                                .flex_col()
+                                .items_end()
+                                .justify_center()
+                                .h_full()
+                                .flex_shrink_0()
+                                .when(cfg!(target_os = "windows"), |d| d.pr_2())
+                                .when(!cfg!(target_os = "windows"), |d| d.pr_4())
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_end()
+                                        .gap_2()
+                                        .text_xs()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .child(div().text_color(p.data_down).child(format!(
+                                            "↓ {}",
+                                            xross_core::util::format_speed(
+                                                self.snapshot.runtime.down_speed
+                                            )
+                                        )))
+                                        .child(div().text_color(p.data_up).child(format!(
+                                            "↑ {}",
+                                            xross_core::util::format_speed(
+                                                self.snapshot.runtime.up_speed
+                                            )
+                                        ))),
                                 )
-                            ))),
-                    )
+                                .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                    "{} {}",
+                                    self.tr("累计", "Total"),
+                                    xross_core::util::format_bytes(
+                                        self.snapshot.runtime.up_total
+                                            + self.snapshot.runtime.down_total
+                                    )
+                                ))),
+                        )
+                    })
                     .child(WindowControls::new(p)),
             )
     }
