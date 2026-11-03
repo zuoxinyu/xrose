@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::Theme;
 use gpui_kit::{App, Window, WindowBackgroundAppearance};
@@ -98,7 +98,9 @@ pub fn apply(window: &mut Window, cx: &mut App) {
     let appearance = window_background();
     #[cfg(windows)]
     let active = windows::apply(window, appearance, cx.theme().mode.is_dark());
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    let active = macos::apply(window, appearance, cx.theme().mode.is_dark());
+    #[cfg(not(any(windows, target_os = "macos")))]
     let active = {
         window.set_background_appearance(appearance);
         appearance != WindowBackgroundAppearance::Opaque
@@ -119,6 +121,45 @@ pub fn refresh_all(style: BackdropStyle, cx: &mut App) {
         }
         cx.refresh_windows();
     });
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use super::*;
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    pub fn apply(window: &mut Window, appearance: WindowBackgroundAppearance, dark: bool) -> bool {
+        window.set_background_appearance(appearance);
+        if let Ok(handle) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::AppKit(raw) = handle.as_raw() {
+                unsafe {
+                    let view = raw.ns_view.as_ptr() as id;
+                    let ns_win: id = msg_send![view, window];
+                    let name = if dark {
+                        "NSAppearanceNameDarkAqua"
+                    } else {
+                        "NSAppearanceNameAqua"
+                    };
+                    let name_ns = NSString::alloc(nil).init_str(name);
+                    if name_ns != nil {
+                        let ns_appearance: id =
+                            msg_send![class!(NSAppearance), appearanceNamed: name_ns];
+                        let _: () = msg_send![name_ns, release];
+                        if ns_appearance != nil {
+                            if ns_win != nil {
+                                let _: () = msg_send![ns_win, setAppearance: ns_appearance];
+                            }
+                            let _: () = msg_send![view, setAppearance: ns_appearance];
+                        }
+                    }
+                }
+            }
+        }
+        appearance != WindowBackgroundAppearance::Opaque
+    }
 }
 
 #[cfg(windows)]

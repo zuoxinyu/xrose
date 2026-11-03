@@ -630,7 +630,7 @@ impl AppView {
             .items_center()
             .border_b_1()
             .border_color(p.border)
-            .bg(p.bg)
+            .bg(if p.is_dark { p.bg } else { p.panel })
             .child(
                 // Noninteractive node metadata shares the caption drag region.
                 div()

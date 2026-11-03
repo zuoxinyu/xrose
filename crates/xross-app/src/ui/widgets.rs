@@ -1,4 +1,5 @@
 use gpui_kit::component::switch::Switch;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{div, px, Div, ElementId, Hsla, IntoElement, ParentElement, SharedString, Styled};
 
 use super::theme::Palette;
@@ -13,6 +14,7 @@ pub fn card(p: &Palette) -> Div {
         .bg(p.panel)
         .border_1()
         .border_color(p.border)
+        .when(!p.is_dark, |d| d.shadow_xs())
 }
 
 pub fn section_title(

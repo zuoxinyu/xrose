@@ -532,7 +532,7 @@ impl AppView {
                 ),
         );
 
-        // Core binaries -------------------------------------------------
+        // Core & updates ------------------------------------------------
         let current_core = settings.core;
         let active_version = settings.active_version(current_core).cloned();
         let core_binaries: Vec<_> = binaries
@@ -549,10 +549,10 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("Core 管理", "Core binaries"),
+                            self.tr("Core 与更新", "Core & updates"),
                             self.tr(
-                                "管理已安装的内核版本或指定自定义可执行文件路径",
-                                "Manage installed core versions or specify custom executable paths",
+                                "管理已安装的内核版本、检查组件更新与数据备份",
+                                "Manage installed core versions, check updates, and back up data",
                             ),
                         ))
                         .child(
@@ -581,8 +581,7 @@ impl AppView {
                                 ),
                         ),
                 )
-                .child(
-                    div().text_xs().text_color(p.muted_fg).child(format!(
+                .child(div().text_xs().text_color(p.muted_fg).child(format!(
                         "{}：{} / {} · {} {}",
                         self.tr("当前平台", "Platform"),
                         platform.os,
@@ -591,8 +590,7 @@ impl AppView {
                         active_version
                             .clone()
                             .unwrap_or_else(|| self.tr("未安装", "not installed").to_string())
-                    )),
-                )
+                    )))
                 .when(core_binaries.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,
@@ -685,7 +683,6 @@ impl AppView {
                                 ),
                         )
                 }))
-                .child(divider(&p))
                 .child(
                     div()
                         .flex()
@@ -719,20 +716,8 @@ impl AppView {
                                     this.sync(cx);
                                 })),
                         ),
-                ),
-        );
-
-        // Updates -------------------------------------------------------
-        body = body.child(
-            card(&p)
-                .child(section_title(
-                    &p,
-                    self.tr("更新", "Updates"),
-                    self.tr(
-                        "App、core 与规则集分别更新，互不阻塞",
-                        "App, core and rule-sets update independently",
-                    ),
-                ))
+                )
+                .child(divider(&p))
                 .child(
                     div()
                         .flex()
@@ -747,7 +732,7 @@ impl AppView {
                                     div()
                                         .text_sm()
                                         .text_color(p.fg)
-                                        .child(self.tr("Core", "Core")),
+                                        .child(self.tr("Core 更新状态", "Core update status")),
                                 )
                                 .child(match &updates.core {
                                     Some(candidate) => {
@@ -783,7 +768,9 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .justify_between()
-                                .child(div().text_sm().text_color(p.fg).child("Xross App"))
+                                .child(div().text_sm().text_color(p.fg).child(
+                                    self.tr("Xross App 更新状态", "Xross App update status"),
+                                ))
                                 .child(match &updates.app {
                                     Some(app) => {
                                         let url = app.url.clone();
@@ -824,6 +811,7 @@ impl AppView {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .gap_2()
                         .child(
                             Button::new("backup-db")
@@ -854,7 +842,7 @@ impl AppView {
                 ),
         );
 
-        // Privilege helper ---------------------------------------------
+        // Privilege helper & diagnostics --------------------------------
         let helper_label = if platform.helper_available {
             self.tr("运行中", "Running")
         } else if platform.helper_installed {
@@ -869,6 +857,7 @@ impl AppView {
         } else {
             p.muted_fg
         };
+        let doctor_busy = self.snapshot.busy.iter().any(|key| key == "doctor");
         body = body.child(
             card(&p)
                 .child(
@@ -878,10 +867,10 @@ impl AppView {
                         .justify_between()
                         .child(section_title(
                             &p,
-                            self.tr("提权助手", "Privilege helper"),
+                            self.tr("提权助手与环境检查", "Privilege helper & environment checks"),
                             self.tr(
-                                "用于启动虚拟网卡（TUN）、托管组网进程、配置系统 DNS 与透明代理规则的后台服务",
-                                "Background service for launching TUN cores, mesh workers, system DNS, and transparent proxy rules",
+                                "后台提权服务管理，以及 TUN、端口、权限与系统代理环境诊断",
+                                "Manage the background privilege helper and inspect TUN, ports, permissions, and proxy backend",
                             ),
                         ))
                         .child(
@@ -934,96 +923,83 @@ impl AppView {
                             "Windows TUN requires the current helper to be installed and running; Wintun is verified and deployed automatically before startup",
                         )),
                 )
-                .when(platform.helper_supported, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .when(!platform.helper_installed, |d| {
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .when(platform.helper_supported && !platform.helper_installed, |d| {
+                            d.child(
+                                Button::new("install-helper")
+                                    .compact()
+                                    .primary()
+                                    .label(self.tr("安装并启动", "Install & start"))
+                                    .loading(helper_busy)
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.install_helper();
+                                    })),
+                            )
+                        })
+                        .when(
+                            platform.helper_supported
+                                && platform.helper_installed
+                                && !platform.helper_available,
+                            |d| {
                                 d.child(
-                                    Button::new("install-helper")
+                                    Button::new("start-helper")
                                         .compact()
                                         .primary()
-                                        .label(self.tr("安装并启动", "Install & start"))
+                                        .label(self.tr("启动", "Start"))
                                         .loading(helper_busy)
                                         .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.install_helper();
+                                            this.service.start_helper();
                                         })),
                                 )
-                            })
-                            .when(
-                                platform.helper_installed && !platform.helper_available,
-                                |d| {
-                                    d.child(
-                                        Button::new("start-helper")
-                                            .compact()
-                                            .primary()
-                                            .label(self.tr("启动", "Start"))
-                                            .loading(helper_busy)
-                                            .on_click(cx.listener(|this, _, _, _| {
-                                                this.service.start_helper();
-                                            })),
-                                    )
-                                },
-                            )
-                            .when(platform.helper_installed, |d| {
-                                d.child(
-                                    Button::new("restart-helper")
-                                        .compact()
-                                        .label(self.tr("重启", "Restart"))
-                                        .loading(helper_busy)
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.restart_helper();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("uninstall-helper")
-                                        .compact()
-                                        .danger()
-                                        .label(self.tr("卸载", "Uninstall"))
-                                        .loading(helper_busy)
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.uninstall_helper();
-                                        })),
-                                )
-                            })
-                            .child(
-                                Button::new("refresh-helper")
+                            },
+                        )
+                        .when(platform.helper_supported && platform.helper_installed, |d| {
+                            d.child(
+                                Button::new("restart-helper")
                                     .compact()
-                                    .ghost()
-                                    .label(self.tr("刷新状态", "Refresh"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.service.refresh_doctor();
-                                        this.service.refresh_helper_status();
-                                        this.sync(cx);
+                                    .label(self.tr("重启", "Restart"))
+                                    .loading(helper_busy)
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.restart_helper();
                                     })),
-                            ),
-                    )
-                })
+                            )
+                            .child(
+                                Button::new("uninstall-helper")
+                                    .compact()
+                                    .danger()
+                                    .label(self.tr("卸载", "Uninstall"))
+                                    .loading(helper_busy)
+                                    .on_click(cx.listener(|this, _, _, _| {
+                                        this.service.uninstall_helper();
+                                    })),
+                            )
+                        })
+                        .child(
+                            Button::new("refresh-doctor")
+                                .compact()
+                                .loading(doctor_busy || helper_busy)
+                                .label(self.tr("重新检查", "Re-check"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.service.refresh_doctor();
+                                    this.service.refresh_helper_status();
+                                    this.sync(cx);
+                                })),
+                        ),
+                )
                 .when(!platform.helper_supported, |d| {
-                    d.child(empty_hint(
-                        &p,
-                        self.tr(
+                    d.child(
+                        div().text_xs().text_color(p.muted_fg).child(self.tr(
                             "该平台暂不支持提权助手；TUN 仍由 core 自身权限处理",
                             "The helper is not available on this platform; TUN relies on the core's own rights",
-                        ),
-                    ))
-                }),
-        );
-
-        // Diagnostics ---------------------------------------------------
-        body = body.child(
-            card(&p)
-                .child(section_title(
-                    &p,
-                    self.tr("运行环境检查", "Environment checks"),
-                    self.tr(
-                        "TUN、端口、权限、协议兼容性；系统代理后端与提权助手状态",
-                        "TUN, ports, permissions, protocol support, proxy backend and helper",
-                    ),
-                ))
+                        )),
+                    )
+                })
+                .child(divider(&p))
                 .child(
                     div()
                         .flex()
@@ -1043,15 +1019,6 @@ impl AppView {
                                 self.tr("是", "yes")
                             } else {
                                 self.tr("否", "no")
-                            }
-                        ))
-                        .child(format!(
-                            "{}：{}",
-                            self.tr("提权助手", "Helper"),
-                            if platform.helper_available {
-                                self.tr("可用", "available")
-                            } else {
-                                self.tr("未就绪", "not ready")
                             }
                         ))
                         .child(format!(
@@ -1079,17 +1046,7 @@ impl AppView {
                                 .text_color(p.muted_fg)
                                 .child(check.detail.clone()),
                         )
-                }))
-                .child(
-                    Button::new("refresh-doctor")
-                        .compact()
-                        .loading(self.snapshot.busy.iter().any(|key| key == "doctor"))
-                        .label(self.tr("重新检查", "Re-check"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.service.refresh_doctor();
-                            this.sync(cx);
-                        })),
-                ),
+                })),
         );
 
         // About ---------------------------------------------------------
