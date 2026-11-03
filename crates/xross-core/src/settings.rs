@@ -132,6 +132,8 @@ pub struct Settings {
     pub check_app_updates: bool,
     pub last_update_check: Option<i64>,
     pub show_tray_speed: bool,
+    /// Masks server addresses and node locations in the UI (on by default).
+    pub privacy_mode: bool,
 }
 
 impl Default for Settings {
@@ -166,6 +168,7 @@ impl Default for Settings {
             check_app_updates: true,
             last_update_check: None,
             show_tray_speed: true,
+            privacy_mode: true,
             active_versions: BTreeMap::new(),
             binary_paths: BTreeMap::new(),
         }

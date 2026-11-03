@@ -12,6 +12,7 @@ use xross_core::settings::BackdropStyle;
 
 static STYLE: RwLock<BackdropStyle> = RwLock::new(BackdropStyle::Auto);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static FOLLOW_SYSTEM: AtomicBool = AtomicBool::new(true);
 static BLUR_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static MICA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -21,6 +22,19 @@ pub fn configure(style: BackdropStyle) {
         effective_style(style) != BackdropStyle::Opaque,
         Ordering::Relaxed,
     );
+}
+
+pub fn set_follow_system(follow: bool) {
+    FOLLOW_SYSTEM.store(follow, Ordering::Relaxed);
+}
+
+/// Clear any native per-window appearance override and sync `Theme` with the
+/// operating system's current light/dark setting.
+pub fn sync_system_appearance(window: &mut Window, cx: &mut App) {
+    set_follow_system(true);
+    #[cfg(target_os = "macos")]
+    macos::clear_appearance_override(window);
+    Theme::sync_system_appearance(Some(window), cx);
 }
 
 pub fn blur_backdrop() -> bool {
@@ -78,7 +92,36 @@ pub fn window_background() -> WindowBackgroundAppearance {
 pub fn make_surface_translucent(cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
-        if theme.mode.is_dark() {
+        let dark = theme.mode.is_dark();
+        // One interaction color (cyan) for primary buttons, toggles and focus;
+        // the soft tint drives hover/selection surfaces. Red stays reserved for
+        // destructive actions.
+        let (primary, primary_fg) = crate::ui::theme::interaction(dark);
+        let (hover, active) = if dark {
+            (
+                crate::ui::theme::hsl(188., 0.86, 0.60),
+                crate::ui::theme::hsl(188., 0.86, 0.46),
+            )
+        } else {
+            (
+                crate::ui::theme::hsl(192., 0.81, 0.27),
+                crate::ui::theme::hsl(192., 0.81, 0.23),
+            )
+        };
+        let tint = crate::ui::theme::interaction_tint(dark);
+        theme.colors.primary = primary;
+        theme.tokens.primary = primary.into();
+        theme.colors.primary_foreground = primary_fg;
+        theme.tokens.primary_foreground = primary_fg.into();
+        theme.colors.primary_hover = hover;
+        theme.tokens.primary_hover = hover.into();
+        theme.colors.primary_active = active;
+        theme.tokens.primary_active = active.into();
+        theme.colors.accent = tint;
+        theme.tokens.accent = tint.into();
+        theme.colors.ring = primary;
+        theme.tokens.ring = primary.into();
+        if dark {
             let input_border = gpui_kit::hsla(0., 0., 0.38, 1.0);
             theme.colors.input = input_border;
             theme.tokens.input = input_border.into();
@@ -99,7 +142,12 @@ pub fn apply(window: &mut Window, cx: &mut App) {
     #[cfg(windows)]
     let active = windows::apply(window, appearance, cx.theme().mode.is_dark());
     #[cfg(target_os = "macos")]
-    let active = macos::apply(window, appearance, cx.theme().mode.is_dark());
+    let active = macos::apply(
+        window,
+        appearance,
+        cx.theme().mode.is_dark(),
+        FOLLOW_SYSTEM.load(Ordering::Relaxed),
+    );
     #[cfg(not(any(windows, target_os = "macos")))]
     let active = {
         window.set_background_appearance(appearance);
@@ -131,9 +179,33 @@ mod macos {
     use objc::{class, msg_send, sel, sel_impl};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-    pub fn apply(window: &mut Window, appearance: WindowBackgroundAppearance, dark: bool) -> bool {
-        window.set_background_appearance(appearance);
+    pub fn clear_appearance_override(window: &mut Window) {
         if let Ok(handle) = HasWindowHandle::window_handle(window) {
+            if let RawWindowHandle::AppKit(raw) = handle.as_raw() {
+                unsafe {
+                    let view = raw.ns_view.as_ptr() as id;
+                    let ns_win: id = msg_send![view, window];
+                    if ns_win != nil {
+                        let null_appearance: id = nil;
+                        let _: () = msg_send![ns_win, setAppearance: null_appearance];
+                    }
+                    let null_appearance: id = nil;
+                    let _: () = msg_send![view, setAppearance: null_appearance];
+                }
+            }
+        }
+    }
+
+    pub fn apply(
+        window: &mut Window,
+        appearance: WindowBackgroundAppearance,
+        dark: bool,
+        follow_system: bool,
+    ) -> bool {
+        window.set_background_appearance(appearance);
+        if follow_system {
+            clear_appearance_override(window);
+        } else if let Ok(handle) = HasWindowHandle::window_handle(window) {
             if let RawWindowHandle::AppKit(raw) = handle.as_raw() {
                 unsafe {
                     let view = raw.ns_view.as_ptr() as id;

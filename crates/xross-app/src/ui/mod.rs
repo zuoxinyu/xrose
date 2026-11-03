@@ -16,6 +16,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -148,6 +149,11 @@ pub struct AppView {
     pub(crate) manual_form: ManualNodeForm,
     pub(crate) manual_error: Option<String>,
     pub(crate) hide_ips: bool,
+    /// Overflow menu of the node list toolbar (batch management, cleanup).
+    pub(crate) toolbar_menu_open: bool,
+    /// Nodes of the latency run started from this window; they show a spinner
+    /// instead of a stale value while the run is busy.
+    pub(crate) latency_pending: std::collections::HashSet<String>,
     pub(crate) node_menu_open: Option<String>,
     pub(crate) sort_by_latency: bool,
     pub(crate) group_by_subscription: bool,
@@ -256,6 +262,7 @@ impl AppView {
         };
         // Debug hook used by the screenshot/regression workflow.
         let show_manual_form = std::env::var_os("XROSS_MANUAL").is_some();
+        let hide_ips = snapshot.settings.privacy_mode;
         let view = Self {
             mesh_form: mesh::MeshForm::new(window, cx),
             snapshot,
@@ -269,7 +276,9 @@ impl AppView {
             show_manual_form,
             manual_form,
             manual_error: None,
-            hide_ips: false,
+            hide_ips,
+            toolbar_menu_open: false,
+            latency_pending: std::collections::HashSet::new(),
             node_menu_open: None,
             sort_by_latency: false,
             group_by_subscription: false,
@@ -438,6 +447,9 @@ impl AppView {
         if refresh_due {
             self.snapshot = self.service.snapshot();
             self.last_refresh = now;
+            if !self.snapshot.busy.iter().any(|b| b == "latency") {
+                self.latency_pending.clear();
+            }
             if self
                 .selected_group
                 .as_ref()
@@ -588,15 +600,10 @@ impl AppView {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let hide = self.hide_ips;
         let running = self.snapshot.process.phase.is_alive();
         let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
         let status_color = if running { p.success } else { p.muted_fg };
-        let action_bg = if running { p.danger } else { p.primary };
-        let action_hover = if running {
-            p.danger.opacity(0.85)
-        } else {
-            p.primary.opacity(0.85)
-        };
         let node = self.snapshot.selected_node(self.selected_group.as_deref());
         let latency = node.and_then(|n| self.snapshot.latency.get(&n.id));
         let delay = latency
@@ -607,22 +614,47 @@ impl AppView {
                     .unwrap_or_else(|| self.tr("超时", "Timeout").to_string())
             })
             .unwrap_or_else(|| self.tr("未测速", "Untested").to_string());
-        let delay_color = match latency.and_then(|entry| entry.delay_ms) {
-            Some(ms) if ms < 150 => p.success,
-            Some(ms) if ms < 350 => p.warning,
-            Some(_) => p.danger,
-            None => p.muted_fg,
-        };
-        let location = node.and_then(|n| self.snapshot.node_location(n));
-        let location_label = location
-            .and_then(|entry| entry.label.clone())
-            .unwrap_or_else(|| {
-                if location.is_none_or(|entry| entry.pending) {
-                    self.tr("归属地查询中…", "Looking up location…").to_string()
+        let delay_color = theme::latency_color(&p, latency);
+        let delay_stale =
+            latency.is_some_and(|e| theme::latency_age_secs(e) > theme::LATENCY_STALE_SECS);
+        // Privacy mode masks everything derived from the server address, so a
+        // screenshot of the title bar cannot reveal where the node is.
+        let node_name = node
+            .map(|n| {
+                if hide && !n.server.is_empty() {
+                    n.name.replace(&n.server, "•••")
                 } else {
-                    self.tr("归属地未知", "Location unknown").to_string()
+                    n.name.clone()
                 }
-            });
+            })
+            .unwrap_or_else(|| self.tr("未选择节点", "No node selected").to_string());
+        let location = node.and_then(|n| self.snapshot.node_location(n));
+        let location_label = if hide {
+            self.tr("位置已隐藏", "Location hidden").to_string()
+        } else {
+            location
+                .and_then(|entry| entry.label.clone())
+                .unwrap_or_else(|| {
+                    if location.is_none_or(|entry| entry.pending) {
+                        self.tr("归属地查询中…", "Looking up location…").to_string()
+                    } else {
+                        self.tr("归属地未知", "Location unknown").to_string()
+                    }
+                })
+        };
+        let stop_hover_bg = p.danger;
+        let start_hover_bg = p.primary.opacity(0.85);
+        let location_tip = if hide {
+            self.tr(
+                "已隐藏服务器地址与位置，点击显示",
+                "Addresses and location hidden — click to reveal",
+            )
+        } else {
+            self.tr(
+                "点击隐藏服务器地址与位置",
+                "Click to hide server addresses and location",
+            )
+        };
         div()
             .id("header-bar")
             .h(px(54.))
@@ -632,7 +664,8 @@ impl AppView {
             .border_color(p.border)
             .bg(if p.is_dark { p.bg } else { p.panel })
             .child(
-                // Noninteractive node metadata shares the caption drag region.
+                // Noninteractive node metadata shares the caption drag region;
+                // clicking the location line toggles privacy mode.
                 div()
                     .id("header-drag")
                     .flex()
@@ -655,6 +688,7 @@ impl AppView {
                         div()
                             .flex()
                             .flex_col()
+                            .items_start()
                             .gap_0p5()
                             .min_w(px(0.))
                             .w_full()
@@ -664,6 +698,7 @@ impl AppView {
                                     .items_center()
                                     .gap_2()
                                     .min_w(px(0.))
+                                    .w_full()
                                     .child(
                                         div()
                                             .min_w(px(0.))
@@ -671,12 +706,7 @@ impl AppView {
                                             .text_sm()
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(p.fg)
-                                            .child(node.map(|n| n.name.clone()).unwrap_or_else(
-                                                || {
-                                                    self.tr("未选择节点", "No node selected")
-                                                        .to_string()
-                                                },
-                                            )),
+                                            .child(node_name),
                                     )
                                     .when(node.is_some(), |d| {
                                         d.child(
@@ -684,6 +714,7 @@ impl AppView {
                                                 .flex_shrink_0()
                                                 .text_xs()
                                                 .text_color(delay_color)
+                                                .when(delay_stale, |d| d.opacity(0.6))
                                                 .font_family(cx.theme().mono_font_family.clone())
                                                 .child(delay),
                                         )
@@ -692,16 +723,37 @@ impl AppView {
                             .when(node.is_some(), |d| {
                                 d.child(
                                     div()
+                                        .id("header-location-toggle")
                                         .flex()
                                         .items_center()
                                         .gap_1()
                                         .min_w(px(0.))
+                                        .max_w_full()
+                                        .cursor_pointer()
                                         .text_xs()
                                         .text_color(p.muted_fg)
+                                        .hover(move |s| s.text_color(p.fg))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(location_tip.clone()).build(window, cx)
+                                        })
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation();
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.hide_ips = !this.hide_ips;
+                                            let mut settings = this.snapshot.settings.clone();
+                                            settings.privacy_mode = this.hide_ips;
+                                            this.service.update_settings(settings);
+                                            this.sync(cx);
+                                        }))
                                         .child(
-                                            Icon::new(IconName::MapPin)
-                                                .size(px(12.))
-                                                .flex_shrink_0(),
+                                            Icon::new(if hide {
+                                                IconName::EyeOff
+                                            } else {
+                                                IconName::MapPin
+                                            })
+                                            .size(px(12.))
+                                            .flex_shrink_0(),
                                         )
                                         .child(
                                             div().min_w(px(0.)).truncate().child(location_label),
@@ -711,19 +763,20 @@ impl AppView {
                     ),
             )
             .child(
-                // The status pill is the visual anchor of the header: equal
-                // flex_1 spacers on both sides keep it centered regardless of
-                // how wide the traffic/control cluster on the right becomes.
+                // Centered status pill: 1px inner padding + rounded right corners on
+                // the action segment keep its fill strictly inside the pill border.
                 div()
                     .id("header-status")
                     .flex()
                     .items_center()
                     .flex_shrink_0()
+                    .px_2()
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .h(px(28.))
+                            .p(px(1.))
                             .rounded_full()
                             .overflow_hidden()
                             .bg(p.panel)
@@ -733,6 +786,7 @@ impl AppView {
                                 div()
                                     .flex()
                                     .items_center()
+                                    .h_full()
                                     .gap_2()
                                     .pl_3()
                                     .pr_2p5()
@@ -762,9 +816,6 @@ impl AppView {
                                     ),
                             )
                             .child(
-                                // The button is the right half of the pill: no
-                                // own radius/padding wrapper, clipped by the
-                                // parent's rounded_full + overflow_hidden.
                                 div()
                                     .id("toggle-core")
                                     .flex()
@@ -772,33 +823,41 @@ impl AppView {
                                     .justify_center()
                                     .h_full()
                                     .px_3()
-                                    .rounded_tr(px(13.))
-                                    .rounded_br(px(13.))
-                                    .bg(action_bg)
+                                    .rounded_r_full()
                                     .cursor_pointer()
-                                    .hover(move |style| style.bg(action_hover))
+                                    .border_l_1()
+                                    .border_color(p.border)
+                                    .when(running, |d| {
+                                        d.text_color(p.danger_text).hover(move |style| {
+                                            style
+                                                .bg(stop_hover_bg)
+                                                .text_color(gpui_kit::hsla(0., 0., 1., 1.))
+                                        })
+                                    })
+                                    .when(!running, |d| {
+                                        d.bg(p.primary)
+                                            .text_color(p.primary_fg)
+                                            .hover(move |style| style.bg(start_hover_bg))
+                                    })
                                     .on_click(cx.listener(|this, _, _, _| {
                                         this.service.toggle_core();
                                     }))
                                     .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(p.primary_fg)
-                                            .child(if core_busy {
+                                        div().text_xs().font_weight(FontWeight::SEMIBOLD).child(
+                                            if core_busy {
                                                 "…".to_string()
                                             } else if running {
                                                 self.tr("停止", "Stop").to_string()
                                             } else {
                                                 self.tr("启动", "Start").to_string()
-                                            }),
+                                            },
+                                        ),
                                     ),
                             ),
                     ),
             )
             .child(
-                // Traffic figures live at the far right and stay right-aligned
-                // both inside the block and against the caption buttons.
+                // Traffic figures on the right; the empty span before them is a drag region.
                 div()
                     .id("header-traffic")
                     .flex()
@@ -833,12 +892,8 @@ impl AppView {
                             .justify_center()
                             .h_full()
                             .flex_shrink_0()
-                            .when(cfg!(target_os = "windows"), |d| d.pr_3())
-                            .when(cfg!(target_os = "macos"), |d| d.pr_5())
-                            .when(
-                                !cfg!(any(target_os = "windows", target_os = "macos")),
-                                |d| d.pr_4(),
-                            )
+                            .when(cfg!(target_os = "windows"), |d| d.pr_2())
+                            .when(!cfg!(target_os = "windows"), |d| d.pr_4())
                             .gap_0p5()
                             .child(
                                 div()
@@ -848,13 +903,13 @@ impl AppView {
                                     .gap_2()
                                     .text_xs()
                                     .font_family(cx.theme().mono_font_family.clone())
-                                    .child(div().text_color(p.primary).child(format!(
+                                    .child(div().text_color(p.data_down).child(format!(
                                         "↓ {}",
                                         xross_core::util::format_speed(
                                             self.snapshot.runtime.down_speed
                                         )
                                     )))
-                                    .child(div().text_color(p.info).child(format!(
+                                    .child(div().text_color(p.data_up).child(format!(
                                         "↑ {}",
                                         xross_core::util::format_speed(
                                             self.snapshot.runtime.up_speed
@@ -922,7 +977,7 @@ impl AppView {
 
     fn page_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.page {
-            Page::Nodes => self.page_nodes(cx).into_any_element(),
+            Page::Nodes => self.page_nodes(window, cx).into_any_element(),
             Page::Subscriptions => self.page_subscriptions(cx).into_any_element(),
             Page::Routing => self.page_routing(cx).into_any_element(),
             Page::Dns => self.page_dns(cx).into_any_element(),
@@ -1016,9 +1071,9 @@ impl AppView {
                 let height = ((value as f32 / max as f32) * 44.0).max(2.0);
                 div().flex_1().h(px(height)).rounded_sm().bg(
                     if sample.down_speed >= sample.up_speed {
-                        p.primary
+                        p.data_down
                     } else {
-                        p.info
+                        p.data_up
                     },
                 )
             }))

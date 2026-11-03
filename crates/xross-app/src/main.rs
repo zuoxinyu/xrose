@@ -57,6 +57,7 @@ fn main() {
 
     let theme_mode = service.settings().theme;
     window_effects::configure(service.settings().backdrop);
+    window_effects::set_follow_system(matches!(theme_mode, ThemeMode::System));
     let start_minimized =
         service.settings().start_minimized || args.iter().any(|arg| arg == "--minimized");
     let window_service = service.clone();
@@ -97,13 +98,13 @@ fn main() {
                         traffic_light_position: Some(point(px(16.), px(16.))),
                     }),
                     window_background: window_effects::window_background(),
-                    app_owns_titlebar_drag: false,
+                    app_owns_titlebar_drag: true,
                     ..Default::default()
                 },
                 cx,
                 move |window, cx| {
                     if matches!(theme_mode, ThemeMode::System) {
-                        Theme::sync_system_appearance(Some(window), cx);
+                        window_effects::sync_system_appearance(window, cx);
                     }
                     window_effects::make_surface_translucent(cx);
                     tray::register_main_window(window);
@@ -112,7 +113,7 @@ fn main() {
                     window
                         .observe_window_appearance(move |window, cx| {
                             if appearance_service.settings().theme == ThemeMode::System {
-                                Theme::sync_system_appearance(Some(window), cx);
+                                window_effects::sync_system_appearance(window, cx);
                                 window_effects::apply(window, cx);
                             }
                         })

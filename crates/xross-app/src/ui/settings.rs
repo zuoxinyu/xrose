@@ -1,6 +1,8 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::CoreKind;
@@ -128,21 +130,31 @@ impl AppView {
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.service.set_theme(mode);
                                                 match mode {
-                                                    ThemeMode::Light => Theme::change(
-                                                        ComponentThemeMode::Light,
-                                                        Some(window),
-                                                        cx,
-                                                    ),
-                                                    ThemeMode::Dark => Theme::change(
-                                                        ComponentThemeMode::Dark,
-                                                        Some(window),
-                                                        cx,
-                                                    ),
-                                                    ThemeMode::System => {
-                                                        Theme::sync_system_appearance(
+                                                    ThemeMode::Light => {
+                                                        crate::window_effects::set_follow_system(
+                                                            false,
+                                                        );
+                                                        Theme::change(
+                                                            ComponentThemeMode::Light,
                                                             Some(window),
                                                             cx,
-                                                        )
+                                                        );
+                                                    }
+                                                    ThemeMode::Dark => {
+                                                        crate::window_effects::set_follow_system(
+                                                            false,
+                                                        );
+                                                        Theme::change(
+                                                            ComponentThemeMode::Dark,
+                                                            Some(window),
+                                                            cx,
+                                                        );
+                                                    }
+                                                    ThemeMode::System => {
+                                                        crate::window_effects::sync_system_appearance(
+                                                            window,
+                                                            cx,
+                                                        );
                                                     }
                                                 }
                                                 // Applying a theme rewrites the root surface
@@ -154,31 +166,69 @@ impl AppView {
                                     }),
                                 ),
                         )
-                        .child(
-                            div().flex().items_start().gap_3()
-                                .child(div().w(px(120.)).flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("窗口材质", "Backdrop")))
-                                .child(div().flex_1().min_w(px(0.)).flex().flex_col().gap_2()
-                                    .child(div().flex().flex_wrap().gap_2().children(
-                                        backdrop_choices().into_iter().map(|(style, zh, en)| {
-                                            let selected = settings.backdrop == style;
-                                            div().id(SharedString::from(format!("backdrop-{style:?}")))
-                                                .px_2().py_1().rounded_md().text_xs().border_1()
-                                                .border_color(if selected { p.primary } else { p.border })
-                                                .bg(if selected { p.accent } else { p.bg }).cursor_pointer()
-                                                .child(self.tr(zh, en))
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.service.set_backdrop(style);
-                                                    crate::window_effects::refresh_all(this.service.settings().backdrop, cx);
-                                                    this.sync(cx);
-                                                }))
+                        .child({
+                            let backdrop_tip = self.tr(
+                                "同时应用到主窗口和托盘浮窗；系统不支持时使用纯色背景。",
+                                "Applies to both windows. Uses a solid background when unavailable.",
+                            );
+                            let label_tip = backdrop_tip.clone();
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .id("backdrop-label")
+                                        .w(px(120.))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .text_sm()
+                                        .text_color(p.muted_fg)
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(label_tip.clone()).build(window, cx)
                                         })
-                                    ))
-                                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                                        "同时应用到主窗口和托盘浮窗；系统不支持时使用纯色背景。",
-                                        "Applies to both windows. Uses a solid background when unavailable."
-                                    )))
+                                        .child(self.tr("窗口材质", "Backdrop"))
+                                        .child(
+                                            Icon::new(IconName::Info)
+                                                .size(px(12.))
+                                                .text_color(p.muted_fg.opacity(0.75)),
+                                        ),
                                 )
-                        )
+                                .children(backdrop_choices().into_iter().map(
+                                    |(style, zh, en)| {
+                                        let selected = settings.backdrop == style;
+                                        let item_tip = backdrop_tip.clone();
+                                        div()
+                                            .id(SharedString::from(format!("backdrop-{style:?}")))
+                                            .px_2()
+                                            .py_1()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .border_1()
+                                            .border_color(if selected {
+                                                p.primary
+                                            } else {
+                                                p.border
+                                            })
+                                            .bg(if selected { p.accent } else { p.bg })
+                                            .cursor_pointer()
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(item_tip.clone()).build(window, cx)
+                                            })
+                                            .child(self.tr(zh, en))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.service.set_backdrop(style);
+                                                crate::window_effects::refresh_all(
+                                                    this.service.settings().backdrop,
+                                                    cx,
+                                                );
+                                                this.sync(cx);
+                                            }))
+                                    },
+                                ))
+                        })
                         .child(
                             div()
                                 .flex()
@@ -922,32 +972,51 @@ impl AppView {
                                 )),
                         ),
                 )
-                .child(
+                .child({
+                    let mut items: Vec<String> = vec![platform.helper_detail.clone()];
+                    if let Some(path) = &platform.helper_path {
+                        items.push(format!("{}: {path}", self.tr("可执行文件", "Executable")));
+                    }
+                    if !platform.elevated {
+                        items.push(
+                            self.tr(
+                                "安装、启动与卸载会弹出系统管理员授权（UAC / osascript / pkexec）",
+                                "Install, start and uninstall go through the OS elevation prompt (UAC / osascript / pkexec)",
+                            )
+                            .to_string(),
+                        );
+                    }
+                    items.push(
+                        self.tr(
+                            "TUN 模式需要安装并启动提权助手代启内核",
+                            "TUN mode requires the privilege helper to launch the core",
+                        )
+                        .to_string(),
+                    );
+                    if cfg!(windows) {
+                        items.push(
+                            self.tr(
+                                "Windows 下 Wintun 驱动会在启动前自动校验部署",
+                                "On Windows, Wintun is verified and deployed automatically before startup",
+                            )
+                            .to_string(),
+                        );
+                    }
                     div()
                         .flex()
                         .flex_col()
                         .gap_1()
                         .text_xs()
                         .text_color(p.muted_fg)
-                        .child(platform.helper_detail.clone())
-                        .when(platform.helper_path.is_some(), |d| {
-                            d.child(format!(
-                                "{}：{}",
-                                self.tr("可执行文件", "Executable"),
-                                platform.helper_path.clone().unwrap_or_default()
-                            ))
-                        })
-                        .when(!platform.elevated, |d| {
-                            d.child(self.tr(
-                                "安装、启动与卸载会弹出系统管理员授权（UAC / osascript / pkexec）",
-                                "Install, start and uninstall go through the OS elevation prompt (UAC / osascript / pkexec)",
-                            ))
-                        })
-                        .child(self.tr(
-                            "TUN 模式需要安装并启动提权助手代启 sing-box；Windows 下 Wintun 驱动会在启动前自动校验部署",
-                            "TUN mode requires the privilege helper to launch sing-box; on Windows, Wintun is verified and deployed automatically before startup",
-                        )),
-                )
+                        .children(items.into_iter().map(|item| {
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .child(div().flex_shrink_0().child("•"))
+                                .child(div().flex_1().min_w(px(0.)).child(item))
+                        }))
+                })
                 .child(
                     div()
                         .flex()
@@ -1025,33 +1094,43 @@ impl AppView {
                     )
                 })
                 .child(divider(&p))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_3()
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(format!(
+                .child({
+                    let env_items = [
+                        format!(
                             "{}：{}",
                             self.tr("系统代理后端", "Proxy backend"),
                             platform.proxy_backend
-                        ))
-                        .child(format!(
+                        ),
+                        format!(
                             "{}：{}",
-                            self.tr("提权", "Elevated"),
+                            self.tr("提权状态", "Elevated"),
                             if platform.elevated {
-                                self.tr("是", "yes")
+                                self.tr("已提权", "yes")
                             } else {
-                                self.tr("否", "no")
+                                self.tr("未提权", "no")
                             }
-                        ))
-                        .child(format!(
+                        ),
+                        format!(
                             "{}：{}",
                             self.tr("日志目录", "Log dir"),
                             platform.log_dir
-                        )),
-                )
+                        ),
+                    ];
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(p.muted_fg)
+                        .children(env_items.into_iter().map(|item| {
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .child(div().flex_shrink_0().child("•"))
+                                .child(div().flex_1().min_w(px(0.)).child(item))
+                        }))
+                })
                 .children(doctor.iter().map(|check| {
                     let color = match check.level {
                         CheckLevel::Ok => p.success,

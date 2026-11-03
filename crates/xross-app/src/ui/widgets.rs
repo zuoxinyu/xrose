@@ -1,6 +1,9 @@
 use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder;
-use gpui_kit::{div, px, Div, ElementId, Hsla, IntoElement, ParentElement, SharedString, Styled};
+use gpui_kit::{
+    div, px, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Stateful, Styled,
+};
 
 use super::theme::Palette;
 
@@ -73,4 +76,45 @@ pub fn empty_hint(p: &Palette, text: impl Into<SharedString>) -> impl IntoElemen
 
 pub fn divider(p: &Palette) -> impl IntoElement {
     div().h(px(1.)).w_full().bg(p.border)
+}
+
+/// Container of a segmented control; items come from [`segment_item`].
+pub fn segmented(p: &Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .gap_0p5()
+        .p_0p5()
+        .rounded_lg()
+        .bg(p.panel_alt)
+}
+
+/// One option of a segmented control; the caller attaches `on_click`.
+pub fn segment_item(
+    p: &Palette,
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    selected: bool,
+) -> Stateful<Div> {
+    let hover_bg = p.panel;
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .px_3()
+        .py_1()
+        .rounded_md()
+        .text_sm()
+        .cursor_pointer()
+        .font_weight(if selected {
+            gpui_kit::FontWeight::MEDIUM
+        } else {
+            gpui_kit::FontWeight::NORMAL
+        })
+        .text_color(if selected { p.primary } else { p.muted_fg })
+        .when(selected, |d| d.bg(p.panel).shadow_xs())
+        .when(!selected, |d| d.hover(move |h| h.bg(hover_bg.opacity(0.6))))
+        .child(label.into())
 }

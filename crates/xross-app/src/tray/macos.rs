@@ -499,7 +499,7 @@ pub fn setup_macos_window() {
                 let _: () = msg_send![win, setHasShadow: YES];
                 let clear_color: id = msg_send![class!(NSColor), clearColor];
                 let _: () = msg_send![win, setBackgroundColor: clear_color];
-                let _: () = msg_send![win, setMovableByWindowBackground: YES];
+                let _: () = msg_send![win, setMovableByWindowBackground: cocoa::base::NO];
 
                 let content_view: id = msg_send![win, contentView];
                 configure_views_tree(content_view);

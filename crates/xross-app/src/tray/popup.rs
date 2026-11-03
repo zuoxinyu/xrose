@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Icon, Sizable, Theme};
+use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::RoutePreset;
@@ -279,7 +279,7 @@ impl PopupView {
         });
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             if this.service.settings().theme == ThemeMode::System {
-                Theme::sync_system_appearance(Some(window), cx);
+                crate::window_effects::sync_system_appearance(window, cx);
                 crate::window_effects::apply(window, cx);
             }
             cx.notify();
@@ -384,12 +384,7 @@ impl Render for PopupView {
                     .delay_ms
                     .map(|ms| format!("{ms} ms"))
                     .unwrap_or_else(|| "—".into());
-                let delay_color = match node.delay_ms {
-                    Some(ms) if ms < 200 => p.success,
-                    Some(ms) if ms < 600 => p.warning,
-                    Some(_) => p.danger,
-                    None => p.muted_fg,
-                };
+                let delay_color = crate::ui::theme::latency_color_ms(&p, node.delay_ms);
                 div()
                     .id(("tray-node", index))
                     .border_1()
@@ -687,12 +682,12 @@ impl Render for PopupView {
                                 (
                                     tr(lang, "↓ 下载", "↓ Download"),
                                     format_speed(d.down_speed),
-                                    p.primary,
+                                    p.data_down,
                                 ),
                                 (
                                     tr(lang, "↑ 上传", "↑ Upload"),
                                     format_speed(d.up_speed),
-                                    p.fg,
+                                    p.data_up,
                                 ),
                                 (tr(lang, "累计流量", "Total traffic"), d.total.clone(), p.fg),
                             ]

@@ -1,20 +1,33 @@
 use std::collections::{BTreeMap, HashMap};
 
-use gpui_base::Disableable;
+use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::spinner::Spinner;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::{CoreKind, GroupKind, Node};
 use xross_core::service::{LatencyScope, ToastLevel};
 use xross_core::settings::Language;
+use xross_core::storage::LatencyEntry;
 use xross_core::util::format_speed;
 
-use super::theme::{palette, Palette};
+use super::theme::{
+    latency_age_secs, latency_color, palette, Palette, LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS,
+    LATENCY_SLOW_MS, LATENCY_STALE_SECS,
+};
 use super::widgets::*;
 use super::{AppView, Page};
+
+/// Lists shorter than this hide search, sorting and grouping.
+const TOOLS_MIN_NODES: usize = 6;
+/// "Fastest" is only shown when it leads the runner-up by at least
+/// `max(FASTEST_MIN_GAP_MS, FASTEST_MIN_GAP_RATIO * runner_up)`.
+const FASTEST_MIN_GAP_MS: u32 = 30;
+const FASTEST_MIN_GAP_RATIO: f32 = 0.15;
 
 #[derive(Clone)]
 struct DraggedNode {
@@ -41,7 +54,11 @@ impl Render for DraggedNode {
 }
 
 impl AppView {
-    pub(crate) fn page_nodes(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_nodes(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
         let model = self.snapshot.model.clone();
@@ -165,99 +182,79 @@ impl AppView {
             );
         }
 
-        // P0: Standard Segmented Control for Outbound Groups / Modes.
-        if !groups.is_empty() {
-            body = body.child(
-                div().flex().flex_col().gap_2().w_full().child(
+        // Outbound mode switch (manual | auto) on the left; privacy toggle on the right.
+        let hide_ips = self.hide_ips;
+        body = body.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .flex_wrap()
+                .w_full()
+                .child(
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .p_1()
-                                .rounded_lg()
-                                .bg(p.panel)
-                                .border_1()
-                                .border_color(p.border)
-                                .children(groups.iter().map(|g| {
-                                    let selected = active_group.as_deref() == Some(g.id.as_str());
-                                    let gid = g.id.clone();
-                                    div()
-                                        .id(SharedString::from(format!("group-{}", g.id)))
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .px_3()
-                                        .py_1p5()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .when(selected, |d| {
-                                            d.bg(p.bg).shadow_sm().border_1().border_color(p.border)
-                                        })
-                                        .when(!selected, |d| {
-                                            d.hover(|h| h.bg(p.panel_alt.opacity(0.4)))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.selected_group = Some(gid.clone());
-                                            this.refresh_header_location();
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(if selected {
-                                                    FontWeight::MEDIUM
-                                                } else {
-                                                    FontWeight::NORMAL
-                                                })
-                                                .text_color(if selected {
-                                                    p.fg
-                                                } else {
-                                                    p.muted_fg
-                                                })
-                                                .child(match (g.id.as_str(), g.name.as_str()) {
-                                                    ("proxy", "代理") => {
-                                                        self.tr("代理", "Proxy").to_string()
-                                                    }
-                                                    ("auto", "自动选择") => self
-                                                        .tr("自动选择", "Auto select")
-                                                        .to_string(),
-                                                    _ => g.name.clone(),
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .px_1p5()
-                                                .py_0p5()
-                                                .rounded_sm()
-                                                .text_xs()
-                                                .bg(if selected { p.accent } else { p.panel_alt })
-                                                .text_color(if selected {
-                                                    p.primary
-                                                } else {
-                                                    p.muted_fg
-                                                })
-                                                .child(match g.kind {
-                                                    GroupKind::Selector => {
-                                                        self.tr("手动选择", "Manual")
-                                                    }
-                                                    GroupKind::UrlTest => {
-                                                        self.tr("自动测速", "URL test")
-                                                    }
-                                                    GroupKind::Fallback => {
-                                                        self.tr("故障转移", "Fallback")
-                                                    }
-                                                    GroupKind::LoadBalance => {
-                                                        self.tr("负载均衡", "Load balance")
-                                                    }
-                                                }),
-                                        )
-                                })),
-                        )
+                        .gap_3()
+                        .flex_wrap()
+                        .when(!groups.is_empty(), |d| {
+                            d.child(segmented(&p).children(groups.iter().map(|g| {
+                                let selected = active_group.as_deref() == Some(g.id.as_str());
+                                let gid = g.id.clone();
+                                let builtin = g.id == "proxy" || g.id == "auto";
+                                let label: SharedString = if builtin {
+                                    match g.kind {
+                                        GroupKind::Selector => super::tr(lang, "手动", "Manual"),
+                                        GroupKind::UrlTest => super::tr(lang, "自动", "Auto"),
+                                        GroupKind::Fallback => {
+                                            super::tr(lang, "故障转移", "Fallback")
+                                        }
+                                        GroupKind::LoadBalance => {
+                                            super::tr(lang, "负载均衡", "Load balance")
+                                        }
+                                    }
+                                } else {
+                                    SharedString::from(g.name.clone())
+                                };
+                                let tip: SharedString = match g.kind {
+                                    GroupKind::Selector => super::tr(
+                                        lang,
+                                        "手动：由你选择出站节点",
+                                        "Manual: you choose the outbound node",
+                                    ),
+                                    GroupKind::UrlTest => super::tr(
+                                        lang,
+                                        "自动：按定期延迟测试结果选用最快的节点",
+                                        "Auto: uses the fastest node from periodic latency tests",
+                                    ),
+                                    GroupKind::Fallback => super::tr(
+                                        lang,
+                                        "故障转移：当前节点不可用时依次切换到备用节点",
+                                        "Fallback: switches to the next node when the current one fails",
+                                    ),
+                                    GroupKind::LoadBalance => super::tr(
+                                        lang,
+                                        "负载均衡：在可用节点之间分配连接",
+                                        "Load balance: spreads connections across available nodes",
+                                    ),
+                                };
+                                segment_item(
+                                    &p,
+                                    SharedString::from(format!("group-{}", g.id)),
+                                    label,
+                                    selected,
+                                )
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(tip.clone()).build(window, cx)
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.selected_group = Some(gid.clone());
+                                    this.refresh_header_location();
+                                    cx.notify();
+                                }))
+                            })))
+                        })
                         .when(is_xray, |d| {
                             d.child(
                                 div()
@@ -265,7 +262,7 @@ impl AppView {
                                     .items_center()
                                     .gap_1p5()
                                     .text_xs()
-                                    .text_color(p.warning)
+                                    .text_color(p.warn_text)
                                     .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
                                     .child(self.tr(
                                         "Xray core 模式：切换节点需重启 core",
@@ -273,9 +270,39 @@ impl AppView {
                                     )),
                             )
                         }),
+                )
+                .child(
+                    Button::new("toggle-privacy")
+                        .compact()
+                        .ghost()
+                        .selected(hide_ips)
+                        .toggled(hide_ips)
+                        .icon(if hide_ips {
+                            IconName::EyeOff
+                        } else {
+                            IconName::Eye
+                        })
+                        .label(self.tr("隐私", "Privacy"))
+                        .tooltip(if hide_ips {
+                            self.tr(
+                                "已隐藏服务器地址与位置，点击显示",
+                                "Addresses and location hidden — click to reveal",
+                            )
+                        } else {
+                            self.tr(
+                                "隐藏服务器地址与位置",
+                                "Hide server addresses and location",
+                            )
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.hide_ips = !this.hide_ips;
+                            let mut settings = this.snapshot.settings.clone();
+                            settings.privacy_mode = this.hide_ips;
+                            this.service.update_settings(settings);
+                            this.sync(cx);
+                        })),
                 ),
-            );
-        }
+        );
 
         if self.show_import_box || self.show_manual_form {
             body = body.child(
@@ -405,8 +432,19 @@ impl AppView {
             .as_ref()
             .map(|g| g.kind)
             .unwrap_or(GroupKind::Selector);
+        // Automatic groups pick the node themselves; rows only display it.
+        let auto_mode = group_kind != GroupKind::Selector;
 
-        let search_query = self.node_search.read(cx).value().trim().to_lowercase();
+        // Search, sorting and grouping only pay off on longer lists.
+        let tools_visible = model.nodes.len() >= TOOLS_MIN_NODES;
+        let sort_active = tools_visible && self.sort_by_latency;
+        let grouped = tools_visible && self.group_by_subscription;
+
+        let search_query = if tools_visible {
+            self.node_search.read(cx).value().trim().to_lowercase()
+        } else {
+            String::new()
+        };
         let mut display_nodes: Vec<Node> = model
             .nodes
             .iter()
@@ -425,7 +463,8 @@ impl AppView {
             .cloned()
             .collect();
 
-        if self.sort_by_latency {
+        // Sorting only changes the view; the stored order is left alone.
+        if sort_active {
             display_nodes.sort_by_key(|n| {
                 let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms);
                 match ms {
@@ -435,20 +474,18 @@ impl AppView {
             });
         }
 
-        // Identify fastest node (among enabled nodes with valid delay).
-        let fastest_node_id: Option<String> = display_nodes
-            .iter()
-            .filter(|n| n.enabled)
-            .filter_map(|n| {
-                let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms)?;
-                if ms > 0 {
-                    Some((n.id.clone(), ms))
-                } else {
-                    None
-                }
-            })
-            .min_by_key(|(_, ms)| *ms)
-            .map(|(id, _)| id);
+        // Fastest node among all enabled nodes, only if it clearly wins.
+        let fastest_node_id = clear_winner(
+            model
+                .nodes
+                .iter()
+                .filter(|n| n.enabled)
+                .filter_map(|n| {
+                    let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms)?;
+                    (ms > 0).then(|| (n.id.clone(), ms))
+                })
+                .collect(),
+        );
 
         // Identify timeout / dead nodes for batch cleanup.
         let timeout_node_ids: Vec<String> = model
@@ -474,10 +511,11 @@ impl AppView {
             .unwrap_or(0);
         let has_traffic = max_speed > 0;
 
-        let hide_ips = self.hide_ips;
         let menu_open = self.node_menu_open.clone();
         let batch_mode = self.batch_mode;
         let batch_selected = self.batch_selected.clone();
+        let latency_busy = this_busy(&self.snapshot.busy, "latency");
+        let core_busy = is_core_busy;
 
         // Subscription map for grouping.
         let sub_names: HashMap<String, String> = self
@@ -487,10 +525,41 @@ impl AppView {
             .map(|s| (s.id.clone(), s.name.clone()))
             .collect();
 
+        // Rows are rendered up front so flat and grouped views share them.
+        let mut rows: HashMap<String, AnyElement> = HashMap::new();
+        for node in display_nodes.iter() {
+            let row = render_node_row(
+                RowProps {
+                    node,
+                    lang,
+                    selected: active_node.as_deref() == Some(node.id.as_str()),
+                    fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
+                    latency: self.snapshot.latency.get(&node.id),
+                    hide_ips,
+                    auto_mode,
+                    group_id: group_id_for_select.clone(),
+                    core_busy,
+                    latency_busy,
+                    testing: latency_busy
+                        && node.enabled
+                        && self.latency_pending.contains(&node.id),
+                    menu_open: menu_open.as_deref() == Some(node.id.as_str()),
+                    batch_mode,
+                    batch_checked: batch_selected.contains(&node.id),
+                    drag_enabled: !sort_active,
+                },
+                &p,
+                window,
+                cx,
+            );
+            rows.insert(node.id.clone(), row.into_any_element());
+        }
+
         // Node list card (now the primary focal point of the page).
         body = body.child(
             card(&p)
-                // Header with unified toolbar (search, sort, group, privacy, test all, add node, batch mode).
+                // Header: title and count on the left; "Test all" (secondary) and
+                // "Add node" (primary) side by side; rarer actions in the overflow menu.
                 .child(
                     div()
                         .flex()
@@ -526,155 +595,192 @@ impl AppView {
                                 )),
                         )
                         .child(
-                            Button::new("toggle-add-drawer")
-                                .compact().primary()
-                                .icon(if self.show_import_box || self.show_manual_form { IconName::X } else { IconName::Plus })
-                                .label(if self.show_import_box || self.show_manual_form { self.tr("收起", "Close") } else { self.tr("添加节点", "Add node") })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let open = !(this.show_import_box || this.show_manual_form);
-                                    this.show_import_box = open;
-                                    this.show_manual_form = false;
-                                    this.manual_error = None;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(
                             div()
                                 .flex()
-                                .flex_wrap()
                                 .items_center()
-                                .justify_start()
-                                .gap_1p5()
-                                .child(
-                                    div()
-                                        .w(px(190.))
-                                        .child(Input::new(&self.node_search)),
-                                )
-                                // Group by subscription toggle
-                                .child(
-                                    Button::new("toggle-grouping")
-                                        .compact()
-                                        .when(self.group_by_subscription, |b| b.primary())
-                                        .when(!self.group_by_subscription, |b| b.ghost())
-                                        .icon(IconName::Layers)
-                                        .label(if self.group_by_subscription { self.tr("分组中", "Grouped") } else { self.tr("按订阅", "By subscription") })
-                                        .tooltip(if self.group_by_subscription {
-                                            self.tr("按订阅分组展示中 (点击切回平铺)", "Grouped by subscription (click to flatten)")
-                                        } else {
-                                            self.tr("按订阅分组与折叠节点", "Group and collapse nodes by subscription")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.group_by_subscription = !this.group_by_subscription;
-                                            cx.notify();
-                                        })),
-                                )
-                                // Latency sort toggle
-                                .child(
-                                    Button::new("sort-latency")
-                                        .compact()
-                                        .when(self.sort_by_latency, |b| b.primary())
-                                        .when(!self.sort_by_latency, |b| b.ghost())
-                                        .icon(IconName::ArrowDownUp)
-                                        .label(self.tr("延迟", "Latency"))
-                                        .tooltip(if self.sort_by_latency {
-                                            self.tr("当前按延迟升序排序 (点击恢复默认)", "Sorted by latency (click to reset)")
-                                        } else {
-                                            self.tr("按延迟排序", "Sort by latency")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sort_by_latency = !this.sort_by_latency;
-                                            cx.notify();
-                                        })),
-                                )
-                                // Privacy mode toggle
-                                .child(
-                                    Button::new("toggle-privacy")
-                                        .compact()
-                                        .when(self.hide_ips, |b| b.primary())
-                                        .when(!self.hide_ips, |b| b.ghost())
-                                        .icon(if self.hide_ips { IconName::EyeOff } else { IconName::Eye })
-                                        .label(self.tr("隐私", "Privacy"))
-                                        .tooltip(if self.hide_ips {
-                                            self.tr("服务器地址已隐藏 (点击显示)", "Addresses masked (click to reveal)")
-                                        } else {
-                                            self.tr("隐藏服务器地址", "Mask server addresses")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.hide_ips = !this.hide_ips;
-                                            cx.notify();
-                                        })),
-                                )
-                                // Batch management toggle
-                                .child(
-                                    Button::new("toggle-batch")
-                                        .compact()
-                                        .when(self.batch_mode, |b| b.primary())
-                                        .when(!self.batch_mode, |b| b.ghost())
-                                        .icon(IconName::ListChecks)
-                                        .label(self.tr("批量", "Batch"))
-                                        .tooltip(if self.batch_mode {
-                                            self.tr("退出批量管理模式", "Exit batch mode")
-                                        } else {
-                                            self.tr("开启多选批量管理模式", "Open batch management mode")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.batch_mode = !this.batch_mode;
-                                            if !this.batch_mode {
-                                                this.batch_selected.clear();
-                                            }
-                                            cx.notify();
-                                        })),
-                                )
-                                // Clean dead nodes button
-                                .child(
-                                    Button::new("clean-dead-nodes")
-                                        .compact()
-                                        .ghost()
-                                        .icon(IconName::Broom)
-                                        .label(self.tr("清理超时", "Remove Timed Out"))
-                                        .tooltip(self.tr(
-                                            "移除所有测速超时的节点",
-                                            "Remove all nodes that timed out during latency testing",
-                                        ))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            let timeout_ids: Vec<String> = this
-                                                .snapshot
-                                                .model
-                                                .nodes
-                                                .iter()
-                                                .filter(|n| {
-                                                    this.snapshot
-                                                        .latency
-                                                        .get(&n.id)
-                                                        .map(|l| l.delay_ms.is_none())
-                                                        .unwrap_or(false)
-                                                })
-                                                .map(|n| n.id.clone())
-                                                .collect();
-                                            if timeout_ids.is_empty() {
-                                                this.service.toast(
-                                                    ToastLevel::Info,
-                                                    "当前没有测速超时的不可用节点",
-                                                );
-                                            } else {
-                                                this.show_clean_confirm = true;
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                                // Test all
+                                .gap_2()
                                 .child(
                                     Button::new("test-all")
                                         .compact()
                                         .icon(IconName::Activity)
-                                        .label(self.tr("全部测速", "Test All"))
-                                        .loading(this_busy(&self.snapshot.busy, "latency"))
-                                        .on_click(cx.listener(|this, _, _, _| {
+                                        .label(self.tr("全部测速", "Test all"))
+                                        .loading(latency_busy)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.latency_pending = this
+                                                .snapshot
+                                                .model
+                                                .nodes
+                                                .iter()
+                                                .filter(|n| n.enabled)
+                                                .map(|n| n.id.clone())
+                                                .collect();
                                             this.service.test_latency(LatencyScope::All);
+                                            this.sync(cx);
                                         })),
                                 )
+                                .child(
+                                    Button::new("toggle-add-drawer")
+                                        .compact()
+                                        .primary()
+                                        .icon(if self.show_import_box || self.show_manual_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
+                                        .label(if self.show_import_box || self.show_manual_form {
+                                            self.tr("收起", "Close")
+                                        } else {
+                                            self.tr("添加节点", "Add node")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let open =
+                                                !(this.show_import_box || this.show_manual_form);
+                                            this.show_import_box = open;
+                                            this.show_manual_form = false;
+                                            this.manual_error = None;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("toolbar-more")
+                                        .compact()
+                                        .ghost()
+                                        .selected(self.toolbar_menu_open)
+                                        .icon(IconName::Ellipsis)
+                                        .tooltip(self.tr("更多操作", "More actions"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toolbar_menu_open = !this.toolbar_menu_open;
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
                 )
+                // Overflow menu: batch management and cleanup.
+                .when(self.toolbar_menu_open, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(p.panel_alt)
+                            .child(
+                                Button::new("toggle-batch")
+                                    .compact()
+                                    .ghost()
+                                    .selected(self.batch_mode)
+                                    .icon(IconName::ListChecks)
+                                    .label(if self.batch_mode {
+                                        self.tr("退出批量管理", "Exit batch mode")
+                                    } else {
+                                        self.tr("批量管理", "Batch manage")
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.batch_mode = !this.batch_mode;
+                                        if !this.batch_mode {
+                                            this.batch_selected.clear();
+                                        }
+                                        this.toolbar_menu_open = false;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("clean-dead-nodes")
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::Broom)
+                                    .label(format!(
+                                        "{} ({timeout_count})",
+                                        self.tr("清理超时节点", "Remove timed-out")
+                                    ))
+                                    .disabled(timeout_count == 0)
+                                    .tooltip(self.tr(
+                                        "移除所有测速超时的节点",
+                                        "Remove all nodes that timed out during latency testing",
+                                    ))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_clean_confirm = true;
+                                        this.toolbar_menu_open = false;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                })
+                // Search, view and sort controls appear once the list is long enough.
+                .when(tools_visible, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(220.)).child(Input::new(&self.node_search)))
+                            .child(
+                                segmented(&p)
+                                    .child(
+                                        segment_item(
+                                            &p,
+                                            "view-flat",
+                                            self.tr("平铺", "Flat"),
+                                            !grouped,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.group_by_subscription = false;
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child(
+                                        segment_item(
+                                            &p,
+                                            "view-grouped",
+                                            self.tr("按订阅", "By subscription"),
+                                            grouped,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.group_by_subscription = true;
+                                            cx.notify();
+                                        })),
+                                    ),
+                            )
+                            .child(
+                                segmented(&p)
+                                    .child(
+                                        segment_item(
+                                            &p,
+                                            "sort-manual",
+                                            self.tr("手动顺序", "Manual order"),
+                                            !sort_active,
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sort_by_latency = false;
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child({
+                                        let tip = self.tr(
+                                            "仅改变显示顺序，不影响已保存的顺序；拖拽排序只在手动顺序下可用",
+                                            "Changes the view only, not the saved order; drag to reorder works in manual order",
+                                        );
+                                        segment_item(
+                                            &p,
+                                            "sort-latency",
+                                            self.tr("延迟 ↑", "Latency ↑"),
+                                            sort_active,
+                                        )
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tip.clone()).build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.sort_by_latency = true;
+                                            cx.notify();
+                                        }))
+                                    }),
+                            ),
+                    )
+                })
                 // Batch Operation Bar (Visible when batch_mode is active).
                 .when(batch_mode, |d| {
                     let all_ids: Vec<String> = display_nodes.iter().map(|n| n.id.clone()).collect();
@@ -731,10 +837,12 @@ impl AppView {
                                             .compact()
                                             .disabled(selected_count == 0)
                                             .label(self.tr("批量测速", "Test selected"))
-                                            .on_click(cx.listener(move |this, _, _, _| {
+                                            .on_click(cx.listener(move |this, _, _, cx| {
                                                 for id in &sel {
+                                                    this.latency_pending.insert(id.clone());
                                                     this.service.test_latency(LatencyScope::Node(id.clone()));
                                                 }
+                                                this.sync(cx);
                                             }))
                                     })
                                     .child({
@@ -765,17 +873,38 @@ impl AppView {
                                     })
                                     .child({
                                         let sel = selected_ids.clone();
-                                        Button::new("batch-delete")
-                                            .compact()
-                                            .disabled(selected_count == 0)
-                                            .ghost()
-                                            .icon(IconName::Trash)
-                                            .label(self.tr("批量删除", "Delete selected"))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.service.delete_nodes(&sel);
-                                                this.batch_selected.clear();
-                                                this.sync(cx);
-                                            }))
+                                        let del_fg = p.danger.opacity(0.72);
+                                        let del_hover_fg = p.danger;
+                                        let del_hover_bg = p.danger.opacity(0.14);
+                                        let del_active_bg = p.danger.opacity(0.22);
+                                        div()
+                                            .id("batch-delete")
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .h(px(26.))
+                                            .px_2p5()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(del_fg)
+                                            .when(selected_count == 0, |d| d.opacity(0.45))
+                                            .when(selected_count > 0, |d| {
+                                                d.cursor_pointer()
+                                                    .hover(move |s| {
+                                                        s.bg(del_hover_bg).text_color(del_hover_fg)
+                                                    })
+                                                    .active(move |s| {
+                                                        s.bg(del_active_bg).text_color(del_hover_fg)
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.service.delete_nodes(&sel);
+                                                        this.batch_selected.clear();
+                                                        this.sync(cx);
+                                                    }))
+                                            })
+                                            .child(Icon::new(IconName::Trash).size(px(14.)))
+                                            .child(self.tr("批量删除", "Delete selected"))
                                     })
                                     .child(
                                         Button::new("batch-exit")
@@ -875,7 +1004,7 @@ impl AppView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_1()
-                                                    .child(dot(p.primary))
+                                                    .child(dot(p.data_down))
                                                     .child(self.tr("下行", "Down")),
                                             )
                                             .child(
@@ -883,7 +1012,7 @@ impl AppView {
                                                     .flex()
                                                     .items_center()
                                                     .gap_1()
-                                                    .child(dot(p.info))
+                                                    .child(dot(p.data_up))
                                                     .child(self.tr("上行", "Up")),
                                             ),
                                     )
@@ -912,28 +1041,10 @@ impl AppView {
                     ))
                 })
                 // Node list: either Grouped by Subscription or Flat List.
-                .when(!self.group_by_subscription, |container| {
-                    container.children(display_nodes.iter().map(|node| {
-                        render_node_row(
-                            node,
-                            &p,
-                            lang,
-                            active_node.as_deref(),
-                            fastest_node_id.as_deref(),
-                            self.snapshot.latency.get(&node.id),
-                            hide_ips,
-                            group_kind,
-                            group_id_for_select.clone(),
-                            is_core_busy,
-                            this_busy(&self.snapshot.busy, "latency"),
-                            menu_open.as_deref(),
-                            batch_mode,
-                            batch_selected.contains(&node.id),
-                            cx,
-                        )
-                    }))
+                .when(!grouped, |container| {
+                    container.children(display_nodes.iter().filter_map(|node| rows.remove(&node.id)))
                 })
-                .when(self.group_by_subscription, |container| {
+                .when(grouped, |container| {
                     // Partition nodes into Subscription Groups
                     let mut sub_groups: BTreeMap<Option<String>, Vec<Node>> = BTreeMap::new();
                     for node in display_nodes.iter() {
@@ -1011,33 +1122,17 @@ impl AppView {
                                             .ghost()
                                             .label(self.tr("测速本组", "Test group"))
                                             .tooltip(self.tr("测试该订阅下所有节点的延迟", "Test latency of all nodes in this subscription"))
-                                            .on_click(cx.listener(move |this, _, _, _| {
+                                            .on_click(cx.listener(move |this, _, _, cx| {
                                                 for id in &node_ids_for_ping {
+                                                    this.latency_pending.insert(id.clone());
                                                     this.service.test_latency(LatencyScope::Node(id.clone()));
                                                 }
+                                                this.sync(cx);
                                             })),
                                     ),
                             )
                             .when(!is_collapsed, |d| {
-                                d.children(group_nodes.iter().map(|node| {
-                                    render_node_row(
-                                        node,
-                                        &p,
-                                        lang,
-                                        active_node.as_deref(),
-                                        fastest_node_id.as_deref(),
-                                        self.snapshot.latency.get(&node.id),
-                                        hide_ips,
-                                        group_kind,
-                                        group_id_for_select.clone(),
-                                        is_core_busy,
-                                        this_busy(&self.snapshot.busy, "latency"),
-                                        menu_open.as_deref(),
-                                        batch_mode,
-                                        batch_selected.contains(&node.id),
-                                        cx,
-                                    )
-                                }))
+                                d.children(group_nodes.iter().filter_map(|node| rows.remove(&node.id)))
                             })
                     }))
                 }),
@@ -1127,25 +1222,98 @@ fn format_endpoint(endpoint: &str, hide: bool) -> String {
     }
 }
 
-/// Render a single node row with interactive controls, radio selection, and optional batch checkbox.
-fn render_node_row(
-    node: &Node,
-    p: &Palette,
+/// Everything a node row needs; computed once per frame by the page.
+struct RowProps<'a> {
+    node: &'a Node,
     lang: Language,
-    active_node: Option<&str>,
-    fastest_node_id: Option<&str>,
-    latency: Option<&xross_core::storage::LatencyEntry>,
+    selected: bool,
+    fastest: bool,
+    latency: Option<&'a LatencyEntry>,
     hide_ips: bool,
-    group_kind: GroupKind,
-    group_id_for_select: Option<String>,
-    is_core_busy: bool,
-    is_latency_busy: bool,
-    menu_open: Option<&str>,
+    auto_mode: bool,
+    group_id: Option<String>,
+    core_busy: bool,
+    latency_busy: bool,
+    testing: bool,
+    menu_open: bool,
     batch_mode: bool,
-    is_batch_checked: bool,
+    batch_checked: bool,
+    drag_enabled: bool,
+}
+
+/// The fastest node, but only if it leads the runner-up by at least
+/// `max(30 ms, 15 %)`. Smaller gaps are measurement noise and flip on the
+/// next run, so no node is marked.
+fn clear_winner(mut measured: Vec<(String, u32)>) -> Option<String> {
+    measured.sort_by_key(|(_, ms)| *ms);
+    let (best_id, best) = measured.first()?;
+    let (_, second) = measured.get(1)?;
+    let threshold = FASTEST_MIN_GAP_MS.max((*second as f32 * FASTEST_MIN_GAP_RATIO) as u32);
+    (second.saturating_sub(*best) >= threshold).then(|| best_id.clone())
+}
+
+fn age_text(lang: Language, secs: i64) -> String {
+    let zh = lang == Language::Zh;
+    match secs {
+        s if s < 60 => {
+            if zh {
+                "刚刚测速".into()
+            } else {
+                "Tested just now".into()
+            }
+        }
+        s if s < 3600 => {
+            let n = s / 60;
+            if zh {
+                format!("{n} 分钟前测速")
+            } else {
+                format!("Tested {n} min ago")
+            }
+        }
+        s if s < 86_400 => {
+            let n = s / 3600;
+            if zh {
+                format!("{n} 小时前测速")
+            } else {
+                format!("Tested {n} h ago")
+            }
+        }
+        s => {
+            let n = s / 86_400;
+            if zh {
+                format!("{n} 天前测速")
+            } else {
+                format!("Tested {n} d ago")
+            }
+        }
+    }
+}
+
+/// Render a single node row: flush selection bar, radio, metadata, latency and
+/// hover-revealed actions.
+fn render_node_row(
+    props: RowProps<'_>,
+    p: &Palette,
+    window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement + use<> {
-    let selected = active_node == Some(node.id.as_str());
+    let RowProps {
+        node,
+        lang,
+        selected,
+        fastest: is_fastest,
+        latency,
+        hide_ips,
+        auto_mode,
+        group_id,
+        core_busy: is_core_busy,
+        latency_busy: is_latency_busy,
+        testing,
+        menu_open: is_menu_open,
+        batch_mode,
+        batch_checked: is_batch_checked,
+        drag_enabled,
+    } = props;
     let node_id = node.id.clone();
     let node_id_select = node.id.clone();
     let node_id_tcp = node.id.clone();
@@ -1155,59 +1323,112 @@ fn render_node_row(
     let node_id_del = node.id.clone();
     let node_id_menu = node.id.clone();
     let node_id_batch = node.id.clone();
-    let group_for_click = group_id_for_select.clone();
+    let group_for_click = group_id;
     let name = node.name.clone();
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
-    let is_fastest = fastest_node_id == Some(&node.id);
-    let is_menu_open = menu_open == Some(&node.id);
     let is_node_busy = is_core_busy && selected;
     let drop_target = node.id.clone();
     let drag_primary = p.primary;
     let drag_accent = p.accent;
+    let hover_bg = p.panel_alt.opacity(0.5);
+    let hover_group = SharedString::from(format!("node-group-{}", node.id));
+
+    // The test button stays hidden until the row is hovered or the button has
+    // keyboard focus; the focus handle is kept per row across frames.
+    let tcp_focus = window
+        .use_keyed_state(
+            SharedString::from(format!("tcp-focus-{}", node.id)),
+            cx,
+            |_, cx| cx.focus_handle(),
+        )
+        .read(cx)
+        .clone();
+    let tcp_focused = tcp_focus.is_focused(window);
 
     let delay_label = latency
-        .as_ref()
         .map(|l| match l.delay_ms {
             Some(ms) => format!("{ms} ms"),
             None => super::tr(lang, "超时", "Timeout").to_string(),
         })
         .unwrap_or_else(|| "—".into());
-
-    let delay_color = match latency.as_ref().and_then(|l| l.delay_ms) {
-        Some(ms) if ms < 150 => p.success,
-        Some(ms) if ms < 350 => p.warning,
-        Some(_) => p.danger,
-        None => p.muted_fg,
+    let delay_color = latency_color(p, latency);
+    let stale = latency.is_some_and(|l| latency_age_secs(l) > LATENCY_STALE_SECS);
+    let delay_tip: SharedString = match latency {
+        None => super::tr(lang, "尚未测速", "Not tested yet"),
+        Some(entry) => {
+            let grades = if lang == Language::Zh {
+                format!(
+                    "分级：<{LATENCY_EXCELLENT_MS} 优 · <{LATENCY_NORMAL_MS} 正常 · <{LATENCY_SLOW_MS} 偏慢 · 其余较差（ms）"
+                )
+            } else {
+                format!(
+                    "Grades: <{LATENCY_EXCELLENT_MS} excellent · <{LATENCY_NORMAL_MS} normal · <{LATENCY_SLOW_MS} slow · else poor (ms)"
+                )
+            };
+            SharedString::from(format!(
+                "{}\n{grades}",
+                age_text(lang, latency_age_secs(entry))
+            ))
+        }
     };
+
+    let radio_border = if auto_mode && selected {
+        p.muted_fg
+    } else if auto_mode {
+        p.border
+    } else if selected {
+        p.primary
+    } else {
+        p.muted_fg
+    };
+    let radio_dot = if auto_mode { p.muted_fg } else { p.primary };
 
     div()
         .id(SharedString::from(format!("node-{}", node.id)))
+        .group(hover_group.clone())
+        .relative()
         .flex()
         .flex_col()
         .rounded_lg()
         .border_1()
-        .border_color(if selected { p.primary } else { p.border })
+        .border_color(p.border)
         .bg(if selected { p.accent } else { p.bg })
         .overflow_hidden()
+        .when(!selected, |d| d.hover(move |s| s.bg(hover_bg)))
         .drag_over::<DraggedNode>(move |style, _, _, _| {
             style.border_color(drag_primary).bg(drag_accent)
         })
         .on_drop(cx.listener(move |this, dragged: &DraggedNode, _, cx| {
             if dragged.id != drop_target {
                 this.service.move_node_to(&dragged.id, &drop_target);
-                this.sort_by_latency = false;
                 this.sync(cx);
             }
         }))
         .when(!node.enabled, |d| d.opacity(0.45))
+        // Selection bar: inset vertically by the corner radius so it never
+        // protrudes past the rounded corners of the row card.
+        .when(selected, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left(px(1.))
+                    .top(px(7.))
+                    .bottom(px(7.))
+                    .w(px(3.))
+                    .rounded_full()
+                    .bg(p.primary),
+            )
+        })
         .child(
             div()
                 .id(SharedString::from(format!("node-row-{}", node.id)))
                 .flex()
                 .items_center()
                 .gap_3()
-                .p_3()
-                .cursor_pointer()
+                .pl_4()
+                .pr_3()
+                .py_3()
+                .when(batch_mode || !auto_mode, |d| d.cursor_pointer())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if batch_mode {
                         if this.batch_selected.contains(&node_id_batch) {
@@ -1218,7 +1439,8 @@ fn render_node_row(
                         cx.notify();
                         return;
                     }
-                    if selected || is_core_busy {
+                    // Automatic groups choose for themselves.
+                    if auto_mode || selected || is_core_busy {
                         return;
                     }
                     if let Some(group) = &group_for_click {
@@ -1226,11 +1448,14 @@ fn render_node_row(
                         this.sync(cx);
                     }
                 }))
-                .child(
+                // Drag handle: dimmed until hover, absent while a sort is applied.
+                .child(if drag_enabled {
                     div()
                         .id(SharedString::from(format!("drag-node-{}", node.id)))
                         .flex_shrink_0()
                         .cursor_pointer()
+                        .opacity(0.35)
+                        .group_hover(hover_group.clone(), |s| s.opacity(1.))
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .on_drag(
                             DraggedNode {
@@ -1243,9 +1468,12 @@ fn render_node_row(
                             Icon::new(IconName::GripVertical)
                                 .size(px(14.))
                                 .text_color(p.muted_fg),
-                        ),
-                )
-                // Batch Checkbox (when batch mode is active)
+                        )
+                        .into_any_element()
+                } else {
+                    div().w(px(14.)).flex_shrink_0().into_any_element()
+                })
+                // Batch checkbox (when batch mode is active).
                 .when(batch_mode, |d| {
                     d.child(
                         div()
@@ -1270,25 +1498,20 @@ fn render_node_row(
                             }),
                     )
                 })
-                // Left accent bar
-                .child(div().w(px(3.)).h(px(22.)).rounded_full().bg(if selected {
-                    p.primary
-                } else {
-                    hsla(0., 0., 0., 0.)
-                }))
-                // Row start: Radio button indicating selected active node.
+                // Radio: disabled in automatic groups, where the chosen node is only marked.
                 .child(
                     div()
                         .w(px(20.))
                         .h(px(20.))
+                        .flex_shrink_0()
                         .rounded_full()
                         .border_1()
-                        .border_color(if selected { p.primary } else { p.muted_fg })
+                        .border_color(radio_border)
                         .flex()
                         .items_center()
                         .justify_center()
                         .child(if selected {
-                            div().size(px(10.)).rounded_full().bg(p.primary)
+                            div().size(px(10.)).rounded_full().bg(radio_dot)
                         } else {
                             div()
                         }),
@@ -1316,6 +1539,13 @@ fn render_node_row(
                                         .truncate()
                                         .child(name),
                                 )
+                                .when(selected && auto_mode, |d| {
+                                    d.child(pill(
+                                        super::tr(lang, "当前选用", "In use"),
+                                        p.primary_fg,
+                                        p.primary,
+                                    ))
+                                })
                                 .when(is_fastest, |d| {
                                     d.child(
                                         div()
@@ -1326,9 +1556,9 @@ fn render_node_row(
                                             .px_2()
                                             .py_0p5()
                                             .rounded_full()
-                                            .bg(p.accent)
+                                            .bg(p.panel)
                                             .text_xs()
-                                            .text_color(p.success)
+                                            .text_color(p.ok_text)
                                             .child(Icon::new(IconName::Zap).size(px(12.)))
                                             .child(super::tr(lang, "最快", "Fastest")),
                                     )
@@ -1336,8 +1566,8 @@ fn render_node_row(
                                 .when(is_node_busy, |d| {
                                     d.child(pill(
                                         super::tr(lang, "切换中…", "Switching…"),
-                                        p.warning,
-                                        p.accent,
+                                        p.warn_text,
+                                        p.panel,
                                     ))
                                 }),
                         )
@@ -1368,49 +1598,62 @@ fn render_node_row(
                                 ),
                         ),
                 )
-                .when(group_kind != GroupKind::Selector, |d| {
-                    d.child(pill(
-                        if group_kind == GroupKind::UrlTest {
-                            super::tr(lang, "自动测速中", "Testing automatically")
-                        } else {
-                            super::tr(lang, "备用", "Standby")
-                        },
-                        p.muted_fg,
-                        p.panel_alt,
-                    ))
-                })
-                // Latency column: fixed width (80px), right-aligned, mono font.
+                // Latency column: fixed width, right-aligned, mono. A spinner replaces
+                // the value while this node is being measured; old values are dimmed.
                 .child(
                     div()
-                        .w(px(80.))
+                        .id(SharedString::from(format!("delay-{}", node.id)))
+                        .w(px(84.))
                         .flex_shrink_0()
                         .flex()
+                        .items_center()
                         .justify_end()
                         .text_sm()
                         .font_family(cx.theme().mono_font_family.clone())
                         .text_color(delay_color)
-                        .child(delay_label),
+                        .when(stale && !testing, |d| d.opacity(0.55))
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(delay_tip.clone()).build(window, cx)
+                        })
+                        .child(if testing {
+                            Spinner::new().small().color(p.muted_fg).into_any_element()
+                        } else {
+                            div().child(delay_label).into_any_element()
+                        }),
                 )
-                // Action buttons: Ping test and More menu.
+                // Actions: the test button is revealed by hover or keyboard focus.
                 .child(
                     div()
                         .id(SharedString::from(format!("node-actions-{}", node.id)))
                         .flex()
                         .items_center()
-                        .gap_1p5()
+                        .gap_1()
                         .flex_shrink_0()
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(
-                            Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
-                                .compact()
-                                .label(super::tr(lang, "测速", "Test"))
-                                .tooltip(super::tr(lang, "测试 TCP 延迟", "Test TCP latency"))
-                                .loading(is_latency_busy)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    this.service
-                                        .test_latency(LatencyScope::Node(node_id_tcp.clone()));
-                                })),
+                            div()
+                                .when(!tcp_focused, |d| {
+                                    d.opacity(0.)
+                                        .group_hover(hover_group.clone(), |s| s.opacity(1.))
+                                })
+                                .child(
+                                    Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
+                                        .compact()
+                                        .ghost()
+                                        .icon(IconName::Activity)
+                                        .tooltip(super::tr(lang, "测速", "Test latency"))
+                                        .disabled(is_latency_busy)
+                                        .track_focus(&tcp_focus)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.latency_pending.clear();
+                                            this.latency_pending.insert(node_id_tcp.clone());
+                                            this.service.test_latency(LatencyScope::Node(
+                                                node_id_tcp.clone(),
+                                            ));
+                                            this.sync(cx);
+                                        })),
+                                ),
                         )
                         .child(
                             Button::new(SharedString::from(format!("more-{node_id_menu}")))
@@ -1430,7 +1673,7 @@ fn render_node_row(
                                 })),
                         ),
                 )
-                // Row end: Enabled toggle switch, isolated with a left border divider.
+                // Row end: enabled toggle, separated by a hairline.
                 .child(
                     div()
                         .id(SharedString::from(format!("node-toggle-{}", node.id)))
@@ -1454,8 +1697,13 @@ fn render_node_row(
                         ),
                 ),
         )
-        // Expanded '⋯' menu tray
+        // Expanded '⋯' menu tray: stretches the row container with the same background.
         .when(is_menu_open, |d| {
+            let del_fg = p.danger.opacity(0.72);
+            let del_hover_fg = p.danger;
+            let del_hover_bg = p.danger.opacity(0.14);
+            let del_active_bg = p.danger.opacity(0.22);
+            let del_tip = super::tr(lang, "删除此节点", "Delete this node");
             d.child(
                 div()
                     .flex()
@@ -1465,9 +1713,12 @@ fn render_node_row(
                     .gap_2()
                     .px_4()
                     .py_2()
-                    .bg(p.panel)
                     .border_t_1()
-                    .border_color(p.border)
+                    .border_color(if selected {
+                        p.primary.opacity(0.16)
+                    } else {
+                        p.border
+                    })
                     .child(
                         Button::new(SharedString::from(format!("real-{node_id_real}")))
                             .compact()
@@ -1513,18 +1764,64 @@ fn render_node_row(
                             })),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("del-{node_id_del}")))
-                            .compact()
-                            .ghost()
-                            .icon(IconName::Trash)
-                            .label(super::tr(lang, "删除", "Delete"))
-                            .tooltip(super::tr(lang, "删除此节点", "Delete this node"))
+                        div()
+                            .id(SharedString::from(format!("del-{node_id_del}")))
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .h(px(26.))
+                            .px_2p5()
+                            .rounded_md()
+                            .cursor_pointer()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(del_fg)
+                            .hover(move |s| s.bg(del_hover_bg).text_color(del_hover_fg))
+                            .active(move |s| s.bg(del_active_bg).text_color(del_hover_fg))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(del_tip.clone()).build(window, cx)
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.service.delete_node(&node_id_del);
                                 this.node_menu_open = None;
                                 this.sync(cx);
-                            })),
+                            }))
+                            .child(Icon::new(IconName::Trash).size(px(14.)))
+                            .child(super::tr(lang, "删除", "Delete")),
                     ),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clear_winner;
+
+    fn nodes(values: &[u32]) -> Vec<(String, u32)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, ms)| (format!("n{i}"), *ms))
+            .collect()
+    }
+
+    #[test]
+    fn close_latencies_have_no_fastest_marker() {
+        assert_eq!(clear_winner(nodes(&[203, 209])), None);
+        // 30 ms apart but under 15 % of the runner-up.
+        assert_eq!(clear_winner(nodes(&[300, 330])), None);
+    }
+
+    #[test]
+    fn clear_lead_is_marked() {
+        assert_eq!(clear_winner(nodes(&[100, 200])), Some("n0".into()));
+        // Absolute floor of 30 ms applies to fast nodes.
+        assert_eq!(clear_winner(nodes(&[80, 40])), Some("n1".into()));
+    }
+
+    #[test]
+    fn a_single_measurement_has_nothing_to_beat() {
+        assert_eq!(clear_winner(nodes(&[50])), None);
+        assert_eq!(clear_winner(Vec::new()), None);
+    }
 }
