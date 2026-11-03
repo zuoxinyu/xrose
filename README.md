@@ -304,14 +304,27 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 - [ ] 优化操作连贯性：缺 core 时自动下载 core，缺 rule-set 时自动下载 rules，
       需要提权时自动引导安装 helper，减少“先手动准备好再启动”的断点。
 
+### 节点与订阅
+
+- [ ] 桌面端二维码扫描：用可拖动的取景器模拟拍照，把取景框移到屏幕上的二维码图像即可识别，
+      直接导入节点或订阅链接，无需摄像头。
+
+### 路由与规则
+
+- [ ] 自定义规则分组：规则支持命名分组、分组启停与排序，编译时按组展开为路由规则，
+      与现有预设共存。
+
 ### 系统集成
 
 - [ ] 系统 toast：接入 Windows 通知中心 / macOS UserNotifications / Linux 桌面通知，
       替代当前仅有的应用内 toast。
 - [ ] 清理系统副作用：退出或卸载时回收提权计划任务 / systemd service / LaunchDaemon、
       虚拟网卡、系统代理设置与 PAC 托管端口，避免端口被占用或残留规则。
-- [ ] 合并提权助手到健康检查界面：把 helper 的状态、安装、启动、卸载收进 `doctor`
-      式的检查列表，不再分散在设置页与 CLI。
+- [ ] 合并提权助手到测试页：把 helper 的状态、安装、启动、卸载收进 `doctor` 式的检查列表，
+      不再分散在设置页与 CLI。
+- [ ] 开机自启扩展：除应用本体外，分别设置登录时启动系统代理、Tailscale 与 EasyTier。
+- [ ] 测试页补充系统诊断：网卡与默认路由、DNS 配置、当前代理模式（系统代理 / PAC / TUN）、
+      监听端口占用，结果可一键复制。
 
 ### 组网
 
@@ -326,6 +339,9 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 - [x] 提高边栏透明度，让窗口材质更明显。
 - [x] 优化 macOS / Windows 下的标题栏布局（红绿灯与自绘控件的避让、拖动区域）。
 - [x] 托盘显示 Tailscale / EasyTier 状态（连接状态与图标），与核心状态并列。
+- [ ] 交互 motion 动画：页面切换、面板展开、列表增删与托盘浮窗进出场统一曲线与时长，
+      并遵循系统“减少动态效果”设置。
+- [ ] 关于页添加对 DeepSeek / GPT / Gemini 的鸣谢（重要）。
 
 ### 文案与引导
 
@@ -338,6 +354,12 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 
 - [ ] macOS / Linux 实机验证：托盘（status item / StatusNotifierItem）、vibrancy 与
       窗口材质、系统代理、提权助手（LaunchDaemon / systemd）、TUN 与组网路径。
+
+### 构建与发布
+
+- [ ] CI：GitHub Actions 在 Windows / macOS / Linux 上构建、运行 `cargo test -p xross-core`、
+      检查格式与 clippy，并缓存依赖。
+- [ ] 打包：Windows 安装包、macOS `.app` / dmg、Linux AppImage / deb，产物附版本号与更新日志。
 
 ## 目录结构
 
