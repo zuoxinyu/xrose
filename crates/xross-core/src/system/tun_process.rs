@@ -39,6 +39,7 @@ struct Running {
     owner_pid: u32,
     child: std::process::Child,
     data_dir: PathBuf,
+    tun_addresses: Vec<String>,
     lines: Arc<Mutex<std::collections::VecDeque<(bool, String)>>>,
     // Readers terminate when the core closes its pipes.
     readers: Vec<std::thread::JoinHandle<()>>,
@@ -86,6 +87,38 @@ impl Drop for Running {
 }
 
 static RUNNING: OnceLock<Mutex<BTreeMap<String, Running>>> = OnceLock::new();
+
+/// Addresses from configurations of cores launched by this helper.
+pub fn active_tun_addresses() -> Vec<String> {
+    RUNNING
+        .get()
+        .map(|map| {
+            map.lock()
+                .values()
+                .flat_map(|r| r.tun_addresses.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn tun_addresses(config: &std::path::Path) -> Result<Vec<String>> {
+    let value: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(config).map_err(|_| Error::config("无法读取 TUN 配置"))?,
+    )?;
+    Ok(value["inbounds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["type"] == "tun")
+        .flat_map(|i| i["address"].as_array().into_iter().flatten())
+        .filter_map(|v| {
+            v.as_str()?
+                .parse::<ipnet::IpNet>()
+                .ok()
+                .map(|n| n.addr().to_string())
+        })
+        .collect())
+}
 
 pub fn stop_all() {
     if let Some(running) = RUNNING.get() {
@@ -213,6 +246,7 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
             }
             let paths = resolve_paths(binary, config);
             validate_start(&paths, binary, config)?;
+            let tun_addresses = tun_addresses(config)?;
             let mut command = std::process::Command::new(binary);
             command
                 .args(crate::core::run_args(
@@ -246,6 +280,7 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
                     owner_pid: request.owner_pid,
                     child,
                     data_dir: paths.data_dir.clone(),
+                    tun_addresses,
                     lines,
                     readers,
                 },
@@ -511,6 +546,7 @@ mod tests {
         RUNNING.get_or_init(Default::default).lock().insert(
             session.clone(),
             Running {
+                tun_addresses: vec![],
                 owner_pid: owner_child.id(),
                 child,
                 data_dir: std::env::temp_dir(),

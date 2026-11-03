@@ -45,6 +45,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spec.elevated_tun = true;
         let supervisor = ProcessSupervisor::new(logs.clone());
         let watchdog = WatchdogConfig { enabled:false, max_retries:0 };
+        let mut proxy_addresses = Vec::new();
+        let initial_mesh_baseline = xross_core::mesh::platform::worker_baseline(&mut proxy_addresses)?;
         for attempt in 0..2 {
             supervisor.start(spec.clone(), watchdog).await?;
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -61,7 +63,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(xross_core::Error::process("原有默认路由或 DNS 发生变化，已停止测试"));
             }
             if std::env::args().any(|a|a=="--crash-owner") { std::process::exit(0); }
+            let mesh_baseline = xross_core::mesh::platform::worker_baseline(&mut proxy_addresses)?;
+            if !proxy_addresses.contains(&"10.254.254.1".to_string()) || !mesh_baseline.preserves_connectivity(&initial_mesh_baseline) {
+                return Err(xross_core::Error::process("未识别后启动的代理 TUN"));
+            }
             supervisor.stop().await?;
+            let after_stop = xross_core::mesh::platform::worker_baseline(&mut proxy_addresses)?;
+            if !after_stop.preserves_connectivity(&mesh_baseline) {
+                return Err(xross_core::Error::process("代理 TUN 回收被误判为原有网络变化"));
+            }
             if supervisor.state().phase != ProcessPhase::Stopped { return Err(xross_core::Error::process("TUN 未停止")); }
         }
         println!("TUN helper start, logs, stop and restart passed");

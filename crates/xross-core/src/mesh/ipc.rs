@@ -229,6 +229,11 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             {
                 return Err(Error::other("该组网后端已经运行，请先断开"));
             }
+            #[cfg(windows)]
+            let baseline = super::platform::baseline_with_proxy_tun(
+                &crate::system::tun_process::active_tun_addresses(),
+            )?;
+            #[cfg(not(windows))]
             let baseline = super::platform::baseline()?;
             let mut wanted = profile.remote_subnets.clone();
             if !profile.ipv4.is_empty() {

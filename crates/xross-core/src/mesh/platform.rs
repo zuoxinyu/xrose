@@ -5,6 +5,10 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkBaseline {
+    #[serde(default)]
+    pub proxy_tun_addresses: Vec<String>,
+    #[serde(default)]
+    proxy_indices: Vec<u32>,
     pub protected: Vec<String>,
     pub defaults: Vec<String>,
     #[serde(default)]
@@ -14,10 +18,62 @@ pub struct NetworkBaseline {
 }
 
 impl NetworkBaseline {
+    fn exclude_proxy_interfaces(&mut self) {
+        let indices = std::mem::take(&mut self.proxy_indices);
+        self.dns.retain(|row| {
+            !row.split('|')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .is_some_and(|i| indices.contains(&i))
+        });
+        self.defaults.retain(|row| {
+            !row.rsplit('|')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+                .is_some_and(|i| indices.contains(&i))
+        });
+    }
+
     /// Newly created adapters may add DNS rows without changing existing DNS.
     pub fn preserves_connectivity(&self, original: &Self) -> bool {
-        self.defaults == original.defaults
-            && original.dns.iter().all(|entry| self.dns.contains(entry))
+        self.connectivity_change(original).is_none()
+    }
+
+    pub fn connectivity_change(&self, original: &Self) -> Option<String> {
+        if self.defaults != original.defaults {
+            let indices = |rows: &[String], other: &[String]| {
+                rows.iter()
+                    .filter(|r| !other.contains(r))
+                    .filter_map(|r| r.rsplit('|').next())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            };
+            return Some(format!(
+                "默认路由变化（新增接口：{}；移除接口：{}）",
+                indices(&self.defaults, &original.defaults),
+                indices(&original.defaults, &self.defaults)
+            ));
+        }
+        for entry in &original.dns {
+            let mut fields = entry.splitn(3, '|');
+            let (Some(index), Some(family), Some(servers)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Some("DNS 基线格式无效".into());
+            };
+            let prefix = format!("{index}|{family}|");
+            let current = self.dns.iter().find_map(|r| r.strip_prefix(&prefix));
+            // Windows creates/removes empty Teredo DNS rows during TUN restarts.
+            // Missing empty rows are harmless; assigning DNS to an existing
+            // empty row or losing an actual resolver must still be detected.
+            if current.unwrap_or("") != servers {
+                return Some(format!(
+                    "接口 {index} 的 {} DNS 变化",
+                    if family == "2" { "IPv4" } else { "IPv6" }
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -83,8 +139,55 @@ fn quote(s: &str) -> String {
 }
 
 pub fn baseline() -> Result<NetworkBaseline> {
-    let raw = powershell("$ErrorActionPreference='Stop'; $r=@(Get-NetRoute -ErrorAction Stop); [pscustomobject]@{ mesh_routes=@($r | Where-Object {$_.InterfaceAlias -like 'xross-mesh-*'} | ForEach-Object { [pscustomobject]@{cidr=$_.DestinationPrefix; interface=$_.InterfaceAlias} }); protected=@(Get-NetIPAddress | Where-Object { $_.InterfaceAlias -notlike 'xross-mesh-*' -and $_.InterfaceAlias -notlike '*Loopback*' } | ForEach-Object { \"$($_.IPAddress)/$($_.PrefixLength)\" }); dns=@(Get-DnsClientServerAddress | Where-Object {$_.InterfaceAlias -notlike 'xross-mesh-*'} | ForEach-Object { \"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')\" } | Sort-Object); defaults=@($r | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')} | ForEach-Object { \"$($_.DestinationPrefix)|$($_.NextHop)|$($_.InterfaceIndex)\" } | Sort-Object) } | ConvertTo-Json -Compress")?;
-    serde_json::from_str(&raw).map_err(|_| Error::other("无法读取本机路由基线"))
+    baseline_with_proxy_tun(&[])
+}
+
+/// Keep addresses through stop/restart, including proxies started after mesh.
+pub fn worker_baseline(known: &mut Vec<String>) -> Result<NetworkBaseline> {
+    fn refresh(known: &mut Vec<String>) -> Result<bool> {
+        #[cfg(windows)]
+        {
+            use crate::system::privilege::{call, HelperRequest};
+            let reply = call(&HelperRequest::ProxyTunAddresses)?;
+            if !reply.is_ok() {
+                return Err(Error::other("无法读取提权助手的代理 TUN 状态"));
+            }
+            let addresses: Vec<String> = serde_json::from_str(reply.message())?;
+            let old = known.clone();
+            known.extend(addresses);
+            known.sort();
+            known.dedup();
+            return Ok(*known != old);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = known;
+            Ok(false)
+        }
+    }
+    refresh(known)?;
+    let current = baseline_with_proxy_tun(known)?;
+    // A core can start while Windows is collecting the network snapshot.
+    if refresh(known)? {
+        baseline_with_proxy_tun(known)
+    } else {
+        Ok(current)
+    }
+}
+
+pub fn baseline_with_proxy_tun(addresses: &[String]) -> Result<NetworkBaseline> {
+    let addresses = addresses
+        .iter()
+        .map(|s| s.parse::<std::net::IpAddr>().map(|ip| ip.to_string()))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| Error::config("代理 TUN 地址无效"))?;
+    let prefix = format!("$ErrorActionPreference='Stop'; $proxyAddresses=@({}); $tunIndices=@(Get-NetAdapter -IncludeHidden | Where-Object {{$_.InterfaceDescription -like 'sing-tun Tunnel*'}} | Select-Object -ExpandProperty InterfaceIndex); $ips=@(Get-NetIPAddress); $proxyIndices=@($ips | Where-Object {{$_.IPAddress -in $proxyAddresses -and $_.InterfaceIndex -in $tunIndices}} | Select-Object -ExpandProperty InterfaceIndex -Unique); ", addresses.iter().map(|s| quote(s)).collect::<Vec<_>>().join(","));
+    let raw = powershell(&(prefix + "$ErrorActionPreference='Stop'; $r=@(Get-NetRoute -ErrorAction Stop); [pscustomobject]@{ proxy_indices=@($proxyIndices); mesh_routes=@($r | Where-Object {$_.InterfaceAlias -like 'xross-mesh-*'} | ForEach-Object { [pscustomobject]@{cidr=$_.DestinationPrefix; interface=$_.InterfaceAlias} }); protected=@($ips | Where-Object { $_.InterfaceAlias -notlike 'xross-mesh-*' -and $_.InterfaceAlias -notlike '*Loopback*' } | ForEach-Object { \"$($_.IPAddress)/$($_.PrefixLength)\" }); dns=@(Get-DnsClientServerAddress | Where-Object {$_.InterfaceAlias -notlike 'xross-mesh-*'} | ForEach-Object { \"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')\" } | Sort-Object); defaults=@($r | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')} | ForEach-Object { \"$($_.DestinationPrefix)|$($_.NextHop)|$($_.InterfaceIndex)\" } | Sort-Object) } | ConvertTo-Json -Compress"))?;
+    let mut baseline: NetworkBaseline =
+        serde_json::from_str(&raw).map_err(|_| Error::other("无法读取本机路由基线"))?;
+    baseline.exclude_proxy_interfaces();
+    baseline.proxy_tun_addresses = addresses;
+    Ok(baseline)
 }
 pub fn interface_routes(interface: &str) -> Result<Vec<String>> {
     let raw = powershell(&format!("$ErrorActionPreference='Stop'; ConvertTo-Json -Compress -InputObject @(Get-NetRoute -InterfaceAlias {} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DestinationPrefix -Unique)", quote(interface)))?;
@@ -227,6 +330,50 @@ impl OwnerProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_teredo_rows_can_disappear_without_relaxing_dns_protection() {
+        let original = NetworkBaseline {
+            dns: vec!["27|2|10.10.10.1".into(), "19|2|".into(), "19|23|".into()],
+            ..Default::default()
+        };
+        let mut current = original.clone();
+        current.dns.retain(|row| !row.starts_with("19|"));
+        assert!(current.preserves_connectivity(&original));
+        current.dns.push("19|23|".into());
+        assert!(current.preserves_connectivity(&original));
+        current.dns.push("19|2|127.0.0.1".into());
+        assert_eq!(
+            current.connectivity_change(&original).unwrap(),
+            "接口 19 的 IPv4 DNS 变化"
+        );
+        current.dns = vec!["19|2|".into(), "19|23|".into()];
+        assert_eq!(
+            current.connectivity_change(&original).unwrap(),
+            "接口 27 的 IPv4 DNS 变化"
+        );
+    }
+    #[test]
+    fn proxy_restart_keeps_physical_dns_and_routes_protected() {
+        fn snapshot(index: u32) -> NetworkBaseline {
+            let mut value = NetworkBaseline {
+                defaults: vec!["0.0.0.0/0|10.10.10.1|27".into(), format!("::/0|::|{index}")],
+                dns: vec!["27|2|10.10.10.1".into(), format!("{index}|2|172.19.0.2")],
+                proxy_indices: vec![index],
+                ..Default::default()
+            };
+            value.exclude_proxy_interfaces();
+            value
+        }
+        let original = snapshot(4);
+        let mut restarted = snapshot(55);
+        assert!(restarted.preserves_connectivity(&original));
+        restarted.dns[0] = "27|2|127.0.0.1".into();
+        assert!(!restarted.preserves_connectivity(&original));
+        restarted = snapshot(55);
+        restarted.defaults.push("0.0.0.0/0|192.0.2.1|99".into());
+        assert!(!restarted.preserves_connectivity(&original));
+    }
+
     #[test]
     fn new_adapter_does_not_hide_changes_to_original_connectivity() {
         let original = NetworkBaseline {

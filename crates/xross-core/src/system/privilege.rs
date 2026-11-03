@@ -46,6 +46,7 @@ const SYSTEMD_UNIT: &str = "xross-helper.service";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HelperRequest {
+    ProxyTunAddresses,
     TunCore {
         request: Box<super::tun_process::Request>,
     },
@@ -321,6 +322,12 @@ pub fn handle_request(request: HelperRequest) -> HelperResponse {
             },
             Err(err) => HelperResponse::error(err.to_string()),
         },
+        HelperRequest::ProxyTunAddresses => {
+            match serde_json::to_string(&super::tun_process::active_tun_addresses()) {
+                Ok(addresses) => HelperResponse::ok(addresses),
+                Err(_) => HelperResponse::error("无法读取代理 TUN 状态"),
+            }
+        }
         HelperRequest::Ping => HelperResponse::ok("pong"),
         HelperRequest::Status => HelperResponse::ok(format!(
             "Xross 提权助手 {}（{}，管理员权限）",

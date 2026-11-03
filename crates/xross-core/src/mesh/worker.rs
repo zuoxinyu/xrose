@@ -66,6 +66,7 @@ pub fn main() -> Result<()> {
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(2));
         let mut dns_suffix=None;
         let mut probe=None;
+        let mut proxy_addresses=boot.baseline.proxy_tun_addresses.clone();
         loop {tokio::select!{
             command=receiver.recv()=> match command {
                 Some(WorkerCommand::Stop)|None=>break,
@@ -79,8 +80,8 @@ pub fn main() -> Result<()> {
             _=interval.tick()=>{
                 let mut state=backend.snapshot().await?;
                 state.probe=probe.clone();
-                let current=super::platform::baseline()?;
-                if !current.preserves_connectivity(&boot.baseline){return Err(Error::other("检测到默认路由或原有 DNS 变化，已停止组网以保护现有联网通道"));}
+                let current=super::platform::worker_baseline(&mut proxy_addresses)?;
+                if let Some(change)=current.connectivity_change(&boot.baseline){return Err(Error::other(format!("检测到{change}，已停止组网以保护现有联网通道")));}
                 super::coexist::check_networks(&state.routes,&boot.baseline.protected)?;
                 let other_routes=current.mesh_routes.iter().filter(|route| route.interface!=state.interface)
                     .filter(|route| route.cidr.parse::<ipnet::IpNet>().is_ok_and(|n| !n.addr().is_multicast() && n.addr()!=std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST) && !is_link_local(n.addr())))

@@ -351,39 +351,28 @@ impl CoreManager {
                 },
             )
             .await?;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        if self.state().phase != ProcessPhase::Running {
-            return Err(Error::other("组网共存配置启动失败"));
-        }
-        #[cfg(windows)]
-        {
-            let ports: Vec<_> = applied
-                .compiled
-                .inbounds
-                .iter()
-                .filter(|inbound| {
-                    inbound.port != 0 && ["mixed", "http", "socks"].contains(&inbound.kind.as_str())
-                })
-                .map(|inbound| inbound.port)
-                .collect();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-            loop {
-                let state = self.state();
-                if state.phase != ProcessPhase::Running {
-                    return Err(Error::other("组网共存配置启动后异常退出"));
-                }
-                if state.pid.is_some_and(|pid| {
-                    ports
+        let started = tokio::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(30);
+        loop {
+            let state = self.state();
+            let ready = state.phase == ProcessPhase::Running
+                && started.elapsed() >= std::time::Duration::from_secs(2);
+            #[cfg(windows)]
+            let ready = ready
+                && state.pid.is_some_and(|pid| {
+                    applied
+                        .compiled
+                        .inbounds
                         .iter()
-                        .all(|port| crate::system::port_owner::owns_listener(pid, *port))
-                }) {
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(Error::other("组网共存配置的代理监听端口未就绪"));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        .filter(|i| {
+                            i.port != 0 && ["mixed", "http", "socks"].contains(&i.kind.as_str())
+                        })
+                        .all(|i| crate::system::port_owner::owns_listener(pid, i.port))
+                });
+            if startup_ready(state.phase, ready, tokio::time::Instant::now() >= deadline)? {
+                break;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         self.supervisor.set_watchdog(WatchdogConfig {
             enabled: applied.settings.watchdog,
@@ -439,6 +428,19 @@ impl CoreManager {
     }
 }
 
+fn startup_ready(phase: ProcessPhase, ready: bool, expired: bool) -> Result<bool> {
+    if !matches!(phase, ProcessPhase::Starting | ProcessPhase::Running) {
+        return Err(Error::other("组网共存配置启动失败，请检查内核日志"));
+    }
+    if phase == ProcessPhase::Running && ready {
+        return Ok(true);
+    }
+    if expired {
+        return Err(Error::other("组网共存配置启动超时，请检查内核日志"));
+    }
+    Ok(false)
+}
+
 async fn replace_with_rollback(
     replace: impl std::future::Future<Output = Result<()>>,
     restore: impl std::future::Future<Output = Result<()>>,
@@ -478,6 +480,16 @@ pub fn binary_table(manager: &BinaryManager) -> Vec<BinaryRecord> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn coexist_start_waits_for_helper_and_listeners() {
+        use super::*;
+        assert!(!startup_ready(ProcessPhase::Starting, false, false).unwrap());
+        assert!(!startup_ready(ProcessPhase::Running, false, false).unwrap());
+        assert!(startup_ready(ProcessPhase::Running, true, false).unwrap());
+        assert!(startup_ready(ProcessPhase::Starting, false, true).is_err());
+        assert!(startup_ready(ProcessPhase::Failed, false, false).is_err());
+    }
+
     use super::*;
 
     #[test]

@@ -12,6 +12,7 @@ function Dns { @(Get-DnsClientServerAddress | Where-Object InterfaceAlias -ne 'x
 function Management { $connection=[Net.Sockets.TcpClient]::new();try{$pending=$connection.ConnectAsync('10.10.10.1',22);return $pending.Wait(1500) -and $connection.Connected}catch{return $false}finally{$connection.Dispose()} }
 $defaults=Defaults;$dns=Dns
 try {
+ if(-not (Management)){throw 'Management channel unavailable before test'}
  $binary=Join-Path $root 'test-helper.exe'
  [IO.File]::WriteAllBytes($binary,[IO.File]::ReadAllBytes((Join-Path $workspace 'target/debug/xross-cli.exe')))
  & icacls $binary /setintegritylevel H | Out-Null
@@ -20,7 +21,8 @@ try {
  [pscustomobject]@{helper_pid=$helper.Id;socket=$Socket} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'ready.json')
  $deadline=[DateTime]::UtcNow.AddMinutes(3)
  while([DateTime]::UtcNow -lt $deadline -and -not (Test-Path (Join-Path $root 'finish.flag'))){
-  if((Defaults) -ne $defaults -or (Dns) -ne $dns -or -not (Management)){$preserved=$false;throw 'Network baseline changed'}
+  $currentDefaults=Defaults;$currentDns=Dns;$management=Management
+  if($currentDefaults -ne $defaults -or $currentDns -ne $dns -or -not $management){$preserved=$false;throw "Network baseline changed: routes=$($currentDefaults -ne $defaults), dns=$($currentDns -ne $dns), management=$management"}
   if($helper.HasExited){throw 'Test helper exited unexpectedly'}
   Start-Sleep -Milliseconds 500
  }
