@@ -1,0 +1,9 @@
+[package]
+name = "block"
+version = "0.1.6"
+edition = "2021"
+license = "MIT"
+description = "Rust interface for Apple's C language extension of blocks. Vendored patch of 0.1.6."
+
+[lib]
+path = "src/lib.rs"

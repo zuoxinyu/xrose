@@ -40,3 +40,10 @@ windows-sys = { version = "0.59", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni.workspace = true
+
+[lints.rust]
+# `objc`'s `msg_send!`/`class!`/`sel!` macros expand to
+# `cfg_attr(feature = "cargo-clippy", ...)`. The feature is not declared by
+# this crate, so test it as an expected value instead of silencing all
+# unexpected-cfg checking.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

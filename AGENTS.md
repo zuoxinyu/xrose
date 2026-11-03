@@ -145,9 +145,13 @@ single instance, privilege IPC), plus `route.rs` (local rule preview), `dns.rs`
 - `rust-toolchain.toml` is deleted in the current working tree even though the README still
   mentions it. `Cargo.toml` declares `rust-version = "1.92"`; the installed toolchain is stable
   1.99.
-- Baseline `cargo build --workspace` emits two warnings (`unused import PathBuf` in
-  `system/autostart.rs`, `fn run is never used` in `system/proxy.rs`). Treat new warnings as
-  regressions; leave those two alone unless the task is about them.
+- `cargo build --workspace` currently emits no warnings. Treat any new warning as a regression.
+  `objc`'s `msg_send!`/`class!`/`sel!` macros expand to `cfg(feature = "cargo-clippy")`; the
+  expected value is declared under `[lints.rust]` in `crates/xross-app/Cargo.toml`, so do not
+  blanket-allow `unexpected_cfgs`.
+- `vendor/block` is a patched copy of `block 0.1.6` (its `static` used an uninhabited type, a
+  future-incompat lint) wired up with `[patch.crates-io]` in the root `Cargo.toml`. Drop the
+  patch once a release of `block` contains the fix.
 - `crates/xross-app/build.rs` raises the **Windows main-thread stack to 16 MiB**. GPUI lays a page
   out as one deep `Div` tree; in debug builds the settings page alone gets close to the 1 MiB
   Windows default and aborts with a stack overflow once a core version row is added. Keep the
