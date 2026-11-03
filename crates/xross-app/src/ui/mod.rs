@@ -482,7 +482,7 @@ impl AppView {
                 d.child(
                     div()
                         .id("sidebar-traffic-lights-spacer")
-                        .h(px(32.))
+                        .h(px(36.))
                         .w_full()
                         .on_mouse_down(MouseButton::Left, |ev, window, _| {
                             if ev.click_count == 2 {
@@ -496,7 +496,7 @@ impl AppView {
             .child(
                 div()
                     .id("sidebar-brand")
-                    .h(px(54.))
+                    .h(px(48.))
                     .px_4()
                     .flex()
                     .items_center()
@@ -625,12 +625,7 @@ impl AppView {
             });
         div()
             .id("header-bar")
-            .pt(if cfg!(target_os = "macos") {
-                px(32.)
-            } else {
-                px(0.)
-            })
-            .h(px(if cfg!(target_os = "macos") { 86. } else { 54. }))
+            .h(px(54.))
             .flex()
             .items_center()
             .border_b_1()
@@ -838,19 +833,13 @@ impl AppView {
                             .justify_center()
                             .h_full()
                             .flex_shrink_0()
-                            .pr_4()
+                            .when(cfg!(target_os = "windows"), |d| d.pr_3())
+                            .when(cfg!(target_os = "macos"), |d| d.pr_5())
+                            .when(
+                                !cfg!(any(target_os = "windows", target_os = "macos")),
+                                |d| d.pr_4(),
+                            )
                             .gap_0p5()
-                            .when(cfg!(target_os = "windows"), |d| {
-                                d.window_control_area(WindowControlArea::Drag)
-                            })
-                            .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                                if ev.click_count == 2 {
-                                    window.titlebar_double_click();
-                                } else {
-                                    window.start_window_move();
-                                }
-                            })
-                            .when(cfg!(target_os = "macos"), |d| d.pr_6())
                             .child(
                                 div()
                                     .flex()

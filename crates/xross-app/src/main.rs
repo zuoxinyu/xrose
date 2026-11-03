@@ -63,6 +63,7 @@ fn main() {
     let app_service = service.clone();
     let close_service = service.clone();
 
+    app_icon::preinstall_executable_icon();
     application()
         .with_assets(brand_assets::BrandAssets)
         .run(move |cx| {
@@ -91,9 +92,9 @@ fn main() {
                     app_id: Some("io.xross.Xross".into()),
                     icon: window_icon,
                     titlebar: Some(TitlebarOptions {
-                        title: None,
+                        title: Some("Xross".into()),
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(14.), px(16.))),
+                        traffic_light_position: Some(point(px(16.), px(16.))),
                     }),
                     window_background: window_effects::window_background(),
                     app_owns_titlebar_drag: false,

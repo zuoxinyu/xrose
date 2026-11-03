@@ -73,9 +73,24 @@ pub fn window_background() -> WindowBackgroundAppearance {
 }
 
 /// Root surfaces stay clear; each view supplies its own opaque fallback fill.
+/// Also configures high-contrast input borders and readable muted foreground
+/// across both dark and light modes.
 pub fn make_surface_translucent(cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
+        if theme.mode.is_dark() {
+            let input_border = gpui_kit::hsla(0., 0., 0.38, 1.0);
+            theme.colors.input = input_border;
+            theme.tokens.input = input_border.into();
+            theme.colors.muted_foreground = gpui_kit::hsla(0., 0., 0.65, 1.0);
+            theme.tokens.muted_foreground = theme.colors.muted_foreground.into();
+        } else {
+            let input_border = gpui_kit::hsla(0., 0., 0.58, 1.0);
+            theme.colors.input = input_border;
+            theme.tokens.input = input_border.into();
+            theme.colors.muted_foreground = gpui_kit::hsla(0., 0., 0.42, 1.0);
+            theme.tokens.muted_foreground = theme.colors.muted_foreground.into();
+        }
     });
 }
 

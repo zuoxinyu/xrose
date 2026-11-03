@@ -7,7 +7,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Sizable, Theme};
+use gpui_kit::component::{Icon, Sizable, Theme};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::RoutePreset;
@@ -226,6 +226,23 @@ fn route_options(lang: Language) -> Vec<RouteOption> {
         label: tr(lang, zh, en),
     })
     .collect()
+}
+
+fn mesh_phase_info(
+    phase: xross_core::mesh::MeshPhase,
+    p: &crate::ui::theme::Palette,
+    lang: Language,
+) -> (Hsla, SharedString) {
+    match phase {
+        xross_core::mesh::MeshPhase::Connected => (p.success, tr(lang, "已连接", "Connected")),
+        xross_core::mesh::MeshPhase::Starting => (p.info, tr(lang, "连接中", "Connecting")),
+        xross_core::mesh::MeshPhase::NeedsLogin => (p.warning, tr(lang, "待登录", "Login req.")),
+        xross_core::mesh::MeshPhase::Stopping => (p.warning, tr(lang, "断开中", "Stopping")),
+        xross_core::mesh::MeshPhase::Failed => (p.danger, tr(lang, "异常", "Failed")),
+        xross_core::mesh::MeshPhase::Disconnected => {
+            (p.muted_fg, tr(lang, "未连接", "Disconnected"))
+        }
+    }
 }
 
 pub struct PopupView {
@@ -502,14 +519,6 @@ impl Render for PopupView {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.action(TrayAction::ShowSettings, window, cx)
                             })),
-                    )
-                    .child(
-                        Button::new("tray-dismiss")
-                            .compact()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip(tr(lang, "收起浮窗", "Dismiss"))
-                            .on_click(cx.listener(|this, _, window, _| this.dismiss(window))),
                     ),
             )
             .child(
@@ -521,31 +530,157 @@ impl Render for PopupView {
                     .p_3()
                     .rounded_lg()
                     .bg(card)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size(px(7.))
-                                    .rounded_full()
-                                    .flex_shrink_0()
-                                    .bg(if running { p.success } else { p.muted_fg }),
-                            )
-                            .child(div().flex_1().min_w(px(0.)).text_xs().child(tr(
+                    .child(div().flex().gap_3().children([
+                        {
+                            let status_color = if running { p.success } else { p.muted_fg };
+                            let status_text = tr(
                                 lang,
                                 if running { "运行中" } else { "已停止" },
                                 if running { "Running" } else { "Stopped" },
-                            )))
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(px(11.))
-                                    .text_color(p.muted_fg)
-                                    .child(d.core_name.clone()),
-                            ),
-                    )
+                            );
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            Icon::new(IconName::Server)
+                                                .size(px(12.))
+                                                .text_color(p.muted_fg),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.))
+                                                .text_color(p.muted_fg)
+                                                .child(d.core_name.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .flex_shrink_0()
+                                                .bg(status_color),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_xs()
+                                                .text_color(p.fg)
+                                                .child(status_text),
+                                        ),
+                                )
+                        },
+                        {
+                            let (et_color, et_text) = mesh_phase_info(d.easytier.phase, &p, lang);
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            Icon::new(IconName::Network)
+                                                .size(px(12.))
+                                                .text_color(p.muted_fg),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.))
+                                                .text_color(p.muted_fg)
+                                                .child("EasyTier"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .flex_shrink_0()
+                                                .bg(et_color),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_xs()
+                                                .text_color(p.fg)
+                                                .child(et_text),
+                                        ),
+                                )
+                        },
+                        {
+                            let (ts_color, ts_text) = mesh_phase_info(d.tailscale.phase, &p, lang);
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            Icon::new(IconName::Globe)
+                                                .size(px(12.))
+                                                .text_color(p.muted_fg),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(11.))
+                                                .text_color(p.muted_fg)
+                                                .child("Tailscale"),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1p5()
+                                        .child(
+                                            div()
+                                                .size(px(6.))
+                                                .rounded_full()
+                                                .flex_shrink_0()
+                                                .bg(ts_color),
+                                        )
+                                        .child(
+                                            div()
+                                                .truncate()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_xs()
+                                                .text_color(p.fg)
+                                                .child(ts_text),
+                                        ),
+                                )
+                        },
+                    ]))
                     .child(
                         div().flex().gap_3().children(
                             [
@@ -814,7 +949,8 @@ impl Render for PopupView {
                             .h(px(28.))
                             .compact()
                             .ghost()
-                            .label(tr(lang, "退出 Xross", "Quit Xross"))
+                            .icon(IconName::LogOut)
+                            .label(tr(lang, "退出", "Quit"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.action(TrayAction::Quit, window, cx)
                             })),

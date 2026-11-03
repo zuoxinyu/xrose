@@ -16,15 +16,25 @@ pub struct DashboardNode {
     pub active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardMeshStatus {
+    pub provider: xross_core::mesh::MeshProvider,
+    pub phase: xross_core::mesh::MeshPhase,
+    pub profile_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Dashboard {
     pub language: Language,
     pub status_line: String,
+    #[allow(dead_code)]
     pub traffic_line: Option<String>,
     pub group_id: Option<String>,
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
     pub running: bool,
+    pub easytier: DashboardMeshStatus,
+    pub tailscale: DashboardMeshStatus,
     pub system_proxy: bool,
     pub tun_enabled: bool,
     pub tun_supported: bool,
@@ -74,7 +84,45 @@ pub fn build(service: &AppService) -> Dashboard {
             }
         })
         .collect();
-    let status_line = format!(
+    let et_net = snapshot
+        .mesh
+        .networks
+        .iter()
+        .find(|n| n.provider == xross_core::mesh::MeshProvider::EasyTier);
+    let et_phase = et_net
+        .map(|n| n.phase)
+        .unwrap_or(xross_core::mesh::MeshPhase::Disconnected);
+    let et_profile = snapshot
+        .mesh
+        .profiles
+        .iter()
+        .find(|p| p.provider == xross_core::mesh::MeshProvider::EasyTier);
+    let easytier = DashboardMeshStatus {
+        provider: xross_core::mesh::MeshProvider::EasyTier,
+        phase: et_phase,
+        profile_name: et_profile.map(|p| p.name.clone()),
+    };
+
+    let ts_net = snapshot
+        .mesh
+        .networks
+        .iter()
+        .find(|n| n.provider == xross_core::mesh::MeshProvider::Tailscale);
+    let ts_phase = ts_net
+        .map(|n| n.phase)
+        .unwrap_or(xross_core::mesh::MeshPhase::Disconnected);
+    let ts_profile = snapshot
+        .mesh
+        .profiles
+        .iter()
+        .find(|p| p.provider == xross_core::mesh::MeshProvider::Tailscale);
+    let tailscale = DashboardMeshStatus {
+        provider: xross_core::mesh::MeshProvider::Tailscale,
+        phase: ts_phase,
+        profile_name: ts_profile.map(|p| p.name.clone()),
+    };
+
+    let mut status_line = format!(
         "Xross v{} · {} ({})",
         snapshot.app_version,
         tr(
@@ -84,6 +132,12 @@ pub fn build(service: &AppService) -> Dashboard {
         ),
         snapshot.settings.core.display_name()
     );
+    if et_phase != xross_core::mesh::MeshPhase::Disconnected {
+        status_line.push_str(&format!(" · EasyTier: {:?}", et_phase));
+    }
+    if ts_phase != xross_core::mesh::MeshPhase::Disconnected {
+        status_line.push_str(&format!(" · Tailscale: {:?}", ts_phase));
+    }
     let traffic_line = running.then(|| {
         format!(
             "↓ {}  ↑ {}  ·  {} {}",
@@ -108,6 +162,8 @@ pub fn build(service: &AppService) -> Dashboard {
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
         nodes,
         running,
+        easytier,
+        tailscale,
         down_speed: snapshot.runtime.down_speed,
         up_speed: snapshot.runtime.up_speed,
         system_proxy: snapshot.system_proxy_active,

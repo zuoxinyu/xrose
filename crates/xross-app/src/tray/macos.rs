@@ -1,6 +1,6 @@
 //! AppKit status item; the dashboard itself is the shared GPUI flyout.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Once;
 
@@ -12,7 +12,6 @@ use objc::declare::ClassDecl;
 use objc::runtime::{Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use xross_core::util::format_speed;
 use xross_core::AppService;
 
 static POPUP_TARGET: AtomicUsize = AtomicUsize::new(0);
@@ -82,10 +81,80 @@ extern "C" fn toggle_popup(_this: &Object, _sel: Sel, _sender: id) {
     super::queue_command(super::TrayCommand::TogglePopup);
 }
 
+fn format_fixed_speed(bytes_per_sec: u64) -> String {
+    if bytes_per_sec == 0 {
+        return "   0 B/s".to_string();
+    }
+    if bytes_per_sec < 1000 {
+        return format!("{:>4} B/s", bytes_per_sec);
+    }
+    let kb = bytes_per_sec as f64 / 1024.0;
+    if kb < 9.95 {
+        return format!("{:>4.1} K/s", kb);
+    }
+    if kb < 999.5 {
+        return format!("{:>4.0} K/s", kb);
+    }
+    let mb = kb / 1024.0;
+    if mb < 9.95 {
+        return format!("{:>4.1} M/s", mb);
+    }
+    if mb < 999.5 {
+        return format!("{:>4.0} M/s", mb);
+    }
+    let gb = mb / 1024.0;
+    if gb < 9.95 {
+        return format!("{:>4.1} G/s", gb);
+    }
+    format!("{:>4.0} G/s", gb.min(999.0))
+}
+
+unsafe fn build_template_logo_image() -> id {
+    let raw_bytes = include_bytes!("../../assets/app-icon-64.png");
+    let png_bytes = if let Ok(decoded) = image::load_from_memory(raw_bytes) {
+        let mut rgba = decoded.to_rgba8();
+        for pixel in rgba.pixels_mut() {
+            let boosted_alpha = ((pixel[3] as u16 * 5) / 4).min(255) as u8;
+            *pixel = image::Rgba([0, 0, 0, boosted_alpha]);
+        }
+        let mut buf = Vec::new();
+        if rgba
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .is_ok()
+        {
+            buf
+        } else {
+            raw_bytes.to_vec()
+        }
+    } else {
+        raw_bytes.to_vec()
+    };
+
+    unsafe {
+        let data: id = msg_send![
+            class!(NSData),
+            dataWithBytes: png_bytes.as_ptr() as *const c_void
+            length: png_bytes.len()
+        ];
+        if data == nil {
+            return nil;
+        }
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithData: data];
+        if image != nil {
+            let _: () = msg_send![image, setSize: NSSize::new(18.0, 18.0)];
+            let _: () = msg_send![image, setTemplate: YES];
+        }
+        image
+    }
+}
+
 pub struct Backend {
     item: id,
     target: id,
     last_title: String,
+    last_running: Option<bool>,
+    logo_image: id,
 }
 
 impl Backend {
@@ -119,14 +188,30 @@ impl Backend {
             let _: () = msg_send![button, setTarget: target];
             let _: () = msg_send![button, setAction: sel!(togglePopup:)];
             let _: isize = msg_send![button, sendActionOn: (1u64 << 2) | (1u64 << 4)];
-            let _: () = msg_send![button, setTitle: string("◇ Xross")];
+
+            let logo_image = build_template_logo_image();
+            if logo_image != nil {
+                let _: () = msg_send![button, setImage: logo_image];
+                let _: () = msg_send![button, setImagePosition: 2usize]; // NSImageLeft = 2
+            }
+            let font: id = msg_send![
+                class!(NSFont),
+                monospacedSystemFontOfSize: 11.0f64
+                weight: 0.0f64
+            ];
+            if font != nil {
+                let _: () = msg_send![button, setFont: font];
+            }
+            let _: () = msg_send![button, setTitle: string("")];
             STATUS_ITEM.store(item as usize, Ordering::Relaxed);
             READY.store(true, Ordering::Relaxed);
             let _: () = msg_send![pool, drain];
             Some(Self {
                 item,
                 target,
-                last_title: String::new(),
+                last_title: "\0__INITIAL__".into(),
+                last_running: None,
+                logo_image,
             })
         }
     }
@@ -135,16 +220,25 @@ impl Backend {
         let dashboard = super::dashboard::build(service);
         let title = if dashboard.running {
             format!(
-                "◈ ↓{} ↑{}",
-                format_speed(dashboard.down_speed),
-                format_speed(dashboard.up_speed)
+                " ↓{} ↑{}",
+                format_fixed_speed(dashboard.down_speed),
+                format_fixed_speed(dashboard.up_speed)
             )
         } else {
-            "◇ Xross".into()
+            String::new()
         };
-        if self.last_title != title {
+        if self.last_title != title || self.last_running != Some(dashboard.running) {
             unsafe {
                 let pool = NSAutoreleasePool::new(nil);
+                if self.last_running != Some(dashboard.running) {
+                    let length: f64 = if dashboard.running {
+                        160.0
+                    } else {
+                        NSVariableStatusItemLength
+                    };
+                    let _: () = msg_send![self.item, setLength: length];
+                    self.last_running = Some(dashboard.running);
+                }
                 let button: id = msg_send![self.item, button];
                 let _: () = msg_send![button, setTitle: string(&title)];
                 let _: () = msg_send![button, setToolTip: string(&dashboard.status_line)];
@@ -166,6 +260,9 @@ impl Drop for Backend {
             let _: () = msg_send![bar, removeStatusItem: self.item];
             let _: () = msg_send![self.item, release];
             let _: () = msg_send![self.target, release];
+            if self.logo_image != nil {
+                let _: () = msg_send![self.logo_image, release];
+            }
         }
     }
 }
@@ -181,6 +278,7 @@ pub fn register_main_window(window: &Window) {
                 let view = raw.ns_view.as_ptr() as id;
                 let window: id = msg_send![view, window];
                 MAIN_WINDOW.store(window as usize, Ordering::Relaxed);
+                crate::app_icon::setup_window_icon(window);
             }
         }
     }
@@ -390,5 +488,43 @@ pub fn hide_popup(window: &mut Window) {
 pub fn show_popup(window: &mut Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
     if let Some(native) = native_window(window) {
         post_popup(PopupOp::Show(native as usize, bounds));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_fixed_speed;
+
+    #[test]
+    fn fixed_speed_always_returns_eight_ascii_chars() {
+        for sample in [
+            0,
+            1,
+            9,
+            188,
+            999,
+            1000,
+            1024,
+            3993,
+            10_180,
+            10_240,
+            512_000,
+            1_023_488,
+            1_048_576,
+            10_485_760,
+            999_000_000,
+            1_073_741_824,
+            100_000_000_000,
+            u64::MAX,
+        ] {
+            let formatted = format_fixed_speed(sample);
+            assert_eq!(
+                formatted.len(),
+                8,
+                "expected 8 chars for {sample}, got {formatted:?}"
+            );
+            assert!(formatted.is_ascii());
+            assert!(formatted.starts_with(' '));
+        }
     }
 }
