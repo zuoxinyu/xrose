@@ -444,6 +444,31 @@ impl AppView {
                                             });
                                         },
                                     )),
+                                )
+                                .child(
+                                    settings_toggle(
+                                        "show-tray-speed",
+                                        self.tr(
+                                            if cfg!(target_os = "macos") {
+                                                "菜单栏显示网速"
+                                            } else {
+                                                "托盘显示网速"
+                                            },
+                                            if cfg!(target_os = "macos") {
+                                                "Show speed in menu bar"
+                                            } else {
+                                                "Show speed in tray"
+                                            },
+                                        ),
+                                        settings.show_tray_speed,
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, checked, _, cx| {
+                                            this.modify_settings(cx, |s| {
+                                                s.show_tray_speed = *checked
+                                            });
+                                        },
+                                    )),
                                 ),
                         ),
                 )

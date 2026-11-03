@@ -149,11 +149,63 @@ unsafe fn build_template_logo_image() -> id {
     }
 }
 
+unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64) -> id {
+    unsafe {
+        let size = NSSize::new(80.0, 22.0);
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithSize: size];
+        if image == nil {
+            return nil;
+        }
+        let _: () = msg_send![image, lockFocus];
+
+        if logo != nil {
+            let logo_rect = NSRect::new(NSPoint::new(2.0, 2.0), NSSize::new(18.0, 18.0));
+            let _: () = msg_send![logo, drawInRect: logo_rect];
+        }
+
+        let font: id = msg_send![
+            class!(NSFont),
+            monospacedSystemFontOfSize: 9.0f64
+            weight: 0.0f64
+        ];
+        let color: id = msg_send![class!(NSColor), blackColor];
+        if font != nil && color != nil {
+            let font_key = string("NSFont");
+            let color_key = string("NSColor");
+            let keys = [font_key, color_key];
+            let objects = [font, color];
+            let attrs: id = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObjects: objects.as_ptr()
+                forKeys: keys.as_ptr()
+                count: 2usize
+            ];
+            if attrs != nil {
+                let up_text = format!("↑{}", format_fixed_speed(up_speed));
+                let down_text = format!("↓{}", format_fixed_speed(down_speed));
+                let up_ns = string(&up_text);
+                let down_ns = string(&down_text);
+                let up_pt = NSPoint::new(24.0, 11.0);
+                let down_pt = NSPoint::new(24.0, 1.0);
+                let _: () = msg_send![up_ns, drawAtPoint: up_pt withAttributes: attrs];
+                let _: () = msg_send![down_ns, drawAtPoint: down_pt withAttributes: attrs];
+            }
+        }
+
+        let _: () = msg_send![image, unlockFocus];
+        let _: () = msg_send![image, setTemplate: YES];
+        image
+    }
+}
+
 pub struct Backend {
     item: id,
     target: id,
-    last_title: String,
     last_running: Option<bool>,
+    last_show_speed: Option<bool>,
+    last_speeds: Option<(u64, u64)>,
+    current_speed_image: id,
     logo_image: id,
 }
 
@@ -192,15 +244,7 @@ impl Backend {
             let logo_image = build_template_logo_image();
             if logo_image != nil {
                 let _: () = msg_send![button, setImage: logo_image];
-                let _: () = msg_send![button, setImagePosition: 2usize]; // NSImageLeft = 2
-            }
-            let font: id = msg_send![
-                class!(NSFont),
-                monospacedSystemFontOfSize: 11.0f64
-                weight: 0.0f64
-            ];
-            if font != nil {
-                let _: () = msg_send![button, setFont: font];
+                let _: () = msg_send![button, setImagePosition: 1usize]; // NSImageOnly = 1
             }
             let _: () = msg_send![button, setTitle: string("")];
             STATUS_ITEM.store(item as usize, Ordering::Relaxed);
@@ -209,8 +253,10 @@ impl Backend {
             Some(Self {
                 item,
                 target,
-                last_title: "\0__INITIAL__".into(),
                 last_running: None,
+                last_show_speed: None,
+                last_speeds: None,
+                current_speed_image: nil,
                 logo_image,
             })
         }
@@ -218,34 +264,63 @@ impl Backend {
 
     pub fn tick(&mut self, service: &AppService) -> Option<super::TrayCommand> {
         let dashboard = super::dashboard::build(service);
-        let title = if dashboard.running {
-            format!(
-                " ↓{} ↑{}",
-                format_fixed_speed(dashboard.down_speed),
-                format_fixed_speed(dashboard.up_speed)
-            )
-        } else {
-            String::new()
-        };
-        if self.last_title != title || self.last_running != Some(dashboard.running) {
+        let show_speed = dashboard.running && dashboard.show_speed;
+        let speeds = (dashboard.up_speed, dashboard.down_speed);
+
+        let state_changed = self.last_running != Some(dashboard.running)
+            || self.last_show_speed != Some(show_speed)
+            || (show_speed && self.last_speeds != Some(speeds));
+
+        if state_changed {
             unsafe {
                 let pool = NSAutoreleasePool::new(nil);
-                if self.last_running != Some(dashboard.running) {
-                    let length: f64 = if dashboard.running {
-                        160.0
-                    } else {
-                        NSVariableStatusItemLength
-                    };
-                    let _: () = msg_send![self.item, setLength: length];
-                    self.last_running = Some(dashboard.running);
-                }
                 let button: id = msg_send![self.item, button];
-                let _: () = msg_send![button, setTitle: string(&title)];
-                let _: () = msg_send![button, setToolTip: string(&dashboard.status_line)];
+
+                if show_speed {
+                    let new_image = build_speed_image(
+                        self.logo_image,
+                        dashboard.up_speed,
+                        dashboard.down_speed,
+                    );
+                    if new_image != nil {
+                        let _: () = msg_send![button, setImage: new_image];
+                        let _: () = msg_send![button, setImagePosition: 1usize]; // NSImageOnly
+                        let _: () = msg_send![button, setTitle: string("")];
+                        let _: () = msg_send![self.item, setLength: 82.0f64];
+
+                        if self.current_speed_image != nil {
+                            let _: () = msg_send![self.current_speed_image, release];
+                        }
+                        self.current_speed_image = new_image;
+                    }
+                } else {
+                    if self.current_speed_image != nil {
+                        let _: () = msg_send![self.current_speed_image, release];
+                        self.current_speed_image = nil;
+                    }
+                    if self.logo_image != nil {
+                        let _: () = msg_send![button, setImage: self.logo_image];
+                        let _: () = msg_send![button, setImagePosition: 1usize];
+                        // NSImageOnly
+                    }
+                    let _: () = msg_send![button, setTitle: string("")];
+                    let _: () = msg_send![self.item, setLength: NSVariableStatusItemLength];
+                }
+
+                let tooltip = if let Some(traffic) = &dashboard.traffic_line {
+                    format!("{}\n{}", dashboard.status_line, traffic)
+                } else {
+                    dashboard.status_line.clone()
+                };
+                let _: () = msg_send![button, setToolTip: string(&tooltip)];
                 let _: () = msg_send![pool, drain];
             }
-            self.last_title = title;
+
+            self.last_running = Some(dashboard.running);
+            self.last_show_speed = Some(show_speed);
+            self.last_speeds = Some(speeds);
         }
+
         None
     }
 }
@@ -262,6 +337,9 @@ impl Drop for Backend {
             let _: () = msg_send![self.target, release];
             if self.logo_image != nil {
                 let _: () = msg_send![self.logo_image, release];
+            }
+            if self.current_speed_image != nil {
+                let _: () = msg_send![self.current_speed_image, release];
             }
         }
     }

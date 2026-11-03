@@ -131,6 +131,7 @@ pub struct Settings {
     pub binary_paths: BTreeMap<String, String>,
     pub check_app_updates: bool,
     pub last_update_check: Option<i64>,
+    pub show_tray_speed: bool,
 }
 
 impl Default for Settings {
@@ -164,6 +165,7 @@ impl Default for Settings {
             subscription_update_hours: 12,
             check_app_updates: true,
             last_update_check: None,
+            show_tray_speed: true,
             active_versions: BTreeMap::new(),
             binary_paths: BTreeMap::new(),
         }
