@@ -16,8 +16,8 @@ use xross_core::storage::LatencyEntry;
 use xross_core::util::format_speed;
 
 use super::theme::{
-    LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS, LATENCY_SLOW_MS, LATENCY_STALE_SECS, Palette,
-    latency_age_secs, latency_color, palette,
+    latency_age_secs, latency_color, palette, Palette, LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS,
+    LATENCY_SLOW_MS, LATENCY_STALE_SECS,
 };
 use super::widgets::*;
 use super::{AppView, Page};
@@ -498,29 +498,6 @@ impl AppView {
                                 .items_center()
                                 .justify_end()
                                 .gap_2()
-                                .child(
-                                    Button::new("toggle-add-drawer")
-                                        .compact()
-                                        .primary()
-                                        .icon(if self.show_import_box || self.show_manual_form {
-                                            IconName::X
-                                        } else {
-                                            IconName::Plus
-                                        })
-                                        .label(if self.show_import_box || self.show_manual_form {
-                                            self.tr("收起", "Close")
-                                        } else {
-                                            self.tr("添加节点", "Add node")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let open =
-                                                !(this.show_import_box || this.show_manual_form);
-                                            this.show_import_box = open;
-                                            this.show_manual_form = false;
-                                            this.manual_error = None;
-                                            cx.notify();
-                                        })),
-                                )
                                 .when(self.toolbar_menu_open, |d| {
                                     d.child(
                                         Button::new("toggle-batch")
@@ -538,7 +515,6 @@ impl AppView {
                                                 if !this.batch_mode {
                                                     this.batch_selected.clear();
                                                 }
-                                                this.toolbar_menu_open = false;
                                                 cx.notify();
                                             })),
                                     )
@@ -580,6 +556,29 @@ impl AppView {
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toolbar_menu_open = !this.toolbar_menu_open;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("toggle-add-drawer")
+                                        .compact()
+                                        .primary()
+                                        .icon(if self.show_import_box || self.show_manual_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
+                                        .label(if self.show_import_box || self.show_manual_form {
+                                            self.tr("收起", "Close")
+                                        } else {
+                                            self.tr("添加节点", "Add node")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            let open =
+                                                !(this.show_import_box || this.show_manual_form);
+                                            this.show_import_box = open;
+                                            this.show_manual_form = false;
+                                            this.manual_error = None;
                                             cx.notify();
                                         })),
                                 ),
@@ -958,7 +957,7 @@ impl AppView {
                                     .child(
                                         Button::new("confirm-clean-dead")
                                             .compact()
-                                            .primary()
+                                            .danger()
                                             .label(self.tr("确认批量删除", "Confirm deletion"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.service.delete_nodes(&ids);
@@ -992,38 +991,68 @@ impl AppView {
                             .child(
                                 div()
                                     .flex()
-                                    .items_center()
-                                    .justify_between()
+                                    .flex_col()
+                                    .gap_1()
                                     .text_xs()
                                     .text_color(p.muted_fg)
                                     .child(
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap_3()
+                                            .justify_between()
                                             .child(
                                                 div()
                                                     .flex()
                                                     .items_center()
-                                                    .gap_1()
+                                                    .gap_1p5()
                                                     .child(dot(p.data_down))
-                                                    .child(self.tr("下行", "Down")),
+                                                    .child(self.tr("下行", "Down"))
+                                                    .child(
+                                                        div()
+                                                            .w(px(100.))
+                                                            .flex_shrink_0()
+                                                            .font_family(
+                                                                cx.theme().mono_font_family.clone(),
+                                                            )
+                                                            .text_color(p.data_down)
+                                                            .child(format_speed(
+                                                                self.snapshot.runtime.down_speed,
+                                                            )),
+                                                    ),
                                             )
                                             .child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap_1()
-                                                    .child(dot(p.data_up))
-                                                    .child(self.tr("上行", "Up")),
+                                                div().child(format!(
+                                                    "{}: {}",
+                                                    self.tr("峰值速率", "Peak"),
+                                                    format_speed(max_speed)
+                                                )),
                                             ),
                                     )
                                     .child(
-                                        div().child(format!(
-                                            "{}: {}",
-                                            self.tr("峰值速率", "Peak"),
-                                            format_speed(max_speed)
-                                        )),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(dot(p.data_up))
+                                                    .child(self.tr("上行", "Up"))
+                                                    .child(
+                                                        div()
+                                                            .w(px(100.))
+                                                            .flex_shrink_0()
+                                                            .font_family(
+                                                                cx.theme().mono_font_family.clone(),
+                                                            )
+                                                            .text_color(p.data_up)
+                                                            .child(format_speed(
+                                                                self.snapshot.runtime.up_speed,
+                                                            )),
+                                                    ),
+                                            ),
                                     ),
                             )
                             .child(self.sparkline(&p)),
@@ -1552,6 +1581,11 @@ fn render_node_row(
                                         .truncate()
                                         .child(name),
                                 )
+                                .child(pill(
+                                    node.protocol.display_name().to_uppercase(),
+                                    p.primary,
+                                    p.panel,
+                                ))
                                 .when(selected && auto_mode, |d| {
                                     d.child(pill(
                                         super::tr(lang, "当前选用", "In use"),
@@ -1591,11 +1625,6 @@ fn render_node_row(
                                 .gap_2()
                                 .text_xs()
                                 .min_w(px(0.))
-                                .child(pill(
-                                    node.protocol.display_name().to_uppercase(),
-                                    p.primary,
-                                    p.panel,
-                                ))
                                 .child(
                                     div()
                                         .min_w(px(0.))
@@ -1611,12 +1640,44 @@ fn render_node_row(
                                 ),
                         ),
                 )
+                // Download speed column: fixed width, right-aligned, mono. Placed to the left of latency.
+                .child(
+                    div()
+                        .w(px(96.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .text_sm()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .text_color(p.muted_fg)
+                        .child(if downloading {
+                            Spinner::new().small().color(p.muted_fg).into_any_element()
+                        } else if let Some(result) = download {
+                            if result.error.is_some() {
+                                div()
+                                    .text_xs()
+                                    .text_color(p.danger)
+                                    .child(super::tr(lang, "下载失败", "Failed"))
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .child(format!(
+                                        "{:.2} MiB/s",
+                                        result.bytes_per_second as f64 / 1048576.0
+                                    ))
+                                    .into_any_element()
+                            }
+                        } else {
+                            div().into_any_element()
+                        }),
+                )
                 // Latency column: fixed width, right-aligned, mono. A spinner replaces
                 // the value while this node is being measured; old values are dimmed.
                 .child(
                     div()
                         .id(SharedString::from(format!("delay-{}", node.id)))
-                        .w(px(84.))
+                        .w(px(80.))
                         .flex_shrink_0()
                         .flex()
                         .items_center()
@@ -1634,29 +1695,6 @@ fn render_node_row(
                             div().child(delay_label).into_any_element()
                         }),
                 )
-                .when(downloading || download.is_some(), |d| {
-                    d.child(
-                        div()
-                            .w(px(108.))
-                            .flex_shrink_0()
-                            .text_sm()
-                            .text_color(p.muted_fg)
-                            .child(if downloading {
-                                super::tr(lang, "下载测速中", "Downloading").to_string()
-                            } else if let Some(result) = download {
-                                if result.error.is_some() {
-                                    super::tr(lang, "下载失败", "Download failed").to_string()
-                                } else {
-                                    format!(
-                                        "{:.2} MiB/s",
-                                        result.bytes_per_second as f64 / 1048576.0
-                                    )
-                                }
-                            } else {
-                                String::new()
-                            }),
-                    )
-                })
                 // Actions: the test button is revealed by hover or keyboard focus.
                 .child(
                     div()
@@ -1789,14 +1827,6 @@ fn render_node_row(
                                 this.sync(cx);
                             })),
                     )
-                    .children(download.map(|result| {
-                        let label = if result.error.is_some() {
-                            super::tr(lang, "下载失败", "Download failed").to_string()
-                        } else {
-                            format!("{:.2} MiB/s", result.bytes_per_second as f64 / 1048576.0)
-                        };
-                        div().text_sm().text_color(p.muted_fg).child(label)
-                    }))
                     .child(
                         Button::new(SharedString::from(format!("share-{node_id_share}")))
                             .compact()

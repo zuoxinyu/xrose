@@ -1,3 +1,4 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
@@ -5,9 +6,9 @@ use gpui_kit::*;
 use xross_core::dns::{self, DnsPreset};
 use xross_core::model::{DnsServer, DnsServerType};
 
-use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
+use super::AppView;
 
 impl AppView {
     pub(crate) fn page_dns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -126,6 +127,11 @@ impl AppView {
                             Button::new("toggle-dns-form")
                                 .compact()
                                 .primary()
+                                .icon(if self.show_dns_form {
+                                    IconName::X
+                                } else {
+                                    IconName::Plus
+                                })
                                 .label(if self.show_dns_form {
                                     self.tr("收起", "Close")
                                 } else {
@@ -296,14 +302,16 @@ impl AppView {
                                     )
                                 })
                                 .child(
-                                    Button::new(SharedString::from(format!("del-dns-{tag_delete}")))
-                                        .compact()
-                                        .ghost()
-                                        .label("✕")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.delete_dns_server(&tag_delete);
-                                            this.sync(cx);
-                                        })),
+                                    danger_icon_button(
+                                        SharedString::from(format!("del-dns-{tag_delete}")),
+                                        IconName::Trash,
+                                        self.tr("删除 DNS 服务器", "Delete DNS server"),
+                                        &p,
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.delete_dns_server(&tag_delete);
+                                        this.sync(cx);
+                                    })),
                                 ),
                         )
                 })),
@@ -328,10 +336,16 @@ impl AppView {
                         .child(
                             Button::new("toggle-host-form")
                                 .compact()
+                                .primary()
+                                .icon(if self.show_host_form {
+                                    IconName::X
+                                } else {
+                                    IconName::Plus
+                                })
                                 .label(if self.show_host_form {
                                     self.tr("收起", "Close")
                                 } else {
-                                    self.tr("添加", "Add")
+                                    self.tr("添加解析", "Add host")
                                 })
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.show_host_form = !this.show_host_form;
@@ -406,16 +420,20 @@ impl AppView {
                                 ),
                         )
                         .child(
-                            Button::new(SharedString::from(format!("del-host-{domain_delete}")))
-                                .compact()
-                                .ghost()
-                                .label("✕")
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            danger_icon_button(
+                                SharedString::from(format!("del-host-{domain_delete}")),
+                                IconName::Trash,
+                                self.tr("删除静态解析", "Delete host mapping"),
+                                &p,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     let mut hosts = this.snapshot.model.dns.hosts.clone();
                                     hosts.remove(&domain_delete);
                                     this.service.set_hosts(hosts);
                                     this.sync(cx);
-                                })),
+                                },
+                            )),
                         )
                 })),
         );

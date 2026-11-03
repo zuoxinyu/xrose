@@ -1,3 +1,4 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
@@ -5,9 +6,9 @@ use gpui_kit::*;
 use xross_core::subscription::Subscription;
 use xross_core::util::{format_bytes, format_duration_secs};
 
-use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
+use super::AppView;
 
 impl AppView {
     pub(crate) fn page_subscriptions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -36,6 +37,8 @@ impl AppView {
                         .child(
                             div()
                                 .flex()
+                                .items_center()
+                                .justify_end()
                                 .gap_2()
                                 .child(
                                     Button::new("refresh-all-subs")
@@ -49,10 +52,15 @@ impl AppView {
                                     Button::new("toggle-sub-form")
                                         .compact()
                                         .primary()
+                                        .icon(if self.show_subscription_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
                                         .label(if self.show_subscription_form {
                                             self.tr("收起", "Close")
                                         } else {
-                                            self.tr("添加订阅", "Add")
+                                            self.tr("添加订阅", "Add subscription")
                                         })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.show_subscription_form = !this.show_subscription_form;
@@ -218,6 +226,7 @@ impl AppView {
                                         )))
                                         .compact()
                                         .danger()
+                                        .icon(IconName::Trash)
                                         .label(self.tr("删除", "Delete"))
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {

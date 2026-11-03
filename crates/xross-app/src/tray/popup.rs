@@ -7,16 +7,16 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Icon, Sizable};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::AppService;
 use xross_core::model::RoutePreset;
 use xross_core::settings::{Language, ThemeMode};
 use xross_core::util::format_speed;
+use xross_core::AppService;
 
-use super::PopupAnchor;
 use super::dashboard::{self, Dashboard, TrayAction};
+use super::PopupAnchor;
 use crate::i18n::tr;
 use crate::ui::theme::palette;
 
@@ -74,7 +74,7 @@ impl PopupManager {
                 })
             })
             .unwrap_or(fallback);
-        let desired_height = 466. + (dashboard.nodes.len().min(4) as f32 * 38.).max(76.);
+        let desired_height = 452. + (dashboard.nodes.len().min(4) as f32 * 38.).max(76.);
         let bounds = popup_bounds(
             anchor.map(|a| a.position),
             work_area,
@@ -533,6 +533,7 @@ impl Render for PopupView {
                                 if running { "运行中" } else { "已停止" },
                                 if running { "Running" } else { "Stopped" },
                             );
+                            let proxy_addr = d.proxy_address.clone();
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
@@ -578,9 +579,24 @@ impl Render for PopupView {
                                                 .child(status_text),
                                         ),
                                 )
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_size(px(10.5))
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(if running {
+                                            p.muted_fg
+                                        } else {
+                                            p.muted_fg.opacity(0.5)
+                                        })
+                                        .child(proxy_addr),
+                                )
                         },
                         {
                             let (et_color, et_text) = mesh_phase_info(d.easytier.phase, &p, lang);
+                            let et_ip = d.easytier.ip.clone().unwrap_or_else(|| "-".to_string());
+                            let has_ip = d.easytier.ip.is_some();
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
@@ -626,9 +642,24 @@ impl Render for PopupView {
                                                 .child(et_text),
                                         ),
                                 )
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_size(px(10.5))
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(if has_ip {
+                                            p.muted_fg
+                                        } else {
+                                            p.muted_fg.opacity(0.5)
+                                        })
+                                        .child(et_ip),
+                                )
                         },
                         {
                             let (ts_color, ts_text) = mesh_phase_info(d.tailscale.phase, &p, lang);
+                            let ts_ip = d.tailscale.ip.clone().unwrap_or_else(|| "-".to_string());
+                            let has_ip = d.tailscale.ip.is_some();
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
@@ -673,6 +704,19 @@ impl Render for PopupView {
                                                 .text_color(p.fg)
                                                 .child(ts_text),
                                         ),
+                                )
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .text_size(px(10.5))
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(if has_ip {
+                                            p.muted_fg
+                                        } else {
+                                            p.muted_fg.opacity(0.5)
+                                        })
+                                        .child(ts_ip),
                                 )
                         },
                     ]))
@@ -846,78 +890,45 @@ impl Render for PopupView {
                     ),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .flex_shrink_0()
-                    .child(
-                        Button::new("tray-core")
-                            .xsmall()
-                            .h(px(32.))
-                            .flex_1()
-                            .primary()
-                            .disabled(d.busy_core)
-                            .label(tr(
-                                lang,
-                                if d.busy_core {
-                                    "处理中…"
-                                } else if running {
-                                    "停止 Core"
-                                } else {
-                                    "启动 Core"
-                                },
-                                if d.busy_core {
-                                    "Working…"
-                                } else if running {
-                                    "Stop core"
-                                } else {
-                                    "Start core"
-                                },
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.action(TrayAction::ToggleCore, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("tray-test-all")
-                            .xsmall()
-                            .h(px(32.))
-                            .flex_1()
-                            .disabled(d.busy_latency)
-                            .label(tr(
-                                lang,
-                                if d.busy_latency {
-                                    "测速中…"
-                                } else {
-                                    "全部测速"
-                                },
-                                if d.busy_latency {
-                                    "Testing…"
-                                } else {
-                                    "Test all"
-                                },
-                            ))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.action(TrayAction::TestAll, window, cx)
-                            })),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(30.))
-                    .flex_shrink_0()
-                    .text_size(px(11.))
-                    .text_color(p.muted_fg)
-                    .line_clamp(2)
-                    .child(d.toast.clone().unwrap_or_else(|| {
-                        tr(
+                div().flex().flex_shrink_0().child(
+                    Button::new("tray-core")
+                        .xsmall()
+                        .h(px(32.))
+                        .w_full()
+                        .primary()
+                        .disabled(d.busy_core)
+                        .label(tr(
                             lang,
-                            "↑ ↓ 选择节点 · Enter 切换 · Esc 收起",
-                            "↑ ↓ Select · Enter Switch · Esc Dismiss",
-                        )
-                        .to_string()
-                    })),
+                            if d.busy_core {
+                                "处理中…"
+                            } else if running {
+                                "停止 Core"
+                            } else {
+                                "启动 Core"
+                            },
+                            if d.busy_core {
+                                "Working…"
+                            } else if running {
+                                "Stop core"
+                            } else {
+                                "Start core"
+                            },
+                        ))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.action(TrayAction::ToggleCore, window, cx)
+                        })),
+                ),
             )
+            .when_some(d.toast.clone(), |d, toast| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(11.))
+                        .text_color(p.muted_fg)
+                        .line_clamp(2)
+                        .child(toast),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -957,7 +968,7 @@ impl Render for PopupView {
 #[cfg(test)]
 mod tests {
     use super::popup_bounds;
-    use gpui_kit::{Bounds, point, px, size};
+    use gpui_kit::{point, px, size, Bounds};
     #[test]
     fn placement_stays_inside_work_area_at_every_edge() {
         let work = Bounds::new(point(px(-1600.), px(-200.)), size(px(1600.), px(860.)));

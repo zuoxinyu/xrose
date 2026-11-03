@@ -1,16 +1,16 @@
 //! Mesh configuration and cached runtime state. All work goes through AppService.
 use super::{
-    AppView,
-    theme::{Palette, palette},
+    theme::{palette, Palette},
     tr,
     widgets::*,
+    AppView,
 };
 use gpui_base::{Disableable, Selectable, SelectableText};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::mesh::{MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret};
@@ -239,19 +239,91 @@ impl AppView {
         let lang = self.lang();
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
         let mut body = div().flex().flex_col().gap_4().w_full().min_w(px(0.));
-        body=body.child(card(&p)
-            .child(div().flex().items_start().flex_wrap().gap_3()
-                .child(div().flex_1().min_w(px(0.)).child(section_title(&p,self.tr("异地组网","Mesh networks"),self.tr("管理 EasyTier 与 Tailscale 虚拟局域网连接","Manage EasyTier and Tailscale virtual network connections"))))
-                .child(div().flex().flex_wrap().justify_end().gap_2()
-                .child(Button::new("mesh-new").primary().label(self.tr("新增网络","Add network")).on_click(cx.listener(|this,_,window,cx|{
-                    this.mesh_form.load(MeshProfile::default().summary(),window,cx);cx.notify();
-                })))
-                .when(!self.snapshot.mesh.tailscale_installed,|d|d.child(Button::new("mesh-install").label(self.tr("安装 Tailscale 组件","Install Tailscale component")).disabled(busy).on_click(cx.listener(|this,_,_,_|this.service.mesh_install_tailscale()))))
-                .when(!self.snapshot.platform.helper_available,|d|d.child(Button::new("mesh-helper").label(self.tr("启用提权助手","Enable privilege helper")).on_click(cx.listener(|this,_,_,_|{
-                    if this.snapshot.platform.helper_installed {this.service.start_helper();} else {this.service.install_helper();}
-                }))))))
-            .child(div().text_sm().text_color(p.muted_fg).child(self.tr("支持多网并存与代理分流联动；主窗口关闭至托盘时保持连接，退出应用时自动断开。","Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.")))
-            .when(!self.snapshot.mesh.supported,|d|d.child(empty_hint(&p,tr(lang,"当前平台仅支持配置管理，组网连接仅在 Windows 可用。","Only profile management is available on this platform; mesh connections require Windows."))))) ;
+        body = body.child(
+            card(&p)
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .flex_wrap()
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(section_title(
+                                    &p,
+                                    self.tr("异地组网", "Mesh networks"),
+                                    self.tr(
+                                        "管理 EasyTier 与 Tailscale 虚拟局域网连接",
+                                        "Manage EasyTier and Tailscale virtual network connections",
+                                    ),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap_2()
+                                .when(!self.snapshot.mesh.tailscale_installed, |d| {
+                                    d.child(
+                                        Button::new("mesh-install")
+                                            .compact()
+                                            .label(self.tr("安装 Tailscale 组件", "Install Tailscale component"))
+                                            .disabled(busy)
+                                            .on_click(cx.listener(|this, _, _, _| {
+                                                this.service.mesh_install_tailscale();
+                                            })),
+                                    )
+                                })
+                                .when(!self.snapshot.platform.helper_available, |d| {
+                                    d.child(
+                                        Button::new("mesh-helper")
+                                            .compact()
+                                            .label(self.tr("启用提权助手", "Enable privilege helper"))
+                                            .on_click(cx.listener(|this, _, _, _| {
+                                                if this.snapshot.platform.helper_installed {
+                                                    this.service.start_helper();
+                                                } else {
+                                                    this.service.install_helper();
+                                                }
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new("mesh-new")
+                                        .compact()
+                                        .primary()
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("添加网络", "Add network"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.mesh_form.load(MeshProfile::default().summary(), window, cx);
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(p.muted_fg)
+                        .child(self.tr(
+                            "支持多网并存与代理分流联动；主窗口关闭至托盘时保持连接，退出应用时自动断开。",
+                            "Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.",
+                        )),
+                )
+                .when(!self.snapshot.mesh.supported, |d| {
+                    d.child(empty_hint(
+                        &p,
+                        tr(
+                            lang,
+                            "当前平台仅支持配置管理，组网连接仅在 Windows 可用。",
+                            "Only profile management is available on this platform; mesh connections require Windows.",
+                        ),
+                    ))
+                }),
+        );
 
         if self.mesh_form.visible {
             let mut form = card(&p).child(
@@ -550,6 +622,9 @@ impl AppView {
                                         "mesh-delete-{}",
                                         delete.clone()
                                     )))
+                                    .compact()
+                                    .danger()
+                                    .icon(IconName::Trash)
                                     .label(tr(lang, "删除配置", "Delete profile"))
                                     .disabled(active || busy)
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -758,7 +833,7 @@ impl AppView {
             body = body.child(empty_hint(
                 &p,
                 self.tr(
-                    "暂无组网配置，点击“新增网络”创建",
+                    "暂无组网配置，点击“添加网络”创建",
                     "No mesh networks configured",
                 ),
             ));

@@ -21,15 +21,15 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::AppService;
 use xross_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
 use xross_core::settings::{Language, LogLevel};
 use xross_core::trace::TraceStepKind;
+use xross_core::AppService;
 
 use self::manual_node::ManualNodeForm;
-use self::theme::{Palette, palette};
+use self::theme::{palette, Palette};
 use self::title_controls::WindowControls;
 use self::widgets::*;
 
@@ -611,33 +611,22 @@ impl AppView {
                             div()
                                 .flex()
                                 .items_center()
-                                .gap_2()
-                                .child(dot(if self.snapshot.process.phase.is_alive() {
-                                    p.success
+                                .gap_1p5()
+                                .text_xs()
+                                .font_weight(if about_active {
+                                    FontWeight::MEDIUM
                                 } else {
-                                    p.muted_fg
-                                }))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_weight(if about_active {
-                                            FontWeight::MEDIUM
-                                        } else {
-                                            FontWeight::NORMAL
-                                        })
-                                        .text_color(if about_active { p.fg } else { p.muted_fg })
-                                        .child(format!("v{}", self.snapshot.app_version)),
-                                ),
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(if about_active { p.primary } else { p.fg })
+                                .child(Icon::new(IconName::Info).size(px(13.)))
+                                .child(self.tr("关于", "About")),
                         )
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
                                 .text_xs()
-                                .text_color(if about_active { p.primary } else { p.muted_fg })
-                                .child(Icon::new(IconName::Info).size(px(13.)))
-                                .child(self.tr("关于", "About")),
+                                .text_color(p.muted_fg)
+                                .child(format!("v{}", self.snapshot.app_version)),
                         ),
                 )
             })

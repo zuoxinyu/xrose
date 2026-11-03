@@ -4,16 +4,16 @@ use std::rc::Rc;
 
 use gpui_base::SelectableText;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use xross_core::core::LogEntry;
 use xross_core::settings::LogLevel;
 
-use super::AppView;
-use super::theme::{Palette, palette};
+use super::theme::{palette, Palette};
 use super::widgets::*;
+use super::AppView;
 
 pub(super) struct LogListState {
     list: ListState,
@@ -212,33 +212,32 @@ impl AppView {
                                 .min_w(px(220.))
                                 .child(Input::new(&self.log_search)),
                         )
-                        .children(
-                            [
-                                (LogLevel::Trace, "Trace"),
-                                (LogLevel::Debug, "Debug"),
-                                (LogLevel::Info, "Info"),
-                                (LogLevel::Warn, "Warn"),
-                                (LogLevel::Error, "Error"),
-                            ]
-                            .into_iter()
-                            .map(|(level, label)| {
-                                let selected = self.log_level == level;
-                                div()
-                                    .id(SharedString::from(format!("loglevel-{label}")))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .border_1()
-                                    .border_color(if selected { p.primary } else { p.border })
-                                    .bg(if selected { p.accent } else { p.bg })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.log_level = level;
-                                        cx.notify();
-                                    }))
-                                    .child(label)
-                            }),
+                        .child(
+                            button_group(&p).children(
+                                [
+                                    (LogLevel::Trace, "Trace"),
+                                    (LogLevel::Debug, "Debug"),
+                                    (LogLevel::Info, "Info"),
+                                    (LogLevel::Warn, "Warn"),
+                                    (LogLevel::Error, "Error"),
+                                ]
+                                .into_iter()
+                                .map(|(level, label)| {
+                                    let selected = self.log_level == level;
+                                    button_group_item(
+                                        &p,
+                                        SharedString::from(format!("loglevel-{label}")),
+                                        label,
+                                        selected,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.log_level = level;
+                                            cx.notify();
+                                        },
+                                    ))
+                                }),
+                            ),
                         ),
                 )
                 .child(
@@ -377,7 +376,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::LogListState;
-    use gpui_kit::{ListOffset, px};
+    use gpui_kit::{px, ListOffset};
     use std::rc::Rc;
     use xross_core::core::LogEntry;
     use xross_core::core::LogStream;

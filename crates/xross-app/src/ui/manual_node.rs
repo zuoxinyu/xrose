@@ -10,9 +10,9 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::{NodeDraft, Protocol, TransportKind};
 
-use super::AppView;
-use super::theme::{Palette, palette};
+use super::theme::{palette, Palette};
 use super::widgets::*;
+use super::AppView;
 
 pub(crate) struct ManualNodeForm {
     pub name: Entity<InputState>,

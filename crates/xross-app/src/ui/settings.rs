@@ -9,9 +9,9 @@ use xross_core::model::CoreKind;
 use xross_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMode};
 use xross_core::system::CheckLevel;
 
-use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
+use super::AppView;
 
 impl AppView {
     fn modify_settings(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {
@@ -33,7 +33,6 @@ impl AppView {
         let updates = self.snapshot.updates.clone();
         let platform = self.snapshot.platform.clone();
         let doctor = self.snapshot.doctor.clone();
-        let running = self.snapshot.process.phase.is_alive();
         let helper_busy = self.snapshot.busy.iter().any(|b| b == "helper");
 
         let mut body = div().flex().flex_col().gap_4().w_full();
@@ -66,31 +65,24 @@ impl AppView {
                                         .text_color(p.muted_fg)
                                         .child(self.tr("语言", "Language")),
                                 )
-                                .children([Language::Zh, Language::En].into_iter().map(
-                                    |language| {
-                                        let selected = settings.language == language;
-                                        div()
-                                            .id(SharedString::from(format!("lang-{:?}", language)))
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .border_1()
-                                            .border_color(if selected {
-                                                p.primary
-                                            } else {
-                                                p.border
-                                            })
-                                            .bg(if selected { p.accent } else { p.bg })
-                                            .cursor_pointer()
+                                .child(
+                                    button_group(&p).children(
+                                        [Language::Zh, Language::En].into_iter().map(|language| {
+                                            let selected = settings.language == language;
+                                            button_group_item(
+                                                &p,
+                                                SharedString::from(format!("lang-{:?}", language)),
+                                                language.label(),
+                                                selected,
+                                            )
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.service.set_language(language);
                                                 this.sync(cx);
                                                 this.localize_inputs(window, cx);
                                             }))
-                                            .child(language.label())
-                                    },
-                                )),
+                                        }),
+                                    ),
+                                ),
                         )
                         .child(
                             div()
@@ -104,29 +96,22 @@ impl AppView {
                                         .text_color(p.muted_fg)
                                         .child(self.tr("主题", "Theme")),
                                 )
-                                .children(
-                                    [
-                                        (ThemeMode::System, self.tr("跟随系统", "System")),
-                                        (ThemeMode::Light, self.tr("浅色", "Light")),
-                                        (ThemeMode::Dark, self.tr("深色", "Dark")),
-                                    ]
-                                    .into_iter()
-                                    .map(|(mode, label)| {
-                                        let selected = settings.theme == mode;
-                                        div()
-                                            .id(SharedString::from(format!("theme-{:?}", mode)))
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .border_1()
-                                            .border_color(if selected {
-                                                p.primary
-                                            } else {
-                                                p.border
-                                            })
-                                            .bg(if selected { p.accent } else { p.bg })
-                                            .cursor_pointer()
+                                .child(
+                                    button_group(&p).children(
+                                        [
+                                            (ThemeMode::System, self.tr("跟随系统", "System")),
+                                            (ThemeMode::Light, self.tr("浅色", "Light")),
+                                            (ThemeMode::Dark, self.tr("深色", "Dark")),
+                                        ]
+                                        .into_iter()
+                                        .map(|(mode, label)| {
+                                            let selected = settings.theme == mode;
+                                            button_group_item(
+                                                &p,
+                                                SharedString::from(format!("theme-{:?}", mode)),
+                                                label,
+                                                selected,
+                                            )
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 this.service.set_theme(mode);
                                                 match mode {
@@ -159,11 +144,14 @@ impl AppView {
                                                 }
                                                 // Applying a theme rewrites the root surface
                                                 // color; keep it clear so the backdrop shows.
-                                                crate::window_effects::refresh_all(this.service.settings().backdrop, cx);
+                                                crate::window_effects::refresh_all(
+                                                    this.service.settings().backdrop,
+                                                    cx,
+                                                );
                                                 this.sync(cx);
                                             }))
-                                            .child(label)
-                                    }),
+                                        }),
+                                    ),
                                 ),
                         )
                         .child({
@@ -196,28 +184,16 @@ impl AppView {
                                                 .text_color(p.muted_fg.opacity(0.75)),
                                         ),
                                 )
-                                .children(backdrop_choices().into_iter().map(
-                                    |(style, zh, en)| {
-                                        let selected = settings.backdrop == style;
-                                        let item_tip = backdrop_tip.clone();
-                                        div()
-                                            .id(SharedString::from(format!("backdrop-{style:?}")))
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .border_1()
-                                            .border_color(if selected {
-                                                p.primary
-                                            } else {
-                                                p.border
-                                            })
-                                            .bg(if selected { p.accent } else { p.bg })
-                                            .cursor_pointer()
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(item_tip.clone()).build(window, cx)
-                                            })
-                                            .child(self.tr(zh, en))
+                                .child(
+                                    button_group(&p).children(
+                                        backdrop_choices().into_iter().map(|(style, zh, en)| {
+                                            let selected = settings.backdrop == style;
+                                            button_group_item(
+                                                &p,
+                                                SharedString::from(format!("backdrop-{style:?}")),
+                                                self.tr(zh, en),
+                                                selected,
+                                            )
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.service.set_backdrop(style);
                                                 crate::window_effects::refresh_all(
@@ -226,48 +202,58 @@ impl AppView {
                                                 );
                                                 this.sync(cx);
                                             }))
-                                    },
-                                ))
+                                        }),
+                                    ),
+                                )
                         })
-                        .child(
+                        .child({
+                            let core_tip = self.tr(
+                                "修改 Core 后需重启方可生效",
+                                "Restart required after changing core",
+                            );
+                            let label_tip = core_tip.clone();
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_3()
                                 .child(
                                     div()
+                                        .id("core-label")
                                         .w(px(120.))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
                                         .text_sm()
                                         .text_color(p.muted_fg)
-                                        .child(self.tr("Core", "Core")),
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(label_tip.clone()).build(window, cx)
+                                        })
+                                        .child(self.tr("Core", "Core"))
+                                        .child(
+                                            Icon::new(IconName::Info)
+                                                .size(px(12.))
+                                                .text_color(p.muted_fg.opacity(0.75)),
+                                        ),
                                 )
-                                .children(CoreKind::all().into_iter().map(|core| {
-                                    let selected = settings.core == core;
-                                    div()
-                                        .id(SharedString::from(format!("core-{:?}", core)))
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_md()
-                                        .text_xs()
-                                        .border_1()
-                                        .border_color(if selected { p.primary } else { p.border })
-                                        .bg(if selected { p.accent } else { p.bg })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.set_core(core);
-                                            this.sync(cx);
-                                        }))
-                                        .child(core.display_name())
-                                }))
-                                .when(running, |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.warning)
-                                            .child(self.tr("修改后需重启", "restart required")),
-                                    )
-                                }),
-                        ),
+                                .child(
+                                    button_group(&p).children(
+                                        CoreKind::all().into_iter().map(|core| {
+                                            let selected = settings.core == core;
+                                            button_group_item(
+                                                &p,
+                                                SharedString::from(format!("core-{core:?}")),
+                                                core.display_name(),
+                                                selected,
+                                            )
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.service.set_core(core);
+                                                this.sync(cx);
+                                            }))
+                                        }),
+                                    ),
+                                )
+                        }),
                 )
                 .child(divider(&p))
                 .child(
@@ -578,186 +564,230 @@ impl AppView {
                                 .text_color(p.muted_fg)
                                 .child(self.tr("日志级别", "Log level")),
                         )
-                        .children(
-                            [
-                                (LogLevel::Debug, "Debug"),
-                                (LogLevel::Info, "Info"),
-                                (LogLevel::Warn, "Warn"),
-                                (LogLevel::Error, "Error"),
-                            ]
-                            .into_iter()
-                            .map(|(level, label)| {
-                                let selected = settings.log_level == level;
-                                div()
-                                    .id(SharedString::from(format!("set-log-{label}")))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .border_1()
-                                    .border_color(if selected { p.primary } else { p.border })
-                                    .bg(if selected { p.accent } else { p.bg })
-                                    .cursor_pointer()
+                        .child(
+                            button_group(&p).children(
+                                [
+                                    (LogLevel::Debug, "Debug"),
+                                    (LogLevel::Info, "Info"),
+                                    (LogLevel::Warn, "Warn"),
+                                    (LogLevel::Error, "Error"),
+                                ]
+                                .into_iter()
+                                .map(|(level, label)| {
+                                    let selected = settings.log_level == level;
+                                    button_group_item(
+                                        &p,
+                                        SharedString::from(format!("set-log-{label}")),
+                                        label,
+                                        selected,
+                                    )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.modify_settings(cx, |s| s.log_level = level);
                                     }))
-                                    .child(label)
-                            }),
+                                }),
+                            ),
                         ),
                 ),
         );
 
         // Core & updates ------------------------------------------------
-        let current_core = settings.core;
-        let active_version = settings.active_version(current_core).cloned();
-        let core_binaries: Vec<_> = binaries
-            .iter()
-            .filter(|b| b.core == current_core)
-            .cloned()
-            .collect();
-        body = body.child(
-            card(&p)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("Core 与更新", "Core & updates"),
-                            self.tr(
-                                "管理已安装的内核版本、检查组件更新与数据备份",
-                                "Manage installed core versions, check updates, and back up data",
-                            ),
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("install-core")
-                                        .compact()
-                                        .primary()
-                                        .label(self.tr("下载 / 更新", "Download / update"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "install"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            let core = this.snapshot.settings.core;
-                                            this.service.install_core_update(core);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("check-updates")
-                                        .compact()
-                                        .label(self.tr("检查更新", "Check updates"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "updates"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.check_updates();
-                                        })),
-                                ),
-                        ),
-                )
-                .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                        "{}：{} / {} · {} {}",
-                        self.tr("当前平台", "Platform"),
-                        platform.os,
-                        platform.arch,
-                        self.tr("当前版本", "active version"),
-                        active_version
-                            .clone()
-                            .unwrap_or_else(|| self.tr("未安装", "not installed").to_string())
-                    )))
-                .when(core_binaries.is_empty(), |d| {
-                    d.child(empty_hint(
+        let is_installing = self.snapshot.busy.iter().any(|b| b == "install");
+        let is_checking_updates = self.snapshot.busy.iter().any(|b| b == "updates");
+
+        let mut core_card = card(&p)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(section_title(
                         &p,
+                        self.tr("Core 与更新", "Core & updates"),
                         self.tr(
-                            "尚未安装该 core，点击“下载 / 更新”自动获取最新版本",
-                            "This core is not installed — use Download / update",
+                            "管理已安装的内核版本、检查组件更新与数据备份",
+                            "Manage installed core versions, check updates, and back up data",
                         ),
                     ))
-                })
-                .children(core_binaries.into_iter().map(|record| {
+                    .child(
+                        Button::new("check-updates")
+                            .compact()
+                            .label(self.tr("检查更新", "Check updates"))
+                            .loading(is_checking_updates)
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this.service.check_updates();
+                            })),
+                    ),
+            )
+            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                "{}：{} / {}",
+                self.tr("当前平台", "Platform"),
+                platform.os,
+                platform.arch,
+            )));
+
+        for (idx, core) in [CoreKind::SingBox, CoreKind::Xray].into_iter().enumerate() {
+            if idx > 0 {
+                core_card = core_card.child(divider(&p));
+            }
+            let is_engine = settings.core == core;
+            let active_version = settings.active_version(core).cloned();
+            let core_binaries: Vec<_> = binaries
+                .iter()
+                .filter(|b| b.core == core)
+                .cloned()
+                .collect();
+            let core_title = core.display_name();
+
+            let mut section = div().flex().flex_col().gap_2();
+            section = section.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(p.fg)
+                                    .child(core_title),
+                            )
+                            .when(is_engine, |d| {
+                                d.child(pill(
+                                    self.tr("当前选用", "Selected"),
+                                    p.primary_fg,
+                                    p.primary,
+                                ))
+                            })
+                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                "{}: {}",
+                                self.tr("当前版本", "Active"),
+                                active_version.clone().unwrap_or_else(|| {
+                                    self.tr("未安装", "Not installed").to_string()
+                                })
+                            ))),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("install-{core:?}")))
+                            .compact()
+                            .primary()
+                            .label(self.tr("下载 / 更新", "Download / update"))
+                            .loading(is_installing && settings.core == core)
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.service.install_core_update(core);
+                            })),
+                    ),
+            );
+
+            if core_binaries.is_empty() {
+                section = section.child(empty_hint(
+                    &p,
+                    self.tr(
+                        "尚未安装该 Core，点击“下载 / 更新”自动获取最新版本",
+                        "This core is not installed — use Download / update",
+                    ),
+                ));
+            } else {
+                for record in core_binaries {
                     let version = record.version.clone();
-                    let core = record.core;
                     let delete_version = record.version.clone();
                     let is_active = active_version.as_deref() == Some(record.version.as_str());
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .p_2()
-                        .rounded_md()
-                        .bg(p.bg)
-                        .border_1()
-                        .border_color(if is_active { p.primary } else { p.border })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(p.fg)
-                                                .child(format!("v{version}")),
+                    section = section.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .p_2()
+                            .rounded_md()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(if is_active { p.primary } else { p.border })
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .flex_1()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(p.fg)
+                                                    .child(format!("v{version}")),
+                                            )
+                                            .when(is_active, |d| {
+                                                d.child(pill(
+                                                    self.tr("使用中", "active"),
+                                                    p.primary_fg,
+                                                    p.primary,
+                                                ))
+                                            })
+                                            .child(pill(
+                                                format!("{}/{}", record.platform, record.arch),
+                                                p.muted_fg,
+                                                p.panel_alt,
+                                            )),
+                                    )
+                                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                        "{} · sha256 {}…",
+                                        xross_core::util::format_bytes(record.size),
+                                        &record.sha256[..12.min(record.sha256.len())]
+                                    ))),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when(!is_active, |d| {
+                                        d.child(
+                                            Button::new(SharedString::from(format!(
+                                                "use-version-{core:?}-{version}"
+                                            )))
+                                            .compact()
+                                            .label(self.tr("使用", "Use"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.service.set_active_version(core, &version);
+                                                this.sync(cx);
+                                            })),
                                         )
-                                        .when(is_active, |d| {
-                                            d.child(pill(
-                                                self.tr("使用中", "active"),
-                                                p.primary_fg,
-                                                p.primary,
-                                            ))
-                                        })
-                                        .child(pill(
-                                            format!("{}/{}", record.platform, record.arch),
-                                            p.muted_fg,
-                                            p.panel_alt,
-                                        )),
-                                )
-                                .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                    "{} · sha256 {}…",
-                                    xross_core::util::format_bytes(record.size),
-                                    &record.sha256[..12.min(record.sha256.len())]
-                                ))),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .when(!is_active, |d| {
-                                    d.child(
-                                        Button::new(SharedString::from(format!(
-                                            "use-version-{version}"
-                                        )))
-                                        .compact()
-                                        .label(self.tr("使用", "Use"))
+                                    })
+                                    .child(
+                                        danger_icon_button(
+                                            SharedString::from(format!(
+                                                "remove-version-{core:?}-{delete_version}"
+                                            )),
+                                            IconName::Trash,
+                                            self.tr("删除此版本", "Delete version"),
+                                            &p,
+                                        )
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.service.set_active_version(core, &version);
+                                                this.service.remove_binary(core, &delete_version);
                                                 this.sync(cx);
                                             }),
                                         ),
-                                    )
-                                })
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "remove-version-{delete_version}"
-                                    )))
-                                    .compact()
-                                    .danger()
-                                    .label("✕")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.remove_binary(core, &delete_version);
-                                        this.sync(cx);
-                                    })),
-                                ),
-                        )
-                }))
+                                    ),
+                            ),
+                    );
+                }
+            }
+
+            core_card = core_card.child(section);
+        }
+
+        body = body.child(
+            core_card
                 .child(
                     div()
                         .flex()

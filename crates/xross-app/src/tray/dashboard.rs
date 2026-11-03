@@ -21,6 +21,7 @@ pub struct DashboardMeshStatus {
     pub provider: xross_core::mesh::MeshProvider,
     pub phase: xross_core::mesh::MeshPhase,
     pub profile_name: Option<String>,
+    pub ip: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,7 @@ pub struct Dashboard {
     pub show_speed: bool,
     pub easytier: DashboardMeshStatus,
     pub tailscale: DashboardMeshStatus,
+    pub proxy_address: String,
     pub system_proxy: bool,
     pub tun_enabled: bool,
     pub tun_supported: bool,
@@ -98,10 +100,16 @@ pub fn build(service: &AppService) -> Dashboard {
         .profiles
         .iter()
         .find(|p| p.provider == xross_core::mesh::MeshProvider::EasyTier);
+    let et_ip = et_net.and_then(|n| {
+        n.addresses
+            .first()
+            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
+    });
     let easytier = DashboardMeshStatus {
         provider: xross_core::mesh::MeshProvider::EasyTier,
         phase: et_phase,
         profile_name: et_profile.map(|p| p.name.clone()),
+        ip: et_ip,
     };
 
     let ts_net = snapshot
@@ -117,10 +125,16 @@ pub fn build(service: &AppService) -> Dashboard {
         .profiles
         .iter()
         .find(|p| p.provider == xross_core::mesh::MeshProvider::Tailscale);
+    let ts_ip = ts_net.and_then(|n| {
+        n.addresses
+            .first()
+            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
+    });
     let tailscale = DashboardMeshStatus {
         provider: xross_core::mesh::MeshProvider::Tailscale,
         phase: ts_phase,
         profile_name: ts_profile.map(|p| p.name.clone()),
+        ip: ts_ip,
     };
 
     let mut status_line = format!(
@@ -166,6 +180,7 @@ pub fn build(service: &AppService) -> Dashboard {
         show_speed: snapshot.settings.show_tray_speed,
         easytier,
         tailscale,
+        proxy_address: format!("127.0.0.1:{}", snapshot.settings.mixed_port),
         down_speed: snapshot.runtime.down_speed,
         up_speed: snapshot.runtime.up_speed,
         system_proxy: snapshot.system_proxy_active,

@@ -1,3 +1,4 @@
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
@@ -155,31 +156,24 @@ impl AppView {
                                         .text_color(p.muted_fg)
                                         .child(self.tr("域名策略", "Domain strategy")),
                                 )
-                                .children(
-                                    [
-                                        (DomainStrategy::AsIs, "AsIs"),
-                                        (DomainStrategy::PreferIpv4, "IPv4"),
-                                        (DomainStrategy::PreferIpv6, "IPv6"),
-                                        (DomainStrategy::IpIfNonMatch, "IPIfNonMatch"),
-                                    ]
-                                    .into_iter()
-                                    .map(
-                                        |(strategy, label)| {
-                                            let selected = routing.domain_strategy == strategy;
-                                            div()
-                                                .id(SharedString::from(format!("strategy-{label}")))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_md()
-                                                .text_xs()
-                                                .border_1()
-                                                .border_color(if selected {
-                                                    p.primary
-                                                } else {
-                                                    p.border
-                                                })
-                                                .bg(if selected { p.accent } else { p.bg })
-                                                .cursor_pointer()
+                                .child(
+                                    button_group(&p).children(
+                                        [
+                                            (DomainStrategy::AsIs, "AsIs"),
+                                            (DomainStrategy::PreferIpv4, "IPv4"),
+                                            (DomainStrategy::PreferIpv6, "IPv6"),
+                                            (DomainStrategy::IpIfNonMatch, "IPIfNonMatch"),
+                                        ]
+                                        .into_iter()
+                                        .map(
+                                            |(strategy, label)| {
+                                                let selected = routing.domain_strategy == strategy;
+                                                button_group_item(
+                                                    &p,
+                                                    SharedString::from(format!("strategy-{label}")),
+                                                    label,
+                                                    selected,
+                                                )
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     let model = &this.snapshot.model.routing;
                                                     this.service.set_routing_flags(
@@ -189,8 +183,8 @@ impl AppView {
                                                     );
                                                     this.sync(cx);
                                                 }))
-                                                .child(label.to_string())
-                                        },
+                                            },
+                                        ),
                                     ),
                                 ),
                         ),
@@ -216,11 +210,27 @@ impl AppView {
                         .child(
                             div()
                                 .flex()
+                                .items_center()
+                                .justify_end()
                                 .gap_2()
+                                .child(
+                                    Button::new("validate-route")
+                                        .compact()
+                                        .label(self.tr("校验", "Validate"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.validate_config();
+                                        })),
+                                )
                                 .child(
                                     Button::new("toggle-rule-form")
                                         .compact()
                                         .primary()
+                                        .icon(if self.show_rule_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
                                         .label(if self.show_rule_form {
                                             self.tr("收起", "Close")
                                         } else {
@@ -229,15 +239,6 @@ impl AppView {
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.show_rule_form = !this.show_rule_form;
                                             cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("validate-route")
-                                        .compact()
-                                        .label(self.tr("校验", "Validate"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.validate_config();
                                         })),
                                 ),
                         ),
@@ -483,14 +484,18 @@ impl AppView {
                         )))
                         .child(
                             div().flex_shrink_0().child(
-                                Button::new(SharedString::from(format!("delete-rule-{}", rule_id)))
-                                    .compact()
-                                    .ghost()
-                                    .label("✕")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                danger_icon_button(
+                                    SharedString::from(format!("delete-rule-{}", rule_id)),
+                                    IconName::Trash,
+                                    self.tr("删除规则", "Delete rule"),
+                                    &p,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
                                         this.service.delete_rule(&rule_id_delete);
                                         this.sync(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                         )
                 })),

@@ -9,7 +9,7 @@ use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::diagnostics::{
-    ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget, connection_test_target,
+    connection_test_target, ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget,
 };
 use xross_core::model::{CoreKind, RouteAction, RouteActionKind};
 use xross_core::runtime::ClashConnection;
@@ -17,7 +17,7 @@ use xross_core::service::ToastLevel;
 use xross_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
 use xross_core::util::{format_bytes, format_speed};
 
-use super::theme::{Palette, palette};
+use super::theme::{palette, Palette};
 use super::widgets::*;
 use super::{AppView, Page};
 
@@ -522,7 +522,7 @@ impl AppView {
                                         .on_click(cx.listener(move |this, _, _, _| {
                                             this.service.kill_connection(&id)
                                         }))
-                                        .child(Icon::new(IconName::X).with_size(px(14.))),
+                                        .child(Icon::new(IconName::Unplug).with_size(px(14.))),
                                 )
                             }),
                     ),
