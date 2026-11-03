@@ -1,5 +1,6 @@
 mod about;
 mod connections;
+mod dialogs;
 mod dns;
 mod logs;
 mod manual_node;
@@ -21,15 +22,15 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xross_core::AppService;
 use xross_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
 use xross_core::settings::{Language, LogLevel};
 use xross_core::trace::TraceStepKind;
-use xross_core::AppService;
 
 use self::manual_node::ManualNodeForm;
-use self::theme::{palette, Palette};
+use self::theme::{Palette, palette};
 use self::title_controls::WindowControls;
 use self::widgets::*;
 
@@ -160,6 +161,7 @@ pub struct AppView {
     pub(crate) show_manual_form: bool,
     pub(crate) manual_form: ManualNodeForm,
     pub(crate) manual_error: Option<String>,
+    pub(crate) editing_node: Option<String>,
     pub(crate) hide_ips: bool,
     /// Overflow menu of the node list toolbar (batch management, cleanup).
     pub(crate) toolbar_menu_open: bool,
@@ -207,8 +209,6 @@ pub struct AppView {
     pub(crate) rule_action: RouteActionKind,
     pub(crate) selected_group: Option<String>,
     pub(crate) log_level: LogLevel,
-    pub(crate) qr_node: Option<String>,
-    pub(crate) show_qr: bool,
 }
 
 impl AppView {
@@ -293,6 +293,7 @@ impl AppView {
             show_manual_form,
             manual_form,
             manual_error: None,
+            editing_node: None,
             hide_ips,
             toolbar_menu_open: false,
             latency_pending: std::collections::HashSet::new(),
@@ -336,11 +337,14 @@ impl AppView {
             rule_action: RouteActionKind::Proxy,
             selected_group: default_group,
             log_level: LogLevel::Info,
-            qr_node: None,
-            show_qr: false,
         };
         view.refresh_header_location();
         view.localize_inputs(window, cx);
+        if show_manual_form {
+            cx.defer_in(window, |this, window, cx| {
+                this.open_node_dialog(None, true, window, cx);
+            });
+        }
         view
     }
 

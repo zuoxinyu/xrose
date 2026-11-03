@@ -91,12 +91,13 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - 定时更新；`ETag` / `If-Modified-Since`；自定义 UA 与请求头；`304` 处理。
 - 解析：**Base64**、**v2rayN 分享链接**（vmess / vless / trojan / ss / hysteria2 / tuic）、
   **Clash YAML**（含 proxy-groups）、**SIP008**、**sing-box JSON**。
-- 统一 `Node` 模型；分享链接**双向转换**（导入/导出）；二维码（终端块字符渲染）；
+- 统一 `Node` 模型；分享链接**双向转换**（导入/导出）；二维码（图形弹窗 / CLI 文本渲染）；
   指纹去重；订阅分组导入；排序字段。
-- **手动添加节点**：协议（VMess / VLESS / Trojan / AnyTLS / Shadowsocks / Hysteria2 / TUIC /
+- **添加与编辑节点**：弹窗配置协议（VMess / VLESS / Trojan / AnyTLS / Shadowsocks / Hysteria2 / TUIC /
   SOCKS / HTTP）、凭据、TLS / Reality（pbk + shortId）、uTLS 指纹、ALPN、
   传输层（TCP / WebSocket / gRPC / HTTP/2 / HTTPUpgrade）、UDP、标签。
   校验规则集中在 `NodeDraft::into_node`，界面、CLI 与测试共用同一套错误文案。
+  编辑时保留节点 ID、出站组引用、订阅归属及未修改的高级参数。
 - 解析 `subscription-userinfo` 响应头，展示已用/总量/到期时间，并可视化进度。
 
 ### 4. 路由与 DNS
@@ -183,7 +184,8 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   查询失败显示“归属地未知”。节点信息区与运行状态右侧空白区均支持拖动窗口。
 - 节点列表工具栏、标记与操作菜单统一使用与侧栏一致的线性图标。
 - 节点支持通过拖动手柄排序并保存；测速、菜单和启用开关不会触发节点切换。
-  标题行的“添加节点”统一提供链接导入和手动填写入口。
+  标题行的“添加节点”弹窗统一提供链接导入和手动填写入口；节点菜单提供编辑和二维码分享弹窗。
+- 添加网络、编辑网络使用弹窗表单；长表单在弹窗内滚动，保存失败时保留输入并显示错误。
 - 托盘 dashboard 与主界面共用 AppService 快照，400 ms 更新；原生回调只排队窗口命令，
   服务动作在 GPUI 线程执行。主窗口句柄单独记录，浮窗的创建/销毁不会影响主窗口隐藏恢复。
 - 应用/任务栏图标：Windows 由 `build.rs` 从 256px PNG 生成 `.ico` 并以资源 ID 1 内嵌

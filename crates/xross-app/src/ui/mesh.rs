@@ -1,23 +1,26 @@
 //! Mesh configuration and cached runtime state. All work goes through AppService.
 use super::{
-    theme::{palette, Palette},
+    AppView,
+    theme::{Palette, palette},
     tr,
     widgets::*,
-    AppView,
 };
 use gpui_base::{Disableable, Selectable, SelectableText};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::mesh::{MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret};
 use xross_core::service::ToastLevel;
 
 pub(crate) struct MeshForm {
-    visible: bool,
+    editing: bool,
+    error: Option<String>,
     id: String,
     provider: MeshProvider,
     name: Entity<InputState>,
@@ -33,7 +36,8 @@ pub(crate) struct MeshForm {
 impl MeshForm {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         Self {
-            visible: false,
+            editing: false,
+            error: None,
             id: MeshProfile::default().id,
             provider: MeshProvider::EasyTier,
             name: super::text_input(window, cx, ""),
@@ -50,7 +54,7 @@ impl MeshForm {
     fn load(&mut self, profile: MeshProfileView, window: &mut Window, cx: &mut Context<AppView>) {
         self.id = profile.id;
         self.provider = profile.provider;
-        self.visible = true;
+        self.error = None;
         for (input, value) in [
             (&self.name, profile.name),
             (&self.hostname, profile.hostname),
@@ -234,6 +238,193 @@ impl AppView {
             .child(text)
     }
 
+    pub(crate) fn open_mesh_dialog(
+        &mut self,
+        profile: Option<MeshProfileView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.mesh_form.editing = profile.is_some();
+        self.mesh_form.load(
+            profile.unwrap_or_else(|| MeshProfile::default().summary()),
+            window,
+            cx,
+        );
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| this.mesh_dialog(dialog, cx))
+            } else {
+                dialog
+            }
+        });
+        cx.notify();
+    }
+
+    fn mesh_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+        let p = palette(cx);
+        let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
+        let mut form = div().flex().flex_col().gap_3().min_w(px(0.)).child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    Button::new("mesh-kind-et")
+                        .label("EasyTier")
+                        .disabled(self.mesh_form.editing)
+                        .selected(self.mesh_form.provider == MeshProvider::EasyTier)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.mesh_form.provider = MeshProvider::EasyTier;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("mesh-kind-ts")
+                        .label("Tailscale")
+                        .disabled(self.mesh_form.editing)
+                        .selected(self.mesh_form.provider == MeshProvider::Tailscale)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.mesh_form.provider = MeshProvider::Tailscale;
+                            cx.notify();
+                        })),
+                ),
+        );
+        let mut fields = vec![
+            (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
+            (
+                self.tr("设备名称", "Device hostname"),
+                &self.mesh_form.hostname,
+            ),
+        ];
+        if self.mesh_form.provider == MeshProvider::EasyTier {
+            fields.extend([
+                (self.tr("网络名称", "Network name"), &self.mesh_form.network),
+                (
+                    if self.mesh_form.editing {
+                        self.tr("网络密钥（留空保留）", "Network secret (blank to keep)")
+                    } else {
+                        self.tr("网络密钥", "Network secret")
+                    },
+                    &self.mesh_form.secret,
+                ),
+                (
+                    self.tr("入口节点（逗号分隔）", "Entry peers (comma separated)"),
+                    &self.mesh_form.peers,
+                ),
+                (
+                    self.tr(
+                        "虚拟 IPv4（留空自动分配）",
+                        "Virtual IPv4 (blank for automatic)",
+                    ),
+                    &self.mesh_form.address,
+                ),
+            ]);
+        } else {
+            fields.push((
+                self.tr(
+                    "控制服务器（留空使用 Tailscale）",
+                    "Control server (blank for Tailscale)",
+                ),
+                &self.mesh_form.control,
+            ));
+        }
+        fields.push((
+            self.tr(
+                "允许访问的远端网段（逗号分隔）",
+                "Allowed remote subnets (comma separated)",
+            ),
+            &self.mesh_form.subnets,
+        ));
+        for (label, input) in fields {
+            form = form.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .child(div().text_sm().child(label))
+                    .child(Input::new(input)),
+            );
+        }
+        if self.mesh_form.provider == MeshProvider::Tailscale {
+            form = form.child(
+                    div().text_sm().text_color(p.muted_fg).child(self.tr(
+                        "保存后点击“连接”，并在浏览器中完成设备授权；断开连接不会清除登录状态。",
+                        "Save, then connect and authorize this device in your browser. Disconnecting preserves your sign-in state.",
+                    )),
+                );
+        }
+
+        let view = cx.entity().downgrade();
+        dialog
+            .centered()
+            .w(px(640.))
+            .bg(p.panel)
+            .text_color(p.fg)
+            .border_color(p.border)
+            .entrance(DialogEntrance::None)
+            .overlay_closable(false)
+            .on_ok(|_, _, _| false)
+            .title(if self.mesh_form.editing {
+                self.tr("编辑网络", "Edit network")
+            } else {
+                self.tr("添加网络", "Add network")
+            })
+            .on_close(move |_, window, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.mesh_form
+                        .secret
+                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    this.mesh_form.error = None;
+                    cx.notify();
+                });
+            })
+            .child(form.when_some(self.mesh_form.error.clone(), |d, error| {
+                d.child(div().text_sm().text_color(p.danger).child(error))
+            }))
+            .footer(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("mesh-cancel")
+                            .label(self.tr("取消", "Cancel"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.mesh_form
+                                    .secret
+                                    .update(cx, |s, cx| s.set_value("", window, cx));
+                                this.mesh_form.error = None;
+                                window.close_dialog(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("mesh-save")
+                            .primary()
+                            .label(self.tr("保存配置", "Save profile"))
+                            .disabled(busy)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                match this.service.save_mesh_profile(this.mesh_form.profile(cx)) {
+                                    Ok(_) => {
+                                        this.mesh_form
+                                            .secret
+                                            .update(cx, |s, cx| s.set_value("", window, cx));
+                                        this.mesh_form.error = None;
+                                        window.close_dialog(cx);
+                                        this.sync(cx);
+                                    }
+                                    Err(err) => {
+                                        this.mesh_form.error = Some(err.to_string());
+                                        cx.notify();
+                                    }
+                                }
+                            })),
+                    ),
+            )
+    }
+
     pub(crate) fn page_mesh(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
@@ -298,8 +489,7 @@ impl AppView {
                                         .icon(IconName::Plus)
                                         .label(self.tr("添加网络", "Add network"))
                                         .on_click(cx.listener(|this, _, window, cx| {
-                                            this.mesh_form.load(MeshProfile::default().summary(), window, cx);
-                                            cx.notify();
+                                            this.open_mesh_dialog(None, window, cx);
                                         })),
                                 ),
                         ),
@@ -324,137 +514,6 @@ impl AppView {
                     ))
                 }),
         );
-
-        if self.mesh_form.visible {
-            let mut form = card(&p).child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        Button::new("mesh-kind-et")
-                            .label("EasyTier")
-                            .selected(self.mesh_form.provider == MeshProvider::EasyTier)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mesh_form.provider = MeshProvider::EasyTier;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("mesh-kind-ts")
-                            .label("Tailscale")
-                            .selected(self.mesh_form.provider == MeshProvider::Tailscale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mesh_form.provider = MeshProvider::Tailscale;
-                                cx.notify();
-                            })),
-                    ),
-            );
-            let mut fields = vec![
-                (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
-                (
-                    self.tr("设备名称", "Device hostname"),
-                    &self.mesh_form.hostname,
-                ),
-            ];
-            if self.mesh_form.provider == MeshProvider::EasyTier {
-                fields.extend([
-                    (self.tr("网络名称", "Network name"), &self.mesh_form.network),
-                    (
-                        self.tr(
-                            "网络密钥（编辑时留空保留）",
-                            "Network secret (leave blank to keep)",
-                        ),
-                        &self.mesh_form.secret,
-                    ),
-                    (
-                        self.tr("入口节点（逗号分隔）", "Entry peers (comma separated)"),
-                        &self.mesh_form.peers,
-                    ),
-                    (
-                        self.tr(
-                            "虚拟 IPv4（留空自动分配）",
-                            "Virtual IPv4 (blank for automatic)",
-                        ),
-                        &self.mesh_form.address,
-                    ),
-                ]);
-            } else {
-                fields.push((
-                    self.tr(
-                        "控制服务器（留空使用 Tailscale）",
-                        "Control server (blank for Tailscale)",
-                    ),
-                    &self.mesh_form.control,
-                ));
-            }
-            fields.push((
-                self.tr(
-                    "允许访问的远端网段（逗号分隔）",
-                    "Allowed remote subnets (comma separated)",
-                ),
-                &self.mesh_form.subnets,
-            ));
-            for (label, input) in fields {
-                form = form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .min_w(px(0.))
-                        .child(div().text_sm().child(label))
-                        .child(Input::new(input)),
-                );
-            }
-            if self.mesh_form.provider == MeshProvider::Tailscale {
-                form = form.child(
-                    div().text_sm().text_color(p.muted_fg).child(self.tr(
-                        "保存后点击“连接”，并在浏览器中完成设备授权；断开连接不会清除登录状态。",
-                        "Save, then connect and authorize this device in your browser. Disconnecting preserves your sign-in state.",
-                    )),
-                );
-            }
-            body = body.child(
-                form.child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            Button::new("mesh-save")
-                                .primary()
-                                .label(self.tr("保存配置", "Save profile"))
-                                .disabled(busy)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    match this.service.save_mesh_profile(this.mesh_form.profile(cx))
-                                    {
-                                        Ok(_) => {
-                                            this.mesh_form.visible = false;
-                                            this.mesh_form
-                                                .secret
-                                                .update(cx, |s, cx| s.set_value("", window, cx));
-                                        }
-                                        Err(e) => {
-                                            this.service.toast(ToastLevel::Error, e.to_string())
-                                        }
-                                    }
-                                    this.sync(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("mesh-cancel")
-                                .label(self.tr("取消", "Cancel"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.mesh_form.visible = false;
-                                    this.mesh_form
-                                        .secret
-                                        .update(cx, |s, cx| s.set_value("", window, cx));
-                                    cx.notify();
-                                })),
-                        ),
-                ),
-            );
-        }
 
         for profile in self.snapshot.mesh.profiles.clone() {
             let provider = profile.provider;
@@ -613,8 +672,7 @@ impl AppView {
                                     .label(tr(lang, "编辑", "Edit"))
                                     .disabled(active || busy)
                                     .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.mesh_form.load(edit.clone(), window, cx);
-                                        cx.notify();
+                                        this.open_mesh_dialog(Some(edit.clone()), window, cx);
                                     })),
                                 )
                                 .child(

@@ -493,7 +493,94 @@ impl Default for NodeDraft {
     }
 }
 
+impl From<&Node> for NodeDraft {
+    fn from(node: &Node) -> Self {
+        let (path, host, service_name) = match &node.transport {
+            Transport::WebSocket { path, host, .. }
+            | Transport::Http2 { path, host }
+            | Transport::HttpUpgrade { path, host } => (
+                path.clone(),
+                host.clone().unwrap_or_default(),
+                String::new(),
+            ),
+            Transport::Grpc { service_name } => ("/".into(), String::new(), service_name.clone()),
+            _ => ("/".into(), String::new(), String::new()),
+        };
+        Self {
+            name: node.name.clone(),
+            protocol: node.protocol,
+            server: node.server.clone(),
+            port: node.port,
+            uuid: node.credentials.uuid.clone().unwrap_or_default(),
+            password: node.credentials.password.clone().unwrap_or_default(),
+            username: node.credentials.username.clone().unwrap_or_default(),
+            method: node.credentials.method.clone().unwrap_or_default(),
+            flow: node.credentials.flow.clone().unwrap_or_default(),
+            tls_enabled: node.tls.enabled,
+            sni: node.tls.server_name.clone().unwrap_or_default(),
+            alpn: node.tls.alpn.join(", "),
+            fingerprint: node.tls.fingerprint.clone().unwrap_or_default(),
+            insecure: node.tls.insecure,
+            reality_public_key: node
+                .tls
+                .reality
+                .as_ref()
+                .map(|r| r.public_key.clone())
+                .unwrap_or_default(),
+            reality_short_id: node
+                .tls
+                .reality
+                .as_ref()
+                .map(|r| r.short_id.clone())
+                .unwrap_or_default(),
+            transport: TransportKind::from_transport(&node.transport),
+            transport_path: path,
+            transport_host: host,
+            transport_service_name: service_name,
+            udp: node.udp,
+            tags: node.tags.join(", "),
+        }
+    }
+}
+
 impl NodeDraft {
+    /// Updates editable parameters while retaining identity and fields absent from the form.
+    pub fn apply_to(&self, original: &Node, core: crate::model::CoreKind) -> crate::Result<Node> {
+        let mut node = self.into_node(core)?;
+        node.id = original.id.clone();
+        node.enabled = original.enabled;
+        node.subscription_id = original.subscription_id.clone();
+        node.source = original.source;
+        node.sort = original.sort;
+        if self.tags == NodeDraft::from(original).tags {
+            node.tags = original.tags.clone();
+        }
+        if node.protocol == original.protocol {
+            let mut credentials = original.credentials.clone();
+            credentials.uuid = node.credentials.uuid;
+            credentials.password = node.credentials.password;
+            credentials.username = node.credentials.username;
+            credentials.method = node.credentials.method;
+            credentials.flow = node.credentials.flow;
+            node.credentials = credentials;
+            match (&mut node.transport, &original.transport) {
+                (
+                    Transport::WebSocket { headers, .. },
+                    Transport::WebSocket { headers: old, .. },
+                ) => {
+                    *headers = old.clone();
+                }
+                (Transport::Kcp { seed }, Transport::Kcp { seed: old }) => *seed = old.clone(),
+                _ => {}
+            }
+            // Imported HTTPS proxies can carry TLS even though the manual proxy form omits it.
+            if original.protocol.is_plain_proxy() {
+                node.tls = original.tls.clone();
+            }
+        }
+        Ok(node)
+    }
+
     pub fn into_node(&self, core: crate::model::CoreKind) -> crate::error::Result<Node> {
         let server = self.server.trim();
         if server.is_empty() {
@@ -820,6 +907,82 @@ impl OutboundGroup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editing_roundtrips_imported_parameters_and_all_transports() {
+        let transports = [
+            Transport::Tcp,
+            Transport::WebSocket {
+                path: "/custom".into(),
+                host: Some("cdn.example.com".into()),
+                headers: BTreeMap::from([("X-Test".into(), "fixture".into())]),
+            },
+            Transport::Grpc {
+                service_name: "proxy".into(),
+            },
+            Transport::Http2 {
+                path: "/h2".into(),
+                host: Some("h2.example.com".into()),
+            },
+            Transport::HttpUpgrade {
+                path: "/upgrade".into(),
+                host: None,
+            },
+            Transport::Quic,
+            Transport::Kcp {
+                seed: Some("fixture-seed".into()),
+            },
+        ];
+        for transport in transports {
+            let mut node = vless_draft().into_node(CoreKind::SingBox).unwrap();
+            node.transport = transport;
+            node.credentials.alter_id = 64;
+            node.credentials.plugin = Some("fixture-plugin".into());
+            node.tls.server_name = Some("tls.example.com".into());
+            node.tls.alpn = vec!["h2".into(), "http/1.1".into()];
+            node.tls.fingerprint = Some("chrome".into());
+            node.tls.reality = Some(RealityOptions {
+                public_key: "fixture-key".into(),
+                short_id: "abcd".into(),
+            });
+            node.tags = vec!["tag with spaces".into(), "other".into()];
+            node.source = NodeSource::Subscription;
+            node.subscription_id = Some("fixture-subscription".into());
+            node.enabled = false;
+            node.udp = false;
+            node.sort = 42;
+            assert_eq!(
+                NodeDraft::from(&node)
+                    .apply_to(&node, CoreKind::SingBox)
+                    .unwrap(),
+                node
+            );
+        }
+    }
+
+    #[test]
+    fn editing_https_proxy_preserves_tls_and_protocol_changes_clear_old_credentials() {
+        let mut node = Node::new("https", Protocol::Http, "proxy.example.com", 443);
+        node.tls.enabled = true;
+        node.tls.server_name = Some("tls.example.com".into());
+        assert_eq!(
+            NodeDraft::from(&node)
+                .apply_to(&node, CoreKind::SingBox)
+                .unwrap(),
+            node
+        );
+        let mut draft = NodeDraft::from(&node);
+        draft.protocol = Protocol::Trojan;
+        draft.password = "fixture-password".into();
+        node.credentials.plugin = Some("old-plugin".into());
+        let edited = draft.apply_to(&node, CoreKind::SingBox).unwrap();
+        assert_eq!(edited.id, node.id);
+        assert_eq!(
+            edited.credentials.password.as_deref(),
+            Some("fixture-password")
+        );
+        assert!(edited.credentials.plugin.is_none());
+    }
+
     #[test]
     fn anytls_manual_requires_password_and_tls() {
         let mut draft = NodeDraft {

@@ -975,6 +975,41 @@ impl AppService {
     // Nodes and groups
     // ------------------------------------------------------------------
 
+    /// Replaces editable node parameters without changing group references or subscription ownership.
+    pub fn update_node(&self, node_id: &str, draft: NodeDraft) -> Result<()> {
+        // An existing node remains editable when the selected core cannot run its protocol.
+        let mut model = self.inner.model.write();
+        let original = model
+            .node(node_id)
+            .ok_or_else(|| Error::other("节点不存在，请刷新后重试"))?;
+        let node = draft.apply_to(original, CoreKind::SingBox)?;
+        let fingerprint = node.fingerprint();
+        if model
+            .nodes
+            .iter()
+            .any(|n| n.id != node_id && n.fingerprint() == fingerprint)
+        {
+            return Err(Error::other(
+                "已存在相同节点（协议 / 地址 / 端口 / 凭据一致）",
+            ));
+        }
+        let mut next = model.clone();
+        *next.node_mut(node_id).expect("node was found above") = node;
+        next.updated_at = now_unix();
+        let profile_id = self.inner.store.save_active_profile(&next)?;
+        *model = next;
+        drop(model);
+        *self.inner.active_profile.write() = Some(profile_id);
+        self.inner.latency.write().remove(node_id);
+        if let Err(err) = self.inner.store.remove_latency(node_id) {
+            self.toast(ToastLevel::Warning, format!("清除节点测速缓存失败：{err}"));
+        }
+        self.refresh_doctor();
+        self.mark_dirty();
+        self.toast(ToastLevel::Success, "节点已保存");
+        Ok(())
+    }
+
     pub fn move_node_to(&self, node_id: &str, target_id: &str) {
         let moved = self.inner.model.write().move_node_to(node_id, target_id);
         if moved {
@@ -1106,6 +1141,25 @@ impl AppService {
     }
 
     pub fn node_qr(&self, node_id: &str) -> Result<String> {
+        qr_ascii(&self.node_share_link(node_id)?)
+    }
+
+    /// Returns QR modules for graphical sharing, without writing credentials to disk.
+    pub fn node_qr_matrix(&self, node_id: &str) -> Result<Vec<Vec<bool>>> {
+        let link = self.node_share_link(node_id)?;
+        let code = qrcode::QrCode::new(link.as_bytes())
+            .map_err(|err| Error::other(format!("无法生成二维码：{err}")))?;
+        let width = code.width();
+        Ok((0..width)
+            .map(|y| {
+                (0..width)
+                    .map(|x| code[(x, y)] == qrcode::Color::Dark)
+                    .collect()
+            })
+            .collect())
+    }
+
+    fn node_share_link(&self, node_id: &str) -> Result<String> {
         let node = self
             .inner
             .model
@@ -1113,9 +1167,8 @@ impl AppService {
             .node(node_id)
             .cloned()
             .ok_or_else(|| Error::other("节点不存在"))?;
-        let link = crate::subscription::node_to_share_link(&node)
-            .ok_or_else(|| Error::other("该协议暂不支持导出分享链接"))?;
-        qr_ascii(&link)
+        crate::subscription::node_to_share_link(&node)
+            .ok_or_else(|| Error::other("该协议暂不支持导出分享链接"))
     }
 
     // ------------------------------------------------------------------
@@ -3171,6 +3224,126 @@ fn pretty_host(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn editing_node_preserves_references_metadata_and_persists_parameters() {
+        let (service, dir) = service();
+        let id = service
+            .add_manual_node(NodeDraft {
+                server: "before.example.com".into(),
+                protocol: Protocol::Http,
+                ..Default::default()
+            })
+            .unwrap();
+        {
+            let mut model = service.inner.model.write();
+            let node = model.node_mut(&id).unwrap();
+            node.source = crate::model::NodeSource::Subscription;
+            node.subscription_id = Some("fixture-sub".into());
+            node.sort = 7;
+            node.enabled = false;
+        }
+        let before = service.model();
+        let mut draft = NodeDraft::from(before.node(&id).unwrap());
+        draft.name = "edited".into();
+        draft.server = "after.example.com".into();
+        draft.port = 8443;
+        service.inner.latency.write().insert(
+            id.clone(),
+            crate::storage::LatencyEntry {
+                key: id.clone(),
+                delay_ms: Some(10),
+                checked_at: now_unix(),
+                detail: Some("fixture".into()),
+            },
+        );
+        service
+            .inner
+            .store
+            .set_latency(&service.snapshot().latency[&id])
+            .unwrap();
+        service.update_node(&id, draft).unwrap();
+        let after = service.model();
+        assert_eq!(after.nodes.len(), before.nodes.len());
+        assert_eq!(after.groups, before.groups);
+        let edited = after.node(&id).unwrap();
+        assert_eq!(
+            (edited.name.as_str(), edited.server.as_str(), edited.port),
+            ("edited", "after.example.com", 8443)
+        );
+        assert_eq!(edited.source, crate::model::NodeSource::Subscription);
+        assert_eq!(edited.subscription_id.as_deref(), Some("fixture-sub"));
+        assert_eq!(edited.sort, 7);
+        assert!(!edited.enabled);
+        assert!(!service.snapshot().latency.contains_key(&id));
+        assert!(
+            service
+                .inner
+                .store
+                .latency_cache()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.key != id)
+        );
+        let saved = Store::open(&AppPaths::from_root(dir.path()))
+            .unwrap()
+            .load_profile(&service.snapshot().active_profile.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.model.node(&id).unwrap(), edited);
+    }
+
+    #[test]
+    fn editing_node_rejects_duplicates_invalid_and_missing_nodes_without_changes() {
+        let (service, _dir) = service();
+        let first = service
+            .add_manual_node(NodeDraft {
+                protocol: Protocol::Http,
+                server: "first.example.com".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let second = service
+            .add_manual_node(NodeDraft {
+                protocol: Protocol::Http,
+                server: "second.example.com".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let before = service.model();
+        let duplicate = NodeDraft::from(before.node(&first).unwrap());
+        assert!(service.update_node(&second, duplicate.clone()).is_err());
+        assert!(service.update_node("missing", duplicate.clone()).is_err());
+        let mut invalid = duplicate;
+        invalid.port = 0;
+        assert!(service.update_node(&first, invalid).is_err());
+        assert_eq!(service.model(), before);
+        service
+            .update_node(&first, NodeDraft::from(before.node(&first).unwrap()))
+            .unwrap();
+    }
+
+    #[test]
+    fn graphical_node_qr_encodes_the_share_link() {
+        let (service, _dir) = service();
+        let id = service
+            .add_manual_node(NodeDraft {
+                protocol: Protocol::Http,
+                server: "qr.example.com".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let matrix = service.node_qr_matrix(&id).unwrap();
+        let code = qrcode::QrCode::new(service.export_links(&[id]).as_bytes()).unwrap();
+        assert_eq!(matrix.len(), code.width());
+        for (y, row) in matrix.iter().enumerate() {
+            assert_eq!(row.len(), code.width());
+            for (x, dark) in row.iter().enumerate() {
+                assert_eq!(*dark, code[(x, y)] == qrcode::Color::Dark);
+            }
+        }
+        assert!(service.node_qr_matrix("missing").is_err());
+    }
+
     #[test]
     fn privacy_preferences_preserve_pending_changes_without_rewriting_the_profile() {
         let (service, _dir) = service();

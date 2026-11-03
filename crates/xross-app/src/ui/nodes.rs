@@ -16,8 +16,8 @@ use xross_core::storage::LatencyEntry;
 use xross_core::util::format_speed;
 
 use super::theme::{
-    latency_age_secs, latency_color, palette, Palette, LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS,
-    LATENCY_SLOW_MS, LATENCY_STALE_SECS,
+    LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS, LATENCY_SLOW_MS, LATENCY_STALE_SECS, Palette,
+    latency_age_secs, latency_color, palette,
 };
 use super::widgets::*;
 use super::{AppView, Page};
@@ -170,10 +170,8 @@ impl AppView {
                                 Button::new("wizard-manual")
                                     .compact()
                                     .label(self.tr("手动添加节点", "Add manually"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_manual_form = true;
-                                        this.manual_error = None;
-                                        cx.notify();
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_node_dialog(None, true, window, cx);
                                     })),
                             ),
                     ),
@@ -181,128 +179,6 @@ impl AppView {
         }
 
         let hide_ips = self.hide_ips;
-
-        if self.show_import_box || self.show_manual_form {
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("add-mode-link")
-                            .compact()
-                            .when(self.show_import_box, |b| b.primary())
-                            .label(self.tr("链接导入", "Import links"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_import_box = true;
-                                this.show_manual_form = false;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("add-mode-manual")
-                            .compact()
-                            .when(self.show_manual_form, |b| b.primary())
-                            .label(self.tr("手动填写", "Enter manually"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_import_box = false;
-                                this.show_manual_form = true;
-                                this.manual_error = None;
-                                cx.notify();
-                            })),
-                    ),
-            );
-        }
-
-        // P1: Collapsible Import Drawer (triggered by "+ 添加节点" in list toolbar).
-        if self.show_import_box {
-            let import_val = self.import_input.read(cx).value().trim().to_string();
-            let is_empty = import_val.is_empty();
-            body = body.child(
-                div()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(p.panel)
-                    .border_1()
-                    .border_color(p.primary.opacity(0.3))
-                    .shadow_sm()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().flex_1().child(Input::new(&self.import_input)))
-                            .child(
-                                Button::new("import-link")
-                                    .compact()
-                                    .primary()
-                                    .disabled(is_empty)
-                                    .label(self.tr("导入", "Import"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let content = this.import_input.read(cx).value().to_string();
-                                        if content.trim().is_empty() {
-                                            this.service.toast(
-                                                ToastLevel::Warning,
-                                                "请先粘贴节点链接",
-                                            );
-                                        } else {
-                                            this.service.import_content(&content);
-                                            this.import_input.update(cx, |input, cx| {
-                                                input.set_value("", window, cx);
-                                            });
-                                            this.show_import_box = false;
-                                        }
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("import-clipboard")
-                                    .compact()
-                                    .label(self.tr("从剪贴板导入", "From Clipboard"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                                            this.service.import_content(&text);
-                                            this.show_import_box = false;
-                                        } else {
-                                            this.service.toast(
-                                                ToastLevel::Warning,
-                                                "剪贴板没有文本",
-                                            );
-                                        }
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("close-import")
-                                    .compact()
-                                    .ghost()
-                                    .icon(IconName::X)
-                                    .tooltip(self.tr("收起", "Close"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_import_box = false;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr(
-                                "支持 vmess / vless / trojan / ss / hysteria2 / tuic 分享链接、Clash YAML、SIP008、sing-box JSON",
-                                "Supports vmess / vless / trojan / ss / hysteria2 / tuic links, Clash YAML, SIP008, sing-box JSON",
-                            )),
-                    ),
-            );
-        }
-
-        // P1b: full manual node form (protocol / credentials / TLS / transport).
-        if self.show_manual_form {
-            body = body.child(self.manual_node_card(cx));
-        }
 
         // Filter and sort nodes.
         let group_id_for_select = active_group.clone();
@@ -563,23 +439,10 @@ impl AppView {
                                     Button::new("toggle-add-drawer")
                                         .compact()
                                         .primary()
-                                        .icon(if self.show_import_box || self.show_manual_form {
-                                            IconName::X
-                                        } else {
-                                            IconName::Plus
-                                        })
-                                        .label(if self.show_import_box || self.show_manual_form {
-                                            self.tr("收起", "Close")
-                                        } else {
-                                            self.tr("添加节点", "Add node")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let open =
-                                                !(this.show_import_box || this.show_manual_form);
-                                            this.show_import_box = open;
-                                            this.show_manual_form = false;
-                                            this.manual_error = None;
-                                            cx.notify();
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("添加节点", "Add node"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_node_dialog(None, false, window, cx);
                                         })),
                                 ),
                         ),
@@ -1168,53 +1031,6 @@ impl AppView {
                 }),
         );
 
-        // QR overlay as an inline card.
-        if self.show_qr {
-            if let Some(node_id) = self.qr_node.clone() {
-                let qr = self
-                    .service
-                    .node_qr(&node_id)
-                    .unwrap_or_else(|err| format!("无法生成二维码：{err}"));
-                let name = model
-                    .node(&node_id)
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default();
-                body = body.child(
-                    card(&p)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(section_title(
-                                    &p,
-                                    self.tr("节点二维码", "Node QR code"),
-                                    name,
-                                ))
-                                .child(
-                                    Button::new("close-qr")
-                                        .compact()
-                                        .ghost()
-                                        .icon(IconName::X)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_qr = false;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div().flex().justify_center().child(
-                                div()
-                                    .font_family(cx.theme().mono_font_family.clone())
-                                    .text_xs()
-                                    .text_color(p.fg)
-                                    .child(qr),
-                            ),
-                        ),
-                );
-            }
-        }
-
         let _ = running;
         body
     }
@@ -1357,6 +1173,7 @@ fn render_node_row(
     let node_id_download = node.id.clone();
     let node_id_share = node.id.clone();
     let node_id_qr = node.id.clone();
+    let node_id_edit = node.id.clone();
     let node_id_del = node.id.clone();
     let node_id_menu = node.id.clone();
     let node_id_batch = node.id.clone();
@@ -1794,6 +1611,19 @@ fn render_node_row(
                         p.border
                     })
                     .child(
+                        Button::new(SharedString::from(format!("edit-{node_id_edit}")))
+                            .compact()
+                            .icon(IconName::Pencil)
+                            .label(super::tr(lang, "编辑", "Edit"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(node) = this.snapshot.model.node(&node_id_edit).cloned()
+                                {
+                                    this.node_menu_open = None;
+                                    this.open_node_dialog(Some(node), true, window, cx);
+                                }
+                            })),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("real-{node_id_real}")))
                             .compact()
                             .icon(IconName::Zap)
@@ -1851,10 +1681,8 @@ fn render_node_row(
                             .icon(IconName::QrCode)
                             .label(super::tr(lang, "二维码", "QR code"))
                             .tooltip(super::tr(lang, "生成并查看二维码", "Show QR code"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.qr_node = Some(node_id_qr.clone());
-                                this.show_qr = true;
-                                cx.notify();
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_node_qr(&node_id_qr, window, cx);
                             })),
                     )
                     .child(

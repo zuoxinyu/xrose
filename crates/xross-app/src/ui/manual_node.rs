@@ -1,18 +1,19 @@
-//! State and input row for the "add node by hand" form.
+//! State and controls shared by the node creation and editing dialogs.
 //!
 //! The form only collects text; [`xross_core::model::NodeDraft`] owns the
 //! validation rules so the CLI and the UI cannot drift apart.
 
 use gpui_base::Disableable;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::model::{NodeDraft, Protocol, TransportKind};
+use xross_core::model::{Node, NodeDraft, Protocol, TransportKind};
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 pub(crate) struct ManualNodeForm {
     pub name: Entity<InputState>,
@@ -144,6 +145,36 @@ impl ManualNodeForm {
             input.update(cx, |state, cx| state.set_value(value, window, cx));
         }
     }
+
+    pub fn load(&mut self, node: &Node, window: &mut Window, cx: &mut Context<AppView>) {
+        let draft = NodeDraft::from(node);
+        self.protocol = draft.protocol;
+        self.transport = draft.transport;
+        self.tls = draft.tls_enabled;
+        self.insecure = draft.insecure;
+        self.udp = draft.udp;
+        for (input, value) in [
+            (&self.name, draft.name),
+            (&self.server, draft.server),
+            (&self.port, draft.port.to_string()),
+            (&self.uuid, draft.uuid),
+            (&self.password, draft.password),
+            (&self.username, draft.username),
+            (&self.method, draft.method),
+            (&self.flow, draft.flow),
+            (&self.sni, draft.sni),
+            (&self.alpn, draft.alpn),
+            (&self.fingerprint, draft.fingerprint),
+            (&self.reality_public_key, draft.reality_public_key),
+            (&self.reality_short_id, draft.reality_short_id),
+            (&self.path, draft.transport_path),
+            (&self.host, draft.transport_host),
+            (&self.service_name, draft.transport_service_name),
+            (&self.tags, draft.tags),
+        ] {
+            input.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
+    }
 }
 
 /// One parameter per row: fixed label column on the left, control filling the
@@ -163,11 +194,12 @@ fn field(
         .child(
             div()
                 .w(px(150.))
+                .flex_shrink_0()
                 .text_xs()
                 .text_color(p.muted_fg)
                 .child(label.into()),
         )
-        .child(div().flex_1().child(Input::new(&input)))
+        .child(div().flex_1().min_w(px(0.)).child(Input::new(&input)))
 }
 
 fn section_label(p: &Palette, label: impl Into<SharedString>) -> impl IntoElement {
@@ -180,7 +212,7 @@ fn section_label(p: &Palette, label: impl Into<SharedString>) -> impl IntoElemen
 }
 
 impl AppView {
-    pub(crate) fn manual_node_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn manual_node_fields(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let form = &self.manual_form;
         let protocol = form.protocol;
@@ -188,7 +220,6 @@ impl AppView {
         let tls = form.tls;
         let insecure = form.insecure;
         let udp = form.udp;
-        let error = self.manual_error.clone();
 
         let needs_uuid = matches!(protocol, Protocol::Vmess | Protocol::Vless | Protocol::Tuic);
         let needs_password = matches!(
@@ -289,32 +320,7 @@ impl AppView {
             )),
         };
 
-        let card = card(&p)
-            .border_color(p.primary.opacity(0.35))
-            .child(                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(section_title(
-                        &p,
-                        self.tr("手动添加节点", "Add node manually"),
-                        self.tr(
-                            "手动配置代理节点参数，保存后自动加入默认出站组",
-                            "Configure node parameters manually and add to default outbound groups",
-                        ),
-                    ))
-                    .child(
-                        Button::new("close-manual-form")
-                            .compact()
-                            .ghost()
-                            .label("✕")
-                            .tooltip(self.tr("收起", "Close"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_manual_form = false;
-                                cx.notify();
-                            })),
-                    ),
-            )
+        let card = div().flex().flex_col().gap_3().min_w(px(0.))
             .child(
                 div()
                     .flex()
@@ -531,68 +537,64 @@ impl AppView {
                         form.tags.clone(),
                         true,
                     )),
-            )
-            .when(error.is_some(), |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .p_2()
-                        .rounded_md()
-                        .bg(p.accent)
-                        .border_1()
-                        .border_color(p.danger)
-                        .text_xs()
-                        .text_color(p.danger)
-                        .child(error.clone().unwrap_or_default()),
-                )
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("save-manual-node")
-                            .compact()
-                            .primary()
-                            .label(self.tr("保存节点", "Save node"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let draft = match this.manual_form.draft(cx) {
-                                    Ok(draft) => draft,
-                                    Err(err) => {
-                                        this.manual_error = Some(err);
-                                        cx.notify();
-                                        return;
-                                    }
-                                };
-                                match this.service.add_manual_node(draft) {
-                                    Ok(_) => {
-                                        this.manual_form.reset(window, cx);
-                                        this.manual_error = None;
-                                        this.show_manual_form = false;
-                                        this.sync(cx);
-                                    }
-                                    Err(err) => {
-                                        this.manual_error = Some(err.to_string());
-                                        cx.notify();
-                                    }
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("reset-manual-node")
-                            .compact()
-                            .ghost()
-                            .label(self.tr("重置", "Reset"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.manual_form.reset(window, cx);
-                                this.manual_error = None;
-                                cx.notify();
-                            })),
-                    ),
             );
         card
+    }
+
+    pub(crate) fn manual_node_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let actions = div()
+            .flex()
+            .flex_wrap()
+            .justify_end()
+            .gap_2()
+            .child(
+                Button::new("cancel-manual-node")
+                    .label(self.tr("取消", "Cancel"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        window.close_dialog(cx);
+                        this.clear_node_editor(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("save-manual-node")
+                    .primary()
+                    .label(self.tr("保存节点", "Save node"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let draft = match this.manual_form.draft(cx) {
+                            Ok(draft) => draft,
+                            Err(err) => {
+                                this.manual_error = Some(err);
+                                cx.notify();
+                                return;
+                            }
+                        };
+                        let result = if let Some(id) = &this.editing_node {
+                            this.service.update_node(id, draft)
+                        } else {
+                            this.service.add_manual_node(draft).map(|_| ())
+                        };
+                        match result {
+                            Ok(()) => {
+                                window.close_dialog(cx);
+                                this.clear_node_editor(window, cx);
+                                this.sync(cx);
+                            }
+                            Err(err) => {
+                                this.manual_error = Some(err.to_string());
+                                cx.notify();
+                            }
+                        }
+                    })),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .when_some(self.manual_error.clone(), |d, error| {
+                d.child(div().text_sm().text_color(p.danger).child(error))
+            })
+            .child(actions)
     }
 }

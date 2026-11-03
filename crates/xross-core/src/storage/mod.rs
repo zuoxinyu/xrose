@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{io_context, Error, Result};
+use crate::error::{Error, Result, io_context};
 use crate::model::AppModel;
 use crate::paths::AppPaths;
 use crate::subscription::Subscription;
@@ -402,6 +402,12 @@ impl Store {
     pub fn clear_latency(&self) -> Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM latency", [])?;
+        Ok(())
+    }
+
+    pub fn remove_latency(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM latency WHERE key = ?1", [key])?;
         Ok(())
     }
 
