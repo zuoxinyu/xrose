@@ -1144,7 +1144,7 @@ fn render_node_row(
     batch_mode: bool,
     is_batch_checked: bool,
     cx: &mut Context<AppView>,
-) -> impl IntoElement {
+) -> impl IntoElement + use<> {
     let selected = active_node == Some(node.id.as_str());
     let node_id = node.id.clone();
     let node_id_select = node.id.clone();

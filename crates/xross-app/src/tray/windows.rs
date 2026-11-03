@@ -387,63 +387,68 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER && wparam == FLYOUT_TIMER {
-        advance_flyout(hwnd);
-        return 0;
-    }
-    if message == WM_POPUP {
-        // Native visibility/geometry messages can synchronously re-enter GPUI.
-        // Run them from our message window, after the GPUI update has finished.
-        let operations = std::mem::take(&mut *POPUP_OPS.lock().unwrap_or_else(|e| e.into_inner()));
-        for operation in operations {
-            match operation {
-                PopupOp::Hide(target) if IsWindow(target as HWND) != 0 => {
-                    animate_hide(hwnd, target)
+    unsafe {
+        if message == windows_sys::Win32::UI::WindowsAndMessaging::WM_TIMER
+            && wparam == FLYOUT_TIMER
+        {
+            advance_flyout(hwnd);
+            return 0;
+        }
+        if message == WM_POPUP {
+            // Native visibility/geometry messages can synchronously re-enter GPUI.
+            // Run them from our message window, after the GPUI update has finished.
+            let operations =
+                std::mem::take(&mut *POPUP_OPS.lock().unwrap_or_else(|e| e.into_inner()));
+            for operation in operations {
+                match operation {
+                    PopupOp::Hide(target) if IsWindow(target as HWND) != 0 => {
+                        animate_hide(hwnd, target)
+                    }
+                    PopupOp::Show {
+                        hwnd: target,
+                        x,
+                        y,
+                        width,
+                        height,
+                        work,
+                        edge,
+                    } if IsWindow(target as HWND) != 0 => {
+                        animate_show(
+                            hwnd,
+                            target,
+                            Placement {
+                                origin: [x, y],
+                                size: [width, height],
+                                work,
+                                edge,
+                            },
+                        );
+                    }
+                    _ => {}
                 }
-                PopupOp::Show {
-                    hwnd: target,
-                    x,
-                    y,
-                    width,
-                    height,
-                    work,
-                    edge,
-                } if IsWindow(target as HWND) != 0 => {
-                    animate_show(
-                        hwnd,
-                        target,
-                        Placement {
-                            origin: [x, y],
-                            size: [width, height],
-                            work,
-                            edge,
-                        },
-                    );
+            }
+            return 0;
+        }
+        if message == WM_TRAY {
+            let event = (lparam as usize & 0xFFFF) as u32;
+            match event {
+                WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => {
+                    super::queue_command(Command::TogglePopup)
                 }
                 _ => {}
             }
+            return 0;
         }
-        return 0;
-    }
-    if message == WM_TRAY {
-        let event = (lparam as usize & 0xFFFF) as u32;
-        match event {
-            WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => {
-                super::queue_command(Command::TogglePopup)
-            }
-            _ => {}
+        if TASKBAR_CREATED
+            .get()
+            .map(|registered| *registered == message)
+            .unwrap_or(false)
+        {
+            NEEDS_READD.store(true, Ordering::Relaxed);
+            return 0;
         }
-        return 0;
+        DefWindowProcW(hwnd, message, wparam, lparam)
     }
-    if TASKBAR_CREATED
-        .get()
-        .map(|registered| *registered == message)
-        .unwrap_or(false)
-    {
-        NEEDS_READD.store(true, Ordering::Relaxed);
-        return 0;
-    }
-    DefWindowProcW(hwnd, message, wparam, lparam)
 }
 
 /// Builds a small HICON from the bundled PNG, with a status dot in the
@@ -714,160 +719,171 @@ fn animations_enabled() -> bool {
 }
 
 unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    };
-    let mut current: RECT = std::mem::zeroed();
-    let from =
-        if IsWindowVisible(hwnd as HWND) != 0 && GetWindowRect(hwnd as HWND, &mut current) != 0 {
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+        };
+        let mut current: RECT = std::mem::zeroed();
+        let from = if IsWindowVisible(hwnd as HWND) != 0
+            && GetWindowRect(hwnd as HWND, &mut current) != 0
+        {
             [current.left, current.top]
         } else {
             placement.hidden_origin()
         };
-    let enabled = animations_enabled();
-    let origin = if enabled { from } else { placement.origin };
-    let motion = enabled.then(|| Motion::new(true, from, placement, Instant::now()));
-    *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
-        hwnd,
-        placement,
-        motion,
-    });
-    // Slide below the topmost taskbar rather than painting over its icons.
-    SetWindowPos(
-        hwnd as HWND,
-        HWND_NOTOPMOST,
-        origin[0],
-        origin[1],
-        placement.size[0],
-        placement.size[1],
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
-    SetForegroundWindow(hwnd as HWND);
-    debug_log(&format!(
-        "flyout opening ({hwnd}, {:?}, animate={enabled})",
-        placement.edge
-    ));
-    if !enabled || !start_flyout_timer(owner) {
-        finish_flyout(owner, true);
+        let enabled = animations_enabled();
+        let origin = if enabled { from } else { placement.origin };
+        let motion = enabled.then(|| Motion::new(true, from, placement, Instant::now()));
+        *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
+            hwnd,
+            placement,
+            motion,
+        });
+        // Slide below the topmost taskbar rather than painting over its icons.
+        SetWindowPos(
+            hwnd as HWND,
+            HWND_NOTOPMOST,
+            origin[0],
+            origin[1],
+            placement.size[0],
+            placement.size[1],
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+        SetForegroundWindow(hwnd as HWND);
+        debug_log(&format!(
+            "flyout opening ({hwnd}, {:?}, animate={enabled})",
+            placement.edge
+        ));
+        if !enabled || !start_flyout_timer(owner) {
+            finish_flyout(owner, true);
+        }
     }
 }
 
 unsafe fn animate_hide(owner: HWND, hwnd: usize) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    };
-    let placement = {
-        let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(flyout) = controller.as_ref().filter(|flyout| flyout.hwnd == hwnd) else {
-            ShowWindow(hwnd as HWND, SW_HIDE);
-            return;
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         };
-        if flyout.motion.is_some_and(|motion| !motion.showing) {
+        let placement = {
+            let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(flyout) = controller.as_ref().filter(|flyout| flyout.hwnd == hwnd) else {
+                ShowWindow(hwnd as HWND, SW_HIDE);
+                return;
+            };
+            if flyout.motion.is_some_and(|motion| !motion.showing) {
+                return;
+            }
+            flyout.placement
+        };
+        if IsWindowVisible(hwnd as HWND) == 0 {
             return;
         }
-        flyout.placement
-    };
-    if IsWindowVisible(hwnd as HWND) == 0 {
-        return;
-    }
-    let mut current: RECT = std::mem::zeroed();
-    let from = if GetWindowRect(hwnd as HWND, &mut current) != 0 {
-        [current.left, current.top]
-    } else {
-        placement.origin
-    };
-    let enabled = animations_enabled();
-    let motion = enabled.then(|| Motion::new(false, from, placement, Instant::now()));
-    *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
-        hwnd,
-        placement,
-        motion,
-    });
-    SetWindowPos(
-        hwnd as HWND,
-        HWND_NOTOPMOST,
-        0,
-        0,
-        0,
-        0,
-        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
-    );
-    debug_log(&format!("flyout closing ({hwnd}, animate={enabled})"));
-    if !enabled || !start_flyout_timer(owner) {
-        finish_flyout(owner, false);
+        let mut current: RECT = std::mem::zeroed();
+        let from = if GetWindowRect(hwnd as HWND, &mut current) != 0 {
+            [current.left, current.top]
+        } else {
+            placement.origin
+        };
+        let enabled = animations_enabled();
+        let motion = enabled.then(|| Motion::new(false, from, placement, Instant::now()));
+        *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Flyout {
+            hwnd,
+            placement,
+            motion,
+        });
+        SetWindowPos(
+            hwnd as HWND,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE,
+        );
+        debug_log(&format!("flyout closing ({hwnd}, animate={enabled})"));
+        if !enabled || !start_flyout_timer(owner) {
+            finish_flyout(owner, false);
+        }
     }
 }
 
 unsafe fn start_flyout_timer(owner: HWND) -> bool {
-    windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(owner, FLYOUT_TIMER, 10, None) != 0
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(owner, FLYOUT_TIMER, 10, None) != 0
+    }
 }
 
 unsafe fn advance_flyout(owner: HWND) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    };
-    let frame = {
-        let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
-        controller.as_ref().and_then(|flyout| {
-            flyout.motion.map(|motion| {
-                let (position, done) = motion.sample(Instant::now());
-                (flyout.hwnd, position, done, motion.showing)
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+        };
+        let frame = {
+            let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+            controller.as_ref().and_then(|flyout| {
+                flyout.motion.map(|motion| {
+                    let (position, done) = motion.sample(Instant::now());
+                    (flyout.hwnd, position, done, motion.showing)
+                })
             })
-        })
-    };
-    let Some((hwnd, position, done, showing)) = frame else {
-        return;
-    };
-    if IsWindow(hwnd as HWND) == 0 {
-        finish_flyout(owner, false);
-        return;
-    }
-    if SetWindowPos(
-        hwnd as HWND,
-        std::ptr::null_mut(),
-        position[0],
-        position[1],
-        0,
-        0,
-        SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
-    ) == 0
-        || done
-    {
-        finish_flyout(owner, showing);
+        };
+        let Some((hwnd, position, done, showing)) = frame else {
+            return;
+        };
+        if IsWindow(hwnd as HWND) == 0 {
+            finish_flyout(owner, false);
+            return;
+        }
+        if SetWindowPos(
+            hwnd as HWND,
+            std::ptr::null_mut(),
+            position[0],
+            position[1],
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+        ) == 0
+            || done
+        {
+            finish_flyout(owner, showing);
+        }
     }
 }
 
 unsafe fn finish_flyout(owner: HWND, showing: bool) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        KillTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
-    };
-    KillTimer(owner, FLYOUT_TIMER);
-    let target = {
-        let mut controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
-        controller.as_mut().map(|flyout| {
-            flyout.motion = None;
-            (flyout.hwnd, flyout.placement.origin)
-        })
-    };
-    let Some((hwnd, origin)) = target else { return };
-    if IsWindow(hwnd as HWND) == 0 {
-        return;
+    unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            KillTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
+        };
+        KillTimer(owner, FLYOUT_TIMER);
+        let target = {
+            let mut controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
+            controller.as_mut().map(|flyout| {
+                flyout.motion = None;
+                (flyout.hwnd, flyout.placement.origin)
+            })
+        };
+        let Some((hwnd, origin)) = target else { return };
+        if IsWindow(hwnd as HWND) == 0 {
+            return;
+        }
+        if !showing {
+            ShowWindow(hwnd as HWND, SW_HIDE);
+        }
+        SetWindowPos(
+            hwnd as HWND,
+            if showing {
+                HWND_TOPMOST
+            } else {
+                HWND_NOTOPMOST
+            },
+            origin[0],
+            origin[1],
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE,
+        );
+        debug_log(&format!("flyout settled ({hwnd}, visible={showing})"));
     }
-    if !showing {
-        ShowWindow(hwnd as HWND, SW_HIDE);
-    }
-    SetWindowPos(
-        hwnd as HWND,
-        if showing {
-            HWND_TOPMOST
-        } else {
-            HWND_NOTOPMOST
-        },
-        origin[0],
-        origin[1],
-        0,
-        0,
-        SWP_NOACTIVATE | SWP_NOSIZE,
-    );
-    debug_log(&format!("flyout settled ({hwnd}, visible={showing})"));
 }

@@ -10,9 +10,8 @@ use std::io::Write;
 use std::path::Path;
 
 use base64::Engine as _;
-use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
-use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, Nonce};
-use rand::RngCore;
+use chacha20poly1305::aead::{Aead, Generate, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
 use crate::error::{io_context, Error, Result};
 
@@ -31,8 +30,7 @@ impl SecretBox {
             let text = fs::read_to_string(key_path).map_err(|e| io_context(key_path, e))?;
             decode_key(text.trim())?
         } else {
-            let mut key = [0u8; 32];
-            OsRng.fill_bytes(&mut key);
+            let key = Key::generate();
             if let Some(parent) = key_path.parent() {
                 fs::create_dir_all(parent).map_err(|e| io_context(parent, e))?;
             }
@@ -46,16 +44,16 @@ impl SecretBox {
             let mut file = options
                 .open(key_path)
                 .map_err(|e| io_context(key_path, e))?;
-            file.write_all(hex::encode(key).as_bytes())
+            file.write_all(hex::encode(&key).as_bytes())
                 .map_err(|e| io_context(key_path, e))?;
             key
         };
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let cipher = ChaCha20Poly1305::new(&key);
         Ok(Self { cipher })
     }
 
     pub fn encrypt(&self, plaintext: &str) -> String {
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
+        let nonce = Nonce::generate();
         match self.cipher.encrypt(&nonce, plaintext.as_bytes()) {
             Ok(ciphertext) => {
                 let mut payload = nonce.to_vec();
@@ -80,9 +78,10 @@ impl SecretBox {
             return Err(Error::other("加密数据长度无效"));
         }
         let (nonce, ciphertext) = payload.split_at(12);
+        let nonce = Nonce::try_from(nonce).map_err(|_| Error::other("加密数据长度无效"))?;
         let plaintext = self
             .cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|_| Error::other("解密失败：密钥不匹配或数据损坏"))?;
         String::from_utf8(plaintext).map_err(|e| Error::other(format!("解密后不是 UTF-8：{e}")))
     }
@@ -92,15 +91,10 @@ impl SecretBox {
     }
 }
 
-fn decode_key(encoded: &str) -> Result<[u8; 32]> {
+fn decode_key(encoded: &str) -> Result<Key> {
     let bytes = hex::decode(encoded.trim())
         .map_err(|_| Error::other("密钥格式错误（需要 64 位十六进制）"))?;
-    if bytes.len() != 32 {
-        return Err(Error::other("密钥长度错误（需要 32 字节）"));
-    }
-    let mut key = [0u8; 32];
-    key.copy_from_slice(&bytes);
-    Ok(key)
+    Key::try_from(bytes.as_slice()).map_err(|_| Error::other("密钥长度错误（需要 32 字节）"))
 }
 
 #[cfg(test)]

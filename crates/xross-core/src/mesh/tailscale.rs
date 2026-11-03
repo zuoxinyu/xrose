@@ -10,7 +10,8 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tonic::{client::Grpc, codec::ProstCodec, transport::Channel, Request};
+use tonic::{client::Grpc, transport::Channel, Request};
+use tonic_prost::ProstCodec;
 
 fn release() -> Result<(&'static str, &'static str)> {
     if !cfg!(windows) {
@@ -78,7 +79,10 @@ fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
         let mut f = zip
             .by_index(i)
             .map_err(|_| Error::binary("读取组网组件失败"))?;
-        if f.name().ends_with("/sing-box.exe") {
+        if f.name()
+            .map(|name| name.ends_with("/sing-box.exe"))
+            .unwrap_or(false)
+        {
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(&mut f, &mut bytes)
                 .map_err(|_| Error::binary("解压组网组件失败"))?;

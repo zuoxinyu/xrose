@@ -5,7 +5,7 @@ exclude = [".probe", ".probe2"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/xross-app/xross"
 rust-version = "1.92"
@@ -19,22 +19,21 @@ serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time", "net", "signal"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate"] }
 futures-util = "0.3"
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-parking_lot = "0.12"
-directories = "5"
-rusqlite = { version = "0.32", features = ["bundled"] }
-zip = { version = "2.2", default-features = false, features = ["deflate"] }
+parking_lot = "0.13"
+directories = "6"
+rusqlite = { version = "0.41", features = ["bundled"] }
+zip = { version = "9.2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 fs2 = "0.4"
-chacha20poly1305 = "0.10"
-rand = "0.8"
+chacha20poly1305 = "0.11"
 url = "2"
 percent-encoding = "2"
 regex = "1"
@@ -44,8 +43,9 @@ interprocess = "2"
 bytes = "1"
 easytier = { git = "https://github.com/EasyTier/EasyTier", rev = "8428a89d2dabc94c97d370ec607c6ca142473626" }
 ipnet = { version = "2", features = ["serde"] }
-prost = "0.13"
-tonic = { version = "0.12", features = ["transport"] }
+prost = "0.14"
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
 widestring = "1.2"
 raw-window-handle = "0.6"
 ksni = { version = "0.3.7", features = ["blocking"] }

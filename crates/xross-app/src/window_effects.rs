@@ -134,25 +134,28 @@ mod windows {
     /// GPUI's Mica setter leaves the old Acrylic accent policy intact. Disable
     /// WCA_ACCENT_POLICY explicitly; setting only DWMSBT_NONE does not clear it.
     unsafe fn clear_accent(hwnd: HWND) -> bool {
-        let name: Vec<u16> = "user32.dll\0".encode_utf16().collect();
-        let module = GetModuleHandleW(name.as_ptr());
-        let Some(proc) = GetProcAddress(module, b"SetWindowCompositionAttribute\0".as_ptr()) else {
-            return false;
-        };
-        let set: unsafe extern "system" fn(HWND, *mut CompositionData) -> i32 =
-            std::mem::transmute(proc);
-        let mut policy = AccentPolicy {
-            state: 0,
-            flags: 0,
-            color: 0,
-            animation: 0,
-        };
-        let mut data = CompositionData {
-            attribute: 19,
-            data: &mut policy as *mut _ as _,
-            size: std::mem::size_of::<AccentPolicy>(),
-        };
-        set(hwnd, &mut data) != 0
+        unsafe {
+            let name: Vec<u16> = "user32.dll\0".encode_utf16().collect();
+            let module = GetModuleHandleW(name.as_ptr());
+            let Some(proc) = GetProcAddress(module, b"SetWindowCompositionAttribute\0".as_ptr())
+            else {
+                return false;
+            };
+            let set: unsafe extern "system" fn(HWND, *mut CompositionData) -> i32 =
+                std::mem::transmute(proc);
+            let mut policy = AccentPolicy {
+                state: 0,
+                flags: 0,
+                color: 0,
+                animation: 0,
+            };
+            let mut data = CompositionData {
+                attribute: 19,
+                data: &mut policy as *mut _ as _,
+                size: std::mem::size_of::<AccentPolicy>(),
+            };
+            set(hwnd, &mut data) != 0
+        }
     }
 
     pub fn apply(window: &mut Window, appearance: WindowBackgroundAppearance, dark: bool) -> bool {
@@ -195,7 +198,10 @@ mod windows {
             let mut actual = 0_i32;
             let readback = DwmGetWindowAttribute(hwnd, 38, &mut actual as *mut _ as _, 4);
             if std::env::var_os("XROSS_DEBUG").is_some() {
-                eprintln!("[backdrop] {:?}: accent_cleared={accent_cleared}, frame={frame:#x}, result={result:#x}, readback={readback:#x}, native={actual}", appearance);
+                eprintln!(
+                    "[backdrop] {:?}: accent_cleared={accent_cleared}, frame={frame:#x}, result={result:#x}, readback={readback:#x}, native={actual}",
+                    appearance
+                );
             }
             if material != 1
                 && (!accent_cleared
