@@ -1,6 +1,6 @@
 //! Live connections and interactive request diagnostics.
 
-use gpui_base::{Disableable, Selectable};
+use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -19,59 +19,82 @@ use xross_core::util::{format_bytes, format_speed};
 
 use super::theme::{palette, Palette};
 use super::widgets::*;
-use super::AppView;
+use super::{AppView, Page};
+
+const CONNECTIONS_PAGE_STEP: usize = 50;
 
 impl AppView {
     pub(crate) fn page_connections(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let runtime = self.snapshot.runtime.clone();
-        let recording = self.snapshot.recording.clone();
         let supported = self.snapshot.settings.core == CoreKind::SingBox;
         let running = self.snapshot.process.phase.is_alive();
         let query = self.connection_search.read(cx).value().to_string();
-        let mut connections: Vec<_> = if self.show_recorded_connections {
-            recording
-                .connections
-                .iter()
-                .rev()
-                .map(|e| (e.connection.clone(), e.closed_at.is_some()))
-                .collect()
-        } else {
-            runtime
-                .connections
-                .iter()
-                .map(|c| (c.clone(), false))
-                .collect()
-        };
-        let total = connections.len();
-        connections.retain(|(c, _)| self.connection_filter.matches(c, &query));
-        let count = connections.len();
-        if let Some(selected) = self
-            .selected_connection
-            .as_mut()
-            .filter(|_| !self.show_recorded_connections)
-        {
-            if let Some(latest) = runtime
-                .connections
-                .iter()
-                .find(|c| c.id == selected.id && c.start == selected.start)
-            {
-                *selected = latest.clone();
-            }
-        }
+        let filter = self.connection_filter;
+        let limit = self.connections_limit.max(CONNECTIONS_PAGE_STEP);
+
+        // Filter by reference first and only clone the visible slice to keep
+        // 400 ms refreshes fast even with 2,000 recorded connections.
+        let (total, count, visible): (usize, usize, Vec<(ClashConnection, bool)>) =
+            if self.show_recorded_connections {
+                let all = &self.snapshot.recording.connections;
+                let total = all.len();
+                let mut count = 0usize;
+                let mut visible = Vec::with_capacity(limit.min(total));
+                for entry in all.iter().rev() {
+                    if filter.matches(&entry.connection, &query) {
+                        if count < limit {
+                            visible.push((entry.connection.clone(), entry.closed_at.is_some()));
+                        }
+                        count += 1;
+                    }
+                }
+                (total, count, visible)
+            } else {
+                let all = &self.snapshot.runtime.connections;
+                let total = all.len();
+                let mut count = 0usize;
+                let mut visible = Vec::with_capacity(limit.min(total));
+                for conn in all.iter() {
+                    if filter.matches(conn, &query) {
+                        if count < limit {
+                            visible.push((conn.clone(), false));
+                        }
+                        count += 1;
+                    }
+                }
+                (total, count, visible)
+            };
+
+        let recording_active = self.snapshot.recording.active;
+        let recording_started = self.snapshot.recording.started_at.is_some();
+        let recorded_conn_len = self.snapshot.recording.connections.len();
+        let recorded_trace_len = self.snapshot.recording.traces.len();
+        let evicted_conns = self.snapshot.recording.evicted_connections;
+        let evicted_traces = self.snapshot.recording.evicted_traces;
+        let export_busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|key| key == "recording-export");
+        let down_speed = self.snapshot.runtime.down_speed;
+        let up_speed = self.snapshot.runtime.up_speed;
+        let down_total = self.snapshot.runtime.down_total;
+        let up_total = self.snapshot.runtime.up_total;
+        let active_conn_len = self.snapshot.runtime.connections.len();
+
         let header = card(&p)
             .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
                 .child(section_title(&p, self.tr("实时连接", "Live connections"), self.tr("查看请求发起方、规则与出站，录制后可复盘已结束的连接", "Inspect sources, rules and outbounds; record to review closed connections")))
                 .child(div().flex().items_center().gap_2().flex_wrap()
-                    .child(Button::new("record-connections").compact().when(recording.active, |b| b.danger())
-                        .icon(if recording.active { IconName::Square } else { IconName::Play })
-                        .label(if recording.active { self.tr("停止录制", "Stop recording") } else { self.tr("开始录制", "Start recording") })
+                    .child(Button::new("record-connections").compact().when(recording_active, |b| b.danger())
+                        .icon(if recording_active { IconName::Square } else { IconName::Play })
+                        .label(if recording_active { self.tr("停止录制", "Stop recording") } else { self.tr("开始录制", "Start recording") })
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.snapshot.recording.active { this.service.stop_recording(); } else { this.service.start_recording(); }
                             this.sync(cx);
                         })))
                     .child(Button::new("export-recording").compact().label(self.tr("导出录制", "Export recording"))
-                        .disabled(recording.started_at.is_none()).loading(self.snapshot.busy.iter().any(|key| key == "recording-export"))
+                        .disabled(!recording_started).loading(export_busy)
                         .on_click(cx.listener(|this, _, _, _| this.service.export_recording())))
                     .child(Button::new("refresh-connections").compact().label(self.tr("刷新", "Refresh")).disabled(!running || !supported)
                         .on_click(cx.listener(|this, _, _, _| this.service.refresh_connections())))
@@ -79,42 +102,63 @@ impl AppView {
                         .on_click(cx.listener(|this, _, _, _| this.service.kill_all_connections())))))
             .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
                 .child(div().flex().flex_col().gap_1()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(format!("↓ {}   ↑ {}", format_speed(runtime.down_speed), format_speed(runtime.up_speed))))
-                    .child(div().text_xs().text_color(p.muted_fg).child(format!("{} {} · {} {}", self.tr("累计下行", "Downloaded"), format_bytes(runtime.down_total), self.tr("累计上行", "Uploaded"), format_bytes(runtime.up_total)))))
-                .child(pill(format!("{} {}", runtime.connections.len(), self.tr("活动连接", "active")), p.primary, p.primary.opacity(0.12))))
+                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(format!("↓ {}   ↑ {}", format_speed(down_speed), format_speed(up_speed))))
+                    .child(div().text_xs().text_color(p.muted_fg).child(format!("{} {} · {} {}", self.tr("累计下行", "Downloaded"), format_bytes(down_total), self.tr("累计上行", "Uploaded"), format_bytes(up_total)))))
+                .child(pill(format!("{active_conn_len} {}", self.tr("活动连接", "active")), p.primary, p.primary.opacity(0.12))))
             .child(self.sparkline(&p))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .children([(ConnectionFilterKind::All, self.tr("全部", "All")), (ConnectionFilterKind::Domain, self.tr("域名", "Domain")), (ConnectionFilterKind::Ip, self.tr("IP", "IP")), (ConnectionFilterKind::Process, self.tr("进程", "Process"))].into_iter().enumerate().map(|(i, (kind, label))| {
                     chip(format!("connection-filter-{i}"), label, self.connection_filter == kind, &p)
-                        .on_click(cx.listener(move |this, _, _, cx| { this.connection_filter = kind; cx.notify(); }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.connection_filter = kind;
+                            this.connections_limit = CONNECTIONS_PAGE_STEP;
+                            cx.notify();
+                        }))
                 }))
                 .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.connection_search)))
                 .child(Button::new("clear-connection-filter").compact().ghost().label(self.tr("重置", "Reset"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.connection_search.update(cx, |input, cx| input.set_value("", window, cx));
-                        this.connection_filter = ConnectionFilterKind::All; cx.notify();
+                        this.connection_filter = ConnectionFilterKind::All;
+                        this.connections_limit = CONNECTIONS_PAGE_STEP;
+                        cx.notify();
                     }))))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .child(chip("connection-live", self.tr("实时", "Live"), !self.show_recorded_connections, &p)
-                    .on_click(cx.listener(|this, _, _, cx| { this.show_recorded_connections = false; cx.notify(); })))
-                .child(chip("connection-recorded", format!("{} {}", self.tr("录制", "Recorded"), recording.connections.len()), self.show_recorded_connections, &p)
-                    .on_click(cx.listener(|this, _, _, cx| { this.show_recorded_connections = true; cx.notify(); })))
-                .child(div().text_xs().text_color(if recording.active { p.danger } else { p.muted_fg }).child(format!("{} · {} {} · {count} / {total}", if recording.active { self.tr("录制中", "Recording") } else { self.tr("录制已停止", "Recording off") }, recording.traces.len(), self.tr("次测试", "tests"))))
-                .when(recording.started_at.is_some(), |d| d.child(Button::new("clear-recording").compact().ghost().label(self.tr("清空录制", "Clear recording"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_recorded_connections = false;
+                        this.connections_limit = CONNECTIONS_PAGE_STEP;
+                        cx.notify();
+                    })))
+                .child(chip("connection-recorded", format!("{} {recorded_conn_len}", self.tr("录制", "Recorded")), self.show_recorded_connections, &p)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_recorded_connections = true;
+                        this.connections_limit = CONNECTIONS_PAGE_STEP;
+                        cx.notify();
+                    })))
+                .child(div().text_xs().text_color(if recording_active { p.danger } else { p.muted_fg }).child(format!("{} · {recorded_trace_len} {} · {count} / {total}", if recording_active { self.tr("录制中", "Recording") } else { self.tr("录制已停止", "Recording off") }, self.tr("次测试", "tests"))))
+                .when(recording_started, |d| d.child(Button::new("clear-recording").compact().ghost().label(self.tr("清空录制", "Clear recording"))
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_recording(); this.sync(cx); })))))
-            .when(recording.started_at.is_some(), |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅保留本次会话元数据，不采集正文；最多 2000 条连接 / 100 次测试，新录制替换旧记录。短于采样间隔的连接可能遗漏。", "Session metadata only, no bodies; up to 2,000 connections / 100 tests. A new recording replaces the previous one. Short-lived connections may be missed."))))
-            .when(recording.evicted_connections + recording.evicted_traces > 0, |d| d.child(div().text_xs().text_color(p.warning).child(format!("{} {} / {}", self.tr("容量限制已移除旧连接/测试：", "Older connections/tests evicted:"), recording.evicted_connections, recording.evicted_traces))));
-        let mut rows = div()
-            .id("connections-list-scroll")
-            .flex()
-            .flex_col()
-            .gap_2()
-            .w_full()
-            .h(px(360.))
-            .overflow_y_scroll()
-            .pr_1();
+            .when(recording_started, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅保留本次会话元数据，不采集正文；最多 2000 条连接 / 100 次测试，新录制替换旧记录。短于采样间隔的连接可能遗漏。", "Session metadata only, no bodies; up to 2,000 connections / 100 tests. A new recording replaces the previous one. Short-lived connections may be missed."))))
+            .when(evicted_conns + evicted_traces > 0, |d| d.child(div().text_xs().text_color(p.warning).child(format!("{} {evicted_conns} / {evicted_traces}", self.tr("容量限制已移除旧连接/测试：", "Older connections/tests evicted:")))));
+
+        let shown = visible.len();
+        let mut rows = div().flex().flex_col().gap_2().w_full();
         if !self.show_recorded_connections && (!running || !supported) {
-            rows = rows.child(empty_hint(&p, if !running { self.tr("core 未运行，启动后可查看连接；仍可在下方测试链接", "Start the core to inspect connections; link tests remain available below") } else { self.tr("Xray 仅提供流量统计，连接列表需要 sing-box；可录制下方测试结果", "Xray exposes counters only. Use sing-box for connections; tests can still be recorded below") }));
+            rows = rows.child(empty_hint(
+                &p,
+                if !running {
+                    self.tr(
+                        "core 未运行，启动后可查看连接；可在「测试」页面发起链路探测",
+                        "Start the core to inspect connections; link probes are available on the Diagnostics page",
+                    )
+                } else {
+                    self.tr(
+                        "Xray 仅提供流量统计，连接列表需要 sing-box；可在「测试」页面发起链路探测",
+                        "Xray exposes counters only. Use sing-box for connections; link probes are available on the Diagnostics page",
+                    )
+                },
+            ));
         } else if count == 0 {
             rows = rows.child(empty_hint(
                 &p,
@@ -125,24 +169,126 @@ impl AppView {
                 },
             ));
         }
-        for (connection, closed) in connections.into_iter().take(100) {
+        for (connection, closed) in visible {
             rows = rows.child(self.connection_row(connection, closed, &p, cx));
         }
-        if count > 100 {
-            rows = rows.child(div().text_xs().text_color(p.muted_fg).child(self.tr("显示前 100 条，请使用筛选定位连接；导出包含完整录制", "Showing 100 entries. Filter to narrow the list; export includes the full recording")));
+        if count > shown || limit > CONNECTIONS_PAGE_STEP {
+            rows = rows.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .pt_2()
+                    .flex_wrap()
+                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                        "{} {shown} / {count}",
+                        self.tr("当前显示", "Showing")
+                    )))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(count > shown, |d| {
+                                d.child(
+                                    Button::new("load-more-connections")
+                                        .compact()
+                                        .ghost()
+                                        .label(self.tr("加载更多 (+50)", "Load 50 more"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.connections_limit += CONNECTIONS_PAGE_STEP;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when(limit > CONNECTIONS_PAGE_STEP, |d| {
+                                d.child(
+                                    Button::new("collapse-connections")
+                                        .compact()
+                                        .ghost()
+                                        .label(self.tr("收起", "Show less"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.connections_limit = CONNECTIONS_PAGE_STEP;
+                                            cx.notify();
+                                        })),
+                                )
+                            }),
+                    ),
+            );
         }
-        let mut body = div()
+
+        div()
             .flex()
             .flex_col()
             .gap_4()
             .w_full()
             .child(header)
-            .child(card(&p).child(rows));
-        if let Some(connection) = self.selected_connection.clone() {
-            body = body.child(self.connection_inspector(&connection, cx));
+            .child(card(&p).child(rows))
+    }
+
+    pub(crate) fn page_diagnostics(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        if let Some(selected) = self
+            .selected_connection
+            .as_mut()
+            .filter(|_| !self.show_recorded_connections)
+        {
+            if let Some(latest) = self
+                .snapshot
+                .runtime
+                .connections
+                .iter()
+                .find(|c| c.id == selected.id && c.start == selected.start)
+            {
+                *selected = latest.clone();
+            }
         }
-        body = body.child(self.trace_card(cx));
-        if !recording.traces.is_empty() {
+        let inspector = if let Some(connection) = self.selected_connection.clone() {
+            self.connection_inspector(&connection, cx)
+                .into_any_element()
+        } else {
+            card(&p)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .flex_wrap()
+                        .child(section_title(
+                            &p,
+                            self.tr("连接透视", "Connection inspector"),
+                            self.tr(
+                                "在「连接」页面点击某条连接的透视按钮，可在此查看发起方、命中规则与出站链并快速生成规则",
+                                "Click a connection's inspect button on the Connections page to view its source, matched rule and outbound chain",
+                            ),
+                        ))
+                        .child(
+                            Button::new("go-to-connections")
+                                .compact()
+                                .ghost()
+                                .icon(IconName::Activity)
+                                .label(self.tr("前往连接列表", "Go to connections"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.page = Page::Connections;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .into_any_element()
+        };
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .w_full()
+            .child(inspector)
+            .child(self.trace_card(cx));
+
+        let traces = self.snapshot.recording.traces.clone();
+        if !traces.is_empty() {
             body = body.child(
                 card(&p)
                     .child(section_title(
@@ -153,7 +299,7 @@ impl AppView {
                             "Select a recording to review its path and failure stage",
                         ),
                     ))
-                    .children(recording.traces.iter().rev().map(|trace| {
+                    .children(traces.iter().rev().map(|trace| {
                         let id = trace.id;
                         Button::new(SharedString::from(format!("replay-trace-{id}")))
                             .compact()
@@ -199,9 +345,20 @@ impl AppView {
         let id = connection.id.clone();
         let inspect = connection.clone();
         let test = connection.clone();
+        let can_test = connection_test_target(&connection).is_some();
         let process = connection.process_name();
+        let hover_group = SharedString::from(format!("conn-group-{id}"));
+        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let btn_hover_bg = p.panel_alt;
+        let muted = p.muted_fg;
+        let fg = p.fg;
+        let primary = p.primary;
+        let inspect_tip = self.tr("链路 / 规则", "Path / rule").to_string();
+        let test_tip = self.tr("测试目标", "Test target").to_string();
+
         div()
             .id(SharedString::from(format!("conn-{id}")))
+            .group(hover_group.clone())
             .flex()
             .flex_col()
             .gap_2()
@@ -210,6 +367,7 @@ impl AppView {
             .bg(p.bg)
             .border_1()
             .border_color(if selected { p.primary } else { p.border })
+            .hover(move |s| s.bg(row_hover_bg))
             .child(
                 div()
                     .flex()
@@ -264,33 +422,82 @@ impl AppView {
                             .gap_1()
                             .flex_shrink_0()
                             .child(
-                                Button::new(SharedString::from(format!("inspect-{id}")))
-                                    .compact()
-                                    .ghost()
-                                    .selected(selected)
-                                    .icon(IconName::Route)
-                                    .tooltip(self.tr("链路 / 规则", "Path / rule"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_connection = Some(inspect.clone());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("test-{id}")))
-                                    .compact()
-                                    .ghost()
-                                    .icon(IconName::Radar)
-                                    .tooltip(self.tr("测试目标", "Test target"))
-                                    .disabled(connection_test_target(&connection).is_none())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if let Some(target) = connection_test_target(&test) {
-                                            this.trace_input.update(cx, |input, cx| {
-                                                input.set_value(target.clone(), window, cx)
-                                            });
-                                            this.selected_connection = Some(test.clone());
-                                            this.run_trace(&target, cx);
-                                        }
-                                    })),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .opacity(if selected { 1. } else { 0. })
+                                    .group_hover(hover_group.clone(), |s| s.opacity(1.))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("inspect-{id}")))
+                                            .w(px(26.))
+                                            .h(px(26.))
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .cursor_pointer()
+                                            .text_color(if selected {
+                                                primary
+                                            } else {
+                                                muted.opacity(0.75)
+                                            })
+                                            .hover(move |s| s.bg(btn_hover_bg).text_color(fg))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(inspect_tip.clone()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.selected_connection = Some(inspect.clone());
+                                                this.page = Page::Diagnostics;
+                                                cx.notify();
+                                            }))
+                                            .child(Icon::new(IconName::Route).with_size(px(14.))),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("test-{id}")))
+                                            .w(px(26.))
+                                            .h(px(26.))
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .when(can_test, |d| {
+                                                d.cursor_pointer()
+                                                    .text_color(muted.opacity(0.75))
+                                                    .hover(move |s| {
+                                                        s.bg(btn_hover_bg).text_color(fg)
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            if let Some(target) =
+                                                                connection_test_target(&test)
+                                                            {
+                                                                this.trace_input.update(
+                                                                    cx,
+                                                                    |input, cx| {
+                                                                        input.set_value(
+                                                                            target.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        )
+                                                                    },
+                                                                );
+                                                                this.selected_connection =
+                                                                    Some(test.clone());
+                                                                this.page = Page::Diagnostics;
+                                                                this.run_trace(&target, cx);
+                                                            }
+                                                        },
+                                                    ))
+                                            })
+                                            .when(!can_test, |d| d.text_color(muted.opacity(0.3)))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(test_tip.clone()).build(window, cx)
+                                            })
+                                            .child(Icon::new(IconName::Radar).with_size(px(14.))),
+                                    ),
                             )
                             .when(!closed && !self.show_recorded_connections, |d| {
                                 let danger = p.danger;
@@ -305,7 +512,7 @@ impl AppView {
                                         .items_center()
                                         .justify_center()
                                         .cursor_pointer()
-                                        .text_color(danger.opacity(0.72))
+                                        .text_color(danger.opacity(0.65))
                                         .hover(move |s| {
                                             s.bg(danger.opacity(0.14)).text_color(danger)
                                         })
@@ -459,14 +666,31 @@ impl AppView {
                         ),
                     ))
                     .child(
-                        Button::new("close-connection-inspector")
-                            .compact()
-                            .ghost()
-                            .label("✕")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.selected_connection = None;
-                                cx.notify();
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("back-to-connections")
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::Activity)
+                                    .label(self.tr("返回连接", "Back to connections"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page = Page::Connections;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("close-connection-inspector")
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.selected_connection = None;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
             .child(

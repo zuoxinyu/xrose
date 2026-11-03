@@ -41,13 +41,14 @@ pub enum Page {
     Routing,
     Dns,
     Connections,
+    Diagnostics,
     Logs,
     Settings,
     About,
 }
 
 impl Page {
-    fn all() -> [Page; 8] {
+    fn all() -> [Page; 9] {
         [
             Page::Nodes,
             Page::Subscriptions,
@@ -55,6 +56,7 @@ impl Page {
             Page::Dns,
             Page::Mesh,
             Page::Connections,
+            Page::Diagnostics,
             Page::Logs,
             Page::Settings,
         ]
@@ -68,6 +70,7 @@ impl Page {
             Page::Routing => IconName::Route,
             Page::Dns => IconName::Globe,
             Page::Connections => IconName::Activity,
+            Page::Diagnostics => IconName::Radar,
             Page::Logs => IconName::Terminal,
             Page::Settings => IconName::Settings,
             Page::About => IconName::Info,
@@ -82,6 +85,7 @@ impl Page {
             Page::Routing => "路由",
             Page::Dns => "DNS",
             Page::Connections => "连接",
+            Page::Diagnostics => "测试",
             Page::Logs => "日志",
             Page::Settings => "设置",
             Page::About => "关于",
@@ -96,6 +100,7 @@ impl Page {
             Page::Routing => "Routing",
             Page::Dns => "DNS",
             Page::Connections => "Connections",
+            Page::Diagnostics => "Diagnostics",
             Page::Logs => "Logs",
             Page::Settings => "Settings",
             Page::About => "About",
@@ -184,6 +189,7 @@ pub struct AppView {
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connection_filter: ConnectionFilterKind,
     pub(crate) show_recorded_connections: bool,
+    pub(crate) connections_limit: usize,
     pub(crate) selected_connection: Option<xross_core::runtime::ClashConnection>,
     pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
     pub(crate) diagnostic_rule_action: RouteActionKind,
@@ -261,6 +267,7 @@ impl AppView {
             "routing" => Page::Routing,
             "dns" => Page::Dns,
             "connections" => Page::Connections,
+            "diagnostics" | "test" | "tests" => Page::Diagnostics,
             "logs" => Page::Logs,
             "settings" => Page::Settings,
             "about" => Page::About,
@@ -310,6 +317,7 @@ impl AppView {
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
             connection_filter: ConnectionFilterKind::All,
             show_recorded_connections: false,
+            connections_limit: 50,
             selected_connection: None,
             diagnostic_rule_kind: DiagnosticRuleKind::Domain,
             diagnostic_rule_action: RouteActionKind::Proxy,
@@ -1015,6 +1023,7 @@ impl AppView {
             Page::Routing => self.page_routing(cx).into_any_element(),
             Page::Dns => self.page_dns(cx).into_any_element(),
             Page::Connections => self.page_connections(cx).into_any_element(),
+            Page::Diagnostics => self.page_diagnostics(cx).into_any_element(),
             Page::Logs => self.page_logs(cx).into_any_element(),
             Page::Settings => self.page_settings(window, cx).into_any_element(),
             Page::About => self.page_about(cx).into_any_element(),
@@ -1173,10 +1182,14 @@ impl Render for AppView {
                             cx.notify();
                         }
                         "6" => {
-                            this.page = Page::Logs;
+                            this.page = Page::Diagnostics;
                             cx.notify();
                         }
                         "7" => {
+                            this.page = Page::Logs;
+                            cx.notify();
+                        }
+                        "8" => {
                             this.page = Page::Settings;
                             cx.notify();
                         }
