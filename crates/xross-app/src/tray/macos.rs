@@ -24,8 +24,10 @@ enum PopupOp {
 }
 
 unsafe fn string(value: &str) -> id {
-    let value = NSString::alloc(nil).init_str(value);
-    msg_send![value, autorelease]
+    unsafe {
+        let value = NSString::alloc(nil).init_str(value);
+        msg_send![value, autorelease]
+    }
 }
 
 fn post_popup(operation: PopupOp) {
@@ -260,7 +262,7 @@ pub fn setup_window() {
     setup_macos_window();
 }
 
-extern "C" {
+unsafe extern "C" {
     fn class_replaceMethod(
         cls: *const objc::runtime::Class,
         name: Sel,
@@ -362,7 +364,7 @@ unsafe fn configure_views_tree(view: id) {
         let count: usize = msg_send![subviews, count];
         for i in 0..count {
             let sub: id = msg_send![subviews, objectAtIndex: i];
-            configure_views_tree(sub);
+            unsafe { configure_views_tree(sub) };
         }
     }
 }

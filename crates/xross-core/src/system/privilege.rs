@@ -778,7 +778,7 @@ fn helper_security_descriptor(
 #[cfg(unix)]
 fn libc_geteuid() -> u32 {
     // Avoid pulling in libc as a direct dependency for this one call.
-    extern "C" {
+    unsafe extern "C" {
         fn geteuid() -> u32;
     }
     unsafe { geteuid() }
