@@ -578,8 +578,24 @@ impl AppService {
     }
 
     fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let old = self.settings();
+        if settings == &old {
+            return Ok(());
+        }
+        let restart_required = settings.requires_core_restart(&old, &self.inner.model.read());
         settings.save(&self.inner.paths.settings_file())?;
         *self.inner.settings.write() = settings.clone();
+        if settings.watchdog != old.watchdog
+            || settings.watchdog_max_retries != old.watchdog_max_retries
+        {
+            self.inner.core.set_watchdog(crate::core::WatchdogConfig {
+                enabled: settings.watchdog,
+                max_retries: settings.watchdog_max_retries,
+            });
+        }
+        if restart_required {
+            self.mark_dirty();
+        }
         Ok(())
     }
 
@@ -1667,8 +1683,14 @@ impl AppService {
             self.toast(ToastLevel::Error, format!("保存设置失败：{err}"));
             return;
         }
-        self.sync_model_settings();
-        let _ = self.persist_model();
+        if new.mixed_port != old.mixed_port
+            || new.allow_lan != old.allow_lan
+            || new.listen_host != old.listen_host
+            || new.tun_enabled != old.tun_enabled
+        {
+            self.sync_model_settings();
+            let _ = self.persist_model();
+        }
         if new.autostart != old.autostart {
             if let Err(err) = system::autostart::set_enabled(new.autostart) {
                 self.toast(ToastLevel::Warning, format!("设置开机自启失败：{err}"));
@@ -1689,8 +1711,11 @@ impl AppService {
                 format!("{} 不支持 TUN，请更新内核", new.core.display_name()),
             );
         }
-        self.refresh_doctor();
-        self.mark_dirty();
+        if new.requires_core_restart(&old, &self.inner.model.read())
+            || new.system_proxy != old.system_proxy
+        {
+            self.refresh_doctor();
+        }
     }
 
     pub fn set_language(&self, language: crate::settings::Language) {
@@ -3146,6 +3171,28 @@ fn pretty_host(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn privacy_preferences_preserve_pending_changes_without_rewriting_the_profile() {
+        let (service, _dir) = service();
+        let profile = service.model();
+        let generation = service.inner.doctor_generation.load(Ordering::SeqCst);
+        service.inner.config_dirty.store(true, Ordering::SeqCst);
+        let mut settings = service.settings();
+        settings.privacy_mode = !settings.privacy_mode;
+        service.update_settings(settings.clone());
+        assert_eq!(service.settings(), settings);
+        assert_eq!(
+            Settings::load(&service.paths().settings_file()).unwrap(),
+            settings
+        );
+        assert_eq!(service.model(), profile);
+        assert_eq!(
+            service.inner.doctor_generation.load(Ordering::SeqCst),
+            generation
+        );
+        assert!(service.snapshot().config_dirty);
+    }
+
     #[test]
     fn latency_batch_tests_every_enabled_requested_node_without_switching_selection() {
         let (service, _dir) = service();

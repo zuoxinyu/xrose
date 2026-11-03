@@ -65,7 +65,7 @@ Windows 首次构建可执行 `powershell -NoProfile -File scripts/build-windows
 - **日志**：接入 stdout/stderr、按级别过滤、大小滚动日志文件
   （`xross.log` / `xross.1.log`，可配置上限与保留数）。
 
-> Xray 与 sing-box 均不支持配置热重载。除 sing-box 的 selector 节点切换通过 Clash API 热切换外，其余配置变更均通过重写配置并重启内核生效。
+> Xray 与 sing-box 均不支持配置热重载。节点、出站组、路由、DNS 等内核配置变更通过重写配置并重启内核生效；sing-box 的 selector 节点切换通过 Clash API 生效。隐私、外观、窗口和托盘偏好不触发内核重启提示；崩溃自动重启策略即时更新。
 
 编译器面向 **sing-box 1.12+**（已在 1.14.4 上验证）：使用新式 typed DNS
 （`type: https/udp/fakeip/local`）、`route.default_domain_resolver` 与

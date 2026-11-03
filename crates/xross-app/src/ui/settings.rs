@@ -545,7 +545,7 @@ impl AppView {
                             Button::new("save-ports")
                                 .compact()
                                 .primary()
-                                .label(self.tr("保存端口", "Save port"))
+                                .label(self.tr("应用", "Apply"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let raw = this.port_input.read(cx).value().to_string();
                                     match raw.trim().parse::<u16>() {

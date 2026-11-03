@@ -188,6 +188,78 @@ impl Settings {
         atomic_write_json(path, self)
     }
 
+    /// Whether changing these preferences affects the selected core's next run.
+    /// Client preferences and controls applied through runtime APIs are excluded.
+    pub(crate) fn requires_core_restart(&self, old: &Self, model: &crate::model::AppModel) -> bool {
+        use crate::model::{GroupKind, InboundKind};
+        if self.core != old.core {
+            return true;
+        }
+        let core = self.core;
+        if self.binary_override(core) != old.binary_override(core)
+            || (self.binary_override(core).is_none()
+                && self.active_version(core) != old.active_version(core))
+        {
+            return true;
+        }
+        if model
+            .inbounds
+            .iter()
+            .any(|i| i.enabled && i.kind == InboundKind::Mixed)
+        {
+            let address = |s: &Self| {
+                if s.allow_lan {
+                    "0.0.0.0".to_string()
+                } else if s.listen_host.is_empty() {
+                    "127.0.0.1".to_string()
+                } else {
+                    s.listen_host.clone()
+                }
+            };
+            if self.mixed_port != old.mixed_port || address(self) != address(old) {
+                return true;
+            }
+        }
+        if model.inbounds.iter().any(|i| i.kind == InboundKind::Tun)
+            && self.effective_tun() != old.effective_tun()
+        {
+            return true;
+        }
+        let log_changed = match core {
+            CoreKind::Xray => self.log_level.xray() != old.log_level.xray(),
+            CoreKind::SingBox => self.log_level.singbox() != old.log_level.singbox(),
+        };
+        if log_changed
+            || match core {
+                CoreKind::Xray => self.stats_port != old.stats_port,
+                CoreKind::SingBox => self.api_port != old.api_port,
+            }
+        {
+            return true;
+        }
+        let automatic = model.groups.iter().filter(|g| {
+            g.enabled
+                && g.members
+                    .iter()
+                    .filter_map(|id| model.node(id))
+                    .any(|n| n.usable_with(core))
+        });
+        match core {
+            CoreKind::Xray => {
+                automatic
+                    .clone()
+                    .any(|g| matches!(g.kind, GroupKind::UrlTest | GroupKind::Fallback))
+                    && (self.urltest_url != old.urltest_url
+                        || self.urltest_interval_secs.max(30) != old.urltest_interval_secs.max(30))
+            }
+            CoreKind::SingBox => {
+                automatic.clone().any(|g| {
+                    matches!(g.kind, GroupKind::UrlTest | GroupKind::Fallback) && g.url.is_none()
+                }) && self.urltest_url != old.urltest_url
+            }
+        }
+    }
+
     pub fn http_port(&self) -> u16 {
         self.mixed_port
     }
@@ -212,6 +284,139 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_preferences_do_not_require_a_core_restart() {
+        let old = Settings::default();
+        let model = crate::model::AppModel::default();
+        let mut new = old.clone();
+        new.language = Language::En;
+        new.theme = ThemeMode::Dark;
+        new.backdrop = BackdropStyle::Opaque;
+        new.privacy_mode = !old.privacy_mode;
+        new.show_tray_speed = !old.show_tray_speed;
+        new.minimize_to_tray = !old.minimize_to_tray;
+        new.close_to_tray = !old.close_to_tray;
+        new.autostart = !old.autostart;
+        new.start_minimized = !old.start_minimized;
+        new.single_instance = !old.single_instance;
+        new.system_proxy = !old.system_proxy;
+        new.pac_enabled = !old.pac_enabled;
+        new.pac_port += 10;
+        new.watchdog = !old.watchdog;
+        new.watchdog_max_retries += 1;
+        new.log_max_bytes += 1024;
+        new.log_keep += 1;
+        new.subscription_update_hours += 1;
+        new.check_app_updates = !old.check_app_updates;
+        new.last_update_check = Some(123);
+        for core in CoreKind::all() {
+            let mut baseline = old.clone();
+            baseline.core = core;
+            new.core = core;
+            assert!(!new.requires_core_restart(&baseline, &model));
+        }
+    }
+
+    #[test]
+    fn core_changes_and_only_the_selected_cores_api_and_binary_require_restart() {
+        let model = crate::model::AppModel::default();
+        for core in CoreKind::all() {
+            let old = Settings {
+                core,
+                ..Default::default()
+            };
+            let mutations: &[fn(&mut Settings)] = &[
+                |s| s.mixed_port += 1,
+                |s| s.allow_lan = true,
+                |s| s.listen_host = "::1".into(),
+                |s| s.tun_enabled = true,
+                |s| s.log_level = LogLevel::Error,
+                |s| {
+                    s.active_versions
+                        .insert(s.core.as_str().into(), "test-version".into());
+                },
+                |s| {
+                    s.binary_paths
+                        .insert(s.core.as_str().into(), "test-binary".into());
+                },
+            ];
+            for mutation in mutations {
+                let mut new = old.clone();
+                mutation(&mut new);
+                assert!(new.requires_core_restart(&old, &model));
+            }
+            let other = if core == CoreKind::Xray {
+                CoreKind::SingBox
+            } else {
+                CoreKind::Xray
+            };
+            let mut new = old.clone();
+            new.core = other;
+            assert!(new.requires_core_restart(&old, &model));
+            let mut new = old.clone();
+            new.active_versions
+                .insert(other.as_str().into(), "test-version".into());
+            new.binary_paths
+                .insert(other.as_str().into(), "test-binary".into());
+            assert!(!new.requires_core_restart(&old, &model));
+            new.api_port += 1;
+            assert_eq!(
+                new.requires_core_restart(&old, &model),
+                core == CoreKind::SingBox
+            );
+            new.api_port = old.api_port;
+            new.stats_port += 1;
+            assert_eq!(
+                new.requires_core_restart(&old, &model),
+                core == CoreKind::Xray
+            );
+        }
+        let old = Settings {
+            core: CoreKind::Xray,
+            log_level: LogLevel::Trace,
+            allow_lan: true,
+            ..Default::default()
+        };
+        let mut new = old.clone();
+        new.log_level = LogLevel::Debug;
+        new.listen_host = "::1".into();
+        assert!(new.requires_core_restart(&old, &model));
+        new.log_level = old.log_level;
+        assert!(!new.requires_core_restart(&old, &model));
+    }
+
+    #[test]
+    fn latency_preferences_restart_only_groups_that_embed_the_defaults() {
+        use crate::model::{AppModel, GroupKind, Node, OutboundGroup, Protocol};
+        let mut model = AppModel::default();
+        let node = Node::new("fixture", Protocol::Http, "example.com", 80);
+        model.add_nodes(vec![node.clone()]);
+        model.groups.clear();
+        let old = Settings::default();
+        let mut new = old.clone();
+        new.urltest_url = "https://example.com/check".into();
+        assert!(!new.requires_core_restart(&old, &model));
+        let mut group = OutboundGroup::new("automatic", GroupKind::UrlTest);
+        group.members = vec![node.id];
+        model.groups.push(group);
+        assert!(new.requires_core_restart(&old, &model));
+        model.groups.last_mut().unwrap().url = Some("https://example.com/custom".into());
+        assert!(!new.requires_core_restart(&old, &model));
+        let old = Settings {
+            core: CoreKind::Xray,
+            ..old
+        };
+        let mut new = old.clone();
+        new.urltest_interval_secs += 1;
+        assert!(new.requires_core_restart(&old, &model));
+        new.core = CoreKind::SingBox;
+        let old = Settings {
+            core: CoreKind::SingBox,
+            ..old
+        };
+        assert!(!new.requires_core_restart(&old, &model));
+    }
+
     use super::*;
 
     #[test]

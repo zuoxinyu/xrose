@@ -240,6 +240,10 @@ impl CoreManager {
 
     pub fn set_watchdog(&self, config: WatchdogConfig) {
         self.supervisor.set_watchdog(config);
+        if let Some(applied) = self.applied.lock().as_mut() {
+            applied.settings.watchdog = config.enabled;
+            applied.settings.watchdog_max_retries = config.max_retries;
+        }
     }
 
     /// Compiles the model, writes the config to the runtime directory and runs
