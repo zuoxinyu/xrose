@@ -9,7 +9,7 @@ use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::diagnostics::{
-    connection_test_target, ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget,
+    ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget, connection_test_target,
 };
 use xross_core::model::{CoreKind, RouteAction, RouteActionKind};
 use xross_core::runtime::ClashConnection;
@@ -17,7 +17,7 @@ use xross_core::service::ToastLevel;
 use xross_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
 use xross_core::util::{format_bytes, format_speed};
 
-use super::theme::{palette, Palette};
+use super::theme::{Palette, palette};
 use super::widgets::*;
 use super::{AppView, Page};
 

@@ -9,9 +9,9 @@ use xross_core::model::CoreKind;
 use xross_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMode};
 use xross_core::system::CheckLevel;
 
+use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
-use super::AppView;
 
 impl AppView {
     fn modify_settings(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Settings)) {

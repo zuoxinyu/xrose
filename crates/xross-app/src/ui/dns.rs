@@ -5,9 +5,9 @@ use gpui_kit::*;
 use xross_core::dns::{self, DnsPreset};
 use xross_core::model::{DnsServer, DnsServerType};
 
+use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
-use super::AppView;
 
 impl AppView {
     pub(crate) fn page_dns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

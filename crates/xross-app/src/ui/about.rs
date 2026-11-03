@@ -2,9 +2,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 struct CreditItem {
     name: &'static str,

@@ -21,15 +21,15 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xross_core::AppService;
 use xross_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
 use xross_core::settings::{Language, LogLevel};
 use xross_core::trace::TraceStepKind;
-use xross_core::AppService;
 
 use self::manual_node::ManualNodeForm;
-use self::theme::{palette, Palette};
+use self::theme::{Palette, palette};
 use self::title_controls::WindowControls;
 use self::widgets::*;
 
@@ -827,14 +827,50 @@ impl AppView {
                             .bg(p.panel)
                             .border_1()
                             .border_color(p.border)
-                            .child(
+                            .child({
+                                let status_tip = running.then(|| {
+                                    let proxy_text =
+                                        if self.snapshot.active_proxy_addresses.is_empty() {
+                                            self.tr("未启用", "Disabled").to_string()
+                                        } else {
+                                            self.snapshot.active_proxy_addresses.join(", ")
+                                        };
+                                    let tun_text =
+                                        self.snapshot.active_tun_interface.clone().unwrap_or_else(
+                                            || self.tr("未启用", "Disabled").to_string(),
+                                        );
+                                    (
+                                        format!("{}：{}", self.tr("代理地址", "Proxy"), proxy_text),
+                                        format!(
+                                            "{}：{}",
+                                            self.tr("TUN 网卡", "TUN interface"),
+                                            tun_text
+                                        ),
+                                    )
+                                });
                                 div()
+                                    .id("header-status-phase")
                                     .flex()
                                     .items_center()
                                     .h_full()
                                     .gap_2()
                                     .pl_3()
                                     .pr_2p5()
+                                    .when_some(status_tip, |d, (proxy_line, tun_line)| {
+                                        d.tooltip(move |window, cx| {
+                                            let proxy_line = proxy_line.clone();
+                                            let tun_line = tun_line.clone();
+                                            Tooltip::element(move |_, _| {
+                                                div()
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap_0p5()
+                                                    .child(proxy_line.clone())
+                                                    .child(tun_line.clone())
+                                            })
+                                            .build(window, cx)
+                                        })
+                                    })
                                     .child(dot(status_color))
                                     .child(
                                         div()
@@ -858,8 +894,8 @@ impl AppView {
                                                     self.tr("启动失败", "Failed")
                                                 }
                                             }),
-                                    ),
-                            )
+                                    )
+                            })
                             .child(
                                 div()
                                     .id("toggle-core")

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{io_context, Error, Result};
+use crate::error::{Error, Result, io_context};
 use crate::model::CoreKind;
 use crate::paths::AppPaths;
 use crate::util::{atomic_write_json, find_executable, now_unix, set_executable, sha256_file};

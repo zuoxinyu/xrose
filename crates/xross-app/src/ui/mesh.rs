@@ -1,16 +1,16 @@
 //! Mesh configuration and cached runtime state. All work goes through AppService.
 use super::{
-    theme::{palette, Palette},
+    AppView,
+    theme::{Palette, palette},
     tr,
     widgets::*,
-    AppView,
 };
 use gpui_base::{Disableable, Selectable, SelectableText};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::mesh::{MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret};
@@ -419,106 +419,158 @@ impl AppView {
                 MeshPhase::Disconnected => p.muted_fg,
             };
             let has_notice = active && cfg!(windows) && self.snapshot.settings.effective_tun();
-            let mut network = card(&p)
-                .child(
+            let mut status_tips: Vec<String> = Vec::new();
+            for message in [state.error, state.warning].into_iter().flatten() {
+                let trimmed = message.trim();
+                if !trimmed.is_empty() {
+                    status_tips.push(trimmed.to_string());
+                }
+            }
+            if has_notice {
+                status_tips.push(
+                    tr(
+                        lang,
+                        "组网连接期间已自动关闭 TUN 严格路由，严格 DNS 防泄漏过滤随之放宽。",
+                        "TUN strict routing is disabled while mesh is connected, relaxing strict DNS leak filtering.",
+                    )
+                    .to_string(),
+                );
+            }
+            let status_tip = (!status_tips.is_empty()).then(|| status_tips.join("\n"));
+            let login_url = state.login_url.clone();
+            let mut network =
+                card(&p).child(
                     div()
                         .flex()
                         .items_center()
+                        .justify_between()
                         .flex_wrap()
                         .gap_2()
-                        .child(div().flex_1().min_w(px(0.)).flex().items_center().gap_2()
-                            .child(div().min_w(px(0.)).truncate().child(profile.name.clone()))
-                            .child(div().flex_shrink_0().child(pill(provider.label(), p.info, p.info.opacity(0.1)))))
                         .child(
-                            div().id(SharedString::from(format!("mesh-status-{}", profile.id)))
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .items_center()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(div().min_w(px(0.)).truncate().child(profile.name.clone()))
+                                .child(div().flex_shrink_0().child(pill(
+                                    provider.label(),
+                                    p.info,
+                                    p.info.opacity(0.1),
+                                )))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "mesh-status-{}",
+                                            profile.id
+                                        )))
+                                        .flex_shrink_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_full()
+                                        .text_xs()
+                                        .text_color(status_color)
+                                        .bg(status_color.opacity(0.1))
+                                        .child(label)
+                                        .when(has_notice, |d| {
+                                            d.child(Icon::new(IconName::Info).size(px(13.)))
+                                        })
+                                        .when_some(status_tip, |d, tip| {
+                                            d.tooltip(move |window, cx| {
+                                                let tip = tip.clone();
+                                                Tooltip::element(move |_, _| {
+                                                    div()
+                                                        .max_w(px(320.))
+                                                        .min_w(px(0.))
+                                                        .whitespace_normal()
+                                                        .child(tip.clone())
+                                                })
+                                                .build(window, cx)
+                                            })
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .flex_wrap()
+                                .justify_end()
+                                .gap_2()
                                 .flex_shrink_0()
-                                .flex().items_center().gap_1().px_2().py_0p5().rounded_full()
-                                .text_xs().text_color(status_color).bg(status_color.opacity(0.1))
-                                .child(label)
-                                .when(has_notice, |d| d.child(Icon::new(IconName::Info).size(px(13.))))
-                                .when(has_notice, |d| {
-                                    d.tooltip(move |window, cx| {
-                                        Tooltip::element(move |_, _| {
-                                            div().w(px(320.)).min_w(px(0.)).whitespace_normal().child(tr(lang,
-                                                "组网连接期间已自动关闭 TUN 严格路由，严格 DNS 防泄漏过滤随之放宽。",
-                                                "TUN strict routing is disabled while mesh is connected, relaxing strict DNS leak filtering."
-                                            ))
-                                        }).build(window, cx)
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mesh-connect-{}",
+                                        id.clone()
+                                    )))
+                                    .primary()
+                                    .disabled(busy || !self.snapshot.mesh.supported)
+                                    .label(if active {
+                                        tr(lang, "断开", "Disconnect")
+                                    } else {
+                                        tr(lang, "连接", "Connect")
                                     })
+                                    .on_click(cx.listener(move |this, _, _, _| {
+                                        if active {
+                                            this.service.mesh_disconnect(provider);
+                                        } else {
+                                            this.service.mesh_connect(&id);
+                                        }
+                                    })),
+                                )
+                                .when_some(login_url, |d, url| {
+                                    d.child(
+                                        Button::new("mesh-login")
+                                            .primary()
+                                            .label(self.tr("在浏览器登录", "Sign in with browser"))
+                                            .on_click(cx.listener(move |this, _, _, _| {
+                                                this.service.open_url(&url)
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mesh-edit-{}",
+                                        edit.id.clone()
+                                    )))
+                                    .label(tr(lang, "编辑", "Edit"))
+                                    .disabled(active || busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.mesh_form.load(edit.clone(), window, cx);
+                                        cx.notify();
+                                    })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "mesh-delete-{}",
+                                        delete.clone()
+                                    )))
+                                    .label(tr(lang, "删除配置", "Delete profile"))
+                                    .disabled(active || busy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if let Err(e) = this.service.delete_mesh_profile(&delete) {
+                                            this.service.toast(ToastLevel::Error, e.to_string());
+                                        }
+                                        this.sync(cx);
+                                    })),
+                                )
+                                .when(active && provider == MeshProvider::Tailscale, |d| {
+                                    d.child(
+                                        Button::new("mesh-logout")
+                                            .label(tr(lang, "注销设备身份", "Log out device"))
+                                            .disabled(busy)
+                                            .on_click(cx.listener(move |this, _, _, _| {
+                                                this.service.mesh_logout(provider)
+                                            })),
+                                    )
                                 }),
                         ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            Button::new(SharedString::from(format!("mesh-connect-{}", id.clone())))
-                                .primary()
-                                .disabled(busy || !self.snapshot.mesh.supported)
-                                .label(if active {
-                                    tr(lang, "断开", "Disconnect")
-                                } else {
-                                    tr(lang, "连接", "Connect")
-                                })
-                                .on_click(cx.listener(move |this, _, _, _| {
-                                    if active {
-                                        this.service.mesh_disconnect(provider);
-                                    } else {
-                                        this.service.mesh_connect(&id);
-                                    }
-                                })),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "mesh-edit-{}",
-                                edit.id.clone()
-                            )))
-                            .label(tr(lang, "编辑", "Edit"))
-                            .disabled(active || busy)
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.mesh_form.load(edit.clone(), window, cx);
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "mesh-delete-{}",
-                                delete.clone()
-                            )))
-                            .label(tr(lang, "删除配置", "Delete profile"))
-                            .disabled(active || busy)
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    if let Err(e) = this.service.delete_mesh_profile(&delete) {
-                                        this.service.toast(ToastLevel::Error, e.to_string());
-                                    }
-                                    this.sync(cx);
-                                },
-                            )),
-                        )
-                        .when(active && provider == MeshProvider::Tailscale, |d| {
-                            d.child(
-                                Button::new("mesh-logout")
-                                    .label(tr(lang, "注销设备身份", "Log out device"))
-                                    .disabled(busy)
-                                    .on_click(cx.listener(move |this, _, _, _| {
-                                        this.service.mesh_logout(provider)
-                                    })),
-                            )
-                        }),
                 );
-            if let Some(url) = state.login_url {
-                network = network.child(
-                    Button::new("mesh-login")
-                        .primary()
-                        .label(self.tr("在浏览器登录", "Sign in with browser"))
-                        .on_click(cx.listener(move |this, _, _, _| this.service.open_url(&url))),
-                );
-            }
             let mut details = vec![
                 (
                     "addresses",
@@ -584,16 +636,6 @@ impl AppView {
                                 .map(|ms| format!(" · {ms:.1} ms"))
                                 .unwrap_or_default()
                         )),
-                );
-            }
-            for message in [state.error, state.warning].into_iter().flatten() {
-                network = network.child(
-                    div()
-                        .text_sm()
-                        .text_color(p.danger)
-                        .min_w(px(0.))
-                        .line_clamp(4)
-                        .child(message),
                 );
             }
             let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));

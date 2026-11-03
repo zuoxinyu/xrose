@@ -354,9 +354,11 @@ mod tests {
         let errors = bus.recent(10, LogLevel::Error, "");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].message, "boom");
-        assert!(bus.recent(10, LogLevel::Info, "hell")[0]
-            .message
-            .contains("hello"));
+        assert!(
+            bus.recent(10, LogLevel::Info, "hell")[0]
+                .message
+                .contains("hello")
+        );
     }
 
     #[test]

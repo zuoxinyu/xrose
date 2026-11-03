@@ -1,8 +1,8 @@
 use gpui_kit::component::switch::Switch;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    div, px, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Stateful, Styled,
+    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
+    Styled, div, px,
 };
 
 use super::theme::Palette;

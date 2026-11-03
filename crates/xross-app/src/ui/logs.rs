@@ -4,16 +4,16 @@ use std::rc::Rc;
 
 use gpui_base::SelectableText;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use xross_core::core::LogEntry;
 use xross_core::settings::LogLevel;
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 pub(super) struct LogListState {
     list: ListState,
@@ -377,7 +377,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::LogListState;
-    use gpui_kit::{px, ListOffset};
+    use gpui_kit::{ListOffset, px};
     use std::rc::Rc;
     use xross_core::core::LogEntry;
     use xross_core::core::LogStream;

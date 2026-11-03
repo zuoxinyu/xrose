@@ -22,8 +22,6 @@ use super::theme::{
 use super::widgets::*;
 use super::{AppView, Page};
 
-/// Lists shorter than this hide search, sorting and grouping.
-const TOOLS_MIN_NODES: usize = 6;
 /// "Fastest" is only shown when it leads the runner-up by at least
 /// `max(FASTEST_MIN_GAP_MS, FASTEST_MIN_GAP_RATIO * runner_up)`.
 const FASTEST_MIN_GAP_MS: u32 = 30;
@@ -182,127 +180,7 @@ impl AppView {
             );
         }
 
-        // Outbound mode switch (manual | auto) on the left; privacy toggle on the right.
         let hide_ips = self.hide_ips;
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .flex_wrap()
-                .w_full()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .flex_wrap()
-                        .when(!groups.is_empty(), |d| {
-                            d.child(segmented(&p).children(groups.iter().map(|g| {
-                                let selected = active_group.as_deref() == Some(g.id.as_str());
-                                let gid = g.id.clone();
-                                let builtin = g.id == "proxy" || g.id == "auto";
-                                let label: SharedString = if builtin {
-                                    match g.kind {
-                                        GroupKind::Selector => super::tr(lang, "手动", "Manual"),
-                                        GroupKind::UrlTest => super::tr(lang, "自动", "Auto"),
-                                        GroupKind::Fallback => {
-                                            super::tr(lang, "故障转移", "Fallback")
-                                        }
-                                        GroupKind::LoadBalance => {
-                                            super::tr(lang, "负载均衡", "Load balance")
-                                        }
-                                    }
-                                } else {
-                                    SharedString::from(g.name.clone())
-                                };
-                                let tip: SharedString = match g.kind {
-                                    GroupKind::Selector => super::tr(
-                                        lang,
-                                        "手动：由你选择出站节点",
-                                        "Manual: you choose the outbound node",
-                                    ),
-                                    GroupKind::UrlTest => super::tr(
-                                        lang,
-                                        "自动：按定期延迟测试结果选用最快的节点",
-                                        "Auto: uses the fastest node from periodic latency tests",
-                                    ),
-                                    GroupKind::Fallback => super::tr(
-                                        lang,
-                                        "故障转移：当前节点不可用时依次切换到备用节点",
-                                        "Fallback: switches to the next node when the current one fails",
-                                    ),
-                                    GroupKind::LoadBalance => super::tr(
-                                        lang,
-                                        "负载均衡：在可用节点之间分配连接",
-                                        "Load balance: spreads connections across available nodes",
-                                    ),
-                                };
-                                segment_item(
-                                    &p,
-                                    SharedString::from(format!("group-{}", g.id)),
-                                    label,
-                                    selected,
-                                )
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(tip.clone()).build(window, cx)
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.selected_group = Some(gid.clone());
-                                    this.refresh_header_location();
-                                    cx.notify();
-                                }))
-                            })))
-                        })
-                        .when(is_xray, |d| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .text_xs()
-                                    .text_color(p.warn_text)
-                                    .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
-                                    .child(self.tr(
-                                        "Xray core 模式：切换节点需重启 core",
-                                        "Xray core: switching node restarts core",
-                                    )),
-                            )
-                        }),
-                )
-                .child(
-                    Button::new("toggle-privacy")
-                        .compact()
-                        .ghost()
-                        .selected(hide_ips)
-                        .toggled(hide_ips)
-                        .icon(if hide_ips {
-                            IconName::EyeOff
-                        } else {
-                            IconName::Eye
-                        })
-                        .label(self.tr("隐私", "Privacy"))
-                        .tooltip(if hide_ips {
-                            self.tr(
-                                "已隐藏服务器地址与位置，点击显示",
-                                "Addresses and location hidden — click to reveal",
-                            )
-                        } else {
-                            self.tr(
-                                "隐藏服务器地址与位置",
-                                "Hide server addresses and location",
-                            )
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.hide_ips = !this.hide_ips;
-                            let mut settings = this.snapshot.settings.clone();
-                            settings.privacy_mode = this.hide_ips;
-                            this.service.update_settings(settings);
-                            this.sync(cx);
-                        })),
-                ),
-        );
 
         if self.show_import_box || self.show_manual_form {
             body = body.child(
@@ -435,12 +313,11 @@ impl AppView {
         // Automatic groups pick the node themselves; rows only display it.
         let auto_mode = group_kind != GroupKind::Selector;
 
-        // Search, sorting and grouping only pay off on longer lists.
-        let tools_visible = model.nodes.len() >= TOOLS_MIN_NODES;
-        let sort_active = tools_visible && self.sort_by_latency;
-        let grouped = tools_visible && self.group_by_subscription;
+        let has_nodes = !model.nodes.is_empty();
+        let sort_active = has_nodes && self.sort_by_latency;
+        let grouped = has_nodes && self.group_by_subscription;
 
-        let search_query = if tools_visible {
+        let search_query = if has_nodes {
             self.node_search.read(cx).value().trim().to_lowercase()
         } else {
             String::new()
@@ -562,8 +439,8 @@ impl AppView {
         // Node list card (now the primary focal point of the page).
         body = body.child(
             card(&p)
-                // Header: title and count on the left; "Test all" (secondary) and
-                // "Add node" (primary) side by side; rarer actions in the overflow menu.
+                // Header: title and count on the left; mode switch, privacy, test all,
+                // add node, and inline expandable actions on the right.
                 .child(
                     div()
                         .flex()
@@ -575,10 +452,11 @@ impl AppView {
                             div()
                                 .flex()
                                 .items_center()
+                                .flex_wrap()
                                 .gap_2p5()
                                 .child(
                                     div()
-                                        .text_base()
+                                        .text_lg()
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(p.fg)
                                         .child(self.tr("节点列表", "Nodes")),
@@ -596,33 +474,30 @@ impl AppView {
                                     },
                                     p.primary,
                                     p.accent,
-                                )),
+                                ))
+                                .when(is_xray, |d| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .text_xs()
+                                            .text_color(p.warn_text)
+                                            .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
+                                            .child(self.tr(
+                                                "Xray core 模式：切换节点需重启 core",
+                                                "Xray core: switching node restarts core",
+                                            )),
+                                    )
+                                }),
                         )
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .items_center()
+                                .justify_end()
                                 .gap_2()
-                                .child(
-                                    Button::new("test-all")
-                                        .compact()
-                                        .icon(IconName::Activity)
-                                        .label(self.tr("全部测速", "Test all"))
-                                        .disabled(tests_busy)
-                                        .loading(latency_busy)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.latency_pending = this
-                                                .snapshot
-                                                .model
-                                                .nodes
-                                                .iter()
-                                                .filter(|n| n.enabled)
-                                                .map(|n| n.id.clone())
-                                                .collect();
-                                            this.service.test_latency(LatencyScope::All);
-                                            this.sync(cx);
-                                        })),
-                                )
                                 .child(
                                     Button::new("toggle-add-drawer")
                                         .compact()
@@ -646,13 +521,63 @@ impl AppView {
                                             cx.notify();
                                         })),
                                 )
+                                .when(self.toolbar_menu_open, |d| {
+                                    d.child(
+                                        Button::new("toggle-batch")
+                                            .compact()
+                                            .ghost()
+                                            .selected(self.batch_mode)
+                                            .icon(IconName::ListChecks)
+                                            .label(if self.batch_mode {
+                                                self.tr("退出批量管理", "Exit batch mode")
+                                            } else {
+                                                self.tr("批量管理", "Batch manage")
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.batch_mode = !this.batch_mode;
+                                                if !this.batch_mode {
+                                                    this.batch_selected.clear();
+                                                }
+                                                this.toolbar_menu_open = false;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new("clean-dead-nodes")
+                                            .compact()
+                                            .ghost()
+                                            .icon(IconName::Broom)
+                                            .label(format!(
+                                                "{} ({timeout_count})",
+                                                self.tr("清理超时节点", "Remove timed-out")
+                                            ))
+                                            .disabled(timeout_count == 0)
+                                            .tooltip(self.tr(
+                                                "移除所有测速超时的节点",
+                                                "Remove all nodes that timed out during latency testing",
+                                            ))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_clean_confirm = true;
+                                                this.toolbar_menu_open = false;
+                                                cx.notify();
+                                            })),
+                                    )
+                                })
                                 .child(
                                     Button::new("toolbar-more")
                                         .compact()
                                         .ghost()
                                         .selected(self.toolbar_menu_open)
-                                        .icon(IconName::Ellipsis)
-                                        .tooltip(self.tr("更多操作", "More actions"))
+                                        .icon(if self.toolbar_menu_open {
+                                            IconName::ChevronRight
+                                        } else {
+                                            IconName::ChevronLeft
+                                        })
+                                        .tooltip(if self.toolbar_menu_open {
+                                            self.tr("收起更多操作", "Hide actions")
+                                        } else {
+                                            self.tr("更多操作", "More actions")
+                                        })
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.toolbar_menu_open = !this.toolbar_menu_open;
                                             cx.notify();
@@ -660,129 +585,203 @@ impl AppView {
                                 ),
                         ),
                 )
-                // Overflow menu: batch management and cleanup.
-                .when(self.toolbar_menu_open, |d| {
+                // Toolbar row: Search, Mode, View, Sort <-> Test All, Privacy (right-aligned).
+                .when(has_nodes, |d| {
                     d.child(
                         div()
                             .flex()
-                            .flex_wrap()
                             .items_center()
+                            .justify_between()
                             .gap_2()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(p.panel_alt)
+                            .flex_wrap()
                             .child(
-                                Button::new("toggle-batch")
-                                    .compact()
-                                    .ghost()
-                                    .selected(self.batch_mode)
-                                    .icon(IconName::ListChecks)
-                                    .label(if self.batch_mode {
-                                        self.tr("退出批量管理", "Exit batch mode")
-                                    } else {
-                                        self.tr("批量管理", "Batch manage")
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(div().w(px(220.)).child(Input::new(&self.node_search)))
+                                    .when(!groups.is_empty(), |d| {
+                                        d.child(segmented(&p).children(groups.iter().map(|g| {
+                                            let selected =
+                                                active_group.as_deref() == Some(g.id.as_str());
+                                            let gid = g.id.clone();
+                                            let builtin = g.id == "proxy" || g.id == "auto";
+                                            let label: SharedString = if builtin {
+                                                match g.kind {
+                                                    GroupKind::Selector => {
+                                                        super::tr(lang, "手动", "Manual")
+                                                    }
+                                                    GroupKind::UrlTest => {
+                                                        super::tr(lang, "自动", "Auto")
+                                                    }
+                                                    GroupKind::Fallback => {
+                                                        super::tr(lang, "故障转移", "Fallback")
+                                                    }
+                                                    GroupKind::LoadBalance => {
+                                                        super::tr(lang, "负载均衡", "Load balance")
+                                                    }
+                                                }
+                                            } else {
+                                                SharedString::from(g.name.clone())
+                                            };
+                                            let tip: SharedString = match g.kind {
+                                                GroupKind::Selector => super::tr(
+                                                    lang,
+                                                    "手动：由你选择出站节点",
+                                                    "Manual: you choose the outbound node",
+                                                ),
+                                                GroupKind::UrlTest => super::tr(
+                                                    lang,
+                                                    "自动：按定期延迟测试结果选用最快的节点",
+                                                    "Auto: uses the fastest node from periodic latency tests",
+                                                ),
+                                                GroupKind::Fallback => super::tr(
+                                                    lang,
+                                                    "故障转移：当前节点不可用时依次切换到备用节点",
+                                                    "Fallback: switches to the next node when the current one fails",
+                                                ),
+                                                GroupKind::LoadBalance => super::tr(
+                                                    lang,
+                                                    "负载均衡：在可用节点之间分配连接",
+                                                    "Load balance: spreads connections across available nodes",
+                                                ),
+                                            };
+                                            segment_item(
+                                                &p,
+                                                SharedString::from(format!("group-{}", g.id)),
+                                                label,
+                                                selected,
+                                            )
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(tip.clone()).build(window, cx)
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.selected_group = Some(gid.clone());
+                                                this.refresh_header_location();
+                                                cx.notify();
+                                            }))
+                                        })))
                                     })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.batch_mode = !this.batch_mode;
-                                        if !this.batch_mode {
-                                            this.batch_selected.clear();
-                                        }
-                                        this.toolbar_menu_open = false;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("clean-dead-nodes")
-                                    .compact()
-                                    .ghost()
-                                    .icon(IconName::Broom)
-                                    .label(format!(
-                                        "{} ({timeout_count})",
-                                        self.tr("清理超时节点", "Remove timed-out")
-                                    ))
-                                    .disabled(timeout_count == 0)
-                                    .tooltip(self.tr(
-                                        "移除所有测速超时的节点",
-                                        "Remove all nodes that timed out during latency testing",
-                                    ))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.show_clean_confirm = true;
-                                        this.toolbar_menu_open = false;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                })
-                // Search, view and sort controls appear once the list is long enough.
-                .when(tools_visible, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(div().w(px(220.)).child(Input::new(&self.node_search)))
-                            .child(
-                                segmented(&p)
                                     .child(
-                                        segment_item(
-                                            &p,
-                                            "view-flat",
-                                            self.tr("平铺", "Flat"),
-                                            !grouped,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.group_by_subscription = false;
-                                            cx.notify();
-                                        })),
+                                        segmented(&p)
+                                            .child(
+                                                segment_item(
+                                                    &p,
+                                                    "view-flat",
+                                                    self.tr("平铺", "Flat"),
+                                                    !grouped,
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.group_by_subscription = false;
+                                                    cx.notify();
+                                                })),
+                                            )
+                                            .child(
+                                                segment_item(
+                                                    &p,
+                                                    "view-grouped",
+                                                    self.tr("订阅", "Subscription"),
+                                                    grouped,
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.group_by_subscription = true;
+                                                    cx.notify();
+                                                })),
+                                            ),
                                     )
                                     .child(
-                                        segment_item(
-                                            &p,
-                                            "view-grouped",
-                                            self.tr("按订阅", "By subscription"),
-                                            grouped,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.group_by_subscription = true;
-                                            cx.notify();
-                                        })),
+                                        segmented(&p)
+                                            .child(
+                                                segment_item(
+                                                    &p,
+                                                    "sort-manual",
+                                                    self.tr("顺序", "Order"),
+                                                    !sort_active,
+                                                )
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sort_by_latency = false;
+                                                    cx.notify();
+                                                })),
+                                            )
+                                            .child({
+                                                let tip = self.tr(
+                                                    "仅改变显示顺序，不影响已保存的顺序；拖拽排序只在手动顺序下可用",
+                                                    "Changes the view only, not the saved order; drag to reorder works in manual order",
+                                                );
+                                                segment_item(
+                                                    &p,
+                                                    "sort-latency",
+                                                    self.tr("延迟 ↑", "Latency ↑"),
+                                                    sort_active,
+                                                )
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(tip.clone()).build(window, cx)
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.sort_by_latency = true;
+                                                    cx.notify();
+                                                }))
+                                            }),
                                     ),
                             )
                             .child(
-                                segmented(&p)
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
                                     .child(
-                                        segment_item(
-                                            &p,
-                                            "sort-manual",
-                                            self.tr("手动顺序", "Manual order"),
-                                            !sort_active,
-                                        )
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sort_by_latency = false;
-                                            cx.notify();
-                                        })),
+                                        Button::new("test-all")
+                                            .compact()
+                                            .ghost()
+                                            .icon(IconName::Activity)
+                                            .tooltip(
+                                                self.tr("全部节点测速", "Test latency for all nodes"),
+                                            )
+                                            .disabled(tests_busy)
+                                            .loading(latency_busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.latency_pending = this
+                                                    .snapshot
+                                                    .model
+                                                    .nodes
+                                                    .iter()
+                                                    .filter(|n| n.enabled)
+                                                    .map(|n| n.id.clone())
+                                                    .collect();
+                                                this.service.test_latency(LatencyScope::All);
+                                                this.sync(cx);
+                                            })),
                                     )
-                                    .child({
-                                        let tip = self.tr(
-                                            "仅改变显示顺序，不影响已保存的顺序；拖拽排序只在手动顺序下可用",
-                                            "Changes the view only, not the saved order; drag to reorder works in manual order",
-                                        );
-                                        segment_item(
-                                            &p,
-                                            "sort-latency",
-                                            self.tr("延迟 ↑", "Latency ↑"),
-                                            sort_active,
-                                        )
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(tip.clone()).build(window, cx)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.sort_by_latency = true;
-                                            cx.notify();
-                                        }))
-                                    }),
+                                    .child(
+                                        Button::new("toggle-privacy")
+                                            .compact()
+                                            .ghost()
+                                            .icon(if hide_ips {
+                                                IconName::EyeOff
+                                            } else {
+                                                IconName::Eye
+                                            })
+                                            .tooltip(if hide_ips {
+                                                self.tr(
+                                                    "已隐藏服务器地址与位置，点击显示",
+                                                    "Addresses and location hidden — click to reveal",
+                                                )
+                                            } else {
+                                                self.tr(
+                                                    "隐藏服务器地址与位置",
+                                                    "Hide server addresses and location",
+                                                )
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.hide_ips = !this.hide_ips;
+                                                let mut settings = this.snapshot.settings.clone();
+                                                settings.privacy_mode = this.hide_ips;
+                                                this.service.update_settings(settings);
+                                                this.sync(cx);
+                                            })),
+                                    ),
                             ),
                     )
                 })

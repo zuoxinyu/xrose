@@ -115,6 +115,10 @@ pub struct UiSnapshot {
     pub updates: UpdateStatus,
     pub system_proxy_active: bool,
     pub pac_url: Option<String>,
+    #[serde(default)]
+    pub active_proxy_addresses: Vec<String>,
+    #[serde(default)]
+    pub active_tun_interface: Option<String>,
     pub config_dirty: bool,
     pub recovery_note: Option<String>,
     pub rule_set_updates: Vec<RuleSetUpdate>,
@@ -428,6 +432,8 @@ impl AppService {
             updates: self.inner.updates.lock().clone(),
             system_proxy_active: self.inner.settings.read().system_proxy,
             pac_url,
+            active_proxy_addresses: self.inner.core.active_proxy_addresses(),
+            active_tun_interface: self.inner.core.active_tun_interface(),
             config_dirty: self.inner.config_dirty.load(Ordering::SeqCst),
             recovery_note: self.inner.recovery_note.read().clone(),
             rule_set_updates: self.inner.rule_set_updates.read().clone(),

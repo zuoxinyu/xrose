@@ -20,8 +20,8 @@ use crate::util::atomic_write;
 pub use binary::{BinaryManager, BinaryRecord};
 pub use logs::{LogBus, LogEntry, LogStream};
 pub use process::{
-    human_failure_reason, ExitInfo, ProcessPhase, ProcessState, ProcessSupervisor, SpawnSpec,
-    WatchdogConfig,
+    ExitInfo, ProcessPhase, ProcessState, ProcessSupervisor, SpawnSpec, WatchdogConfig,
+    human_failure_reason,
 };
 
 #[derive(Debug, Clone)]
@@ -107,6 +107,94 @@ impl CoreManager {
                     .iter()
                     .any(|inbound| inbound.kind == "tun")
             })
+    }
+
+    /// Listen addresses of proxy inbounds in the currently running configuration.
+    pub fn active_proxy_addresses(&self) -> Vec<String> {
+        if !self.state().phase.is_alive() {
+            return Vec::new();
+        }
+        let guard = self.applied.lock();
+        let Some(applied) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let proxy_inbounds: Vec<_> = applied
+            .compiled
+            .inbounds
+            .iter()
+            .filter(|inbound| inbound.kind != "tun" && inbound.port != 0)
+            .collect();
+        let single_mixed = proxy_inbounds.len() == 1 && proxy_inbounds[0].kind == "mixed";
+        proxy_inbounds
+            .into_iter()
+            .map(|inbound| {
+                let listen = applied
+                    .model
+                    .inbounds
+                    .iter()
+                    .find(|i| i.tag == inbound.tag || format!("{}-http", i.tag) == inbound.tag)
+                    .map(|i| i.listen_address().to_string())
+                    .unwrap_or_else(|| {
+                        if inbound.allow_lan {
+                            "0.0.0.0".into()
+                        } else if applied.settings.listen_host.is_empty() {
+                            "127.0.0.1".into()
+                        } else {
+                            applied.settings.listen_host.clone()
+                        }
+                    });
+                if single_mixed {
+                    format!("{listen}:{}", inbound.port)
+                } else {
+                    format!(
+                        "{} {listen}:{}",
+                        inbound.kind.to_ascii_uppercase(),
+                        inbound.port
+                    )
+                }
+            })
+            .collect()
+    }
+
+    /// Active TUN interface name when TUN is running in the current core.
+    pub fn active_tun_interface(&self) -> Option<String> {
+        if !self.native_tun_active() {
+            return None;
+        }
+        for entry in self
+            .logs
+            .recent(200, crate::settings::LogLevel::Trace, "")
+            .into_iter()
+            .rev()
+        {
+            if entry.stream == LogStream::App && entry.message.starts_with("启动 ") {
+                break;
+            }
+            if let Some((_, rest)) = entry.message.split_once("inbound/tun[") {
+                if let Some((_, iface)) = rest.split_once("]: started at ") {
+                    let iface = iface.trim();
+                    if !iface.is_empty() {
+                        return Some(iface.to_string());
+                    }
+                }
+            }
+        }
+        let configured = self.applied.lock().as_ref().and_then(|applied| {
+            applied
+                .model
+                .inbounds
+                .iter()
+                .find(|inbound| inbound.enabled && inbound.kind == crate::model::InboundKind::Tun)
+                .and_then(|inbound| inbound.tun.interface_name.clone())
+                .filter(|name| !name.trim().is_empty())
+        });
+        Some(configured.unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "utun".to_string()
+            } else {
+                "tun0".to_string()
+            }
+        }))
     }
 
     pub fn last_compiled(&self) -> Option<CompiledConfig> {

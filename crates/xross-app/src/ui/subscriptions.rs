@@ -5,9 +5,9 @@ use gpui_kit::*;
 use xross_core::subscription::Subscription;
 use xross_core::util::{format_bytes, format_duration_secs};
 
+use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
-use super::AppView;
 
 impl AppView {
     pub(crate) fn page_subscriptions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
