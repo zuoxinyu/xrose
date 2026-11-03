@@ -1,4 +1,4 @@
-//! Session-owned Windows proxy cores, supervised by the privileged helper.
+//! Session-owned proxy cores for TUN mode, supervised by the privileged helper.
 use crate::{core::process::SpawnSpec, paths::AppPaths, Error, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,7 @@ pub struct Reply {
 struct Running {
     owner_pid: u32,
     child: std::process::Child,
+    data_dir: PathBuf,
     lines: Arc<Mutex<std::collections::VecDeque<(bool, String)>>>,
     // Readers terminate when the core closes its pipes.
     readers: Vec<std::thread::JoinHandle<()>>,
@@ -45,12 +46,102 @@ struct Running {
 
 impl Drop for Running {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        #[cfg(unix)]
+        {
+            unsafe extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+                fn chown(path: *const std::ffi::c_char, owner: u32, group: u32) -> i32;
+            }
+            let pid = self.child.id() as i32;
+            if pid > 0 {
+                unsafe {
+                    kill(pid, 15);
+                }
+                let deadline = std::time::Instant::now() + Duration::from_millis(600);
+                while std::time::Instant::now() < deadline {
+                    if matches!(self.child.try_wait(), Ok(Some(_))) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(30));
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if let Some(uid) = super::privilege::allowed_uid() {
+                use std::os::unix::ffi::OsStrExt;
+                let cache = self.data_dir.join("cache.db");
+                if let Ok(c_path) = std::ffi::CString::new(cache.as_os_str().as_bytes()) {
+                    unsafe {
+                        chown(c_path.as_ptr(), uid, u32::MAX);
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
 static RUNNING: OnceLock<Mutex<BTreeMap<String, Running>>> = OnceLock::new();
+
+pub fn stop_all() {
+    if let Some(running) = RUNNING.get() {
+        running.lock().clear();
+    }
+}
+
+fn resolve_paths(binary: &std::path::Path, config: &std::path::Path) -> AppPaths {
+    let mut paths = AppPaths::discover();
+    #[cfg(unix)]
+    if !binary.starts_with(&paths.data_dir) {
+        use std::os::unix::fs::MetadataExt;
+        let allowed = super::privilege::allowed_uid();
+        let uid_ok = |uid: u32| uid == 0 || Some(uid) == allowed;
+        let binary_canon = binary.canonicalize().ok();
+        let config_canon = config.canonicalize().ok();
+        if let (Some(bin), Some(cfg)) = (binary_canon.as_deref(), config_canon.as_deref()) {
+            for ancestor in bin.ancestors() {
+                if ancestor.join("cores").join("manifest.json").is_file() {
+                    let dir_ok = std::fs::metadata(ancestor)
+                        .map(|m| uid_ok(m.uid()))
+                        .unwrap_or(false);
+                    let cfg_ok = std::fs::metadata(cfg)
+                        .map(|m| uid_ok(m.uid()))
+                        .unwrap_or(false);
+                    if dir_ok && cfg_ok {
+                        paths.data_dir = ancestor.to_path_buf();
+                        paths.config_dir = ancestor.to_path_buf();
+                        paths.cache_dir = ancestor.join("cache");
+                        let data_run = ancestor.join("run");
+                        if cfg.starts_with(&data_run) {
+                            paths.runtime_dir = data_run;
+                        } else if let Some(root_run) = ancestor.parent().map(|p| p.join("run")) {
+                            if cfg.starts_with(&root_run) {
+                                paths.runtime_dir = root_run;
+                            } else if let Some(parent) = cfg.parent() {
+                                let parent_ok = std::fs::metadata(parent)
+                                    .map(|m| uid_ok(m.uid()))
+                                    .unwrap_or(false)
+                                    && parent
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .is_some_and(|n| n == "xross" || n.starts_with("xross-"));
+                                if parent_ok {
+                                    paths.runtime_dir = parent.to_path_buf();
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    paths
+}
 
 fn validate_start(
     paths: &AppPaths,
@@ -99,6 +190,7 @@ fn validate_start(
 }
 
 pub fn dispatch(request: &Request) -> Result<Reply> {
+    #[cfg(windows)]
     use std::os::windows::{io::AsRawHandle, process::CommandExt};
     if request.version != VERSION || uuid::Uuid::parse_str(&request.session).is_err() {
         return Err(Error::other("TUN 助手协议不兼容，请重新安装提权助手"));
@@ -119,9 +211,10 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
             if map.values().any(|r| r.owner_pid == request.owner_pid) {
                 return Err(Error::other("该客户端已有 TUN 核心，请先停止"));
             }
-            let paths = AppPaths::discover();
+            let paths = resolve_paths(binary, config);
             validate_start(&paths, binary, config)?;
-            let mut child = std::process::Command::new(binary)
+            let mut command = std::process::Command::new(binary);
+            command
                 .args(crate::core::run_args(
                     crate::model::CoreKind::SingBox,
                     config,
@@ -129,10 +222,13 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
                 .current_dir(&paths.data_dir)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .creation_flags(0x08000000)
+                .stderr(std::process::Stdio::piped());
+            #[cfg(windows)]
+            command.creation_flags(0x08000000);
+            let mut child = command
                 .spawn()
-                .map_err(|_| Error::process("特权助手无法启动 TUN 核心"))?;
+                .map_err(|_| Error::process("提权助手无法启动 TUN 核心"))?;
+            #[cfg(windows)]
             if crate::core::job::adopt(child.as_raw_handle()).is_err() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -149,6 +245,7 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
                 Running {
                     owner_pid: request.owner_pid,
                     child,
+                    data_dir: paths.data_dir.clone(),
                     lines,
                     readers,
                 },
@@ -309,9 +406,8 @@ impl Client {
         self.pid
     }
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        use std::os::windows::process::ExitStatusExt;
         if self.stopped {
-            return Ok(std::process::ExitStatus::from_raw(1));
+            return Ok(exit_status_from_code(1));
         }
         loop {
             let reply = self
@@ -334,7 +430,7 @@ impl Client {
                 }
             }
             if let Some(code) = reply.exit_code {
-                return Ok(std::process::ExitStatus::from_raw(code));
+                return Ok(exit_status_from_code(code));
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -348,6 +444,19 @@ impl Client {
             .map_err(std::io::Error::other)?;
         self.stopped = true;
         Ok(())
+    }
+}
+
+fn exit_status_from_code(code: u32) -> std::process::ExitStatus {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(((code & 0xff) as i32) << 8)
     }
 }
 
@@ -371,18 +480,28 @@ mod tests {
 
     #[test]
     fn crashed_owner_reaps_its_core_without_client_polling() {
-        use std::os::windows::process::CommandExt;
         let launch = || {
-            std::process::Command::new("powershell.exe")
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "Start-Sleep -Seconds 30",
-                ])
-                .creation_flags(0x08000000)
-                .spawn()
-                .unwrap()
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                std::process::Command::new("powershell.exe")
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Start-Sleep -Seconds 30",
+                    ])
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .unwrap()
+            }
+            #[cfg(unix)]
+            {
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .unwrap()
+            }
         };
         let mut owner_child = launch();
         let owner = crate::mesh::platform::OwnerProcess::open(owner_child.id()).unwrap();
@@ -394,6 +513,7 @@ mod tests {
             Running {
                 owner_pid: owner_child.id(),
                 child,
+                data_dir: std::env::temp_dir(),
                 lines: Default::default(),
                 readers: vec![],
             },
@@ -435,5 +555,24 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("摘要"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_user_data_and_runtime_dirs_from_registered_binary_and_config() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path());
+        paths.ensure().unwrap();
+        let bin_dir = paths.cores_dir().join("sing-box").join("1.14.4");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let binary = bin_dir.join("sing-box");
+        std::fs::write(&binary, b"fake core").unwrap();
+        let config = paths.runtime_dir.join("sing-box-config.json");
+        std::fs::write(&config, br#"{"inbounds":[{"type":"tun"}]}"#).unwrap();
+        crate::core::BinaryManager::new(&paths)
+            .adopt_existing(crate::model::CoreKind::SingBox, "1.14.4", &binary)
+            .unwrap();
+        let resolved = resolve_paths(&binary, &config);
+        assert!(validate_start(&resolved, &binary, &config).is_ok());
     }
 }

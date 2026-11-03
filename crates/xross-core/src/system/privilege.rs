@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Stream};
+use interprocess::local_socket::{prelude::*, ListenerOptions, Stream};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -46,7 +46,6 @@ const SYSTEMD_UNIT: &str = "xross-helper.service";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum HelperRequest {
-    #[cfg(windows)]
     TunCore {
         request: Box<super::tun_process::Request>,
     },
@@ -162,13 +161,35 @@ impl HelperStatus {
     }
 }
 
+#[cfg(unix)]
+pub(crate) fn unix_socket_path() -> std::path::PathBuf {
+    let raw = std::env::var("XROSS_HELPER_SOCKET").unwrap_or_else(|_| SOCKET_NAME.into());
+    let path = std::path::PathBuf::from(&raw);
+    if path.is_absolute() {
+        path
+    } else {
+        std::path::PathBuf::from("/tmp").join(raw)
+    }
+}
+
 fn socket_name() -> Result<interprocess::local_socket::Name<'static>> {
     // A foreground test helper can use an isolated pipe without replacing the
     // installed helper or accepting commands from the user's running GUI.
-    std::env::var("XROSS_HELPER_SOCKET")
-        .unwrap_or_else(|_| SOCKET_NAME.into())
-        .to_ns_name::<GenericNamespaced>()
-        .map_err(|e| Error::other(format!("无效的 helper socket 名：{e}")))
+    #[cfg(unix)]
+    {
+        use interprocess::local_socket::GenericFilePath;
+        unix_socket_path()
+            .to_fs_name::<GenericFilePath>()
+            .map_err(|e| Error::other(format!("无效的 helper socket 名：{e}")))
+    }
+    #[cfg(not(unix))]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        std::env::var("XROSS_HELPER_SOCKET")
+            .unwrap_or_else(|_| SOCKET_NAME.into())
+            .to_ns_name::<GenericNamespaced>()
+            .map_err(|e| Error::other(format!("无效的 helper socket 名：{e}")))
+    }
 }
 
 /// Calls the privileged helper. Fails fast when it is not installed.
@@ -179,7 +200,7 @@ pub fn call(request: &HelperRequest) -> Result<HelperResponse> {
 pub fn call_with_timeout(request: &HelperRequest, timeout: Duration) -> Result<HelperResponse> {
     let name = socket_name()?;
     let mut stream = Stream::connect(name)
-        .map_err(|e| Error::other(format!("无法连接特权助手（未安装或未运行）：{e}")))?;
+        .map_err(|e| Error::other(format!("无法连接提权助手（未安装或未运行）：{e}")))?;
     stream.set_recv_timeout(Some(timeout)).ok();
     stream.set_send_timeout(Some(timeout)).ok();
     let line = serde_json::to_string(request)?;
@@ -202,8 +223,16 @@ pub fn serve<F>(handler: F) -> Result<()>
 where
     F: FnMut(HelperRequest) -> HelperResponse + Send + 'static,
 {
+    #[cfg(unix)]
+    let socket_path = {
+        let path = unix_socket_path();
+        let _ = std::fs::remove_file(&path);
+        path
+    };
     let name = socket_name()?;
     let options = ListenerOptions::new().name(name);
+    #[cfg(unix)]
+    let options = options.try_overwrite(true);
     #[cfg(windows)]
     let options = {
         use interprocess::os::windows::local_socket::ListenerOptionsExt;
@@ -212,6 +241,13 @@ where
     let listener = options
         .create_sync()
         .map_err(|e| Error::other(format!("创建 helper socket 失败：{e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Allow unprivileged client UIDs to connect(2) to the root-owned socket;
+        // `authorize` and `peer_pid` enforce UID/PID checks via kernel peer credentials.
+        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666));
+    }
     let mut handler = handler;
     for connection in listener {
         let Ok(mut stream) = connection else { continue };
@@ -236,23 +272,15 @@ where
             continue;
         }
         let response = match serde_json::from_str::<HelperRequest>(line.trim()) {
-            #[cfg(windows)]
             Ok(HelperRequest::TunCore { request }) => {
-                if stream
-                    .peer_creds()
-                    .ok()
-                    .and_then(|c| c.pid())
-                    .map(|pid| pid as u32)
-                    != Some(request.owner_pid)
-                {
+                if peer_pid(&stream) != Some(request.owner_pid) {
                     HelperResponse::error("TUN 调用进程身份校验失败")
                 } else {
                     handler(HelperRequest::TunCore { request })
                 }
             }
             Ok(HelperRequest::Mesh { request }) => {
-                let peer_pid = stream.peer_creds().ok().and_then(|c| c.pid());
-                if peer_pid.map(|pid| pid as u32) != Some(request.owner_pid) {
+                if peer_pid(&stream) != Some(request.owner_pid) {
                     HelperResponse::error("组网调用进程身份校验失败")
                 } else {
                     handler(HelperRequest::Mesh { request })
@@ -269,6 +297,9 @@ where
             break;
         }
     }
+    super::tun_process::stop_all();
+    #[cfg(unix)]
+    let _ = std::fs::remove_file(&socket_path);
     Ok(())
 }
 
@@ -276,7 +307,6 @@ where
 /// `xross-cli helper` so both behave identically.
 pub fn handle_request(request: HelperRequest) -> HelperResponse {
     match request {
-        #[cfg(windows)]
         HelperRequest::TunCore { request } => match super::tun_process::dispatch(&request) {
             Ok(reply) => match serde_json::to_string(&reply) {
                 Ok(message) => HelperResponse::ok(message),
@@ -303,7 +333,10 @@ pub fn handle_request(request: HelperRequest) -> HelperResponse {
         HelperRequest::RestoreSystemDns => platform::restore_system_dns(),
         HelperRequest::ApplyTransparentRules { port } => platform::apply_transparent_rules(port),
         HelperRequest::ClearTransparentRules => platform::clear_transparent_rules(),
-        HelperRequest::Shutdown => HelperResponse::stop("提权助手已退出"),
+        HelperRequest::Shutdown => {
+            super::tun_process::stop_all();
+            HelperResponse::stop("提权助手已退出")
+        }
     }
 }
 
@@ -452,11 +485,11 @@ fn compute_status() -> HelperStatus {
     let detail = if !supported {
         "该操作系统没有可用的提权助手实现".to_string()
     } else if running {
-        "助手正在运行：可代为准备 TUN、修改系统 DNS 与透明代理规则".to_string()
+        "助手正在运行：可代启 TUN 核心、修改系统 DNS 与透明代理规则".to_string()
     } else if installed {
         "已安装但未运行：点击“启动”或重新安装".to_string()
     } else {
-        "尚未安装：TUN 仍由 core 自行处理，修改系统 DNS / 透明代理不可用".to_string()
+        "尚未安装：开启 TUN、修改系统 DNS 或透明代理前需安装提权助手".to_string()
     };
     HelperStatus {
         supported,
@@ -701,13 +734,65 @@ fn run_helper() -> Result<()> {
 /// UID allowed to talk to the helper (Unix). Root is always accepted.
 static ALLOWED_UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
+#[cfg(unix)]
+pub(crate) fn allowed_uid() -> Option<u32> {
+    ALLOWED_UID.get().copied().or_else(|| {
+        let uid = libc_geteuid();
+        (uid != 0).then_some(uid)
+    })
+}
+
+fn peer_pid(stream: &Stream) -> Option<u32> {
+    if let Some(pid) = stream.peer_creds().ok().and_then(|c| c.pid()) {
+        return Some(pid as u32);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::{AsFd, AsRawFd};
+        #[allow(irrefutable_let_patterns)]
+        let Stream::UdSocket(ref socket) = *stream
+        else {
+            return None;
+        };
+        unsafe extern "C" {
+            fn getsockopt(
+                socket: std::ffi::c_int,
+                level: std::ffi::c_int,
+                option_name: std::ffi::c_int,
+                option_value: *mut std::ffi::c_void,
+                option_len: *mut u32,
+            ) -> std::ffi::c_int;
+        }
+        const SOL_LOCAL: std::ffi::c_int = 0;
+        const LOCAL_PEERPID: std::ffi::c_int = 2;
+        let mut pid: i32 = 0;
+        let mut len = std::mem::size_of::<i32>() as u32;
+        let rc = unsafe {
+            getsockopt(
+                socket.as_fd().as_raw_fd(),
+                SOL_LOCAL,
+                LOCAL_PEERPID,
+                (&mut pid as *mut i32).cast(),
+                &mut len,
+            )
+        };
+        if rc == 0 && pid > 0 {
+            return Some(pid as u32);
+        }
+    }
+    None
+}
+
 fn authorize(stream: &Stream) -> bool {
     #[cfg(unix)]
     {
         match stream.peer_creds() {
             Ok(creds) => match creds.euid() {
                 Some(0) => true,
-                Some(uid) => ALLOWED_UID.get().copied() == Some(uid),
+                Some(uid) => {
+                    let expected = ALLOWED_UID.get().copied().unwrap_or_else(libc_geteuid);
+                    uid == expected
+                }
                 None => false,
             },
             Err(_) => false,
@@ -1056,7 +1141,7 @@ mod platform {
 
     pub fn prepare_tun(interface: &str) -> HelperResponse {
         HelperResponse::ok(format!(
-            "TUN 接口“{interface}”将由特权助手代启 sing-box 创建；驱动由客户端在启动前校验部署"
+            "TUN 接口“{interface}”将由提权助手代启 sing-box 创建；驱动由客户端在启动前校验部署"
         ))
     }
 
@@ -1172,13 +1257,14 @@ mod platform {
     <string>{uid}</string>
   </array>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><false/>
+  <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>
 "#,
             xml_escape(&exe.to_string_lossy())
         );
+        let _ = super::request_shutdown();
         if let Some(parent) = Path::new(PLIST).parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error::other(format!("创建 {} 失败：{e}", parent.display())))?;
@@ -1186,9 +1272,12 @@ mod platform {
         std::fs::write(PLIST, plist)
             .map_err(|e| Error::other(format!("写入 {PLIST} 失败：{e}")))?;
         let _ = std::fs::set_permissions(PLIST, std::fs::Permissions::from_mode(0o644));
+        let target = format!("system/{LAUNCHD_LABEL}");
         let _ = Command::new("launchctl")
-            .args(["bootout", &format!("system/{LAUNCHD_LABEL}")])
+            .args(["bootout", &target])
             .status();
+        let _ = std::fs::remove_file(super::unix_socket_path());
+        let _ = Command::new("launchctl").args(["enable", &target]).status();
         let bootstrapped = Command::new("launchctl")
             .args(["bootstrap", "system", PLIST])
             .status()
@@ -1199,28 +1288,14 @@ mod platform {
                 .args(["load", "-w", PLIST])
                 .status();
         }
+        let _ = Command::new("launchctl")
+            .args(["kickstart", "-k", &target])
+            .status();
         Ok(format!("已安装提权助手（LaunchDaemon {LAUNCHD_LABEL}）"))
     }
 
     pub fn start() -> Result<String> {
-        let target = format!("system/{LAUNCHD_LABEL}");
-        let kicked = Command::new("launchctl")
-            .args(["kickstart", "-k", &target])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !kicked {
-            let output = Command::new("launchctl")
-                .args(["load", "-w", PLIST])
-                .output()
-                .map_err(|e| Error::other(format!("launchctl load 失败：{e}")))?;
-            if !output.status.success() {
-                return Err(Error::other(format!(
-                    "launchctl 启动失败：{}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-        }
+        let _ = install()?;
         Ok("已请求 launchd 启动提权助手".into())
     }
 
@@ -1231,6 +1306,7 @@ mod platform {
         let _ = Command::new("launchctl")
             .args(["unload", "-w", PLIST])
             .status();
+        let _ = std::fs::remove_file(super::unix_socket_path());
         if Path::new(PLIST).exists() {
             std::fs::remove_file(PLIST)
                 .map_err(|e| Error::other(format!("删除 {PLIST} 失败：{e}")))?;
@@ -1265,8 +1341,10 @@ mod platform {
         }
     }
 
-    pub fn prepare_tun(_interface: &str) -> HelperResponse {
-        HelperResponse::unsupported("macOS 使用系统 utun，TUN 无需预先创建设备")
+    pub fn prepare_tun(interface: &str) -> HelperResponse {
+        HelperResponse::ok(format!(
+            "TUN 接口“{interface}”将由提权助手代启 sing-box 创建"
+        ))
     }
 
     pub fn remove_tun(_interface: &str) -> HelperResponse {
@@ -1441,6 +1519,7 @@ mod platform {
     }
 
     pub fn start() -> Result<String> {
+        let _ = std::fs::remove_file(super::unix_socket_path());
         run("systemctl", &["restart", SYSTEMD_UNIT])?;
         Ok("已请求 systemd 启动提权助手".into())
     }
@@ -1449,6 +1528,7 @@ mod platform {
         let _ = Command::new("systemctl")
             .args(["disable", "--now", SYSTEMD_UNIT])
             .status();
+        let _ = std::fs::remove_file(super::unix_socket_path());
         if Path::new(UNIT_PATH).exists() {
             std::fs::remove_file(UNIT_PATH)
                 .map_err(|e| Error::other(format!("删除 {UNIT_PATH} 失败：{e}")))?;
@@ -1481,7 +1561,7 @@ mod platform {
         }
         if device.exists() {
             HelperResponse::ok(format!(
-                "/dev/net/tun 已就绪，TUN 接口“{interface}”由 core 创建"
+                "/dev/net/tun 已就绪，TUN 接口“{interface}”将由提权助手代启 sing-box 创建"
             ))
         } else {
             HelperResponse::error(
@@ -1728,6 +1808,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn scoped_pipe_accepts_and_authenticates_its_user() {
+        use interprocess::local_socket::GenericNamespaced;
         use interprocess::os::windows::local_socket::ListenerOptionsExt;
         let name = format!("io.xross.helper-test.{}", uuid::Uuid::new_v4())
             .to_ns_name::<GenericNamespaced>()
@@ -1740,6 +1821,24 @@ mod tests {
         let _client = Stream::connect(name).unwrap();
         let accepted = listener.accept().unwrap();
         assert!(authorize(&accepted));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_socket_accepts_and_authenticates_its_user_and_pid() {
+        use interprocess::local_socket::GenericFilePath;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("helper.sock");
+        let name = path.clone().to_fs_name::<GenericFilePath>().unwrap();
+        let listener = ListenerOptions::new()
+            .name(name.clone())
+            .try_overwrite(true)
+            .create_sync()
+            .unwrap();
+        let _client = Stream::connect(name).unwrap();
+        let accepted = listener.accept().unwrap();
+        assert!(authorize(&accepted));
+        assert_eq!(peer_pid(&accepted), Some(std::process::id()));
     }
 
     #[test]

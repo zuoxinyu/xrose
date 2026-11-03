@@ -98,13 +98,13 @@ pub(crate) fn diagnose_for_process(
         {
             checks.push(DoctorCheck::ok(
                 "Wintun",
-                "启动 TUN 前自动校验并部署驱动，由特权助手代启核心",
+                "启动 TUN 前自动校验并部署驱动，由提权助手代启核心",
             ));
         }
         if !super::privilege::is_elevated() && !super::privilege::helper_available() {
             checks.push(DoctorCheck::warn(
                 "权限",
-                "TUN 路由通常需要管理员/root 权限，或安装 Xross 特权助手",
+                "TUN 路由通常需要管理员/root 权限，或安装 Xross 提权助手",
             ));
         } else {
             checks.push(DoctorCheck::ok("权限", "已具备提升权限或助手可用"));

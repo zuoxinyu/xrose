@@ -267,12 +267,38 @@ mod tests {
         assert!(!root.path().join("dns-owner.json").exists());
     }
 }
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub struct OwnerProcess(i32);
+#[cfg(unix)]
+impl OwnerProcess {
+    pub fn open(pid: u32) -> Result<Self> {
+        let pid = i32::try_from(pid)
+            .ok()
+            .filter(|&p| p > 0)
+            .ok_or_else(|| Error::other("所属进程无效"))?;
+        let owner = Self(pid);
+        if !owner.alive() {
+            return Err(Error::other("所属进程已退出或不可访问"));
+        }
+        Ok(owner)
+    }
+    pub fn alive(&self) -> bool {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        if unsafe { kill(self.0, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(1)
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub struct OwnerProcess;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, unix)))]
 impl OwnerProcess {
     pub fn open(_: u32) -> Result<Self> {
-        Err(Error::other("异地组网当前仅在 Windows 启用"))
+        Err(Error::other("当前平台不支持进程归属检测"))
     }
     pub fn alive(&self) -> bool {
         false

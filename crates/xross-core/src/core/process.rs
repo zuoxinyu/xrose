@@ -383,7 +383,6 @@ async fn run_loop(mut ctx: RunContext) {
 
 enum Child {
     Local(tokio::process::Child),
-    #[cfg(windows)]
     Elevated(crate::system::tun_process::Client),
 }
 
@@ -391,21 +390,18 @@ impl Child {
     fn id(&self) -> Option<u32> {
         match self {
             Self::Local(child) => child.id(),
-            #[cfg(windows)]
             Self::Elevated(child) => Some(child.id()),
         }
     }
     async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         match self {
             Self::Local(child) => child.wait().await,
-            #[cfg(windows)]
             Self::Elevated(child) => child.wait().await,
         }
     }
     async fn start_kill(&mut self) -> std::io::Result<()> {
         match self {
             Self::Local(child) => child.start_kill(),
-            #[cfg(windows)]
             Self::Elevated(child) => child.stop().await,
         }
     }
@@ -418,7 +414,6 @@ async fn spawn_child(ctx: &RunContext) -> std::io::Result<Child> {
             format!("找不到 core 可执行文件：{}", ctx.spec.program.display()),
         ));
     }
-    #[cfg(windows)]
     if ctx.spec.elevated_tun && !crate::system::privilege::is_elevated() {
         return crate::system::tun_process::Client::start(
             &ctx.spec,

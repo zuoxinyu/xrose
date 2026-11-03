@@ -919,8 +919,8 @@ impl AppView {
                             ))
                         })
                         .child(self.tr(
-                            "Windows TUN 需要安装并启动新版助手；Wintun 驱动会在启动前自动校验部署",
-                            "Windows TUN requires the current helper to be installed and running; Wintun is verified and deployed automatically before startup",
+                            "TUN 模式需要安装并启动提权助手代启 sing-box；Windows 下 Wintun 驱动会在启动前自动校验部署",
+                            "TUN mode requires the privilege helper to launch sing-box; on Windows, Wintun is verified and deployed automatically before startup",
                         )),
                 )
                 .child(

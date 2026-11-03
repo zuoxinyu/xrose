@@ -25,7 +25,7 @@ impl AppPaths {
                 config_dir: dirs.config_dir().to_path_buf(),
                 data_dir: dirs.data_dir().to_path_buf(),
                 cache_dir: dirs.cache_dir().to_path_buf(),
-                runtime_dir: runtime_dir(),
+                runtime_dir: runtime_dir(dirs.data_dir()),
             },
             None => Self::from_root(&std::env::temp_dir().join("xross")),
         }
@@ -93,7 +93,7 @@ impl AppPaths {
     }
 }
 
-fn runtime_dir() -> PathBuf {
+fn runtime_dir(data_dir: &Path) -> PathBuf {
     #[cfg(unix)]
     {
         if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
@@ -101,10 +101,11 @@ fn runtime_dir() -> PathBuf {
                 return PathBuf::from(dir).join("xross");
             }
         }
-        std::env::temp_dir().join(format!("xross-{}", std::process::id()))
+        data_dir.join("run")
     }
     #[cfg(not(unix))]
     {
+        let _ = data_dir;
         std::env::temp_dir().join("xross")
     }
 }

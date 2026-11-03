@@ -1267,6 +1267,11 @@ impl AppService {
                 service.toast(ToastLevel::Error, err);
                 return;
             }
+            if let Err(err) = service.ensure_tun_helper().await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, err);
+                return;
+            }
             if let Some(warning) = service.prepare_tun_via_helper().await {
                 service.toast(
                     ToastLevel::Warning,
@@ -1366,6 +1371,11 @@ impl AppService {
             if was_running {
                 // Prepare dependencies before stopping the working core.
                 if let Err(err) = service.ensure_rule_sets().await {
+                    service.set_busy("core", false);
+                    service.toast(ToastLevel::Error, err);
+                    return;
+                }
+                if let Err(err) = service.ensure_tun_helper().await {
                     service.set_busy("core", false);
                     service.toast(ToastLevel::Error, err);
                     return;
@@ -1974,6 +1984,53 @@ impl AppService {
             .and_then(|inbound| inbound.tun.interface_name.clone())
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "xross-tun".to_string())
+    }
+
+    /// Ensures the privileged helper is running before spawning an elevated TUN core.
+    async fn ensure_tun_helper(&self) -> std::result::Result<(), String> {
+        if !self.inner.settings.read().effective_tun() || privilege::is_elevated() {
+            return Ok(());
+        }
+        let result = tokio::task::spawn_blocking(|| {
+            let current = privilege::status();
+            if current.running {
+                return (Ok(String::new()), current);
+            }
+            privilege::invalidate_status();
+            let current = privilege::status();
+            if current.running {
+                return (Ok(String::new()), current);
+            }
+            let outcome = if current.installed {
+                privilege::start()
+            } else {
+                privilege::install()
+            };
+            (outcome, privilege::status())
+        })
+        .await;
+        match result {
+            Ok((_, status)) if status.running => {
+                *self.inner.helper.write() = status;
+                Ok(())
+            }
+            Ok((Err(err), status)) => {
+                *self.inner.helper.write() = status;
+                Err(format!("开启 TUN 需要提权助手运行：{err}"))
+            }
+            Ok((Ok(message), status)) => {
+                *self.inner.helper.write() = status;
+                Err(format!(
+                    "开启 TUN 需要提权助手运行：{}",
+                    if message.is_empty() {
+                        "提权助手未能启动，请在设置 → 系统集成中检查助手状态"
+                    } else {
+                        &message
+                    }
+                ))
+            }
+            Err(err) => Err(format!("启动提权助手任务异常：{err}")),
+        }
     }
 
     /// Asks the helper to prepare privileges for TUN. Returns a warning only
