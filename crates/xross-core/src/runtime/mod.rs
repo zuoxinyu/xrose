@@ -3,10 +3,11 @@
 pub mod clash;
 pub mod latency;
 pub mod location;
+pub mod probe;
 pub mod xray_stats;
 
 pub use clash::{ClashClient, ClashConnection, ClashProxy, ConnectionsResponse};
-pub use latency::{tcping, test_many, LatencyResult};
+pub use latency::{LatencyResult, tcping, test_many};
 pub use xray_stats::{XrayStatsClient, XrayTraffic};
 
 use std::collections::VecDeque;

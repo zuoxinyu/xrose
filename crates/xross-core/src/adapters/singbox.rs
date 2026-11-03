@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{
-    action_tag, dns_server_rule, network_str, proxy_group_tag, resolve_rule_set, split_dns_domains,
-    CompileContext, CompiledConfig, CompiledInbound, CoreAdapter,
+    CompileContext, CompiledConfig, CompiledInbound, CoreAdapter, action_tag, dns_server_rule,
+    network_str, proxy_group_tag, resolve_rule_set, split_dns_domains,
 };
 use crate::error::{Error, Result};
 use crate::model::{
@@ -417,6 +417,17 @@ fn tun_inbound(inbound: &Inbound) -> Value {
     value
 }
 
+/// Minimal configuration used only by private per-node probes.
+pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+    Ok(json!({
+        "log": {"disabled": true},
+        "dns": {"servers": [{"type": "local", "tag": "local"}]},
+        "inbounds": [{"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port}],
+        "outbounds": [node_outbound(node, &mut [])?],
+        "route": {"auto_detect_interface": true, "default_domain_resolver": "local", "final": node.outbound_tag()}
+    }))
+}
+
 fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
     let _ = warnings;
     let mut outbound = match node.protocol {
@@ -458,14 +469,15 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
             }
             value
         }
-        Protocol::Trojan => {
+        Protocol::Trojan | Protocol::Anytls => {
             let password = node
                 .credentials
                 .password
                 .as_ref()
+                .filter(|password| !password.is_empty())
                 .ok_or_else(|| Error::config("缺少密码"))?;
             json!({
-                "type": "trojan",
+                "type": node.protocol.as_str(),
                 "tag": node.outbound_tag(),
                 "server": node.server,
                 "server_port": node.port,
@@ -585,6 +597,11 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
     if let Some(tls) = tls_json(node) {
         outbound["tls"] = tls;
     }
+    if node.protocol == Protocol::Anytls && !matches!(node.transport, Transport::Tcp) {
+        return Err(Error::config(
+            "AnyTLS 不支持叠加 WebSocket / gRPC 等传输，请使用 TCP",
+        ));
+    }
     if let Some(transport) = transport_json(node) {
         outbound["transport"] = transport;
     }
@@ -593,7 +610,10 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
 
 fn tls_json(node: &Node) -> Option<Value> {
     let tls = &node.tls;
-    let required = matches!(node.protocol, Protocol::Hysteria2 | Protocol::Tuic);
+    let required = matches!(
+        node.protocol,
+        Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+    );
     if !tls.enabled && !required && tls.reality.is_none() {
         return None;
     }
@@ -1064,6 +1084,35 @@ fn build_dns(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anytls_emits_required_tls_and_private_probe_route() {
+        let mut node = Node::new("test", Protocol::Anytls, "example.com", 443);
+        node.credentials.password = Some("fake".into());
+        node.tls.server_name = Some("tls.example.com".into());
+        let (mut model, settings, ctx) = sample();
+        model.add_nodes(vec![node.clone()]);
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let outbound = compiled.json["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["type"] == "anytls")
+            .unwrap();
+        assert_eq!(outbound["password"], "fake");
+        assert_eq!(outbound["tls"]["enabled"], true);
+        assert_eq!(outbound["tls"]["server_name"], "tls.example.com");
+        assert!(outbound.get("transport").is_none());
+        let probe = super::super::compile_probe(CoreKind::SingBox, &node, 12345).unwrap();
+        assert_eq!(probe["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(probe["route"]["final"], node.outbound_tag());
+        assert_eq!(probe["route"]["auto_detect_interface"], true);
+        assert_eq!(probe["inbounds"][0]["listen"], "127.0.0.1");
+        assert!(probe.get("experimental").is_none());
+        assert!(probe["route"].get("rules").is_none());
+        node.credentials.password = None;
+        assert!(super::super::compile_probe(CoreKind::SingBox, &node, 12345).is_err());
+    }
+
     use super::*;
     use crate::model::{AppModel, Node, Protocol};
     use crate::settings::Settings;
@@ -1138,14 +1187,18 @@ mod tests {
             .iter()
             .find(|v| v["type"] == "tun")
             .unwrap();
-        assert!(tun["route_exclude_address"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("100.64.0.0/10")));
-        assert!(tun["route_exclude_address"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("192.0.2.0/24")));
+        assert!(
+            tun["route_exclude_address"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("100.64.0.0/10"))
+        );
+        assert!(
+            tun["route_exclude_address"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("192.0.2.0/24"))
+        );
         assert_eq!(tun["strict_route"], json!(!cfg!(windows)));
         assert_eq!(
             compiled.json["dns"]["rules"][0]["server"],
@@ -1231,11 +1284,13 @@ mod tests {
                 .unwrap()
                 .url
         );
-        assert!(compiled.json["route"]["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|rule| rule["rule_set"] == json!(["geosite-gfw"])));
+        assert!(
+            compiled.json["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|rule| rule["rule_set"] == json!(["geosite-gfw"]))
+        );
         let mut legacy = super::super::default_rule_set("geosite-gfw").unwrap();
         legacy.url =
             "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs"

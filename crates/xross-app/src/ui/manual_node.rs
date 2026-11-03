@@ -3,15 +3,16 @@
 //! The form only collects text; [`xross_core::model::NodeDraft`] owns the
 //! validation rules so the CLI and the UI cannot drift apart.
 
+use gpui_base::Disableable;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::{NodeDraft, Protocol, TransportKind};
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 pub(crate) struct ManualNodeForm {
     pub name: Entity<InputState>,
@@ -193,6 +194,7 @@ impl AppView {
         let needs_password = matches!(
             protocol,
             Protocol::Trojan
+                | Protocol::Anytls
                 | Protocol::Hysteria2
                 | Protocol::Shadowsocks
                 | Protocol::Tuic
@@ -203,7 +205,10 @@ impl AppView {
         let has_credentials =
             needs_uuid || needs_password || needs_username || protocol == Protocol::Vless;
         let tls_capable = !protocol.is_plain_proxy();
-        let transport_capable = !matches!(protocol, Protocol::Hysteria2 | Protocol::Tuic);
+        let transport_capable = !matches!(
+            protocol,
+            Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+        );
 
         let mut credentials = div().flex().flex_col().gap_2();
         if needs_uuid {
@@ -343,6 +348,10 @@ impl AppView {
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.manual_form.protocol = candidate;
+                                        if matches!(candidate, Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls) {
+                                            this.manual_form.tls = true;
+                                            this.manual_form.transport = TransportKind::Tcp;
+                                        }
                                         this.manual_error = None;
                                         cx.notify();
                                     }))
@@ -393,7 +402,7 @@ impl AppView {
                                 .items_center()
                                 .gap_4()
                                 .child(
-                                    toggle("manual-tls", "TLS", tls).on_change(cx.listener(
+                                    toggle("manual-tls", "TLS", tls || !transport_capable).disabled(!transport_capable).on_change(cx.listener(
                                         |this, checked, _, cx| {
                                             this.manual_form.tls = *checked;
                                             cx.notify();

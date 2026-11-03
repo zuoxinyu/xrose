@@ -11,6 +11,7 @@ pub enum Protocol {
     #[default]
     Vless,
     Trojan,
+    Anytls,
     Shadowsocks,
     Hysteria2,
     Tuic,
@@ -20,11 +21,12 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn all() -> [Protocol; 9] {
+    pub fn all() -> [Protocol; 10] {
         [
             Protocol::Vmess,
             Protocol::Vless,
             Protocol::Trojan,
+            Protocol::Anytls,
             Protocol::Shadowsocks,
             Protocol::Hysteria2,
             Protocol::Tuic,
@@ -36,11 +38,12 @@ impl Protocol {
 
     /// Protocols the manual "add node" form can produce. WireGuard has no key
     /// fields in the model yet, so offering it would only create a dead end.
-    pub fn manual() -> [Protocol; 8] {
+    pub fn manual() -> [Protocol; 9] {
         [
             Protocol::Vmess,
             Protocol::Vless,
             Protocol::Trojan,
+            Protocol::Anytls,
             Protocol::Shadowsocks,
             Protocol::Hysteria2,
             Protocol::Tuic,
@@ -70,6 +73,7 @@ impl Protocol {
             Protocol::Vmess => "vmess",
             Protocol::Vless => "vless",
             Protocol::Trojan => "trojan",
+            Protocol::Anytls => "anytls",
             Protocol::Shadowsocks => "ss",
             Protocol::Hysteria2 => "hysteria2",
             Protocol::Tuic => "tuic",
@@ -83,6 +87,7 @@ impl Protocol {
             Protocol::Vmess => "VMess",
             Protocol::Vless => "VLESS",
             Protocol::Trojan => "Trojan",
+            Protocol::Anytls => "AnyTLS",
             Protocol::Shadowsocks => "Shadowsocks",
             Protocol::Hysteria2 => "Hysteria2",
             Protocol::Tuic => "TUIC",
@@ -96,6 +101,7 @@ impl Protocol {
             "vmess" => Some(Protocol::Vmess),
             "vless" => Some(Protocol::Vless),
             "trojan" => Some(Protocol::Trojan),
+            "anytls" => Some(Protocol::Anytls),
             "ss" | "shadowsocks" => Some(Protocol::Shadowsocks),
             "hysteria2" | "hy2" => Some(Protocol::Hysteria2),
             "tuic" => Some(Protocol::Tuic),
@@ -107,6 +113,9 @@ impl Protocol {
     }
     pub fn supported_by(&self, core: crate::model::CoreKind) -> bool {
         use crate::model::CoreKind;
+        if *self == Protocol::Anytls {
+            return core.capabilities().anytls;
+        }
         match core {
             CoreKind::Xray => !matches!(self, Protocol::Hysteria2 | Protocol::Tuic),
             CoreKind::SingBox => true,
@@ -549,7 +558,7 @@ impl NodeDraft {
                     }
                 }
             }
-            Protocol::Trojan | Protocol::Hysteria2 => {
+            Protocol::Trojan | Protocol::Hysteria2 | Protocol::Anytls => {
                 credentials.password = Some(self.require_password()?);
             }
             Protocol::Shadowsocks => {
@@ -588,9 +597,12 @@ impl NodeDraft {
         let reality_short = self.reality_short_id.trim();
         let mut tls = TlsOptions::default();
         if !protocol.is_plain_proxy() {
-            // Hysteria2/TUIC are TLS-only; Reality implies TLS.
+            // Hysteria2/TUIC/AnyTLS require TLS; Reality also implies TLS.
             tls.enabled = self.tls_enabled
-                || matches!(protocol, Protocol::Hysteria2 | Protocol::Tuic)
+                || matches!(
+                    protocol,
+                    Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+                )
                 || !reality_key.is_empty();
             tls.server_name = none_if_empty(self.sni.trim());
             tls.insecure = self.insecure;
@@ -635,11 +647,13 @@ impl NodeDraft {
             TransportKind::Quic => Transport::Quic,
             TransportKind::Kcp => Transport::Kcp { seed: None },
         };
-        if matches!(protocol, Protocol::Hysteria2 | Protocol::Tuic)
-            && !matches!(transport, Transport::Tcp)
+        if matches!(
+            protocol,
+            Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+        ) && !matches!(transport, Transport::Tcp)
         {
             return Err(crate::error::Error::other(
-                "Hysteria2 / TUIC 使用自有传输层，不能叠加 WebSocket / gRPC 等传输",
+                "Hysteria2 / TUIC / AnyTLS 使用自有传输层，不能叠加 WebSocket / gRPC 等传输",
             ));
         }
         node.transport = transport;
@@ -806,6 +820,33 @@ impl OutboundGroup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anytls_manual_requires_password_and_tls() {
+        let mut draft = NodeDraft {
+            protocol: Protocol::Anytls,
+            server: "example.com".into(),
+            port: 443,
+            ..Default::default()
+        };
+        assert!(draft.into_node(CoreKind::SingBox).is_err());
+        draft.password = "fixture-password".into();
+        let node = draft.into_node(CoreKind::SingBox).unwrap();
+        assert!(node.tls.enabled);
+        assert_eq!(
+            node.credentials.password.as_deref(),
+            Some("fixture-password")
+        );
+        assert!(
+            draft
+                .into_node(CoreKind::Xray)
+                .unwrap_err()
+                .to_string()
+                .contains("sing-box")
+        );
+        draft.transport = TransportKind::WebSocket;
+        assert!(draft.into_node(CoreKind::SingBox).is_err());
+    }
+
     use super::*;
     use crate::model::CoreKind;
 
@@ -862,35 +903,43 @@ mod tests {
     fn manual_draft_rejects_bad_endpoint_and_uuid() {
         let mut draft = vless_draft();
         draft.server = "https://jp.example.com".into();
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("不要带协议头"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("不要带协议头")
+        );
 
         let mut draft = vless_draft();
         draft.uuid = "not-a-uuid".into();
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("UUID 格式无效"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("UUID 格式无效")
+        );
 
         let mut draft = vless_draft();
         draft.uuid = String::new();
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("需要 UUID"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("需要 UUID")
+        );
 
         let mut draft = vless_draft();
         draft.port = 0;
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("端口"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("端口")
+        );
     }
 
     #[test]
@@ -912,11 +961,13 @@ mod tests {
     fn manual_draft_validates_reality_and_transport_combinations() {
         let mut draft = vless_draft();
         draft.reality_short_id = "abcd1234".into();
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("public key"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("public key")
+        );
 
         let mut draft = vless_draft();
         draft.tls_enabled = false;
@@ -929,11 +980,13 @@ mod tests {
         draft.protocol = Protocol::Hysteria2;
         draft.password = "secret".into();
         draft.transport = TransportKind::WebSocket;
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("自有传输层"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("自有传输层")
+        );
     }
 
     #[test]
@@ -946,11 +999,13 @@ mod tests {
             tls_enabled: true,
             ..Default::default()
         };
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("加密方式"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("加密方式")
+        );
         draft.method = "aes-256-gcm".into();
         let node = draft.into_node(CoreKind::SingBox).unwrap();
         assert!(!node.tls.enabled, "plain proxies drop TLS fields");
@@ -963,11 +1018,13 @@ mod tests {
             username: "user".into(),
             ..Default::default()
         };
-        assert!(draft
-            .into_node(CoreKind::SingBox)
-            .unwrap_err()
-            .to_string()
-            .contains("同时填写"));
+        assert!(
+            draft
+                .into_node(CoreKind::SingBox)
+                .unwrap_err()
+                .to_string()
+                .contains("同时填写")
+        );
         draft.password = "pass".into();
         let node = draft.into_node(CoreKind::SingBox).unwrap();
         assert_eq!(node.credentials.username.as_deref(), Some("user"));

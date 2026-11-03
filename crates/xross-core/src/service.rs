@@ -2,8 +2,8 @@
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use crate::runtime::{
 use crate::settings::LogLevel;
 use crate::settings::Settings;
 use crate::storage::{LatencyEntry, ProfileMeta, Store};
-use crate::subscription::{parse_subscription, qr_ascii, Subscription, SubscriptionUsage};
+use crate::subscription::{Subscription, SubscriptionUsage, parse_subscription, qr_ascii};
 use crate::system::privilege::{self, HelperRequest, HelperStatus};
 use crate::system::{self, DoctorCheck, PacServer, ProxyManager};
 use crate::trace::{self, TraceSession};
@@ -100,6 +100,8 @@ pub struct UiSnapshot {
     pub active_profile: Option<String>,
     pub runtime: RuntimeView,
     pub latency: BTreeMap<String, LatencyEntry>,
+    #[serde(default)]
+    pub downloads: BTreeMap<String, crate::runtime::probe::DownloadResult>,
     #[serde(default)]
     pub node_locations: BTreeMap<String, NodeLocation>,
     pub validation: Option<ValidationReport>,
@@ -177,6 +179,7 @@ struct Inner {
     connections: RwLock<Vec<ClashConnection>>,
     proxies: RwLock<BTreeMap<String, ClashProxy>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
+    downloads: RwLock<BTreeMap<String, crate::runtime::probe::DownloadResult>>,
     node_locations: RwLock<BTreeMap<String, NodeLocation>>,
     busy: RwLock<BTreeSet<String>>,
     toasts: Mutex<Vec<Toast>>,
@@ -277,6 +280,7 @@ impl AppService {
             connections: RwLock::new(Vec::new()),
             proxies: RwLock::new(BTreeMap::new()),
             latency: RwLock::new(latency),
+            downloads: RwLock::new(BTreeMap::new()),
             node_locations: RwLock::new(BTreeMap::new()),
             busy: RwLock::new(BTreeSet::new()),
             toasts: Mutex::new(Vec::new()),
@@ -393,6 +397,7 @@ impl AppService {
             active_profile: self.inner.active_profile.read().clone(),
             runtime,
             latency: self.inner.latency.read().clone(),
+            downloads: self.inner.downloads.read().clone(),
             node_locations: self.inner.node_locations.read().clone(),
             validation,
             compiled_warnings: self
@@ -1096,24 +1101,45 @@ impl AppService {
     // ------------------------------------------------------------------
 
     pub fn test_latency(&self, scope: LatencyScope) {
-        if self.is_busy("latency") {
+        if self.is_busy("latency") || self.is_busy("download") {
             return;
         }
         let model = self.inner.model.read().clone();
         let node_ids: Vec<String> = match &scope {
             LatencyScope::All => model.nodes.iter().map(|n| n.id.clone()).collect(),
             LatencyScope::Node(id) => vec![id.clone()],
+            LatencyScope::Nodes(ids) => ids.clone(),
             LatencyScope::Group(id) => model
                 .group(id)
                 .map(|g| g.members.clone())
                 .unwrap_or_default(),
         };
-        let targets: Vec<(String, String, u16)> = node_ids
+        let targets: Vec<Node> = node_ids
             .iter()
             .filter_map(|id| model.node(id))
             .filter(|n| n.enabled)
-            .map(|n| (n.id.clone(), n.server.clone(), n.port))
+            .cloned()
             .collect();
+        // Use the applied configuration, not a pending settings edit. A TUN TCP
+        // handshake can terminate locally before any remote connection exists.
+        let use_http = self.inner.core.native_tun_active();
+        let settings = self.settings();
+        let core = if use_http {
+            CoreKind::SingBox
+        } else {
+            settings.core
+        };
+        let binary = if use_http {
+            match self.inner.core.resolve_binary(core, &settings) {
+                Ok(binary) => Some(binary),
+                Err(err) => {
+                    self.toast(ToastLevel::Error, err.to_string());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if targets.is_empty() {
             self.toast(ToastLevel::Warning, "没有可测试的节点");
             return;
@@ -1121,8 +1147,33 @@ impl AppService {
         self.set_busy("latency", true);
         let service = self.clone();
         self.spawn(async move {
-            let results =
-                crate::runtime::test_many(targets, 8, std::time::Duration::from_secs(4)).await;
+            use futures_util::{StreamExt, stream};
+            let results: Vec<_> = stream::iter(targets)
+                .map(|node| {
+                    let binary = binary.clone();
+                    let url = settings.urltest_url.clone();
+                    async move {
+                        let result = if let Some(binary) = binary {
+                            match crate::runtime::probe::http_latency(&binary, core, &node, &url)
+                                .await
+                            {
+                                Ok(ms) => crate::runtime::LatencyResult::ok(ms),
+                                Err(err) => crate::runtime::LatencyResult::failed(err.to_string()),
+                            }
+                        } else {
+                            crate::runtime::tcping(
+                                &node.server,
+                                node.port,
+                                std::time::Duration::from_secs(4),
+                            )
+                            .await
+                        };
+                        (node.id, result)
+                    }
+                })
+                .buffer_unordered(4)
+                .collect()
+                .await;
             let mut ok_count = 0;
             {
                 let mut cache = service.inner.latency.write();
@@ -1134,7 +1185,16 @@ impl AppService {
                         key: key.clone(),
                         delay_ms: result.delay_ms,
                         checked_at: now_unix(),
-                        detail: result.error.clone(),
+                        detail: result.error.clone().or_else(|| {
+                            Some(
+                                if use_http {
+                                    "HTTP 延迟"
+                                } else {
+                                    "TCP 延迟"
+                                }
+                                .into(),
+                            )
+                        }),
                     };
                     let _ = service.inner.store.set_latency(&entry);
                     cache.insert(key.clone(), entry);
@@ -1148,41 +1208,115 @@ impl AppService {
         });
     }
 
-    /// Real latency through the running core (requires Clash API / sing-box).
+    /// HTTP latency through a private core configured with exactly one node.
     pub fn test_real_latency(&self, node_id: &str) {
-        let settings = self.inner.settings.read().clone();
-        if !self.is_running() || settings.core != CoreKind::SingBox {
-            self.toast(ToastLevel::Warning, "走代理的真实延迟需要运行中的 sing-box");
+        if self.is_busy("latency") || self.is_busy("download") {
             return;
         }
+        let settings = self.settings();
+        let core = if self.inner.core.native_tun_active() {
+            CoreKind::SingBox
+        } else {
+            settings.core
+        };
         let Some(node) = self.inner.model.read().node(node_id).cloned() else {
             return;
         };
-        let client = ClashClient::new(settings.api_port, "");
+        let binary = match self.inner.core.resolve_binary(core, &settings) {
+            Ok(binary) => binary,
+            Err(err) => {
+                self.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+        };
+        self.set_busy("latency", true);
         let service = self.clone();
-        let key = node.id.clone();
-        let url = settings.urltest_url.clone();
         self.spawn(async move {
-            let delay = client.delay(&node.outbound_tag(), &url, 5000).await;
+            let result =
+                crate::runtime::probe::http_latency(&binary, core, &node, &settings.urltest_url)
+                    .await;
             let entry = LatencyEntry {
-                key: key.clone(),
-                delay_ms: delay,
+                key: node.id.clone(),
+                delay_ms: result.as_ref().ok().copied(),
                 checked_at: now_unix(),
-                detail: delay.is_none().then(|| "通过代理请求失败".to_string()),
+                detail: Some(match &result {
+                    Ok(_) => "HTTP 延迟".into(),
+                    Err(err) => err.to_string(),
+                }),
             };
             let _ = service.inner.store.set_latency(&entry);
-            service.inner.latency.write().insert(key, entry);
-            service.toast(
-                if delay.is_some() {
-                    ToastLevel::Success
-                } else {
-                    ToastLevel::Warning
-                },
-                match delay {
-                    Some(ms) => format!("“{}”真实延迟 {ms} ms", node.name),
-                    None => format!("“{}”真实延迟测试失败", node.name),
-                },
-            );
+            service.inner.latency.write().insert(node.id, entry);
+            service.set_busy("latency", false);
+            match result {
+                Ok(ms) => service.toast(
+                    ToastLevel::Success,
+                    format!("“{}”HTTP 延迟 {ms} ms", node.name),
+                ),
+                Err(err) => service.toast(ToastLevel::Warning, err.to_string()),
+            }
+        });
+    }
+
+    pub fn test_download(&self, node_id: &str) {
+        if self.is_busy("download") || self.is_busy("latency") {
+            return;
+        }
+        let settings = self.settings();
+        let core = if self.inner.core.native_tun_active() {
+            CoreKind::SingBox
+        } else {
+            settings.core
+        };
+        let Some(node) = self.inner.model.read().node(node_id).cloned() else {
+            return;
+        };
+        if !node.enabled || !node.protocol.supported_by(core) {
+            self.toast(ToastLevel::Warning, "该节点未启用或当前内核不支持该协议");
+            return;
+        }
+        let binary = match self.inner.core.resolve_binary(core, &settings) {
+            Ok(binary) => binary,
+            Err(err) => {
+                self.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+        };
+        self.set_busy("download", true);
+        self.set_busy(&format!("download:{}", node.id), true);
+        self.inner.downloads.write().remove(&node.id);
+        let service = self.clone();
+        self.spawn(async move {
+            let result = crate::runtime::probe::download(&binary, core, &node).await;
+            let entry = match result {
+                Ok(entry) => {
+                    service.toast(
+                        ToastLevel::Success,
+                        format!(
+                            "“{}”下载速度 {:.2} MiB/s",
+                            node.name,
+                            entry.bytes_per_second as f64 / 1048576.0
+                        ),
+                    );
+                    entry
+                }
+                Err(err) => {
+                    service.toast(ToastLevel::Warning, err.to_string());
+                    crate::runtime::probe::DownloadResult {
+                        bytes: 0,
+                        elapsed_ms: 0,
+                        bytes_per_second: 0,
+                        checked_at: now_unix(),
+                        error: Some(err.to_string()),
+                    }
+                }
+            };
+            service
+                .inner
+                .downloads
+                .write()
+                .insert(node.id.clone(), entry);
+            service.set_busy(&format!("download:{}", node.id), false);
+            service.set_busy("download", false);
         });
     }
 
@@ -2985,6 +3119,7 @@ impl AppService {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LatencyScope {
+    Nodes(Vec<String>),
     All,
     Node(String),
     Group(String),
@@ -2999,6 +3134,41 @@ fn pretty_host(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn latency_batch_tests_every_enabled_requested_node_without_switching_selection() {
+        let (service, _dir) = service();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let first = Node::new("first", crate::model::Protocol::Http, "127.0.0.1", port);
+        let second_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let second = Node::new(
+            "second",
+            crate::model::Protocol::Http,
+            "127.0.0.1",
+            second_listener.local_addr().unwrap().port(),
+        );
+        let mut disabled = Node::new("disabled", crate::model::Protocol::Http, "127.0.0.1", 1);
+        disabled.enabled = false;
+        let ids = vec![first.id.clone(), second.id.clone(), disabled.id.clone()];
+        service
+            .inner
+            .model
+            .write()
+            .add_nodes(vec![first, second, disabled]);
+        let before = service.model();
+        service.test_latency(LatencyScope::Nodes(ids.clone()));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while service.is_busy("latency") && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!service.is_busy("latency"));
+        let snapshot = service.snapshot();
+        assert!(snapshot.latency[&ids[0]].delay_ms.is_some());
+        assert!(snapshot.latency[&ids[1]].delay_ms.is_some());
+        assert!(!snapshot.latency.contains_key(&ids[2]));
+        assert_eq!(service.model(), before);
+    }
+
     use super::*;
     use crate::model::Protocol;
 
@@ -3062,9 +3232,11 @@ mod tests {
             reloaded.unwrap().model.routing.rules[0],
             model.routing.rules[0]
         );
-        assert!(service
-            .add_diagnostic_rule(&target, DiagnosticRuleKind::Process, RouteAction::direct())
-            .is_err());
+        assert!(
+            service
+                .add_diagnostic_rule(&target, DiagnosticRuleKind::Process, RouteAction::direct())
+                .is_err()
+        );
     }
 
     #[test]
@@ -3124,10 +3296,12 @@ proxy-groups:
 "#;
         service.import_content(yaml);
         let model = service.model();
-        assert!(model
-            .groups
-            .iter()
-            .any(|g| g.name == "我的组" && g.members.len() == 1));
+        assert!(
+            model
+                .groups
+                .iter()
+                .any(|g| g.name == "我的组" && g.members.len() == 1)
+        );
     }
 
     #[test]
@@ -3149,11 +3323,13 @@ proxy-groups:
         let (service, _dir) = service();
         service.set_tun_enabled(true);
         assert!(service.settings().effective_tun());
-        assert!(service
-            .model()
-            .inbounds
-            .iter()
-            .any(|inbound| inbound.kind == InboundKind::Tun && inbound.enabled));
+        assert!(
+            service
+                .model()
+                .inbounds
+                .iter()
+                .any(|inbound| inbound.kind == InboundKind::Tun && inbound.enabled)
+        );
         assert!(
             Settings::load(&service.paths().settings_file())
                 .unwrap()
@@ -3163,12 +3339,14 @@ proxy-groups:
         assert!(!service.is_busy("core"));
         service.set_tun_enabled(false);
         assert!(!service.settings().tun_enabled);
-        assert!(service
-            .model()
-            .inbounds
-            .iter()
-            .filter(|inbound| inbound.kind == InboundKind::Tun)
-            .all(|inbound| !inbound.enabled));
+        assert!(
+            service
+                .model()
+                .inbounds
+                .iter()
+                .filter(|inbound| inbound.kind == InboundKind::Tun)
+                .all(|inbound| !inbound.enabled)
+        );
     }
 
     #[test]
@@ -3177,11 +3355,13 @@ proxy-groups:
         service.set_core(CoreKind::Xray);
         service.set_tun_enabled(true);
         assert!(!service.settings().tun_enabled);
-        assert!(service
-            .snapshot()
-            .toasts
-            .iter()
-            .any(|toast| toast.message.contains("不支持 TUN")));
+        assert!(
+            service
+                .snapshot()
+                .toasts
+                .iter()
+                .any(|toast| toast.message.contains("不支持 TUN"))
+        );
         service.set_core(CoreKind::SingBox);
         service.set_busy("core", true);
         service.set_tun_enabled(true);

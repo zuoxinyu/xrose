@@ -97,6 +97,18 @@ impl CoreManager {
         self.last_validation.lock().clone()
     }
 
+    /// Checks the applied configuration; validation may have compiled pending edits.
+    pub fn native_tun_active(&self) -> bool {
+        self.state().phase.is_alive()
+            && self.applied.lock().as_ref().is_some_and(|applied| {
+                applied
+                    .compiled
+                    .inbounds
+                    .iter()
+                    .any(|inbound| inbound.kind == "tun")
+            })
+    }
+
     pub fn last_compiled(&self) -> Option<CompiledConfig> {
         self.last_compiled.lock().clone()
     }

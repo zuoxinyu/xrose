@@ -16,8 +16,8 @@ use xross_core::storage::LatencyEntry;
 use xross_core::util::format_speed;
 
 use super::theme::{
-    latency_age_secs, latency_color, palette, Palette, LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS,
-    LATENCY_SLOW_MS, LATENCY_STALE_SECS,
+    LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS, LATENCY_SLOW_MS, LATENCY_STALE_SECS, Palette,
+    latency_age_secs, latency_color, palette,
 };
 use super::widgets::*;
 use super::{AppView, Page};
@@ -515,6 +515,7 @@ impl AppView {
         let batch_mode = self.batch_mode;
         let batch_selected = self.batch_selected.clone();
         let latency_busy = this_busy(&self.snapshot.busy, "latency");
+        let tests_busy = latency_busy || this_busy(&self.snapshot.busy, "download");
         let core_busy = is_core_busy;
 
         // Subscription map for grouping.
@@ -535,11 +536,14 @@ impl AppView {
                     selected: active_node.as_deref() == Some(node.id.as_str()),
                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
                     latency: self.snapshot.latency.get(&node.id),
+                    download: self.snapshot.downloads.get(&node.id),
+                    download_busy: this_busy(&self.snapshot.busy, "download"),
+                    downloading: this_busy(&self.snapshot.busy, &format!("download:{}", node.id)),
                     hide_ips,
                     auto_mode,
                     group_id: group_id_for_select.clone(),
                     core_busy,
-                    latency_busy,
+                    latency_busy: tests_busy,
                     testing: latency_busy
                         && node.enabled
                         && self.latency_pending.contains(&node.id),
@@ -604,6 +608,7 @@ impl AppView {
                                         .compact()
                                         .icon(IconName::Activity)
                                         .label(self.tr("全部测速", "Test all"))
+                                        .disabled(tests_busy)
                                         .loading(latency_busy)
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.latency_pending = this
@@ -835,13 +840,11 @@ impl AppView {
                                         let sel = selected_ids.clone();
                                         Button::new("batch-ping")
                                             .compact()
-                                            .disabled(selected_count == 0)
+                                            .disabled(selected_count == 0 || tests_busy)
                                             .label(self.tr("批量测速", "Test selected"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                for id in &sel {
-                                                    this.latency_pending.insert(id.clone());
-                                                    this.service.test_latency(LatencyScope::Node(id.clone()));
-                                                }
+                                                this.latency_pending.extend(sel.iter().cloned());
+                                                this.service.test_latency(LatencyScope::Nodes(sel.clone()));
                                                 this.sync(cx);
                                             }))
                                     })
@@ -1121,12 +1124,11 @@ impl AppView {
                                             .compact()
                                             .ghost()
                                             .label(self.tr("测速本组", "Test group"))
+                                            .disabled(tests_busy)
                                             .tooltip(self.tr("测试该订阅下所有节点的延迟", "Test latency of all nodes in this subscription"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                for id in &node_ids_for_ping {
-                                                    this.latency_pending.insert(id.clone());
-                                                    this.service.test_latency(LatencyScope::Node(id.clone()));
-                                                }
+                                                this.latency_pending.extend(node_ids_for_ping.iter().cloned());
+                                                this.service.test_latency(LatencyScope::Nodes(node_ids_for_ping.clone()));
                                                 this.sync(cx);
                                             })),
                                     ),
@@ -1229,6 +1231,9 @@ struct RowProps<'a> {
     selected: bool,
     fastest: bool,
     latency: Option<&'a LatencyEntry>,
+    download: Option<&'a xross_core::runtime::probe::DownloadResult>,
+    download_busy: bool,
+    downloading: bool,
     hide_ips: bool,
     auto_mode: bool,
     group_id: Option<String>,
@@ -1303,6 +1308,9 @@ fn render_node_row(
         selected,
         fastest: is_fastest,
         latency,
+        download,
+        download_busy,
+        downloading,
         hide_ips,
         auto_mode,
         group_id,
@@ -1318,6 +1326,7 @@ fn render_node_row(
     let node_id_select = node.id.clone();
     let node_id_tcp = node.id.clone();
     let node_id_real = node.id.clone();
+    let node_id_download = node.id.clone();
     let node_id_share = node.id.clone();
     let node_id_qr = node.id.clone();
     let node_id_del = node.id.clone();
@@ -1366,8 +1375,13 @@ fn render_node_row(
                 )
             };
             SharedString::from(format!(
-                "{}\n{grades}",
-                age_text(lang, latency_age_secs(entry))
+                "{}\n{}\n{grades}",
+                age_text(lang, latency_age_secs(entry)),
+                match entry.detail.as_deref() {
+                    Some("HTTP 延迟") => super::tr(lang, "HTTP 延迟", "HTTP latency").to_string(),
+                    Some("TCP 延迟") => super::tr(lang, "TCP 延迟", "TCP latency").to_string(),
+                    detail => detail.unwrap_or_default().to_string(),
+                }
             ))
         }
     };
@@ -1621,6 +1635,29 @@ fn render_node_row(
                             div().child(delay_label).into_any_element()
                         }),
                 )
+                .when(downloading || download.is_some(), |d| {
+                    d.child(
+                        div()
+                            .w(px(108.))
+                            .flex_shrink_0()
+                            .text_sm()
+                            .text_color(p.muted_fg)
+                            .child(if downloading {
+                                super::tr(lang, "下载测速中", "Downloading").to_string()
+                            } else if let Some(result) = download {
+                                if result.error.is_some() {
+                                    super::tr(lang, "下载失败", "Download failed").to_string()
+                                } else {
+                                    format!(
+                                        "{:.2} MiB/s",
+                                        result.bytes_per_second as f64 / 1048576.0
+                                    )
+                                }
+                            } else {
+                                String::new()
+                            }),
+                    )
+                })
                 // Actions: the test button is revealed by hover or keyboard focus.
                 .child(
                     div()
@@ -1724,15 +1761,43 @@ fn render_node_row(
                             .compact()
                             .icon(IconName::Zap)
                             .label(super::tr(lang, "HTTP 测速", "HTTP Test"))
+                            .disabled(is_latency_busy)
                             .tooltip(super::tr(
                                 lang,
                                 "通过节点发起 HTTP 请求测试实际连通延迟",
                                 "Measure end-to-end HTTP latency through this node",
                             ))
                             .on_click(cx.listener(move |this, _, _, _| {
+                                this.latency_pending.clear();
+                                this.latency_pending.insert(node_id_real.clone());
                                 this.service.test_real_latency(&node_id_real);
                             })),
                     )
+                    .child(
+                        Button::new(SharedString::from(format!("download-{node_id_download}")))
+                            .compact()
+                            .icon(IconName::Download)
+                            .label(super::tr(lang, "下载测速", "Download test"))
+                            .loading(downloading)
+                            .disabled(download_busy || is_latency_busy || !node.enabled)
+                            .tooltip(super::tr(
+                                lang,
+                                "通过此节点下载测试，最多 10 秒或 50 MiB",
+                                "Download through this node for up to 10 seconds or 50 MiB",
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.service.test_download(&node_id_download);
+                                this.sync(cx);
+                            })),
+                    )
+                    .children(download.map(|result| {
+                        let label = if result.error.is_some() {
+                            super::tr(lang, "下载失败", "Download failed").to_string()
+                        } else {
+                            format!("{:.2} MiB/s", result.bytes_per_second as f64 / 1048576.0)
+                        };
+                        div().text_sm().text_color(p.muted_fg).child(label)
+                    }))
                     .child(
                         Button::new(SharedString::from(format!("share-{node_id_share}")))
                             .compact()

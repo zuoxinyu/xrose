@@ -215,7 +215,10 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
     node.source = crate::model::NodeSource::Subscription;
 
     let tls_enabled = yaml_bool(value, "tls").unwrap_or(false)
-        || matches!(proxy_type.as_str(), "trojan" | "hysteria2" | "tuic");
+        || matches!(
+            proxy_type.as_str(),
+            "trojan" | "hysteria2" | "tuic" | "anytls"
+        );
     node.tls = TlsOptions {
         enabled: tls_enabled,
         server_name: yaml_str(value, "servername")
@@ -244,7 +247,9 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
             node.credentials.uuid = yaml_str(value, "uuid");
             node.credentials.flow = yaml_str(value, "flow");
         }
-        Protocol::Trojan => node.credentials.password = yaml_str(value, "password"),
+        Protocol::Trojan | Protocol::Anytls => {
+            node.credentials.password = yaml_str(value, "password")
+        }
         Protocol::Shadowsocks => {
             node.credentials.method = yaml_str(value, "cipher");
             node.credentials.password = yaml_str(value, "password");
@@ -430,7 +435,7 @@ pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as u32;
             }
-            Protocol::Trojan | Protocol::Hysteria2 => {
+            Protocol::Trojan | Protocol::Hysteria2 | Protocol::Anytls => {
                 node.credentials.password = string("password");
                 node.credentials.obfs = outbound
                     .get("obfs")
@@ -612,6 +617,26 @@ fn yaml_string_list(value: &Value, key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imports_anytls_links_clash_and_singbox() {
+        let sources = [
+            "anytls://fake@example.com:443?sni=tls.example.com&insecure=1#test".to_string(),
+            crate::util::encode_base64(b"anytls://fake@example.com:443?sni=tls.example.com&insecure=1#test"),
+            "proxies:\n  - {name: test, type: anytls, server: example.com, port: 443, password: fake, sni: tls.example.com, skip-cert-verify: true}".to_string(),
+            r#"{"outbounds":[{"type":"anytls","tag":"test","server":"example.com","server_port":443,"password":"fake","tls":{"enabled":true,"server_name":"tls.example.com","insecure":true}}]}"#.to_string(),
+        ];
+        for source in sources {
+            let parsed = parse_subscription(&source);
+            assert_eq!(parsed.nodes.len(), 1);
+            let node = &parsed.nodes[0];
+            assert_eq!(node.protocol, Protocol::Anytls);
+            assert_eq!(node.credentials.password.as_deref(), Some("fake"));
+            assert!(node.tls.enabled);
+            assert!(node.tls.insecure);
+            assert_eq!(node.tls.server_name.as_deref(), Some("tls.example.com"));
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -9,10 +9,11 @@ use crate::model::{Node, Protocol, RealityOptions, TlsOptions, Transport};
 use crate::util::{decode_base64_any, truthy};
 
 pub fn is_share_link(line: &str) -> bool {
-    const SCHEMES: [&str; 9] = [
+    const SCHEMES: [&str; 10] = [
         "vmess://",
         "vless://",
         "trojan://",
+        "anytls://",
         "ss://",
         "hysteria2://",
         "hy2://",
@@ -36,6 +37,9 @@ pub fn parse_share_link(input: &str) -> Option<Node> {
     }
     if let Some(rest) = line.strip_prefix("trojan://") {
         return parse_standard_url("trojan", rest);
+    }
+    if let Some(rest) = line.strip_prefix("anytls://") {
+        return parse_standard_url("anytls", rest);
     }
     if let Some(rest) = line.strip_prefix("ss://") {
         return parse_ss(rest);
@@ -123,8 +127,19 @@ fn parse_standard_url(scheme: &str, rest: &str) -> Option<Node> {
     let url = Url::parse(&format!("{scheme}://{rest}")).ok()?;
     let server = normalize_host(url.host_str()?);
     let port = url.port_or_known_default().unwrap_or(443);
-    let username = url.username().to_string();
-    let password = url.password().map(|p| p.to_string());
+    let username = percent_encoding::percent_decode_str(url.username())
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    let password = url
+        .password()
+        .map(|p| {
+            percent_encoding::percent_decode_str(p)
+                .decode_utf8()
+                .map(|s| s.into_owned())
+        })
+        .transpose()
+        .ok()?;
     let name = fragment_name(&url, &format!("{scheme} {server}"));
     let params: BTreeMap<String, String> = url
         .query_pairs()
@@ -142,7 +157,7 @@ fn parse_standard_url(scheme: &str, rest: &str) -> Option<Node> {
             });
             node.credentials.flow = get("flow");
         }
-        "trojan" => {
+        "trojan" | "anytls" => {
             node.credentials.password = Some(if username.is_empty() {
                 password.unwrap_or_default()
             } else {
@@ -163,7 +178,7 @@ fn parse_standard_url(scheme: &str, rest: &str) -> Option<Node> {
         None
     };
     node.tls = TlsOptions {
-        enabled: matches!(security.as_str(), "tls" | "reality" | "xtls"),
+        enabled: scheme == "anytls" || matches!(security.as_str(), "tls" | "reality" | "xtls"),
         server_name: sni.clone().or_else(|| get("host")),
         insecure: get("allowInsecure")
             .or_else(|| get("insecure"))

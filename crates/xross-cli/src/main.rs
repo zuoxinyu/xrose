@@ -3,13 +3,13 @@
 
 use std::path::PathBuf;
 
+use xross_core::AppService;
 use xross_core::adapters::{self, CompileContext};
 use xross_core::model::{CoreKind, Node, NodeDraft, Protocol, TransportKind};
 use xross_core::paths::AppPaths;
 use xross_core::subscription::parse_subscription;
 use xross_core::system;
 use xross_core::system::privilege;
-use xross_core::AppService;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -96,9 +96,8 @@ fn usage() {
 
 fn mesh_command(args: &[String]) -> Result<(), String> {
     use xross_core::mesh::{
-        self,
+        self, MeshProfile, MeshSecret,
         ipc::{MeshCommand, MeshRequest},
-        MeshProfile, MeshSecret,
     };
     let (_, _, home, positional) = parse_args(args);
     let paths = home
@@ -258,7 +257,9 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                 .position(|v| v == "--seconds")
                 .and_then(|i| args.get(i + 1))
                 .and_then(|v| v.parse::<u64>().ok());
-            println!("组网会话运行中；Ctrl+C 或结束进程会清理网卡。可用 mesh status 查询、mesh disconnect <ID> 断开。");
+            println!(
+                "组网会话运行中；Ctrl+C 或结束进程会清理网卡。可用 mesh status 查询、mesh disconnect <ID> 断开。"
+            );
             let result=runtime.block_on(async {
                 let deadline=tokio::time::sleep(std::time::Duration::from_secs(seconds.unwrap_or(86400*365)));
                 tokio::pin!(deadline);
@@ -494,7 +495,7 @@ fn add_node(args: &[String]) -> Result<(), String> {
     }
     if let Some(protocol) = value_arg(args, "--protocol") {
         draft.protocol = Protocol::parse(&protocol).ok_or_else(|| {
-            format!("未知协议：{protocol}（可用 vmess/vless/trojan/ss/hysteria2/tuic/socks/http）")
+            format!("未知协议：{protocol}（可用 vmess/vless/trojan/anytls/ss/hysteria2/tuic/socks/http）")
         })?;
     }
     draft.server =

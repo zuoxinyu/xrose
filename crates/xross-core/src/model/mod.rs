@@ -63,6 +63,7 @@ impl CoreKind {
                 native_rule_set: true,
                 hysteria2: false,
                 tuic: false,
+                anytls: false,
                 clash_connections: false,
                 fake_ip: false,
                 dns_split: true,
@@ -75,6 +76,7 @@ impl CoreKind {
                 native_rule_set: true,
                 hysteria2: true,
                 tuic: true,
+                anytls: true,
                 clash_connections: true,
                 fake_ip: true,
                 dns_split: true,
@@ -98,6 +100,8 @@ pub struct Capabilities {
     pub native_rule_set: bool,
     pub hysteria2: bool,
     pub tuic: bool,
+    #[serde(default)]
+    pub anytls: bool,
     pub clash_connections: bool,
     pub fake_ip: bool,
     pub dns_split: bool,
@@ -479,10 +483,12 @@ mod tests {
         assert!(model.default_group.is_some());
         assert!(!model.inbounds.is_empty());
         // Empty model legitimately reports "no nodes".
-        assert!(model
-            .validate(CoreKind::SingBox)
-            .iter()
-            .any(|i| i.contains("没有可用")));
+        assert!(
+            model
+                .validate(CoreKind::SingBox)
+                .iter()
+                .any(|i| i.contains("没有可用"))
+        );
     }
 
     #[test]
@@ -510,16 +516,20 @@ mod tests {
     #[test]
     fn presets_are_semantic() {
         let model = AppModel::default();
-        assert!(model
-            .routing
-            .rules
-            .iter()
-            .any(|r| r.matchers.geosites.contains(&"cn".to_string())));
-        assert!(model
-            .routing
-            .rules
-            .iter()
-            .any(|r| !r.matchers.geoips.is_empty()));
+        assert!(
+            model
+                .routing
+                .rules
+                .iter()
+                .any(|r| r.matchers.geosites.contains(&"cn".to_string()))
+        );
+        assert!(
+            model
+                .routing
+                .rules
+                .iter()
+                .any(|r| !r.matchers.geoips.is_empty())
+        );
     }
 
     #[test]

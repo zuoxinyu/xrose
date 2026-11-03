@@ -48,7 +48,10 @@ pub(crate) fn default_rule_set(tag: &str) -> Option<RuleSet> {
 pub(crate) fn resolve_rule_set(model: &AppModel, tag: &str) -> Option<RuleSet> {
     if let Some(set) = model.routing.rule_sets.iter().find(|set| set.tag == tag) {
         // Repair only the old built-in URL; user mirrors retain precedence.
-        if tag != "geosite-gfw" || set.url != "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs" {
+        if tag != "geosite-gfw"
+            || set.url
+                != "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs"
+        {
             return Some(set.clone());
         }
     }
@@ -177,6 +180,18 @@ pub fn adapter_for(core: CoreKind) -> &'static dyn CoreAdapter {
 
 static XRAY: XrayAdapter = XrayAdapter;
 static SINGBOX: SingBoxAdapter = SingBoxAdapter;
+
+/// A private HTTP listener routed exclusively through the requested node.
+/// No selectors, TUN, cache file, API ports or user routing are shared.
+pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16) -> Result<Value> {
+    if !node.usable_with(core) {
+        return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
+    }
+    match core {
+        CoreKind::SingBox => singbox::compile_probe(node, port),
+        CoreKind::Xray => xray::compile_probe(node, port),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Validation

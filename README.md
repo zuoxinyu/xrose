@@ -77,7 +77,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - `AppModel` 以意图建模，不绑定任何 core 的 schema。
 - **Xray**：`dokodemo-door` 透明代理、`balancers` + `observatory`（leastPing）、
   `geosite:` / `geoip:` 原生字段、fake-ip 跳过并提示、Stats API 入站与策略。
-  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；没有 TUN；不支持 Hysteria2/TUIC。
+  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；没有 TUN；不支持 Hysteria2/TUIC/AnyTLS。
 - **sing-box**：内建 TUN、`selector` / `urltest`、`.srs` rule-set、
   新版路由动作（`sniff`、`hijack-dns`、`reject`）、typed DNS + fake-ip、Clash API。
   旧版 `geoip`/`geosite` 字段已移除，编译器自动生成 rule-set 引用
@@ -93,7 +93,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   **Clash YAML**（含 proxy-groups）、**SIP008**、**sing-box JSON**。
 - 统一 `Node` 模型；分享链接**双向转换**（导入/导出）；二维码（终端块字符渲染）；
   指纹去重；订阅分组导入；排序字段。
-- **手动添加节点**：协议（VMess / VLESS / Trojan / Shadowsocks / Hysteria2 / TUIC /
+- **手动添加节点**：协议（VMess / VLESS / Trojan / AnyTLS / Shadowsocks / Hysteria2 / TUIC /
   SOCKS / HTTP）、凭据、TLS / Reality（pbk + shortId）、uTLS 指纹、ALPN、
   传输层（TCP / WebSocket / gRPC / HTTP/2 / HTTPUpgrade）、UDP、标签。
   校验规则集中在 `NodeDraft::into_node`，界面、CLI 与测试共用同一套错误文案。
@@ -149,7 +149,9 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   `/proxies/{name}/delay` 真实延迟。
 - Xray：`xray api statsquery`（其内部即 gRPC StatsService）解析累计流量；
   连接列表不可得，界面会明确说明。
-- 延迟测试：并发 TCP 握手测速、结果缓存（SQLite）、走代理的真实延迟。
+- AnyTLS：sing-box 1.12+ 支持；可手动添加、导入/导出 `anytls://` 分享链接，导入 Clash YAML 与 sing-box JSON 节点。Xray 跳过该协议并提示。
+- 延迟测试：并发 TCP 握手测试、结果缓存（SQLite）与指定节点的 HTTP 延迟测试。TUN 运行时使用 HTTP 延迟，结果提示中标明测试类型；批量与订阅分组测试覆盖全部所选节点。
+- 下载测速：节点菜单选择「下载测速」，通过所选节点下载 Cloudflare 测试数据，显示平均 MiB/s。单次接收最多 50 MiB 或持续 10 秒（连接准备时间另计），结果保留至本次退出；同一时间执行一项下载测试，不切换当前节点。
 - 日志查看器、速率/累计流量曲线（快照轮询）。
 - 连接页支持域名/IP/进程筛选，展开查看发起方、协议、规则、出站链与返回路径；
   一键测试目标，按精确域名/IP/进程添加置顶规则，应用配置后生效。
@@ -247,6 +249,7 @@ cargo test -p xross-core
 ```
 
 覆盖：链接解析/导出往返、Clash/SIP008/sing-box 解析、去重、规则匹配、CIDR、
+AnyTLS 手动配置与订阅解析、分享链接往返、测试连接隔离与下载边界、
 DNS 校验、加密落库、SQLite 迁移与备份、PAC HTTP 服务、日志轮转、进程退出归因、
 单实例锁、订阅合并、Profile 切换、两套 adapter 的结构约束、tar.gz 魔数解压、
 手动节点草稿校验（UUID/Reality/传输组合）、提权助手协议与状态标签等。

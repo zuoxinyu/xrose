@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::{
-    action_tag, network_str, xray_dns_address, CompileContext, CompiledConfig, CompiledInbound,
-    CoreAdapter,
+    CompileContext, CompiledConfig, CompiledInbound, CoreAdapter, action_tag, network_str,
+    xray_dns_address,
 };
 use crate::error::{Error, Result};
 use crate::model::{
@@ -291,22 +291,24 @@ impl CoreAdapter for XrayAdapter {
                 if let Some(address) = xray_dns_address(server, &mut warnings) {
                     let mut entry = json!({"address": address});
                     if !server.domains.is_empty() {
-                        entry["domains"] = json!(server
-                            .domains
-                            .iter()
-                            .map(|d| {
-                                if d.starts_with("geosite:")
-                                    || d.starts_with("domain:")
-                                    || d.starts_with("full:")
-                                {
-                                    d.clone()
-                                } else if d.starts_with('.') {
-                                    format!("domain:{}", d.trim_start_matches('.'))
-                                } else {
-                                    d.clone()
-                                }
-                            })
-                            .collect::<Vec<_>>());
+                        entry["domains"] = json!(
+                            server
+                                .domains
+                                .iter()
+                                .map(|d| {
+                                    if d.starts_with("geosite:")
+                                        || d.starts_with("domain:")
+                                        || d.starts_with("full:")
+                                    {
+                                        d.clone()
+                                    } else if d.starts_with('.') {
+                                        format!("domain:{}", d.trim_start_matches('.'))
+                                    } else {
+                                        d.clone()
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        );
                     }
                     dns_servers.push(entry);
                 }
@@ -427,6 +429,15 @@ fn transparent_inbound(inbound: &Inbound) -> Value {
     value
 }
 
+/// Minimal configuration used only by private per-node probes.
+pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+    Ok(json!({
+        "log": {"loglevel": "none"},
+        "inbounds": [{"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}],
+        "outbounds": [node_outbound(node, &mut Vec::new())?]
+    }))
+}
+
 fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
     let address = &node.server;
     let port = node.port;
@@ -529,7 +540,7 @@ fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
         Protocol::Wireguard => {
             return Err(Error::config("WireGuard 出站尚未支持（模型缺少密钥字段）"));
         }
-        Protocol::Hysteria2 | Protocol::Tuic => {
+        Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls => {
             return Err(Error::other(format!(
                 "{} 仅 sing-box 支持",
                 node.protocol.display_name()
@@ -711,6 +722,30 @@ fn xray_rule(model: &AppModel, rule: &RouteRule, warnings: &mut Vec<String>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anytls_is_skipped_with_warning_and_probe_never_falls_back() {
+        let (mut model, settings, ctx) = sample();
+        let mut node = Node::new("AnyTLS fixture", Protocol::Anytls, "example.com", 443);
+        node.credentials.password = Some("fake".into());
+        model.add_nodes(vec![node.clone()]);
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(compiled.warnings.iter().any(|w| w.contains("AnyTLS")));
+        assert!(
+            !compiled.json["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o["tag"] == node.outbound_tag())
+        );
+        assert!(super::super::compile_probe(CoreKind::Xray, &node, 12345).is_err());
+        let probe = super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345).unwrap();
+        assert_eq!(probe["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(probe["outbounds"][0]["tag"], model.nodes[0].outbound_tag());
+        assert_eq!(probe["inbounds"][0]["listen"], "127.0.0.1");
+        assert!(probe.get("routing").is_none());
+        assert!(probe.get("api").is_none());
+    }
+
     use super::*;
     use crate::model::AppModel;
     use crate::settings::Settings;
@@ -788,10 +823,12 @@ mod tests {
         let (model, settings, ctx) = sample();
         let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
         assert!(compiled.warnings.iter().any(|w| w.contains("fake-ip")));
-        assert!(compiled.json["dns"]["servers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|s| s["address"] != "fakeip"));
+        assert!(
+            compiled.json["dns"]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["address"] != "fakeip")
+        );
     }
 }

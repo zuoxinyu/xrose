@@ -10,6 +10,7 @@ pub fn node_to_share_link(node: &Node) -> Option<String> {
         Protocol::Vmess => export_vmess(node),
         Protocol::Vless => export_standard(node, "vless"),
         Protocol::Trojan => export_standard(node, "trojan"),
+        Protocol::Anytls => export_standard(node, "anytls"),
         Protocol::Shadowsocks => export_ss(node),
         Protocol::Hysteria2 => export_hysteria2(node),
         Protocol::Tuic => export_tuic(node),
@@ -256,6 +257,30 @@ fn encode_query(params: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anytls_roundtrip_preserves_escaped_password_and_tls() {
+        let mut node = Node::new("AnyTLS 测试", Protocol::Anytls, "2001:db8::1", 8443);
+        node.credentials.password = Some("fake:p@ss/%?密碼".into());
+        node.tls.enabled = true;
+        node.tls.server_name = Some("tls.example.com".into());
+        node.tls.insecure = true;
+        node.tls.alpn = vec!["h2".into(), "http/1.1".into()];
+        let parsed = roundtrip(node.clone());
+        assert_eq!(parsed.protocol, Protocol::Anytls);
+        assert_eq!(parsed.server, node.server);
+        assert_eq!(parsed.port, node.port);
+        assert_eq!(parsed.name, node.name);
+        assert_eq!(parsed.credentials.password, node.credentials.password);
+        assert_eq!(parsed.tls, node.tls);
+        let default_tls =
+            super::super::links::parse_share_link("anytls://fake@example.com#default").unwrap();
+        assert!(default_tls.tls.enabled);
+        assert_eq!(default_tls.port, 443);
+        assert!(super::super::links::is_share_link(
+            "anytls://fake@example.com"
+        ));
+    }
+
     use super::*;
     use crate::model::Node;
 
