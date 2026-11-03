@@ -57,7 +57,7 @@ impl CoreKind {
     pub fn capabilities(&self) -> Capabilities {
         match self {
             CoreKind::Xray => Capabilities {
-                native_tun: false,
+                native_tun: true,
                 native_selector: false,
                 native_urltest: true,
                 native_rule_set: true,
@@ -366,10 +366,7 @@ impl AppModel {
                 issues.push(format!("入站 {} 的端口不能为 0", inbound.tag));
             }
             if inbound.kind == InboundKind::Tun && !core.capabilities().native_tun {
-                issues.push(format!(
-                    "{} 不内建 TUN；请在 sing-box 下使用 TUN，或配合 tun2socks",
-                    core.display_name()
-                ));
+                issues.push(format!("{} 不支持 TUN，请更新内核", core.display_name()));
             }
         }
         for (idx, server) in self.dns.servers.iter().enumerate() {

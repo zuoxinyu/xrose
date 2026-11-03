@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use interprocess::local_socket::{prelude::*, ListenerOptions, Stream};
+use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -378,8 +378,8 @@ fn windows_elevated() -> bool {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows_sys::Win32::{
         Security::{
-            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
-            TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
         UI::Shell::IsUserAnAdmin,
@@ -757,8 +757,7 @@ fn peer_pid(stream: &Stream) -> Option<u32> {
     {
         use std::os::fd::{AsFd, AsRawFd};
         #[allow(irrefutable_let_patterns)]
-        let Stream::UdSocket(ref socket) = *stream
-        else {
+        let Stream::UdSocket(ref socket) = *stream else {
             return None;
         };
         unsafe extern "C" {
@@ -821,8 +820,8 @@ fn current_user_sid() -> Result<String> {
     use windows_sys::Win32::{
         Foundation::LocalFree,
         Security::{
-            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
-            TOKEN_USER,
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
         },
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
@@ -854,8 +853,8 @@ fn current_user_sid() -> Result<String> {
 }
 
 #[cfg(windows)]
-fn helper_security_descriptor(
-) -> Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+fn helper_security_descriptor()
+-> Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
     let sid = current_user_sid()?;
     // An elevated process's default pipe ACL/label rejects its own unelevated
     // GUI. Explicitly admit that SID at Medium IL, then verify every peer PID.
@@ -1090,10 +1089,10 @@ mod platform {
     pub fn run_elevated(args: &[String]) -> Result<()> {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            GetExitCodeProcess, WaitForSingleObject, INFINITE,
+            GetExitCodeProcess, INFINITE, WaitForSingleObject,
         };
         use windows_sys::Win32::UI::Shell::{
-            ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+            SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
         };
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -1148,7 +1147,7 @@ mod platform {
 
     pub fn prepare_tun(interface: &str) -> HelperResponse {
         HelperResponse::ok(format!(
-            "TUN 接口“{interface}”将由提权助手代启 sing-box 创建；驱动由客户端在启动前校验部署"
+            "TUN 接口“{interface}”将由提权助手代启内核创建；驱动由客户端在启动前校验部署"
         ))
     }
 
@@ -1349,9 +1348,7 @@ mod platform {
     }
 
     pub fn prepare_tun(interface: &str) -> HelperResponse {
-        HelperResponse::ok(format!(
-            "TUN 接口“{interface}”将由提权助手代启 sing-box 创建"
-        ))
+        HelperResponse::ok(format!("TUN 接口“{interface}”将由提权助手代启内核创建"))
     }
 
     pub fn remove_tun(_interface: &str) -> HelperResponse {
@@ -1568,7 +1565,7 @@ mod platform {
         }
         if device.exists() {
             HelperResponse::ok(format!(
-                "/dev/net/tun 已就绪，TUN 接口“{interface}”将由提权助手代启 sing-box 创建"
+                "/dev/net/tun 已就绪，TUN 接口“{interface}”将由提权助手代启内核创建"
             ))
         } else {
             HelperResponse::error(

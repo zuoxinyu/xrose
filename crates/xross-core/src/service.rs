@@ -1131,7 +1131,7 @@ impl AppService {
         let use_http = self.inner.core.native_tun_active();
         let settings = self.settings();
         let core = if use_http {
-            CoreKind::SingBox
+            self.inner.core.state().core.unwrap_or(settings.core)
         } else {
             settings.core
         };
@@ -1160,8 +1160,10 @@ impl AppService {
                     let url = settings.urltest_url.clone();
                     async move {
                         let result = if let Some(binary) = binary {
-                            match crate::runtime::probe::http_latency(&binary, core, &node, &url)
-                                .await
+                            match crate::runtime::probe::http_latency(
+                                &binary, core, &node, &url, use_http,
+                            )
+                            .await
                             {
                                 Ok(ms) => crate::runtime::LatencyResult::ok(ms),
                                 Err(err) => crate::runtime::LatencyResult::failed(err.to_string()),
@@ -1220,8 +1222,9 @@ impl AppService {
             return;
         }
         let settings = self.settings();
-        let core = if self.inner.core.native_tun_active() {
-            CoreKind::SingBox
+        let bypass_tun = self.inner.core.native_tun_active();
+        let core = if bypass_tun {
+            self.inner.core.state().core.unwrap_or(settings.core)
         } else {
             settings.core
         };
@@ -1238,9 +1241,14 @@ impl AppService {
         self.set_busy("latency", true);
         let service = self.clone();
         self.spawn(async move {
-            let result =
-                crate::runtime::probe::http_latency(&binary, core, &node, &settings.urltest_url)
-                    .await;
+            let result = crate::runtime::probe::http_latency(
+                &binary,
+                core,
+                &node,
+                &settings.urltest_url,
+                bypass_tun,
+            )
+            .await;
             let entry = LatencyEntry {
                 key: node.id.clone(),
                 delay_ms: result.as_ref().ok().copied(),
@@ -1268,8 +1276,9 @@ impl AppService {
             return;
         }
         let settings = self.settings();
-        let core = if self.inner.core.native_tun_active() {
-            CoreKind::SingBox
+        let bypass_tun = self.inner.core.native_tun_active();
+        let core = if bypass_tun {
+            self.inner.core.state().core.unwrap_or(settings.core)
         } else {
             settings.core
         };
@@ -1292,7 +1301,7 @@ impl AppService {
         self.inner.downloads.write().remove(&node.id);
         let service = self.clone();
         self.spawn(async move {
-            let result = crate::runtime::probe::download(&binary, core, &node).await;
+            let result = crate::runtime::probe::download(&binary, core, &node, bypass_tun).await;
             let entry = match result {
                 Ok(entry) => {
                     service.toast(
@@ -1677,7 +1686,7 @@ impl AppService {
         if new.tun_enabled && !new.core.capabilities().native_tun {
             self.toast(
                 ToastLevel::Warning,
-                format!("{} 不支持 TUN，请切换到 sing-box", new.core.display_name()),
+                format!("{} 不支持 TUN，请更新内核", new.core.display_name()),
             );
         }
         self.refresh_doctor();
@@ -1715,10 +1724,7 @@ impl AppService {
         let mut settings = self.settings();
         let old_tun = settings.effective_tun();
         if enabled && !settings.core.capabilities().native_tun {
-            self.toast(
-                ToastLevel::Warning,
-                "当前 Core 不支持 TUN，请先切换到 sing-box",
-            );
+            self.toast(ToastLevel::Warning, "当前内核不支持 TUN，请更新内核");
             return;
         }
         if self.is_busy("core") {
@@ -3356,18 +3362,19 @@ proxy-groups:
     }
 
     #[test]
-    fn tun_toggle_rejects_unsupported_cores_and_busy_restarts() {
+    fn tun_toggle_supports_xray_and_rejects_busy_restarts() {
         let (service, _dir) = service();
         service.set_core(CoreKind::Xray);
         service.set_tun_enabled(true);
-        assert!(!service.settings().tun_enabled);
+        assert!(service.settings().effective_tun());
         assert!(
             service
-                .snapshot()
-                .toasts
+                .model()
+                .inbounds
                 .iter()
-                .any(|toast| toast.message.contains("不支持 TUN"))
+                .any(|i| i.kind == InboundKind::Tun && i.enabled)
         );
+        service.set_tun_enabled(false);
         service.set_core(CoreKind::SingBox);
         service.set_busy("core", true);
         service.set_tun_enabled(true);

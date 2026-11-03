@@ -19,7 +19,7 @@
 | 能力 | Xray | sing-box | Xross 处理 |
 | --- | --- | --- | --- |
 | mixed 入站 | 无 | 有 | Xray 拆成 SOCKS + HTTP(port+1)，界面提示 |
-| TUN | 无（依赖 tun2socks） | 原生 | Xray 编译时跳过并警告 |
+| TUN | 原生（自动路由需 26.6.27+） | 原生 | Xray 生成 `gateway`、`autoSystemRoutingTable` 与 `autoOutboundsInterface`；共享提权启动与进程回收 |
 | AnyTLS | 不支持 | 1.12+ | 密码认证与必选 TLS；Xray 跳过并警告 |
 | selector 热切换 | 无 | Clash API | Xray 选择节点 = 改配置 + 重启 |
 | urltest | balancer + observatory | 原生 urltest | 分别生成 |
@@ -33,13 +33,17 @@
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
 | 组网访问 | 优先 freedom 规则 + 专用 DNS | 绑定组网接口直连 + TUN 排除 + 专用 DNS | `CompileContext.mesh` 注入，不改变 AppModel；MagicDNS 优先于 fake-IP |
-| Windows 组网与 TUN 共存 | 无内建 TUN | 暂时关闭 `strict_route` | 明确提示 DNS 防泄漏过滤放宽，全部组网断开后恢复 |
+| Windows 组网与 TUN 共存 | 从自动路由中排除组网网段 | 暂时关闭 `strict_route` | 明确提示 DNS 防泄漏过滤放宽，全部组网断开后恢复 |
 
 节点 HTTP 延迟与下载测试由 `runtime::probe` 启动短期测试内核，适配器生成仅含目标节点与本地 HTTP 入站的配置。
 测试客户端显式连接该入站，关闭系统代理继承、重定向与自动解压；不复用当前选择组、规则、API 端口或缓存文件。
-sing-box 测试内核启用 `auto_detect_interface`，连接节点时绑定默认网络接口。TUN 运行状态取自已应用配置，普通延迟测试此时改用 HTTP；未启用 TUN 时保留 TCP 连接测试。
+sing-box 测试内核启用 `auto_detect_interface`；Xray TUN 下的测试内核检测默认上联网卡并设置 `sockopt.interface`，先解析节点地址并保留 TLS SNI。TUN 运行状态取自已应用配置，普通延迟测试此时改用 HTTP；未启用 TUN 时保留 TCP 连接测试。
 下载按实际接收字节计算平均速度，限制接收时间与数据量；空响应、HTTP 错误及连接中断返回失败。测试结束后停止并回收进程，删除临时配置。
 AnyTLS 字段依据 [sing-box 官方文档](https://sing-box.sagernet.org/configuration/outbound/anytls/)。
+Xray TUN 字段依据 [官方 TUN 文档](https://xtls.github.io/en/config/inbounds/tun.html) 及 [26.6.27 配置定义](https://github.com/XTLS/Xray-core/blob/v26.6.27/infra/conf/tun.go)。
+Xray 自动路由通过 CIDR 差集排除用户与组网网段，DNS 劫持规则先于 LAN 绕过；系统解析器在 TUN DNS 下替换为显式上游，避免解析回环。
+`strict_route` 与网络栈选择在 Xray 下不映射，编译时警告；Linux/macOS 不自动接管系统 DNS，Windows 配置 TUN 接口 DNS。
+提权助手从经过摘要校验的已登记二进制识别内核类型，校验对应 TUN 入站格式，生成该内核的固定启动参数，并提取 TUN 地址用于组网基线保护。
 
 组网独立于 `CoreKind`：`mesh::MeshProfile` 表达网络身份、入口和远端网段意图，
 `MeshController` 通过带版本和调用者鉴权的助手 IPC 管理会话。EasyTier 2.6.4

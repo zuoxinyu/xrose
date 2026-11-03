@@ -77,10 +77,7 @@ pub(crate) fn diagnose_for_process(
         } else {
             checks.push(DoctorCheck::error(
                 "TUN 支持",
-                format!(
-                    "{} 不内建 TUN。请切换到 sing-box，或安装 tun2socks",
-                    settings.core.display_name()
-                ),
+                format!("{} 不支持 TUN，请更新内核", settings.core.display_name()),
             ));
         }
         #[cfg(target_os = "linux")]

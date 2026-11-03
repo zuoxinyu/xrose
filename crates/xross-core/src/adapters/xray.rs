@@ -88,9 +88,13 @@ impl CoreAdapter for XrayAdapter {
                     });
                 }
                 InboundKind::Tun => {
-                    warnings.push(
-                        "Xray 不内建 TUN，已跳过 TUN 入站；请使用 sing-box 或配合 tun2socks".into(),
-                    );
+                    inbounds.push(tun_inbound(inbound, ctx, model.dns.enabled, &mut warnings)?);
+                    compiled_inbounds.push(CompiledInbound {
+                        tag: inbound.tag.clone(),
+                        kind: "tun".into(),
+                        port: 0,
+                        allow_lan: false,
+                    });
                 }
                 InboundKind::Tproxy | InboundKind::Redirect => {
                     if !cfg!(target_os = "linux") {
@@ -113,7 +117,7 @@ impl CoreAdapter for XrayAdapter {
 
         if compiled_inbounds.is_empty() {
             return Err(Error::config(
-                "没有可用的入站。Xray 需要至少一个 SOCKS/HTTP/透明代理入站（不支持 TUN）",
+                "没有可用的入站，请启用至少一个代理或 TUN 入站",
             ));
         }
 
@@ -206,6 +210,15 @@ impl CoreAdapter for XrayAdapter {
             rules.push(json!({"type":"field","domain":ctx.mesh.dns.iter().map(|d|format!("domain:{}",d.suffix)).collect::<Vec<_>>(),"outboundTag":"direct"}));
             rules.push(json!({"type":"field","ip":["127.0.0.153/32"],"outboundTag":"direct"}));
         }
+        let tun_dns_tags: Vec<_> = model
+            .inbounds
+            .iter()
+            .filter(|i| i.enabled && i.kind == InboundKind::Tun && i.tun.dns_hijack)
+            .map(|i| &i.tag)
+            .collect();
+        if !tun_dns_tags.is_empty() && model.dns.enabled {
+            rules.push(json!({"type":"field", "inboundTag":tun_dns_tags, "network":"tcp,udp", "port":"53", "outboundTag":"dns-out"}));
+        }
         if model.dns.enabled {
             rules.push(
                 json!({"type": "field", "network": "udp", "port": "53", "outboundTag": "dns-out"}),
@@ -289,6 +302,14 @@ impl CoreAdapter for XrayAdapter {
             let mut dns_servers = Vec::new();
             for server in &model.dns.servers {
                 if let Some(address) = xray_dns_address(server, &mut warnings) {
+                    let address = if !tun_dns_tags.is_empty()
+                        && matches!(address.as_str(), "localhost" | "system" | "local")
+                    {
+                        warnings.push("TUN DNS 已将系统解析器替换为 1.1.1.1，避免 DNS 回环".into());
+                        "1.1.1.1".to_string()
+                    } else {
+                        address
+                    };
                     let mut entry = json!({"address": address});
                     if !server.domains.is_empty() {
                         entry["domains"] = json!(
@@ -320,7 +341,16 @@ impl CoreAdapter for XrayAdapter {
                 .as_ref()
                 .and_then(|tag| model.dns.servers.iter().find(|s| &s.tag == tag))
                 .and_then(|s| xray_dns_address(s, &mut warnings))
-                .or_else(|| Some("localhost".into()));
+                .or_else(|| Some("localhost".into()))
+                .map(|address| {
+                    if !tun_dns_tags.is_empty()
+                        && matches!(address.as_str(), "localhost" | "system" | "local")
+                    {
+                        "1.1.1.1".into()
+                    } else {
+                        address
+                    }
+                });
             if let Some(address) = final_address {
                 dns_servers.push(json!({"address": address}));
             }
@@ -429,6 +459,148 @@ fn transparent_inbound(inbound: &Inbound) -> Value {
     value
 }
 
+/// Subtract excluded prefixes from the captured routes, including mesh networks.
+fn subtract_prefix(network: ipnet::IpNet, excluded: ipnet::IpNet, result: &mut Vec<ipnet::IpNet>) {
+    if excluded.contains(&network.network()) && excluded.prefix_len() <= network.prefix_len() {
+        return;
+    }
+    if !network.contains(&excluded.network()) {
+        result.push(network);
+        return;
+    }
+    let prefix = network.prefix_len() + 1;
+    let first = network.network();
+    let second = match first {
+        std::net::IpAddr::V4(ip) => {
+            std::net::IpAddr::V4((u32::from(ip) | (1 << (32 - prefix))).into())
+        }
+        std::net::IpAddr::V6(ip) => {
+            std::net::IpAddr::V6((u128::from(ip) | (1 << (128 - prefix))).into())
+        }
+    };
+    for address in [first, second] {
+        subtract_prefix(
+            ipnet::IpNet::new(address, prefix).expect("valid child prefix"),
+            excluded,
+            result,
+        );
+    }
+}
+
+fn tun_inbound(
+    inbound: &Inbound,
+    ctx: &CompileContext,
+    dns_enabled: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let tun = &inbound.tun;
+    let mut gateways = Vec::new();
+    let mut dns = Vec::new();
+    for address in [&tun.inet4_address, &tun.inet6_address]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+    {
+        let net: ipnet::IpNet = address
+            .parse()
+            .map_err(|_| Error::config("TUN 地址必须为有效 IP/CIDR"))?;
+        gateways.push(address.clone());
+        let candidate = match net.network() {
+            std::net::IpAddr::V4(ip) => {
+                let host = u32::from(ip).checked_add(
+                    if u32::from(ip)
+                        .checked_add(1)
+                        .map(std::net::Ipv4Addr::from)
+                        .map(std::net::IpAddr::V4)
+                        == Some(net.addr())
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                );
+                host.map(|v| std::net::IpAddr::V4(v.into()))
+            }
+            std::net::IpAddr::V6(ip) => {
+                let host = u128::from(ip).checked_add(
+                    if u128::from(ip)
+                        .checked_add(1)
+                        .map(std::net::Ipv6Addr::from)
+                        .map(std::net::IpAddr::V6)
+                        == Some(net.addr())
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                );
+                host.map(|v| std::net::IpAddr::V6(v.into()))
+            }
+        }
+        .filter(|ip| *ip != net.addr() && net.contains(ip));
+        if tun.dns_hijack && dns_enabled {
+            dns.push(
+                candidate
+                    .ok_or_else(|| Error::config("TUN 地址段需要保留一个 DNS 地址，请扩大子网"))?
+                    .to_string(),
+            );
+        }
+    }
+    if gateways.is_empty() {
+        return Err(Error::config("TUN 至少需要一个 IPv4 或 IPv6 地址段"));
+    }
+    let mut settings = json!({"mtu":tun.mtu, "gateway":gateways, "autoOutboundsInterface":"auto"});
+    // Let Xray choose an available utun name on macOS; other platforms use a stable name.
+    if let Some(name) = tun.interface_name.as_deref().filter(|s| !s.is_empty()) {
+        settings["name"] = json!(name);
+    } else if !cfg!(target_os = "macos") {
+        settings["name"] = json!("xross-tun");
+    }
+    if tun.auto_route {
+        let mut routes: Vec<ipnet::IpNet> = Vec::new();
+        if !tun.inet4_address.is_empty() {
+            routes.push("0.0.0.0/0".parse().unwrap());
+        }
+        if !tun.inet6_address.is_empty() {
+            routes.push("::/0".parse().unwrap());
+        }
+        let mut excludes = tun.route_exclude_addresses.clone();
+        excludes.extend(ctx.mesh.routes.iter().map(|r| r.cidr.clone()));
+        if ctx.mesh.active {
+            excludes.push("127.0.0.153/32".into());
+        }
+        for cidr in excludes {
+            let excluded = cidr
+                .parse()
+                .map_err(|_| Error::config(format!("TUN 排除路由无效：{cidr}")))?;
+            let mut next = Vec::new();
+            for network in routes {
+                subtract_prefix(network, excluded, &mut next);
+            }
+            routes = next;
+        }
+        settings["autoSystemRoutingTable"] =
+            json!(routes.iter().map(ToString::to_string).collect::<Vec<_>>());
+    }
+    if tun.dns_hijack && dns_enabled {
+        settings["dns"] = json!(dns);
+    }
+    if tun.dns_hijack && !dns_enabled {
+        warnings.push("未启用 DNS 配置，TUN DNS 劫持已停用".into());
+    }
+    if tun.strict_route {
+        warnings.push("Xray TUN 已使用自动路由；不支持 sing-box 严格路由选项".into());
+    }
+    if tun.stack != crate::model::TunStack::Mixed {
+        warnings.push("Xray TUN 使用内置网络栈，已忽略网络栈选择".into());
+    }
+    if tun.dns_hijack && !cfg!(windows) {
+        warnings.push("Xray TUN 在当前平台不自动修改系统 DNS，请确认系统 DNS 设置".into());
+    }
+    Ok(
+        json!({"tag":inbound.tag, "protocol":"tun", "settings":settings, "sniffing":sniffing(inbound)}),
+    )
+}
+
 /// Minimal configuration used only by private per-node probes.
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
     Ok(json!({
@@ -436,6 +608,11 @@ pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
         "inbounds": [{"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}],
         "outbounds": [node_outbound(node, &mut Vec::new())?]
     }))
+}
+
+/// Bind probe sockets before they can be captured by a running TUN.
+pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str) {
+    config["outbounds"][0]["streamSettings"]["sockopt"]["interface"] = json!(interface);
 }
 
 fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
@@ -722,6 +899,145 @@ fn xray_rule(model: &AppModel, rule: &RouteRule, warnings: &mut Vec<String>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_tun_compiles_without_proxy_ports_and_routes_dns_before_lan() {
+        let (mut model, settings, ctx) = sample();
+        let mut tun = Inbound::new("tun-fixture", InboundKind::Tun, 0);
+        tun.tun.interface_name = Some("xross-test".into());
+        model.inbounds = vec![tun];
+        assert!(model.validate(CoreKind::Xray).is_empty());
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let inbound = &compiled.json["inbounds"][0];
+        assert_eq!(inbound["protocol"], "tun");
+        assert!(inbound.get("port").is_none());
+        assert_eq!(inbound["settings"]["name"], "xross-test");
+        assert_eq!(
+            inbound["settings"]["gateway"],
+            json!(["172.19.0.1/30", "fdfe:dcba:9876::1/126"])
+        );
+        assert_eq!(
+            inbound["settings"]["dns"],
+            json!(["172.19.0.2", "fdfe:dcba:9876::2"])
+        );
+        assert_eq!(
+            inbound["settings"]["autoSystemRoutingTable"],
+            json!(["0.0.0.0/0", "::/0"])
+        );
+        assert_eq!(inbound["settings"]["autoOutboundsInterface"], "auto");
+        assert_eq!(compiled.inbounds[0].kind, "tun");
+        let rules = compiled.json["routing"]["rules"].as_array().unwrap();
+        let dns = rules
+            .iter()
+            .position(|r| {
+                r["inboundTag"] == json!(["tun-fixture"]) && r["outboundTag"] == "dns-out"
+            })
+            .unwrap();
+        let lan = rules
+            .iter()
+            .position(|r| r["ip"] == json!(["geoip:private"]))
+            .unwrap();
+        assert!(dns < lan);
+        assert_eq!(rules[dns]["network"], "tcp,udp");
+        assert!(
+            compiled.json["dns"]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|r| !matches!(
+                    r["address"].as_str(),
+                    Some("localhost" | "system" | "local")
+                ))
+        );
+    }
+
+    #[test]
+    fn tun_subtracts_exclusions_and_mesh_routes_in_both_ip_families() {
+        let (mut model, settings, mut ctx) = sample();
+        let mut tun = Inbound::new("tun", InboundKind::Tun, 0);
+        tun.tun.route_exclude_addresses = vec!["192.0.2.0/24".into(), "2001:db8::/32".into()];
+        ctx.mesh.active = true;
+        ctx.mesh.routes.push(crate::mesh::coexist::MeshRoute {
+            cidr: "100.64.0.0/10".into(),
+            interface: "mesh-test".into(),
+        });
+        model.inbounds = vec![tun];
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let routes: Vec<ipnet::IpNet> =
+            compiled.json["inbounds"][0]["settings"]["autoSystemRoutingTable"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().parse().unwrap())
+                .collect();
+        for address in ["192.0.2.5", "2001:db8::1", "100.64.0.2", "127.0.0.153"] {
+            let ip: std::net::IpAddr = address.parse().unwrap();
+            assert!(
+                !routes.iter().any(|r| r.contains(&ip)),
+                "excluded: {address}"
+            );
+        }
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            let ip: std::net::IpAddr = address.parse().unwrap();
+            assert!(routes.iter().any(|r| r.contains(&ip)));
+        }
+    }
+
+    #[test]
+    fn tun_manual_routing_disabled_dns_and_invalid_prefixes() {
+        let (mut model, settings, ctx) = sample();
+        let mut tun = Inbound::new("tun", InboundKind::Tun, 0);
+        tun.tun.auto_route = false;
+        model.inbounds = vec![tun];
+        model.dns.enabled = false;
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(
+            compiled.json["inbounds"][0]["settings"]
+                .get("autoSystemRoutingTable")
+                .is_none()
+        );
+        assert!(
+            compiled.json["inbounds"][0]["settings"]
+                .get("dns")
+                .is_none()
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.contains("DNS 劫持已停用"))
+        );
+        model.inbounds[0].tun.auto_route = true;
+        model.inbounds[0]
+            .tun
+            .route_exclude_addresses
+            .push("invalid".into());
+        assert!(XrayAdapter.compile(&model, &settings, &ctx).is_err());
+        model.inbounds[0].tun.route_exclude_addresses.clear();
+        model.inbounds[0].tun.inet4_address = "255.255.255.255/32".into();
+        model.dns.enabled = true;
+        assert!(XrayAdapter.compile(&model, &settings, &ctx).is_err());
+    }
+
+    #[test]
+    fn xray_probe_binds_only_the_requested_node_to_the_uplink() {
+        let (model, _, _) = sample();
+        let mut config =
+            super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345).unwrap();
+        bind_probe_interface(&mut config, "test-uplink");
+        assert_eq!(config["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            config["outbounds"][0]["streamSettings"]["sockopt"]["interface"],
+            "test-uplink"
+        );
+        assert!(
+            config["inbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["protocol"] != "tun")
+        );
+    }
+
     #[test]
     fn anytls_is_skipped_with_warning_and_probe_never_falls_back() {
         let (mut model, settings, ctx) = sample();

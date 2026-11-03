@@ -1,5 +1,5 @@
 //! Session-owned proxy cores for TUN mode, supervised by the privileged helper.
-use crate::{core::process::SpawnSpec, paths::AppPaths, Error, Result};
+use crate::{Error, Result, core::process::SpawnSpec, paths::AppPaths};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -109,8 +109,17 @@ fn tun_addresses(config: &std::path::Path) -> Result<Vec<String>> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter(|i| i["type"] == "tun")
-        .flat_map(|i| i["address"].as_array().into_iter().flatten())
+        .flat_map(|i| {
+            if i["type"] == "tun" {
+                i["address"].as_array()
+            } else if i["protocol"] == "tun" {
+                i["settings"]["gateway"].as_array()
+            } else {
+                None
+            }
+            .into_iter()
+            .flatten()
+        })
         .filter_map(|v| {
             v.as_str()?
                 .parse::<ipnet::IpNet>()
@@ -180,13 +189,13 @@ fn validate_start(
     paths: &AppPaths,
     binary: &std::path::Path,
     config: &std::path::Path,
-) -> Result<()> {
+) -> Result<crate::model::CoreKind> {
     let binary = binary
         .canonicalize()
         .map_err(|_| Error::binary("TUN 核心文件不存在"))?;
     let manager = crate::core::BinaryManager::new(paths);
     let record = manager
-        .for_core(crate::model::CoreKind::SingBox)
+        .list()
         .into_iter()
         .find(|r| {
             r.matches_platform()
@@ -194,11 +203,11 @@ fn validate_start(
         })
         .ok_or_else(|| {
             Error::binary(
-                "TUN 代启仅支持 Xross 已安装的 sing-box，请在设置中下载核心并取消自定义路径",
+                "TUN 代启仅支持 Xross 已安装并登记的内核，请在设置中下载内核并取消自定义路径",
             )
         })?;
     if !manager.verify(&record)? {
-        return Err(Error::binary("TUN 核心摘要不匹配，请重新安装 sing-box"));
+        return Err(Error::binary("TUN 核心摘要不匹配，请重新安装内核"));
     }
     let runtime = paths
         .runtime_dir
@@ -213,13 +222,15 @@ fn validate_start(
     let bytes = std::fs::read(config).map_err(|_| Error::config("无法读取 TUN 配置"))?;
     let value: serde_json::Value =
         serde_json::from_slice(&bytes).map_err(|_| Error::config("TUN 配置不是有效 JSON"))?;
-    if !value["inbounds"]
-        .as_array()
-        .is_some_and(|items| items.iter().any(|i| i["type"] == "tun"))
-    {
+    if !value["inbounds"].as_array().is_some_and(|items| {
+        items.iter().any(|i| match record.core {
+            crate::model::CoreKind::SingBox => i["type"] == "tun",
+            crate::model::CoreKind::Xray => i["protocol"] == "tun",
+        })
+    }) {
         return Err(Error::config("提权启动请求缺少 TUN 入站"));
     }
-    Ok(())
+    Ok(record.core)
 }
 
 pub fn dispatch(request: &Request) -> Result<Reply> {
@@ -245,14 +256,11 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
                 return Err(Error::other("该客户端已有 TUN 核心，请先停止"));
             }
             let paths = resolve_paths(binary, config);
-            validate_start(&paths, binary, config)?;
+            let core = validate_start(&paths, binary, config)?;
             let tun_addresses = tun_addresses(config)?;
             let mut command = std::process::Command::new(binary);
             command
-                .args(crate::core::run_args(
-                    crate::model::CoreKind::SingBox,
-                    config,
-                ))
+                .args(crate::core::run_args(core, config))
                 .current_dir(&paths.data_dir)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
@@ -330,15 +338,17 @@ fn monitor_owner(
     owner: crate::mesh::platform::OwnerProcess,
 ) -> std::thread::JoinHandle<()> {
     // This monitor is independent of GUI polling and survives GUI crashes.
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(200));
-        let mut map = RUNNING.get_or_init(Default::default).lock();
-        if !map.contains_key(&session) {
-            break;
-        }
-        if !owner.alive() {
-            map.remove(&session);
-            break;
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut map = RUNNING.get_or_init(Default::default).lock();
+            if !map.contains_key(&session) {
+                break;
+            }
+            if !owner.alive() {
+                map.remove(&session);
+                break;
+            }
         }
     })
 }
@@ -511,6 +521,41 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn xray_tun_uses_registered_core_kind_and_tracks_gateway_addresses() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(root.path());
+        paths.ensure().unwrap();
+        let binary = paths.data_dir.join("xray-fixture");
+        std::fs::write(&binary, b"fake xray").unwrap();
+        crate::core::BinaryManager::new(&paths)
+            .adopt_existing(crate::model::CoreKind::Xray, "26.10.31", &binary)
+            .unwrap();
+        let config = paths.runtime_dir.join("xray-config.json");
+        std::fs::write(&config, br#"{"inbounds":[{"protocol":"tun","settings":{"gateway":["172.19.0.1/30","fdfe:dcba:9876::1/126"]}}]}"#).unwrap();
+        assert_eq!(
+            validate_start(&paths, &binary, &config).unwrap(),
+            crate::model::CoreKind::Xray
+        );
+        assert_eq!(
+            tun_addresses(&config).unwrap(),
+            vec!["172.19.0.1", "fdfe:dcba:9876::1"]
+        );
+        std::fs::write(
+            &config,
+            br#"{"inbounds":[{"type":"tun","address":["172.19.0.1/30"]}]}"#,
+        )
+        .unwrap();
+        assert!(validate_start(&paths, &binary, &config).is_err());
+        std::fs::write(&binary, b"tampered").unwrap();
+        assert!(
+            validate_start(&paths, &binary, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("摘要")
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -570,10 +615,12 @@ mod tests {
         std::fs::write(&binary, b"fake core").unwrap();
         let config = paths.runtime_dir.join("test.json");
         std::fs::write(&config, br#"{"inbounds":[{"type":"tun"}]}"#).unwrap();
-        assert!(validate_start(&paths, &binary, &config)
-            .unwrap_err()
-            .to_string()
-            .contains("已安装"));
+        assert!(
+            validate_start(&paths, &binary, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("已安装")
+        );
         crate::core::BinaryManager::new(&paths)
             .adopt_existing(crate::model::CoreKind::SingBox, "1.14.4", &binary)
             .unwrap();
@@ -582,15 +629,19 @@ mod tests {
         std::fs::copy(&config, &foreign).unwrap();
         assert!(validate_start(&paths, &binary, &foreign).is_err());
         std::fs::write(&config, br#"{"inbounds":[]}"#).unwrap();
-        assert!(validate_start(&paths, &binary, &config)
-            .unwrap_err()
-            .to_string()
-            .contains("TUN 入站"));
+        assert!(
+            validate_start(&paths, &binary, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("TUN 入站")
+        );
         std::fs::write(&binary, b"tampered").unwrap();
-        assert!(validate_start(&paths, &binary, &config)
-            .unwrap_err()
-            .to_string()
-            .contains("摘要"));
+        assert!(
+            validate_start(&paths, &binary, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("摘要")
+        );
     }
 
     #[cfg(unix)]

@@ -10,13 +10,13 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xross_core::AppService;
 use xross_core::model::RoutePreset;
 use xross_core::settings::{Language, ThemeMode};
 use xross_core::util::format_speed;
-use xross_core::AppService;
 
-use super::dashboard::{self, Dashboard, TrayAction};
 use super::PopupAnchor;
+use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
 use crate::ui::theme::palette;
 
@@ -832,8 +832,8 @@ impl Render for PopupView {
                     .when(!d.tun_supported, |row| {
                         row.child(div().text_size(px(11.)).text_color(p.muted_fg).child(tr(
                             lang,
-                            "仅 sing-box",
-                            "sing-box only",
+                            "内核不支持",
+                            "Unsupported core",
                         )))
                     })
                     .child(
@@ -957,7 +957,7 @@ impl Render for PopupView {
 #[cfg(test)]
 mod tests {
     use super::popup_bounds;
-    use gpui_kit::{point, px, size, Bounds};
+    use gpui_kit::{Bounds, point, px, size};
     #[test]
     fn placement_stays_inside_work_area_at_every_edge() {
         let work = Bounds::new(point(px(-1600.), px(-200.)), size(px(1600.), px(860.)));

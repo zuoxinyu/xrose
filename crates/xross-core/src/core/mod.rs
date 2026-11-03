@@ -261,6 +261,23 @@ impl CoreManager {
         core: CoreKind,
     ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
+        if core == CoreKind::Xray && uses_native_tun(model, core) {
+            let (_, output) = crate::core::process::run_capture(
+                &binary,
+                &["version".into()],
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            let version = regex::Regex::new(r"\b(\d+\.\d+\.\d+)")
+                .unwrap()
+                .captures(&output)
+                .and_then(|c| semver::Version::parse(&c[1]).ok());
+            if !version.is_some_and(|v| v >= semver::Version::new(26, 6, 27)) {
+                return Err(Error::binary(
+                    "Xray 自动 TUN 需要 26.6.27 或更新版本，请在设置中更新内核",
+                ));
+            }
+        }
         #[cfg(windows)]
         if uses_native_tun(model, core) {
             let archive = crate::mesh::driver::install(&self.paths).await?;

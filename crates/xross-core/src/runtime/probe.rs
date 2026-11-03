@@ -30,10 +30,47 @@ struct Probe {
 }
 
 impl Probe {
-    async fn start(binary: &Path, core: CoreKind, node: &Node) -> Result<Self> {
+    async fn start(binary: &Path, core: CoreKind, node: &Node, bypass_tun: bool) -> Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let config = crate::adapters::compile_probe(core, node, port)?;
+        let mut node = node.clone();
+        let interface = if core == CoreKind::Xray && bypass_tun {
+            let interface = default_uplink().await?;
+            // Resolve before timing the request; the probe core must not recurse
+            // through a TUN-controlled system resolver while dialing its server.
+            if node.server.parse::<std::net::IpAddr>().is_err() {
+                let address = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio::net::lookup_host((node.server.as_str(), node.port)),
+                )
+                .await
+                .map_err(|_| Error::other("节点地址解析超时"))??
+                .next()
+                .ok_or_else(|| Error::other("节点服务器没有可用 IP 地址"))?;
+                // Preserve TLS identity when replacing a hostname with an IP.
+                if node.tls.server_name.is_none() {
+                    node.tls.server_name = Some(node.server.clone());
+                }
+                match &mut node.transport {
+                    crate::model::Transport::WebSocket { host, .. }
+                    | crate::model::Transport::Http2 { host, .. }
+                    | crate::model::Transport::HttpUpgrade { host, .. }
+                        if host.is_none() =>
+                    {
+                        *host = Some(node.server.clone());
+                    }
+                    _ => {}
+                }
+                node.server = address.ip().to_string();
+            }
+            Some(interface)
+        } else {
+            None
+        };
+        let mut config = crate::adapters::compile_probe(core, &node, port)?;
+        if let Some(interface) = interface {
+            crate::adapters::xray::bind_probe_interface(&mut config, &interface);
+        }
         let directory = tempfile::Builder::new().prefix("xross-probe-").tempdir()?;
         let path = directory.path().join("config.json");
         crate::util::atomic_write(&path, &serde_json::to_vec(&config)?)?;
@@ -84,6 +121,65 @@ impl Probe {
     }
 }
 
+/// Read the existing default uplink; this never mutates routes or interfaces.
+async fn default_uplink() -> Result<String> {
+    #[cfg(windows)]
+    let (program, args) = (
+        "powershell.exe",
+        vec![
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$r=Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object @{Expression={$_.RouteMetric + $_.InterfaceMetric}} | Select-Object -First 1; if ($r) { [Console]::OutputEncoding=[Text.Encoding]::UTF8; $r.InterfaceAlias }",
+        ],
+    );
+    #[cfg(target_os = "linux")]
+    let (program, args) = ("ip", vec!["-j", "-4", "route", "show", "default"]);
+    #[cfg(target_os = "macos")]
+    let (program, args) = ("/sbin/route", vec!["-n", "get", "default"]);
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    return Err(Error::other("当前平台不支持 TUN 下的独立节点测试"));
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    {
+        let (code, output) = crate::core::process::run_capture(
+            Path::new(program),
+            &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            Duration::from_secs(5),
+        )
+        .await?;
+        if code != 0 {
+            return Err(Error::other("无法检测默认网络接口，请检查系统路由"));
+        }
+        #[cfg(windows)]
+        let name = output.trim().trim_start_matches('\u{feff}').to_string();
+        #[cfg(target_os = "linux")]
+        let name = serde_json::from_str::<serde_json::Value>(&output)
+            .ok()
+            .and_then(|v| {
+                v.as_array()
+                    .and_then(|r| {
+                        r.iter()
+                            .filter(|r| r.get("gateway").is_some())
+                            .min_by_key(|r| r["metric"].as_u64().unwrap_or(0))
+                    })
+                    .and_then(|r| r["dev"].as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        #[cfg(target_os = "macos")]
+        let name = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("interface:"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err(Error::other("未找到默认网络接口，已取消节点测试"));
+        }
+        Ok(name)
+    }
+}
+
 fn probe_client(port: u16) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .no_proxy()
@@ -97,8 +193,14 @@ fn probe_client(port: u16) -> Result<reqwest::Client> {
         .build()?)
 }
 
-pub async fn http_latency(binary: &Path, core: CoreKind, node: &Node, url: &str) -> Result<u32> {
-    let mut probe = Probe::start(binary, core, node).await?;
+pub async fn http_latency(
+    binary: &Path,
+    core: CoreKind,
+    node: &Node,
+    url: &str,
+    bypass_tun: bool,
+) -> Result<u32> {
+    let mut probe = Probe::start(binary, core, node, bypass_tun).await?;
     let started = Instant::now();
     let result = probe
         .client
@@ -119,8 +221,13 @@ pub async fn http_latency(binary: &Path, core: CoreKind, node: &Node, url: &str)
     Ok(elapsed)
 }
 
-pub async fn download(binary: &Path, core: CoreKind, node: &Node) -> Result<DownloadResult> {
-    let mut probe = Probe::start(binary, core, node).await?;
+pub async fn download(
+    binary: &Path,
+    core: CoreKind,
+    node: &Node,
+    bypass_tun: bool,
+) -> Result<DownloadResult> {
+    let mut probe = Probe::start(binary, core, node, bypass_tun).await?;
     let result = measure_download(
         &probe.client,
         DOWNLOAD_URL,

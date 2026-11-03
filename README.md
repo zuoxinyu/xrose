@@ -77,7 +77,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - `AppModel` 以意图建模，不绑定任何 core 的 schema。
 - **Xray**：`dokodemo-door` 透明代理、`balancers` + `observatory`（leastPing）、
   `geosite:` / `geoip:` 原生字段、fake-ip 跳过并提示、Stats API 入站与策略。
-  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；没有 TUN；不支持 Hysteria2/TUIC/AnyTLS。
+  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；支持原生 TUN；不支持 Hysteria2/TUIC/AnyTLS。
 - **sing-box**：内建 TUN、`selector` / `urltest`、`.srs` rule-set、
   新版路由动作（`sniff`、`hijack-dns`、`reject`）、typed DNS + fake-ip、Clash API。
   旧版 `geoip`/`geosite` 字段已移除，编译器自动生成 rule-set 引用
@@ -119,7 +119,10 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 
 ### 6. 系统集成
 
-- TUN 使用 sing-box 原生实现；启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
+- TUN 使用 Xray 或 sing-box 原生实现；Xray 自动路由需 26.6.27+。启动前做 `/dev/net/tun`、端口、权限、路由冲突检查。
+  Xray 配置自动路由和出站接口绑定，排除用户指定及组网网段；DNS 劫持覆盖 TCP/UDP 53。
+  Xray 不映射 sing-box 的严格路由和网络栈选项，界面显示编译警告；Linux/macOS 的系统 DNS 仍需由系统管理。
+  更新程序后需重新安装提权助手，才能通过助手启动 Xray TUN。
   Windows 启动前自动校验 Wintun 0.14.1 并部署到实际核心目录，无需手动配置 DLL。
   普通权限客户端通过提权助手启动 TUN 核心，支持日志、启停、重启及客户端退出回收。
 - **托盘浮窗**（Windows / macOS / Linux）：使用 GPUI Kit 绘制独立卡片式控制面板，
@@ -127,7 +130,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   TUN 开关、路由预设下拉框、全部测速、设置、显示主窗口与退出；再次点击图标、失焦或按 Esc 收起。
   浮窗使用紧凑字号；路由下拉框与主界面同步，运行中切换会校验并重启 Core，停止时只保存。
   Windows 从任务栏方向滑入/滑出，支持中途反转并遵循系统“动画效果”开关；
-  TUN 在 Core 运行时通过校验、重启生效，停止时只保存设置，Xray 下不可启用。
+  TUN 在 Core 运行时通过校验、重启生效，停止时只保存设置，Xray 与 sing-box 均可启用。
   Windows 使用 `Shell_NotifyIcon`，macOS 使用 AppKit status item，Linux 使用 StatusNotifierItem。
   **最小化到托盘**与**关闭到托盘**可在设置中分别开关；Linux 使用最小化/激活恢复，保留任务栏入口。
 - **提权助手**：GUI 保持普通用户权限运行。安装为 Windows 计划任务（绑定当前用户，登录时最高权限）/
@@ -138,7 +141,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   Windows 安装器维护独立的助手程序副本与 High 完整性标签；GUI 保持普通权限。
   更新程序后重新安装助手以同步其版本。
   Windows 普通权限启动 TUN 需要已安装并运行的新版助手；仅代启已登记、摘要校验通过的
-  sing-box 核心，不接受任意命令或参数。其他平台沿用核心自身权限。
+  Xray 或 sing-box 内核，不接受任意命令或参数。其他平台沿用核心自身权限。
 - 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；支持 `--minimized`。
 - 单实例锁（文件锁 + PID）。
 

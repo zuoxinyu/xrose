@@ -204,7 +204,7 @@ impl Settings {
             .filter(|v| !v.is_empty())
     }
 
-    /// TUN streaming on Xray needs an external stack; UI and validator call this.
+    /// Whether the selected core should start a native TUN inbound.
     pub fn effective_tun(&self) -> bool {
         self.tun_enabled && self.core.capabilities().native_tun
     }
