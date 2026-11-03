@@ -1,9 +1,11 @@
 //! Live connections and interactive request diagnostics.
 
-use gpui_base::Disableable;
+use gpui_base::{Disableable, Selectable};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::diagnostics::{
@@ -62,7 +64,8 @@ impl AppView {
                 .child(section_title(&p, self.tr("实时连接", "Live connections"), self.tr("查看请求发起方、规则与出站，录制后可复盘已结束的连接", "Inspect sources, rules and outbounds; record to review closed connections")))
                 .child(div().flex().items_center().gap_2().flex_wrap()
                     .child(Button::new("record-connections").compact().when(recording.active, |b| b.danger())
-                        .label(if recording.active { self.tr("● 停止录制", "● Stop recording") } else { self.tr("● 开始录制", "● Record") })
+                        .icon(if recording.active { IconName::Square } else { IconName::Play })
+                        .label(if recording.active { self.tr("停止录制", "Stop recording") } else { self.tr("开始录制", "Start recording") })
                         .on_click(cx.listener(|this, _, _, cx| {
                             if this.snapshot.recording.active { this.service.stop_recording(); } else { this.service.start_recording(); }
                             this.sync(cx);
@@ -101,7 +104,15 @@ impl AppView {
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_recording(); this.sync(cx); })))))
             .when(recording.started_at.is_some(), |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅保留本次会话元数据，不采集正文；最多 2000 条连接 / 100 次测试，新录制替换旧记录。短于采样间隔的连接可能遗漏。", "Session metadata only, no bodies; up to 2,000 connections / 100 tests. A new recording replaces the previous one. Short-lived connections may be missed."))))
             .when(recording.evicted_connections + recording.evicted_traces > 0, |d| d.child(div().text_xs().text_color(p.warning).child(format!("{} {} / {}", self.tr("容量限制已移除旧连接/测试：", "Older connections/tests evicted:"), recording.evicted_connections, recording.evicted_traces))));
-        let mut rows = div().flex().flex_col().gap_2().w_full();
+        let mut rows = div()
+            .id("connections-list-scroll")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .h(px(360.))
+            .overflow_y_scroll()
+            .pr_1();
         if !self.show_recorded_connections && (!running || !supported) {
             rows = rows.child(empty_hint(&p, if !running { self.tr("core 未运行，启动后可查看连接；仍可在下方测试链接", "Start the core to inspect connections; link tests remain available below") } else { self.tr("Xray 仅提供流量统计，连接列表需要 sing-box；可录制下方测试结果", "Xray exposes counters only. Use sing-box for connections; tests can still be recorded below") }));
         } else if count == 0 {
@@ -249,13 +260,16 @@ impl AppView {
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap_1()
                             .flex_shrink_0()
                             .child(
                                 Button::new(SharedString::from(format!("inspect-{id}")))
                                     .compact()
                                     .ghost()
-                                    .label(self.tr("链路 / 规则", "Path / rule"))
+                                    .selected(selected)
+                                    .icon(IconName::Route)
+                                    .tooltip(self.tr("链路 / 规则", "Path / rule"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.selected_connection = Some(inspect.clone());
                                         cx.notify();
@@ -264,7 +278,9 @@ impl AppView {
                             .child(
                                 Button::new(SharedString::from(format!("test-{id}")))
                                     .compact()
-                                    .label(self.tr("测试目标", "Test target"))
+                                    .ghost()
+                                    .icon(IconName::Radar)
+                                    .tooltip(self.tr("测试目标", "Test target"))
                                     .disabled(connection_test_target(&connection).is_none())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         if let Some(target) = connection_test_target(&test) {
@@ -277,14 +293,29 @@ impl AppView {
                                     })),
                             )
                             .when(!closed && !self.show_recorded_connections, |d| {
+                                let danger = p.danger;
+                                let tip = self.tr("断开此连接", "Close connection").to_string();
                                 d.child(
-                                    Button::new(SharedString::from(format!("kill-{id}")))
-                                        .compact()
-                                        .ghost()
-                                        .label("✕")
+                                    div()
+                                        .id(SharedString::from(format!("kill-{id}")))
+                                        .w(px(26.))
+                                        .h(px(26.))
+                                        .rounded_md()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .text_color(danger.opacity(0.72))
+                                        .hover(move |s| {
+                                            s.bg(danger.opacity(0.14)).text_color(danger)
+                                        })
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tip.clone()).build(window, cx)
+                                        })
                                         .on_click(cx.listener(move |this, _, _, _| {
                                             this.service.kill_connection(&id)
-                                        })),
+                                        }))
+                                        .child(Icon::new(IconName::X).with_size(px(14.))),
                                 )
                             }),
                     ),
@@ -669,8 +700,9 @@ impl AppView {
             move |_, _, _| (),
             move |bounds, _, window, _| {
                 let anim = paint_phase.get();
-                let cell = (f32::from(bounds.size.width) + 24.) / 6.;
-                let node_w = cell - 24.;
+                let gap = 10.;
+                let cell = (f32::from(bounds.size.width) + gap) / 6.;
+                let node_w = cell - gap;
                 let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
                 for index in 0..6 {
                     let x = index as f32 * cell + node_w / 2.;
@@ -755,123 +787,122 @@ impl AppView {
             .gap_2()
             .w_full()
             .child(
-                div().w_full().overflow_x_scrollbar().child(
-                    div()
-                        .relative()
-                        .w_full()
-                        .min_w(px(980.))
-                        .h(px(246.))
-                        .rounded_lg()
-                        .bg(p.info.opacity(0.045))
-                        .child(graph)
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(8.))
-                                .left(px(12.))
-                                .text_xs()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("请求 →", "REQUEST →")),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(36.))
-                                .left_0()
-                                .right_0()
-                                .flex()
-                                .gap(px(24.))
-                                .children(kinds.into_iter().enumerate().map(|(index, kind)| {
-                                    let step = trace.and_then(|t| t.step(kind));
-                                    let status = step.map_or(TraceStatus::Pending, |s| s.status);
-                                    let color = status_color(status, &p);
-                                    let detail = step
-                                        .map(|s| s.detail.clone())
-                                        .filter(|s| !s.is_empty())
-                                        .unwrap_or_else(|| {
-                                            self.tr("等待测试", "Awaiting test").to_string()
-                                        });
-                                    div()
-                                        .id(SharedString::from(format!("trace-stage-{index}")))
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .h(px(148.))
-                                        .flex()
-                                        .flex_col()
-                                        .gap_2()
-                                        .p_3()
-                                        .rounded_lg()
-                                        .bg(if status == TraceStatus::Active {
-                                            p.accent
-                                        } else {
-                                            p.bg
-                                        })
-                                        .border_1()
-                                        .border_color(color.opacity(0.7))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.expanded_trace_step = Some(kind);
-                                            cx.notify();
-                                        }))
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .justify_between()
-                                                .gap_1()
-                                                .child(div().text_xs().text_color(color).child(
-                                                    format!(
-                                                        "{:02}  {}",
-                                                        index + 1,
-                                                        match status {
-                                                            TraceStatus::Ok => "✓",
-                                                            TraceStatus::Active => "●",
-                                                            TraceStatus::Error
-                                                            | TraceStatus::Warn => "!",
-                                                            TraceStatus::Skipped => "–",
-                                                            TraceStatus::Pending => "○",
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(246.))
+                    .rounded_lg()
+                    .bg(p.info.opacity(0.045))
+                    .child(graph)
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(8.))
+                            .left(px(12.))
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .child(self.tr("请求发出 →", "REQUEST SENT →")),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(px(36.))
+                            .left_0()
+                            .right_0()
+                            .flex()
+                            .gap(px(10.))
+                            .children(kinds.into_iter().enumerate().map(|(index, kind)| {
+                                let step = trace.and_then(|t| t.step(kind));
+                                let status = step.map_or(TraceStatus::Pending, |s| s.status);
+                                let color = status_color(status, &p);
+                                let detail = step
+                                    .map(|s| s.detail.clone())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| {
+                                        self.tr("等待测试", "Awaiting test").to_string()
+                                    });
+                                div()
+                                    .id(SharedString::from(format!("trace-stage-{index}")))
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .h(px(148.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .p_2p5()
+                                    .rounded_lg()
+                                    .bg(if status == TraceStatus::Active {
+                                        p.accent
+                                    } else {
+                                        p.bg
+                                    })
+                                    .border_1()
+                                    .border_color(color.opacity(0.7))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.expanded_trace_step = Some(kind);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_1()
+                                            .child(div().text_xs().text_color(color).child(
+                                                format!(
+                                                    "{:02}  {}",
+                                                    index + 1,
+                                                    match status {
+                                                        TraceStatus::Ok => "✓",
+                                                        TraceStatus::Active => "●",
+                                                        TraceStatus::Error | TraceStatus::Warn => {
+                                                            "!"
                                                         }
-                                                    ),
-                                                ))
-                                                .when_some(
-                                                    step.and_then(|s| s.duration_ms),
-                                                    |d, ms| {
-                                                        d.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .text_color(p.muted_fg)
-                                                                .child(format!("{ms} ms")),
-                                                        )
-                                                    },
+                                                        TraceStatus::Skipped => "–",
+                                                        TraceStatus::Pending => "○",
+                                                    }
                                                 ),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_color(p.fg)
-                                                .child(self.trace_step_label(kind)),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w(px(0.))
-                                                .text_xs()
-                                                .text_color(p.muted_fg)
-                                                .line_clamp(3)
-                                                .child(detail),
-                                        )
-                                })),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .bottom(px(4.))
-                                .left(px(12.))
-                                .text_xs()
-                                .text_color(response_color)
-                                .child(self.tr("← 响应返回", "← RESPONSE")),
-                        ),
-                ),
+                                            ))
+                                            .when_some(
+                                                step.and_then(|s| s.duration_ms),
+                                                |d, ms| {
+                                                    d.child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(p.muted_fg)
+                                                            .child(format!("{ms} ms")),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(p.fg)
+                                            .truncate()
+                                            .child(self.trace_step_label(kind)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .line_clamp(3)
+                                            .child(detail),
+                                    )
+                            })),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .bottom(px(4.))
+                            .left(px(12.))
+                            .text_xs()
+                            .text_color(response_color)
+                            .child(self.tr("← 响应返回", "← RESPONSE RECEIVED")),
+                    ),
             )
             .child(
                 div()

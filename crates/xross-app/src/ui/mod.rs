@@ -1,3 +1,4 @@
+mod about;
 mod connections;
 mod dns;
 mod logs;
@@ -42,6 +43,7 @@ pub enum Page {
     Connections,
     Logs,
     Settings,
+    About,
 }
 
 impl Page {
@@ -68,6 +70,7 @@ impl Page {
             Page::Connections => IconName::Activity,
             Page::Logs => IconName::Terminal,
             Page::Settings => IconName::Settings,
+            Page::About => IconName::Info,
         }
     }
 
@@ -81,6 +84,7 @@ impl Page {
             Page::Connections => "连接",
             Page::Logs => "日志",
             Page::Settings => "设置",
+            Page::About => "关于",
         }
     }
 
@@ -94,6 +98,7 @@ impl Page {
             Page::Connections => "Connections",
             Page::Logs => "Logs",
             Page::Settings => "Settings",
+            Page::About => "About",
         }
     }
 }
@@ -258,6 +263,7 @@ impl AppView {
             "connections" => Page::Connections,
             "logs" => Page::Logs,
             "settings" => Page::Settings,
+            "about" => Page::About,
             _ => Page::Nodes,
         };
         // Debug hook used by the screenshot/regression workflow.
@@ -570,32 +576,59 @@ impl AppView {
                         )
                 }),
             ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p_3()
-                    .border_t_1()
-                    .border_color(p.border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_start()
-                            .gap_2()
-                            .child(dot(if self.snapshot.process.phase.is_alive() {
-                                p.success
-                            } else {
-                                p.muted_fg
-                            }))
-                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                "v{} · {}",
-                                self.snapshot.app_version,
-                                self.snapshot.settings.core.display_name()
-                            ))),
-                    ),
-            )
+            .child({
+                let about_active = self.page == Page::About;
+                div().p_2().border_t_1().border_color(p.border).child(
+                    div()
+                        .id("nav-About")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_3()
+                        .h(px(36.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(about_active, |d| d.bg(p.accent))
+                        .hover(move |s| s.bg(p.panel_alt))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = Page::About;
+                            cx.notify();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(dot(if self.snapshot.process.phase.is_alive() {
+                                    p.success
+                                } else {
+                                    p.muted_fg
+                                }))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_weight(if about_active {
+                                            FontWeight::MEDIUM
+                                        } else {
+                                            FontWeight::NORMAL
+                                        })
+                                        .text_color(if about_active { p.fg } else { p.muted_fg })
+                                        .child(format!("v{}", self.snapshot.app_version)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_xs()
+                                .text_color(if about_active { p.primary } else { p.muted_fg })
+                                .child(Icon::new(IconName::Info).size(px(13.)))
+                                .child(self.tr("关于", "About")),
+                        ),
+                )
+            })
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -984,6 +1017,7 @@ impl AppView {
             Page::Connections => self.page_connections(cx).into_any_element(),
             Page::Logs => self.page_logs(cx).into_any_element(),
             Page::Settings => self.page_settings(window, cx).into_any_element(),
+            Page::About => self.page_about(cx).into_any_element(),
             Page::Mesh => self.page_mesh(cx).into_any_element(),
         }
     }
