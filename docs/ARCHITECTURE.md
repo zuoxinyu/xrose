@@ -198,15 +198,19 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 
 ## 登录启动与通知
 
-`Settings` 独立记录应用、系统代理以及两种组网的配置 ID。任一选项启用即注册系统登录入口
-`--autostart`；`run_login_actions()` 只由 GUI 调用且每进程执行一次，不影响 CLI 或单元测试。
-系统代理等待内核启动成功；Tailscale、EasyTier 依次走已有组网连接与路由共存入口。
+`Settings.autostart` 独立控制系统登录入口 `--autostart`。`startup_proxy` 与两种组网的
+`startup_*` 配置 ID 控制应用启动动作；`run_startup_actions()` 由每次 GUI 启动调用且每进程
+执行一次，不影响 CLI 或服务构造。旧 `autostart_*` 字段通过别名读取，原隐式启用的登录启动
+迁移为显式 `autostart`，不改动现有系统启动项。组网表单通过 `AppService` 同步配置与启动选择，
+每个后端保留一个配置 ID，关闭未选中的配置不影响已选项。
+代理按保存的模式启动，系统代理等待内核启动成功；Tailscale、EasyTier 依次走已有组网连接与路由共存入口。
 组网支持 Windows、macOS、Linux；缺失配置和登录授权需求通过提示呈现。
 
-`AppService::toast()` 将事件投递到有界通知队列，GUI 初始化通知工作线程；无需依赖快照轮询。
+`AppService::toast()` 保留诊断事件，并在系统通知启用时投递到通知队列；GUI 初始化通知工作线程，无需依赖快照轮询。
 Windows 使用 WinRT toast 和 Xross 应用标识，macOS 使用 UserNotifications 授权与请求接口，
-Linux 使用桌面通知服务。30 秒内同内容去重；关闭通知立即停止后续投递，投递错误仅写日志，避免递归通知。
-macOS 非应用包运行、未授权或桌面服务不可用时，应用内提示继续可用。
+Linux 使用桌面通知服务。系统通知默认关闭；启用后界面隐藏应用内通知，投递错误仅写日志，避免递归通知。
+事件记住产生时的通知通道，关闭开关不会将已投递的系统通知重新显示为应用内提示。30 秒内同内容去重。
+提权助手检查通过异步锁串行执行，已运行时不提示；需要启动或安装时才发通知。
 
 OpenVPN / OpenConnect 的适配以 sing-box 1.14.4 的类型定义和官方客户端文档为准：
 [OpenVPN](https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/)、

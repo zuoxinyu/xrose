@@ -36,6 +36,7 @@ pub(crate) struct MeshForm {
     forwards: Entity<InputState>,
     outbound_port: Entity<InputState>,
     advertise_exit: bool,
+    connect_on_startup: bool,
 }
 
 impl MeshForm {
@@ -58,6 +59,7 @@ impl MeshForm {
             forwards: super::text_input(window, cx, "tcp://127.0.0.1:8080/10.126.126.2:80"),
             outbound_port: super::text_input(window, cx, ""),
             advertise_exit: false,
+            connect_on_startup: false,
         }
     }
 
@@ -295,6 +297,11 @@ impl AppView {
             window,
             cx,
         );
+        self.mesh_form.connect_on_startup = self
+            .snapshot
+            .settings
+            .mesh_startup_profile(self.mesh_form.provider)
+            == Some(self.mesh_form.id.as_str());
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, cx| {
             if let Some(view) = view.upgrade() {
@@ -429,7 +436,9 @@ impl AppView {
                     .child(Input::new(input)),
             );
         }
-        form = form.child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
+        form = form.child(toggle("mesh-connect-on-startup", self.tr("随应用启动连接", "Connect when app starts"), self.mesh_form.connect_on_startup).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.connect_on_startup = *checked; cx.notify(); })))
+            .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("每种组网类型可选择一个启动连接配置。", "Select one startup profile for each network type.")))
+            .child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
             .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("填写出口出站端口后，节点列表将生成可用于出站组和分流规则的出口节点。转发格式：tcp://监听IP:端口/目标IP:端口（支持 udp）。", "An outbound port creates a node for groups and routing rules. Forward format: tcp://listen-IP:port/target-IP:port (udp supported).")));
         if self.mesh_form.provider == MeshProvider::Tailscale {
             form = form.child(
@@ -496,11 +505,12 @@ impl AppView {
                             .label(self.tr("保存配置", "Save profile"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                match this
-                                    .mesh_form
-                                    .profile(cx)
-                                    .and_then(|profile| this.service.save_mesh_profile(profile))
-                                {
+                                match this.mesh_form.profile(cx).and_then(|profile| {
+                                    this.service.save_mesh_profile_with_startup(
+                                        profile,
+                                        this.mesh_form.connect_on_startup,
+                                    )
+                                }) {
                                     Ok(_) => {
                                         this.mesh_form
                                             .secret

@@ -138,7 +138,7 @@ impl MeshProfile {
     pub fn validate(&self) -> Result<()> {
         if self.auto_connect {
             return Err(Error::config(
-                "请关闭 auto_connect，并在设置中选择组网登录启动配置",
+                "请关闭 auto_connect，并在应用启动设置中选择组网配置",
             ));
         }
         uuid::Uuid::parse_str(&self.id).map_err(|_| Error::config("组网配置 ID 无效"))?;

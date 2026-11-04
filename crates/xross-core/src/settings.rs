@@ -112,10 +112,14 @@ pub struct Settings {
     pub tun_enabled: bool,
     pub tun_strict_route: bool,
     pub autostart: bool,
-    pub autostart_proxy: bool,
-    /// Explicit profile identities; None leaves that provider disconnected at login.
-    pub autostart_tailscale: Option<String>,
-    pub autostart_easytier: Option<String>,
+    /// Start the core with the saved proxy mode whenever the GUI launches.
+    #[serde(alias = "autostart_proxy")]
+    pub startup_proxy: bool,
+    /// Explicit profile identities; None leaves that provider disconnected on app launch.
+    #[serde(alias = "autostart_tailscale")]
+    pub startup_tailscale: Option<String>,
+    #[serde(alias = "autostart_easytier")]
+    pub startup_easytier: Option<String>,
     pub system_notifications: bool,
     pub start_minimized: bool,
     /// Minimizing the window hides it into the tray instead of the taskbar.
@@ -160,10 +164,10 @@ impl Default for Settings {
             tun_enabled: false,
             tun_strict_route: true,
             autostart: false,
-            autostart_proxy: false,
-            autostart_tailscale: None,
-            autostart_easytier: None,
-            system_notifications: true,
+            startup_proxy: false,
+            startup_tailscale: None,
+            startup_easytier: None,
+            system_notifications: false,
             start_minimized: false,
             minimize_to_tray: true,
             close_to_tray: true,
@@ -189,9 +193,30 @@ impl Default for Settings {
 impl Settings {
     pub fn login_enabled(&self) -> bool {
         self.autostart
-            || self.autostart_proxy
-            || self.autostart_tailscale.is_some()
-            || self.autostart_easytier.is_some()
+    }
+
+    pub fn mesh_startup_profile(&self, provider: crate::mesh::MeshProvider) -> Option<&str> {
+        match provider {
+            crate::mesh::MeshProvider::Tailscale => self.startup_tailscale.as_deref(),
+            crate::mesh::MeshProvider::EasyTier => self.startup_easytier.as_deref(),
+        }
+    }
+
+    pub fn set_mesh_startup_profile(
+        &mut self,
+        provider: crate::mesh::MeshProvider,
+        id: &str,
+        enabled: bool,
+    ) {
+        let selected = match provider {
+            crate::mesh::MeshProvider::Tailscale => &mut self.startup_tailscale,
+            crate::mesh::MeshProvider::EasyTier => &mut self.startup_easytier,
+        };
+        if enabled {
+            *selected = Some(id.into());
+        } else if selected.as_deref() == Some(id) {
+            *selected = None;
+        }
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -199,7 +224,19 @@ impl Settings {
             return Ok(Self::default());
         }
         let bytes = std::fs::read(path)?;
-        Ok(serde_json::from_slice(&bytes).unwrap_or_default())
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+        let mut settings: Self = serde_json::from_value(value.clone()).unwrap_or_default();
+        // Old startup actions implicitly registered the OS login entry. Preserve
+        // that effective choice explicitly; new startup actions are independent.
+        if value.get("startup_proxy").is_none()
+            && value.get("startup_tailscale").is_none()
+            && value.get("startup_easytier").is_none()
+        {
+            settings.autostart |= value["autostart_proxy"].as_bool().unwrap_or(false)
+                || value["autostart_tailscale"].as_str().is_some()
+                || value["autostart_easytier"].as_str().is_some();
+        }
+        Ok(settings)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -306,15 +343,36 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn independent_login_choices_roundtrip_and_old_settings_default_off() {
+    fn legacy_login_actions_keep_the_effective_login_choice_when_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"autostart":false,"autostart_proxy":true,"autostart_tailscale":"fixture-ts","system_notifications":true}"#).unwrap();
+        let settings = Settings::load(&path).unwrap();
+        assert!(settings.autostart);
+        assert!(settings.startup_proxy);
+        assert_eq!(settings.startup_tailscale.as_deref(), Some("fixture-ts"));
+        assert!(settings.system_notifications);
+        settings.save(&path).unwrap();
+        let mut settings = Settings::load(&path).unwrap();
+        settings.autostart = false;
+        settings.save(&path).unwrap();
+        let settings = Settings::load(&path).unwrap();
+        assert!(!settings.login_enabled());
+        assert!(settings.startup_proxy);
+    }
+    #[test]
+    fn app_startup_choices_do_not_enable_os_login_and_old_settings_default_off() {
         let mut settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.login_enabled());
-        assert!(settings.autostart_tailscale.is_none());
-        settings.autostart_proxy = true;
-        assert!(settings.login_enabled());
-        settings.autostart_proxy = false;
-        settings.autostart_tailscale = Some("test-tailnet".into());
-        settings.autostart_easytier = Some("test-network".into());
+        assert!(settings.startup_tailscale.is_none());
+        assert!(!settings.system_notifications);
+        settings.startup_proxy = true;
+        assert!(!settings.login_enabled());
+        settings.startup_proxy = false;
+        settings.startup_tailscale = Some("test-tailnet".into());
+        settings.startup_easytier = Some("test-network".into());
+        assert!(!settings.login_enabled());
+        settings.autostart = true;
         assert!(settings.login_enabled());
         assert_eq!(
             serde_json::from_str::<Settings>(&serde_json::to_string(&settings).unwrap()).unwrap(),

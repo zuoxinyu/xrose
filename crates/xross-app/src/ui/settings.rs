@@ -399,25 +399,18 @@ impl AppView {
                                         },
                                     )),
                                 )
-                                .child(settings_toggle("autostart-proxy", self.tr("登录时启动系统代理", "Start system proxy at login"), settings.autostart_proxy)
-                                    .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.autostart_proxy = *checked); })))
+                                .child(settings_toggle("autostart-proxy", self.tr("应用启动时开启代理", "Start proxy when app starts"), settings.startup_proxy)
+                                    .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.startup_proxy = *checked); })))
                                 .child(settings_toggle("system-notifications", self.tr("系统通知", "System notifications"), settings.system_notifications)
                                     .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.system_notifications = *checked); })))
                                 .children(self.snapshot.mesh.profiles.iter().filter(|_| self.snapshot.mesh.supported).map(|profile| {
                                     let id = profile.id.clone(); let provider = profile.provider;
-                                    let selected = match provider {
-                                        xross_core::mesh::MeshProvider::Tailscale => settings.autostart_tailscale.as_deref(),
-                                        xross_core::mesh::MeshProvider::EasyTier => settings.autostart_easytier.as_deref(),
-                                    } == Some(id.as_str());
+                                    let selected = settings.mesh_startup_profile(provider) == Some(id.as_str());
                                     settings_toggle(SharedString::from(format!("login-mesh-{id}")),
-                                        format!("{} {} · {}", self.tr("登录时连接", "Connect at login"), provider.label(), profile.name), selected)
+                                        format!("{} {} · {}", self.tr("应用启动时连接", "Connect on app launch"), provider.label(), profile.name), selected)
                                         .on_change(cx.listener(move |this, checked: &bool, _, cx| {
                                             this.modify_settings(cx, |s| {
-                                                let target = match provider {
-                                                    xross_core::mesh::MeshProvider::Tailscale => &mut s.autostart_tailscale,
-                                                    xross_core::mesh::MeshProvider::EasyTier => &mut s.autostart_easytier,
-                                                };
-                                                *target = checked.then(|| id.clone());
+                                                s.set_mesh_startup_profile(provider, &id, *checked);
                                             });
                                         }))
                                 }))

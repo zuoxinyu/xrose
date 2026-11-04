@@ -91,7 +91,7 @@ fn main() {
             }
             notifications::install(&app_service);
             let mut tray = tray::TrayManager::new(&app_service);
-            if args.iter().any(|arg| arg == "--autostart") { app_service.run_login_actions(); }
+            app_service.run_startup_actions();
             // Development preview for visual regression checks with an isolated profile.
             if cfg!(debug_assertions) && std::env::var_os("XROSS_TRAY_PREVIEW").is_some() {
                 tray::queue_command(tray::TrayCommand::TogglePopup);

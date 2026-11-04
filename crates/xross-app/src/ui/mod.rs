@@ -1092,56 +1092,66 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_2()
-            .children(self.snapshot.toasts.iter().rev().take(5).map(|toast| {
-                let color = match toast.level {
-                    xross_core::service::ToastLevel::Info => p.info,
-                    xross_core::service::ToastLevel::Success => p.success,
-                    xross_core::service::ToastLevel::Warning => p.warning,
-                    xross_core::service::ToastLevel::Error => p.danger,
-                };
-                let id = toast.id;
-                div()
-                    .flex()
-                    .items_start()
-                    .w_full()
-                    .min_w(px(0.))
-                    .gap_2()
-                    .p_3()
-                    .rounded_md()
-                    .bg(p.panel)
-                    .border_1()
-                    .border_color(color)
-                    .shadow_md()
-                    .child(
+            .children(
+                self.snapshot
+                    .toasts
+                    .iter()
+                    .rev()
+                    .filter(|toast| {
+                        toast.visible_in_app(self.snapshot.settings.system_notifications)
+                    })
+                    .take(5)
+                    .map(|toast| {
+                        let color = match toast.level {
+                            xross_core::service::ToastLevel::Info => p.info,
+                            xross_core::service::ToastLevel::Success => p.success,
+                            xross_core::service::ToastLevel::Warning => p.warning,
+                            xross_core::service::ToastLevel::Error => p.danger,
+                        };
+                        let id = toast.id;
                         div()
-                            .h(px(20.))
                             .flex()
-                            .items_center()
-                            .flex_shrink_0()
-                            .child(dot(color)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
+                            .items_start()
+                            .w_full()
                             .min_w(px(0.))
-                            .text_sm()
-                            .line_height(px(20.))
-                            .whitespace_normal()
-                            .overflow_hidden()
-                            .text_color(p.fg)
-                            .child(toast.message.clone()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("toast-{id}")))
-                            .compact()
-                            .ghost()
-                            .icon(IconName::X)
-                            .flex_shrink_0()
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.service.dismiss_toast(id);
-                            })),
-                    )
-            }))
+                            .gap_2()
+                            .p_3()
+                            .rounded_md()
+                            .bg(p.panel)
+                            .border_1()
+                            .border_color(color)
+                            .shadow_md()
+                            .child(
+                                div()
+                                    .h(px(20.))
+                                    .flex()
+                                    .items_center()
+                                    .flex_shrink_0()
+                                    .child(dot(color)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .text_sm()
+                                    .line_height(px(20.))
+                                    .whitespace_normal()
+                                    .overflow_hidden()
+                                    .text_color(p.fg)
+                                    .child(toast.message.clone()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("toast-{id}")))
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::X)
+                                    .flex_shrink_0()
+                                    .on_click(cx.listener(move |this, _, _, _| {
+                                        this.service.dismiss_toast(id);
+                                    })),
+                            )
+                    }),
+            )
     }
 
     fn sparkline(&self, p: &Palette) -> impl IntoElement {

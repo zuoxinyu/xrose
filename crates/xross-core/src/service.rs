@@ -48,6 +48,15 @@ pub struct Toast {
     pub level: ToastLevel,
     pub message: String,
     pub at: i64,
+    /// Retained in history for CLI errors, but excluded from the in-app overlay.
+    #[serde(default)]
+    pub system_notification: bool,
+}
+
+impl Toast {
+    pub fn visible_in_app(&self, system_notifications: bool) -> bool {
+        !system_notifications && !self.system_notification
+    }
 }
 
 /// Native notification controls are independent of the UI's toast polling.
@@ -210,9 +219,10 @@ struct Inner {
     trace_generation: AtomicU64,
     recording: Mutex<DiagnosticRecording>,
     toast_seq: AtomicU64,
-    login_started: AtomicBool,
+    startup_started: AtomicBool,
     notification_sender: RwLock<Option<std::sync::mpsc::Sender<NotificationEvent>>>,
     install_lock: tokio::sync::Mutex<()>,
+    helper_lock: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; all state lives behind Arc.
@@ -316,9 +326,10 @@ impl AppService {
             trace_generation: AtomicU64::new(0),
             recording: Mutex::new(DiagnosticRecording::default()),
             toast_seq: AtomicU64::new(1),
-            login_started: AtomicBool::new(false),
+            startup_started: AtomicBool::new(false),
             notification_sender: RwLock::new(None),
             install_lock: tokio::sync::Mutex::new(()),
+            helper_lock: tokio::sync::Mutex::new(()),
         });
         let service = Self {
             inner: inner.clone(),
@@ -530,7 +541,7 @@ impl AppService {
         self.inner.core.logs().push(
             LogStream::App,
             LogLevel::Warn,
-            format!("系统通知不可用，继续显示应用内提示：{message}"),
+            format!("系统通知不可用：{message}"),
         );
         self.local_toast(ToastLevel::Warning, message);
     }
@@ -546,13 +557,15 @@ impl AppService {
 
     fn push_toast(&self, level: ToastLevel, message: String, native: bool) {
         let id = self.inner.toast_seq.fetch_add(1, Ordering::SeqCst);
+        let system_notification = self.inner.settings.read().system_notifications;
         let toast = Toast {
             id,
             level,
             message: message.clone(),
             at: now_unix(),
+            system_notification,
         };
-        if native && self.inner.settings.read().system_notifications {
+        if native && system_notification {
             if let Some(sender) = self.inner.notification_sender.read().as_ref() {
                 let _ = sender.send(NotificationEvent::Show(toast.clone()));
             }
@@ -1596,32 +1609,25 @@ impl AppService {
         Ok(())
     }
 
-    /// Called only by the GUI login entry point, never by CLI/test construction.
-    pub fn run_login_actions(&self) {
-        if self.inner.login_started.swap(true, Ordering::SeqCst) {
+    /// Called once on every GUI launch, never by CLI/test construction.
+    pub fn run_startup_actions(&self) {
+        if self.inner.startup_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let settings = self.settings();
-        if settings.autostart_proxy {
-            let mut new = settings.clone();
-            new.system_proxy = true;
-            // The proxy is applied only after the core has successfully started.
-            if let Err(err) = self.save_settings(&new) {
-                self.toast(ToastLevel::Error, err.to_string());
-            } else {
-                self.start_core();
-            }
+        if settings.startup_proxy {
+            self.start_core();
         }
         let service = self.clone();
         self.spawn(async move {
             for (provider, id) in [
                 (
                     crate::mesh::MeshProvider::Tailscale,
-                    settings.autostart_tailscale,
+                    settings.startup_tailscale,
                 ),
                 (
                     crate::mesh::MeshProvider::EasyTier,
-                    settings.autostart_easytier,
+                    settings.startup_easytier,
                 ),
             ] {
                 let Some(id) = id else {
@@ -1637,7 +1643,7 @@ impl AppService {
                 {
                     service.toast(
                         ToastLevel::Warning,
-                        format!("{} 登录启动配置不存在，请重新选择", provider.label()),
+                        format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
                     );
                     continue;
                 }
@@ -1956,12 +1962,7 @@ impl AppService {
 
     pub fn update_settings(&self, mut new: Settings) {
         let old = self.settings();
-        if self.is_busy("autostart")
-            && (new.autostart != old.autostart
-                || new.autostart_proxy != old.autostart_proxy
-                || new.autostart_tailscale != old.autostart_tailscale
-                || new.autostart_easytier != old.autostart_easytier)
-        {
+        if self.is_busy("autostart") && new.autostart != old.autostart {
             self.toast(ToastLevel::Info, "正在设置登录启动，请稍后重试");
             return;
         }
@@ -1993,11 +1994,7 @@ impl AppService {
             self.sync_model_settings();
             let _ = self.persist_model();
         }
-        if new.autostart != old.autostart
-            || new.autostart_proxy != old.autostart_proxy
-            || new.autostart_tailscale != old.autostart_tailscale
-            || new.autostart_easytier != old.autostart_easytier
-        {
+        if new.autostart != old.autostart {
             let service = self.clone();
             let new = new.clone();
             let old = old.clone();
@@ -2011,9 +2008,6 @@ impl AppService {
                 if !matches!(result, Ok(Ok(()))) {
                     let mut current = service.settings();
                     current.autostart = old.autostart;
-                    current.autostart_proxy = old.autostart_proxy;
-                    current.autostart_tailscale = old.autostart_tailscale;
-                    current.autostart_easytier = old.autostart_easytier;
                     let _ = service.save_settings(&current);
                     service.toast(
                         ToastLevel::Error,
@@ -2650,8 +2644,9 @@ impl AppService {
     }
 
     async fn ensure_helper(&self) -> std::result::Result<(), String> {
-        self.toast(ToastLevel::Info, "正在检查提权助手，安装时请完成系统授权");
-        let result = tokio::task::spawn_blocking(|| {
+        let _guard = self.inner.helper_lock.lock().await;
+        let service = self.clone();
+        let result = tokio::task::spawn_blocking(move || {
             let current = privilege::status();
             if current.running {
                 return (Ok(String::new()), current);
@@ -2662,8 +2657,10 @@ impl AppService {
                 return (Ok(String::new()), current);
             }
             let outcome = if current.installed {
+                service.toast(ToastLevel::Info, "正在启动提权助手…");
                 privilege::start()
             } else {
+                service.toast(ToastLevel::Info, "正在安装提权助手，请完成系统授权");
                 privilege::install()
             };
             (outcome, privilege::status())
@@ -2676,12 +2673,12 @@ impl AppService {
             }
             Ok((Err(err), status)) => {
                 *self.inner.helper.write() = status;
-                Err(format!("开启 TUN 需要提权助手运行：{err}"))
+                Err(format!("此操作需要提权助手运行：{err}"))
             }
             Ok((Ok(message), status)) => {
                 *self.inner.helper.write() = status;
                 Err(format!(
-                    "开启 TUN 需要提权助手运行：{}",
+                    "此操作需要提权助手运行：{}",
                     if message.is_empty() {
                         "提权助手未能启动，请在设置 → 系统集成中检查助手状态"
                     } else {
@@ -3234,6 +3231,22 @@ impl AppService {
     }
 
     pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
+        self.save_mesh_profile_inner(profile, None)
+    }
+
+    pub fn save_mesh_profile_with_startup(
+        &self,
+        profile: crate::mesh::MeshProfile,
+        connect_on_startup: bool,
+    ) -> Result<String> {
+        self.save_mesh_profile_inner(profile, Some(connect_on_startup))
+    }
+
+    fn save_mesh_profile_inner(
+        &self,
+        profile: crate::mesh::MeshProfile,
+        connect_on_startup: Option<bool>,
+    ) -> Result<String> {
         let settings = self.settings();
         if profile.outbound_port != 0
             && [
@@ -3248,12 +3261,20 @@ impl AppService {
                 "出口出站端口与代理或管理端口冲突，请使用其他端口",
             ));
         }
+        let provider = profile.provider;
         let id = self.inner.mesh.save(profile)?;
         self.inner
             .mesh
             .sync_outbounds(&mut self.inner.model.write());
         self.persist_model()?;
         self.mark_dirty();
+        if let Some(enabled) = connect_on_startup {
+            let mut settings = self.settings();
+            settings.set_mesh_startup_profile(provider, &id, enabled);
+            self.save_settings(&settings).map_err(|err| {
+                Error::other(format!("组网配置已保存，但应用启动设置保存失败：{err}"))
+            })?;
+        }
         self.toast(ToastLevel::Success, "组网配置已保存");
         Ok(id)
     }
@@ -3267,11 +3288,11 @@ impl AppService {
         self.persist_model()?;
         self.mark_dirty();
         let mut settings = self.settings();
-        if settings.autostart_tailscale.as_deref() == Some(id) {
-            settings.autostart_tailscale = None;
+        if settings.startup_tailscale.as_deref() == Some(id) {
+            settings.startup_tailscale = None;
         }
-        if settings.autostart_easytier.as_deref() == Some(id) {
-            settings.autostart_easytier = None;
+        if settings.startup_easytier.as_deref() == Some(id) {
+            settings.startup_easytier = None;
         }
         self.update_settings(settings);
         Ok(())
@@ -3803,6 +3824,10 @@ mod tests {
     #[test]
     fn notifications_queue_once_and_honor_preference_without_a_desktop() {
         let (service, _dir) = service();
+        assert!(!service.settings().system_notifications);
+        let mut settings = service.settings();
+        settings.system_notifications = true;
+        service.update_settings(settings);
         let receiver = service.subscribe_notifications();
         assert!(matches!(
             receiver.try_recv().unwrap(),
@@ -3819,6 +3844,12 @@ mod tests {
         let _ = service.snapshot();
         let _ = service.snapshot();
         assert!(receiver.try_recv().is_err());
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .all(|t| !t.visible_in_app(true))
+        );
         let mut settings = service.settings();
         settings.system_notifications = false;
         service.update_settings(settings.clone());
@@ -3835,7 +3866,14 @@ mod tests {
             service
                 .active_toasts()
                 .iter()
-                .any(|t| t.message == "disabled")
+                .any(|t| t.message == "disabled" && t.visible_in_app(false))
+        );
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .filter(|t| t.message == "fixture")
+                .all(|t| !t.visible_in_app(false))
         );
         settings.system_notifications = true;
         service.update_settings(settings.clone());
@@ -3855,8 +3893,102 @@ mod tests {
             service
                 .active_toasts()
                 .iter()
-                .any(|t| t.message == "fixture permission failure")
+                .any(|t| t.message == "fixture permission failure"
+                    && !t.visible_in_app(true)
+                    && !t.visible_in_app(false))
         );
+    }
+
+    #[test]
+    fn mesh_startup_selection_saves_with_forms_and_keeps_providers_independent() {
+        use crate::mesh::{MeshProfile, MeshProvider, MeshSecret};
+        let (service, _dir) = service();
+        let first = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            name: "first".into(),
+            ..Default::default()
+        };
+        let second = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            name: "second".into(),
+            ..Default::default()
+        };
+        let et = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: MeshSecret("fake-key".into()),
+            peers: vec!["tcp://192.0.2.1:11010".into()],
+            ..Default::default()
+        };
+        service
+            .save_mesh_profile_with_startup(first.clone(), true)
+            .unwrap();
+        service
+            .save_mesh_profile_with_startup(second.clone(), false)
+            .unwrap();
+        assert_eq!(
+            service.settings().startup_tailscale.as_deref(),
+            Some(first.id.as_str())
+        );
+        service
+            .save_mesh_profile_with_startup(et.clone(), true)
+            .unwrap();
+        service
+            .save_mesh_profile_with_startup(second.clone(), true)
+            .unwrap();
+        service
+            .save_mesh_profile_with_startup(first.clone(), false)
+            .unwrap();
+        let saved = Settings::load(&service.paths().settings_file()).unwrap();
+        assert_eq!(saved.startup_tailscale.as_deref(), Some(second.id.as_str()));
+        assert_eq!(saved.startup_easytier.as_deref(), Some(et.id.as_str()));
+        assert!(!saved.login_enabled());
+        assert!(!service.is_busy("autostart"));
+        service.delete_mesh_profile(&first.id).unwrap();
+        assert_eq!(
+            service.settings().startup_tailscale.as_deref(),
+            Some(second.id.as_str())
+        );
+        service
+            .save_mesh_profile_with_startup(second.clone(), false)
+            .unwrap();
+        assert!(service.settings().startup_tailscale.is_none());
+        assert_eq!(
+            service.settings().startup_easytier.as_deref(),
+            Some(et.id.as_str())
+        );
+        service.delete_mesh_profile(&et.id).unwrap();
+        assert!(service.settings().startup_easytier.is_none());
+    }
+
+    #[test]
+    fn startup_actions_run_once_on_manual_launch_and_preserve_proxy_mode() {
+        let (service, _dir) = service();
+        let mut settings = service.settings();
+        settings.startup_proxy = true;
+        settings.startup_tailscale = Some("missing-fixture".into());
+        settings.tun_enabled = true;
+        settings.system_proxy = false;
+        service.update_settings(settings);
+        // An empty profile fails compilation before binary download or helper access.
+        service.run_startup_actions();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let toasts = service.active_toasts();
+            if !service.is_busy("core")
+                && toasts
+                    .iter()
+                    .any(|t| t.message.contains("应用启动连接配置不存在"))
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!service.settings().system_proxy);
+        assert!(service.settings().tun_enabled);
+        let before = service.inner.toast_seq.load(Ordering::SeqCst);
+        service.run_startup_actions();
+        assert_eq!(service.inner.toast_seq.load(Ordering::SeqCst), before);
     }
 
     #[test]
