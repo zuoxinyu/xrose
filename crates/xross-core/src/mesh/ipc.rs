@@ -113,6 +113,8 @@ impl Worker {
             std::thread::sleep(Duration::from_millis(50));
         }
         let mut child = self.child.lock();
+        #[cfg(unix)]
+        super::platform::kill_worker_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
         let _ = super::platform::cleanup_dns(&self.directory);
@@ -131,7 +133,7 @@ static SESSIONS: OnceLock<Mutex<BTreeMap<String, Session>>> = OnceLock::new();
 
 pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
     if request.version != PROTOCOL_VERSION {
-        return Err(Error::other("组网助手协议不兼容，请更新并重启特权助手"));
+        return Err(Error::other("组网助手协议不兼容，请更新并重启提权助手"));
     }
     if request.session.0.len() != 64 || !request.session.0.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::other("组网会话凭证无效"));
@@ -249,14 +251,17 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             }
             let mut protected = baseline.protected.clone();
             protected.extend(other_routes);
-            super::coexist::check_networks(&wanted, &protected)?;
+            super::coexist::check_startup_networks(profile.provider, &wanted, &protected)?;
             let directory = crate::paths::AppPaths::discover()
                 .data_dir
                 .join("mesh-state")
                 .join(&profile.id);
             super::platform::secure_directory(&directory)?;
             super::platform::cleanup_dns(&directory)?;
+            #[cfg(windows)]
             super::driver::unpack(driver_archive, &directory)?;
+            #[cfg(not(windows))]
+            let _ = driver_archive;
             if profile.provider == MeshProvider::Tailscale {
                 super::tailscale::verify_binary(
                     tailscale_binary
@@ -273,6 +278,11 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
             #[cfg(windows)]
             {
                 use std::os::windows::process::CommandExt;
@@ -464,6 +474,38 @@ mod tests {
         request.version = PROTOCOL_VERSION;
         assert!(dispatch(&request).unwrap_err().to_string().contains("凭证"));
         assert!(!format!("{request:?}").contains("fake-key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_stop_reaps_a_stuck_worker_process_group() {
+        use std::os::unix::process::CommandExt;
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let worker = Worker {
+            input: command_pipe(child.stdin.take().unwrap()),
+            child: Mutex::new(child),
+            state: Mutex::new(MeshRuntimeView {
+                phase: MeshPhase::Connected,
+                ..Default::default()
+            }),
+            directory: directory.path().to_path_buf(),
+            owner: super::super::platform::OwnerProcess::open(std::process::id()).unwrap(),
+            stopping: Default::default(),
+        };
+        let started = Instant::now();
+        worker.stop();
+        worker.stop();
+        assert!(started.elapsed() < Duration::from_secs(7));
+        assert!(worker.child.lock().try_wait().unwrap().is_some());
+        assert_eq!(worker.state.lock().phase, MeshPhase::Disconnected);
     }
 
     #[cfg(windows)]

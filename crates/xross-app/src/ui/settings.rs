@@ -304,7 +304,8 @@ impl AppView {
                                             },
                                         ),
                                     ),
-                                ),
+                                )
+                                .child(settings_toggle("tun-strict-route", self.tr("TUN 严格路由", "TUN strict route"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.tun_strict_route = *checked); })))
                         ),
                 )
                 .child(
@@ -402,7 +403,7 @@ impl AppView {
                                     .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.autostart_proxy = *checked); })))
                                 .child(settings_toggle("system-notifications", self.tr("系统通知", "System notifications"), settings.system_notifications)
                                     .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.system_notifications = *checked); })))
-                                .children(self.snapshot.mesh.profiles.iter().filter(|_| cfg!(windows)).map(|profile| {
+                                .children(self.snapshot.mesh.profiles.iter().filter(|_| self.snapshot.mesh.supported).map(|profile| {
                                     let id = profile.id.clone(); let provider = profile.provider;
                                     let selected = match provider {
                                         xross_core::mesh::MeshProvider::Tailscale => settings.autostart_tailscale.as_deref(),

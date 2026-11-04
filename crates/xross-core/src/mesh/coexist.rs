@@ -52,6 +52,29 @@ pub fn check_networks(values: &[String], protected: &[String]) -> Result<()> {
     }
     Ok(())
 }
+
+pub fn check_startup_networks(
+    provider: super::MeshProvider,
+    values: &[String],
+    protected: &[String],
+) -> Result<()> {
+    if provider == super::MeshProvider::Tailscale {
+        let spaces: [IpNet; 2] = [
+            "100.64.0.0/10".parse().unwrap(),
+            "fd7a:115c:a1e0::/48".parse().unwrap(),
+        ];
+        if protected
+            .iter()
+            .filter_map(|v| v.parse::<IpNet>().ok())
+            .any(|p| p.prefix_len() != 0 && spaces.iter().any(|space| overlaps(space, &p)))
+        {
+            return Err(Error::config(
+                "系统已有网卡占用 Tailscale 网段；请先断开独立 Tailscale 客户端或使用同网段的 VPN，再连接 Xross",
+            ));
+        }
+    }
+    check_networks(values, protected)
+}
 pub fn plan(networks: &[MeshRuntimeView], protected: &[String]) -> Result<CoexistencePlan> {
     let mut result = CoexistencePlan::default();
     result.active = networks.iter().any(|n| {
@@ -128,16 +151,46 @@ pub fn valid_suffix(s: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn tailscale_conflicts_explain_how_to_release_the_network() {
+        for address in ["100.64.1.2/32", "fd7a:115c:a1e0::1234/128"] {
+            let error = check_startup_networks(
+                super::super::MeshProvider::Tailscale,
+                &[],
+                &[address.into()],
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("独立 Tailscale 客户端"));
+        }
+        assert!(
+            check_startup_networks(
+                super::super::MeshProvider::Tailscale,
+                &["192.168.1.0/24".into()],
+                &["192.168.1.5/24".into()]
+            )
+            .is_err()
+        );
+        assert!(
+            check_startup_networks(
+                super::super::MeshProvider::EasyTier,
+                &["10.126.126.0/24".into()],
+                &["100.64.1.2/32".into()]
+            )
+            .is_ok()
+        );
+    }
+    #[test]
     fn tailscale_internal_addresses_do_not_overlap_default_proxy_tun() {
         let tun = crate::model::TunOptions::default();
-        assert!(check_networks(
-            &[
-                super::super::TAILSCALE_TUN_NETWORK.into(),
-                super::super::TAILSCALE_TUN_IPV6_NETWORK.into()
-            ],
-            &[tun.inet4_address, tun.inet6_address],
-        )
-        .is_ok());
+        assert!(
+            check_networks(
+                &[
+                    super::super::TAILSCALE_TUN_NETWORK.into(),
+                    super::super::TAILSCALE_TUN_IPV6_NETWORK.into()
+                ],
+                &[tun.inet4_address, tun.inet6_address],
+            )
+            .is_ok()
+        );
     }
     #[test]
     fn protects_lan_and_both_ip_families() {

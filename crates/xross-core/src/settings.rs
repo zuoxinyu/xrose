@@ -110,6 +110,7 @@ pub struct Settings {
     pub pac_enabled: bool,
     pub pac_port: u16,
     pub tun_enabled: bool,
+    pub tun_strict_route: bool,
     pub autostart: bool,
     pub autostart_proxy: bool,
     /// Explicit profile identities; None leaves that provider disconnected at login.
@@ -157,6 +158,7 @@ impl Default for Settings {
             pac_enabled: false,
             pac_port: 7891,
             tun_enabled: false,
+            tun_strict_route: true,
             autostart: false,
             autostart_proxy: false,
             autostart_tailscale: None,
@@ -239,6 +241,9 @@ impl Settings {
         if model.inbounds.iter().any(|i| i.kind == InboundKind::Tun)
             && self.effective_tun() != old.effective_tun()
         {
+            return true;
+        }
+        if self.effective_tun() && self.tun_strict_route != old.tun_strict_route {
             return true;
         }
         let log_changed = match core {

@@ -31,6 +31,11 @@ pub(crate) struct MeshForm {
     address: Entity<InputState>,
     subnets: Entity<InputState>,
     control: Entity<InputState>,
+    exit_node: Entity<InputState>,
+    advertised: Entity<InputState>,
+    forwards: Entity<InputState>,
+    outbound_port: Entity<InputState>,
+    advertise_exit: bool,
 }
 
 impl MeshForm {
@@ -48,12 +53,18 @@ impl MeshForm {
             address: super::text_input(window, cx, "10.126.126.2/24"),
             subnets: super::text_input(window, cx, "192.168.50.0/24"),
             control: super::text_input(window, cx, "https://controlplane.tailscale.com"),
+            exit_node: super::text_input(window, cx, ""),
+            advertised: super::text_input(window, cx, "192.168.10.0/24"),
+            forwards: super::text_input(window, cx, "tcp://127.0.0.1:8080/10.126.126.2:80"),
+            outbound_port: super::text_input(window, cx, ""),
+            advertise_exit: false,
         }
     }
 
     fn load(&mut self, profile: MeshProfileView, window: &mut Window, cx: &mut Context<AppView>) {
         self.id = profile.id;
         self.provider = profile.provider;
+        self.advertise_exit = profile.advertise_exit_node;
         self.error = None;
         for (input, value) in [
             (&self.name, profile.name),
@@ -64,21 +75,40 @@ impl MeshForm {
             (&self.address, profile.ipv4),
             (&self.subnets, profile.remote_subnets.join(", ")),
             (&self.control, profile.control_url),
+            (&self.exit_node, profile.exit_node),
+            (&self.advertised, profile.advertised_subnets.join(", ")),
+            (
+                &self.forwards,
+                profile
+                    .port_forwards
+                    .iter()
+                    .map(|f| f.text())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            (
+                &self.outbound_port,
+                if profile.outbound_port == 0 {
+                    String::new()
+                } else {
+                    profile.outbound_port.to_string()
+                },
+            ),
         ] {
             input.update(cx, |state, cx| state.set_value(value, window, cx));
         }
     }
 
-    fn profile(&self, cx: &Context<AppView>) -> MeshProfile {
+    fn profile(&self, cx: &Context<AppView>) -> xross_core::Result<MeshProfile> {
         let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        let list = |input: &Entity<InputState>| {
+        let list = |input: &Entity<InputState>| -> Vec<String> {
             value(input)
                 .split(|c: char| c == ',' || c.is_whitespace())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect()
         };
-        MeshProfile {
+        Ok(MeshProfile {
             id: self.id.clone(),
             name: value(&self.name),
             provider: self.provider,
@@ -90,7 +120,22 @@ impl MeshForm {
             remote_subnets: list(&self.subnets),
             control_url: value(&self.control),
             auto_connect: false,
-        }
+            exit_node: value(&self.exit_node),
+            advertise_exit_node: self.advertise_exit,
+            advertised_subnets: list(&self.advertised),
+            port_forwards: list(&self.forwards)
+                .iter()
+                .map(|v| xross_core::mesh::PortForward::parse(v))
+                .collect::<xross_core::Result<Vec<_>>>()?,
+            outbound_port: if value(&self.outbound_port).is_empty() {
+                0
+            } else {
+                value(&self.outbound_port)
+                    .parse::<u16>()
+                    .map_err(|_| xross_core::Error::config("出口出站端口必须为 1024–65535"))?
+            },
+            outbound_secret: MeshSecret::default(),
+        })
     }
 }
 
@@ -264,32 +309,41 @@ impl AppView {
     fn mesh_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
         let p = palette(cx);
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
-        let mut form = div().flex().flex_col().gap_3().min_w(px(0.)).child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .child(
-                    Button::new("mesh-kind-et")
-                        .label("EasyTier")
-                        .disabled(self.mesh_form.editing)
-                        .selected(self.mesh_form.provider == MeshProvider::EasyTier)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.mesh_form.provider = MeshProvider::EasyTier;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    Button::new("mesh-kind-ts")
-                        .label("Tailscale")
-                        .disabled(self.mesh_form.editing)
-                        .selected(self.mesh_form.provider == MeshProvider::Tailscale)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.mesh_form.provider = MeshProvider::Tailscale;
-                            cx.notify();
-                        })),
-                ),
-        );
+        let mut form = div()
+            .id("mesh-editor-scroll")
+            .max_h(px(520.))
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .min_w(px(0.))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .flex_shrink_0()
+                    .gap_2()
+                    .child(
+                        Button::new("mesh-kind-et")
+                            .label("EasyTier")
+                            .disabled(self.mesh_form.editing)
+                            .selected(self.mesh_form.provider == MeshProvider::EasyTier)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.mesh_form.provider = MeshProvider::EasyTier;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("mesh-kind-ts")
+                            .label("Tailscale")
+                            .disabled(self.mesh_form.editing)
+                            .selected(self.mesh_form.provider == MeshProvider::Tailscale)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.mesh_form.provider = MeshProvider::Tailscale;
+                                cx.notify();
+                            })),
+                    ),
+            );
         let mut fields = vec![
             (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
             (
@@ -336,22 +390,52 @@ impl AppView {
             ),
             &self.mesh_form.subnets,
         ));
+        fields.extend([
+            (
+                self.tr(
+                    "本机发布子网（逗号分隔）",
+                    "Advertised subnets (comma separated)",
+                ),
+                &self.mesh_form.advertised,
+            ),
+            (
+                self.tr(
+                    "出口节点（设备名或虚拟 IP）",
+                    "Exit node (device name or virtual IP)",
+                ),
+                &self.mesh_form.exit_node,
+            ),
+            (
+                self.tr(
+                    "出口出站端口（留空禁用）",
+                    "Exit outbound port (blank to disable)",
+                ),
+                &self.mesh_form.outbound_port,
+            ),
+            (
+                self.tr("端口转发（逗号分隔）", "Port forwards (comma separated)"),
+                &self.mesh_form.forwards,
+            ),
+        ]);
         for (label, input) in fields {
             form = form.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
+                    .flex_shrink_0()
                     .min_w(px(0.))
                     .child(div().text_sm().child(label))
                     .child(Input::new(input)),
             );
         }
+        form = form.child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
+            .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("填写出口出站端口后，节点列表将生成可用于出站组和分流规则的出口节点。转发格式：tcp://监听IP:端口/目标IP:端口（支持 udp）。", "An outbound port creates a node for groups and routing rules. Forward format: tcp://listen-IP:port/target-IP:port (udp supported).")));
         if self.mesh_form.provider == MeshProvider::Tailscale {
             form = form.child(
-                    div().text_sm().text_color(p.muted_fg).child(self.tr(
-                        "保存后点击“连接”，并在浏览器中完成设备授权；断开连接不会清除登录状态。",
-                        "Save, then connect and authorize this device in your browser. Disconnecting preserves your sign-in state.",
+                    div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr(
+                        "保存后连接，并在浏览器中完成授权。发布子网与出口需在控制端批准；断开连接保留登录状态。",
+                        "Connect and authorize in your browser. Advertised subnets and exit nodes require control-plane approval. Disconnecting preserves sign-in.",
                     )),
                 );
         }
@@ -381,7 +465,13 @@ impl AppView {
                 });
             })
             .child(form.when_some(self.mesh_form.error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(p.danger).child(error))
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(p.danger)
+                        .child(error),
+                )
             }))
             .footer(
                 div()
@@ -406,7 +496,11 @@ impl AppView {
                             .label(self.tr("保存配置", "Save profile"))
                             .disabled(busy)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                match this.service.save_mesh_profile(this.mesh_form.profile(cx)) {
+                                match this
+                                    .mesh_form
+                                    .profile(cx)
+                                    .and_then(|profile| this.service.save_mesh_profile(profile))
+                                {
                                     Ok(_) => {
                                         this.mesh_form
                                             .secret
@@ -508,8 +602,8 @@ impl AppView {
                         &p,
                         tr(
                             lang,
-                            "当前平台仅支持配置管理，组网连接仅在 Windows 可用。",
-                            "Only profile management is available on this platform; mesh connections require Windows.",
+                            "当前平台不支持组网连接。",
+                            "Mesh connections are unavailable on this platform.",
                         ),
                     ))
                 }),
@@ -549,7 +643,10 @@ impl AppView {
                 MeshPhase::Starting | MeshPhase::NeedsLogin | MeshPhase::Stopping => p.warn_text,
                 MeshPhase::Disconnected => p.muted_fg,
             };
-            let has_notice = active && cfg!(windows) && self.snapshot.settings.effective_tun();
+            let has_notice = active
+                && cfg!(windows)
+                && self.snapshot.settings.effective_tun()
+                && self.snapshot.settings.tun_strict_route;
             let mut status_tips: Vec<String> = Vec::new();
             for message in [state.error, state.warning].into_iter().flatten() {
                 let trimmed = message.trim();
@@ -561,8 +658,8 @@ impl AppView {
                 status_tips.push(
                     tr(
                         lang,
-                        "组网连接期间已自动关闭 TUN 严格路由，严格 DNS 防泄漏过滤随之放宽。",
-                        "TUN strict routing is disabled while mesh is connected, relaxing strict DNS leak filtering.",
+                        "TUN 严格路由可能影响组网 DNS；出现解析失败时可在设置中关闭。",
+                        "TUN strict routing may affect mesh DNS. Disable it in settings if name resolution fails.",
                     )
                     .to_string(),
                 );

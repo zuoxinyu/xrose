@@ -8,9 +8,14 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/xross-app/xross"
-rust-version = "1.92"
+rust-version = "1.95"
 
 [workspace.dependencies]
+async-trait = "0.1"
+tokio-smoltcp = "0.7"
+smoltcp = { version = "0.14", default-features = false, features = ["proto-ipv4", "proto-ipv4-fragmentation", "fragmentation-buffer-size-8192", "reassembly-buffer-size-8192", "reassembly-buffer-count-16"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+socket2 = "0.6"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

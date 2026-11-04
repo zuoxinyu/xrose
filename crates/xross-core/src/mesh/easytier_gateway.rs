@@ -1,0 +1,593 @@
+//! Authenticated loopback SOCKS gateway. Every payload uses the mesh stack;
+//! missing peers never fall back to host sockets or host default routes.
+use super::MeshProfile;
+use crate::{Error, Result};
+use easytier::{
+    peers::{PeerPacketFilter, peer_manager::PeerManager},
+    tunnel::packet_def::{PacketType, ZCPacket},
+};
+use parking_lot::Mutex;
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream, UdpSocket},
+    task::JoinSet,
+};
+use tokio_smoltcp::{self as stack, smoltcp};
+
+type Ports = Arc<Mutex<HashSet<u16>>>;
+
+struct ChannelDevice {
+    incoming: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    outgoing: tokio_util::sync::PollSender<Vec<u8>>,
+    caps: smoltcp::phy::DeviceCapabilities,
+}
+impl stack::device::AsyncDevice for ChannelDevice {
+    fn capabilities(&self) -> &smoltcp::phy::DeviceCapabilities {
+        &self.caps
+    }
+}
+impl futures_util::Stream for ChannelDevice {
+    type Item = std::io::Result<Vec<u8>>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.incoming.poll_recv(cx)
+    }
+}
+impl futures_util::Sink<Vec<u8>> for ChannelDevice {
+    type Error = std::io::Error;
+    fn poll_ready(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.outgoing.poll_reserve(cx).map_err(|_| invalid())
+    }
+    fn start_send(mut self: std::pin::Pin<&mut Self>, item: Vec<u8>) -> std::io::Result<()> {
+        self.outgoing.send_item(item).map_err(|_| invalid())
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.outgoing.close();
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+struct PacketSink {
+    ports: Ports,
+    address: Ipv4Addr,
+    sender: tokio::sync::mpsc::Sender<std::io::Result<Vec<u8>>>,
+}
+#[async_trait::async_trait]
+impl PeerPacketFilter for PacketSink {
+    async fn try_process_packet_from_peer(&self, packet: ZCPacket) -> Option<ZCPacket> {
+        if !packet
+            .peer_manager_header()
+            .is_some_and(|h| h.packet_type == PacketType::Data as u8)
+        {
+            return Some(packet);
+        }
+        let data = packet.payload();
+        if data.len() < 20 || data[0] >> 4 != 4 || data[16..20] != self.address.octets() {
+            return Some(packet);
+        }
+        let offset = usize::from(data[0] & 15) * 4;
+        // Fragmented UDP is reassembled by smoltcp; also retain the kernel copy
+        // since later fragments do not contain a transport port.
+        if data[9] == 17 && (data[6] & 0x3f != 0 || data[7] != 0) {
+            if !self.ports.lock().is_empty() {
+                let _ = self.sender.try_send(Ok(data.to_vec()));
+            }
+            return Some(packet);
+        }
+        if matches!(data[9], 6 | 17)
+            && offset >= 20
+            && data.len() >= offset + 4
+            && self
+                .ports
+                .lock()
+                .contains(&u16::from_be_bytes([data[offset + 2], data[offset + 3]]))
+        {
+            let _ = self.sender.try_send(Ok(data.to_vec()));
+            None
+        } else {
+            Some(packet)
+        }
+    }
+}
+
+struct PortGuard {
+    _holder: socket2::Socket,
+    port: u16,
+    _udp: std::net::UdpSocket,
+    ports: Ports,
+}
+impl PortGuard {
+    fn new(ports: &Ports) -> std::io::Result<Self> {
+        for _ in 0..16 {
+            // Reserve across local interfaces without opening a TCP listener.
+            // This prevents intercepting another application's virtual-IP flow.
+            let holder = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::STREAM,
+                Some(socket2::Protocol::TCP),
+            )?;
+            holder.bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0).into())?;
+            let port = holder.local_addr()?.as_socket().ok_or_else(invalid)?.port();
+            match std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)) {
+                Ok(udp) => {
+                    ports.lock().insert(port);
+                    return Ok(Self {
+                        _holder: holder,
+                        port,
+                        _udp: udp,
+                        ports: ports.clone(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "无法分配出口连接端口",
+        ))
+    }
+    fn port(&self) -> u16 {
+        self.port
+    }
+}
+impl Drop for PortGuard {
+    fn drop(&mut self) {
+        self.ports.lock().remove(&self.port());
+    }
+}
+
+pub struct Gateway {
+    address: IpAddr,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+impl Gateway {
+    pub async fn start(
+        peer: Arc<PeerManager>,
+        address: String,
+        profile: &MeshProfile,
+    ) -> Result<Self> {
+        let cidr = address
+            .parse::<ipnet::Ipv4Net>()
+            .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?;
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, profile.outbound_port))
+            .await
+            .map_err(|_| Error::other("出口出站端口已被占用，请修改本地端口"))?;
+        let ports = Ports::default();
+        let mut caps = smoltcp::phy::DeviceCapabilities::default();
+        caps.medium = smoltcp::phy::Medium::Ip;
+        caps.max_transmission_unit = 1284;
+        let (sender, incoming) = tokio::sync::mpsc::channel(1024);
+        let (outgoing, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1024);
+        let device = ChannelDevice {
+            incoming,
+            outgoing: tokio_util::sync::PollSender::new(outgoing),
+            caps,
+        };
+        peer.add_packet_process_pipeline(Box::new(PacketSink {
+            ports: ports.clone(),
+            address: cidr.addr(),
+            sender,
+        }))
+        .await;
+        let net = Arc::new(stack::Net::new(
+            device,
+            stack::NetConfig::new(
+                smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip),
+                address
+                    .parse()
+                    .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?,
+                vec![cidr.addr().into()],
+            ),
+        ));
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn(async move {
+            while let Some(data) = receiver.recv().await {
+                if data.len() >= 20 && data[0] >> 4 == 4 {
+                    let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
+                    let _ = peer
+                        .send_msg_by_ip(ZCPacket::new_with_payload(&data), dst.into(), false)
+                        .await;
+                }
+            }
+        }));
+        let password = profile.outbound_secret.0.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut clients = JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((socket, _)) = accepted else { break; };
+                        if clients.len() >= 256 { continue; }
+                        let (net, ports, password) = (net.clone(), ports.clone(), password.clone());
+                        clients.spawn(async move { let _ = serve(socket, net, ports, &password).await; });
+                    }
+                    _ = clients.join_next(), if !clients.is_empty() => {}
+                }
+            }
+        }));
+        Ok(Self {
+            address: cidr.addr().into(),
+            tasks,
+        })
+    }
+    pub fn check_address(&self, address: IpAddr) -> Result<()> {
+        if self.address != address || self.tasks.iter().any(|task| task.is_finished()) {
+            return Err(Error::other("EasyTier 出口虚拟地址已变化，请重新连接组网"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Gateway {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+fn invalid() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, "SOCKS request rejected")
+}
+
+async fn authenticate(socket: &mut TcpStream, password: &str) -> std::io::Result<()> {
+    if socket.read_u8().await? != 5 {
+        return Err(invalid());
+    }
+    let count = socket.read_u8().await?;
+    let mut methods = vec![0; usize::from(count)];
+    socket.read_exact(&mut methods).await?;
+    if !methods.contains(&2) || password.is_empty() {
+        socket.write_all(&[5, 255]).await?;
+        return Err(invalid());
+    }
+    socket.write_all(&[5, 2]).await?;
+    if socket.read_u8().await? != 1 {
+        return Err(invalid());
+    }
+    let count = socket.read_u8().await?;
+    let mut username = vec![0; usize::from(count)];
+    socket.read_exact(&mut username).await?;
+    let count = socket.read_u8().await?;
+    let mut supplied = vec![0; usize::from(count)];
+    socket.read_exact(&mut supplied).await?;
+    if username != b"xross" || supplied != password.as_bytes() {
+        socket.write_all(&[1, 1]).await?;
+        return Err(invalid());
+    }
+    socket.write_all(&[1, 0]).await
+}
+
+async fn read_target(socket: &mut TcpStream) -> std::io::Result<SocketAddr> {
+    let ip = match socket.read_u8().await? {
+        1 => {
+            let mut bytes = [0; 4];
+            socket.read_exact(&mut bytes).await?;
+            IpAddr::V4(bytes.into())
+        }
+        3 => {
+            let count = socket.read_u8().await?;
+            let mut name = vec![0; usize::from(count)];
+            socket.read_exact(&mut name).await?;
+            let port = socket.read_u16().await?;
+            let name = String::from_utf8(name).map_err(|_| invalid())?;
+            // Proxy cores normally resolve destinations according to their DNS
+            // policy. Keep SOCKS clients with domain requests interoperable.
+            return tokio::net::lookup_host((name.as_str(), port))
+                .await?
+                .find(SocketAddr::is_ipv4)
+                .ok_or_else(invalid);
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(SocketAddr::new(ip, socket.read_u16().await?))
+}
+
+async fn serve(
+    mut socket: TcpStream,
+    net: Arc<stack::Net>,
+    ports: Ports,
+    password: &str,
+) -> std::io::Result<()> {
+    let (command, target) = tokio::time::timeout(Duration::from_secs(10), async {
+        authenticate(&mut socket, password).await?;
+        if socket.read_u8().await? != 5 {
+            return Err(invalid());
+        }
+        let command = socket.read_u8().await?;
+        if socket.read_u8().await? != 0 {
+            return Err(invalid());
+        }
+        Ok((command, read_target(&mut socket).await?))
+    })
+    .await
+    .map_err(|_| invalid())??;
+    if command == 1 {
+        let port = PortGuard::new(&ports)?;
+        let connected = tokio::time::timeout(
+            Duration::from_secs(15),
+            net.tcp_connect_with_options(
+                target,
+                stack::TcpConnectOptions::default().with_source_port(port.port()),
+            ),
+        )
+        .await;
+        let mut upstream = match connected {
+            Ok(Ok(stream)) => stream,
+            _ => {
+                socket.write_all(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+                return Err(invalid());
+            }
+        };
+        socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0]).await?;
+        tokio::io::copy_bidirectional(&mut socket, &mut upstream).await?;
+    } else if command == 3 {
+        let relay = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        let port = relay.local_addr()?.port().to_be_bytes();
+        socket
+            .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, port[0], port[1]])
+            .await?;
+        let port_guard = PortGuard::new(&ports)?;
+        let upstream = net
+            .udp_bind(SocketAddr::new(
+                Ipv4Addr::UNSPECIFIED.into(),
+                port_guard.port(),
+            ))
+            .await?;
+        let mut client = None;
+        let mut sent = HashSet::new();
+        let mut input = vec![0u8; 65536];
+        let mut output = vec![0u8; 65536];
+        let mut control = [0; 1];
+        loop {
+            tokio::select! {
+                _ = socket.read(&mut control) => break,
+                packet = relay.recv_from(&mut input) => {
+                    let (count, source) = packet?;
+                    if !source.ip().is_loopback() || client.is_some_and(|old| old != source) { continue; }
+                    let Some((destination, body)) = udp_destination(&input[..count]).await else { continue; };
+                    if sent.len() >= 256 && !sent.contains(&destination) { continue; }
+                    client = Some(source); sent.insert(destination);
+                    upstream.send_to(body, destination).await?;
+                }
+                packet = upstream.recv_from(&mut output[10..]) => {
+                    let (count, source) = packet?;
+                    if let (Some(client), IpAddr::V4(ip)) = (client,source.ip()) {
+                        if !sent.contains(&source) { continue; }
+                        output[..4].copy_from_slice(&[0,0,0,1]); output[4..8].copy_from_slice(&ip.octets()); output[8..10].copy_from_slice(&source.port().to_be_bytes());
+                        relay.send_to(&output[..count+10],client).await?;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(120)) => break,
+            }
+        }
+    } else {
+        socket.write_all(&[5, 7, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+    }
+    Ok(())
+}
+
+fn decode_udp(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
+    if data.len() < 10 || data[..4] != [0, 0, 0, 1] {
+        return None;
+    }
+    Some((
+        SocketAddr::new(
+            Ipv4Addr::new(data[4], data[5], data[6], data[7]).into(),
+            u16::from_be_bytes([data[8], data[9]]),
+        ),
+        &data[10..],
+    ))
+}
+
+async fn udp_destination(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
+    if let Some(destination) = decode_udp(data) {
+        return Some(destination);
+    }
+    if data.len() < 7 || data[..4] != [0, 0, 0, 3] {
+        return None;
+    }
+    let end = 5 + usize::from(data[4]);
+    if end == 5 || data.len() < end + 2 {
+        return None;
+    }
+    let name = std::str::from_utf8(&data[5..end]).ok()?;
+    let port = u16::from_be_bytes([data[end], data[end + 1]]);
+    let mut addresses = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((name, port)),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    Some((addresses.find(SocketAddr::is_ipv4)?, &data[end + 2..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn virtual_pair() -> (Arc<stack::Net>, Arc<stack::Net>) {
+        let (a_tx, a_rx) = tokio::sync::mpsc::channel(64);
+        let (b_tx, b_rx) = tokio::sync::mpsc::channel(64);
+        // Convert channel output into received IP packets, without host sockets.
+        let (a_wire, mut a_wire_rx) = tokio::sync::mpsc::channel(64);
+        let (b_wire, mut b_wire_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(packet) = a_wire_rx.recv().await {
+                if b_tx.send(Ok(packet)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tokio::spawn(async move {
+            while let Some(packet) = b_wire_rx.recv().await {
+                if a_tx.send(Ok(packet)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let make = |ip: &str, incoming, outgoing| {
+            let mut caps = smoltcp::phy::DeviceCapabilities::default();
+            caps.medium = smoltcp::phy::Medium::Ip;
+            caps.max_transmission_unit = 1284;
+            Arc::new(stack::Net::new(
+                ChannelDevice {
+                    incoming,
+                    outgoing: tokio_util::sync::PollSender::new(outgoing),
+                    caps,
+                },
+                stack::NetConfig::new(
+                    smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip),
+                    ip.parse().unwrap(),
+                    vec![],
+                ),
+            ))
+        };
+        (
+            make("192.0.2.1/24", a_rx, a_wire),
+            make("192.0.2.2/24", b_rx, b_wire),
+        )
+    }
+
+    async fn authorized_client(
+        net: Arc<stack::Net>,
+        request: &[u8],
+    ) -> (
+        TcpStream,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+        [u8; 10],
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await?;
+            serve(socket, net, Ports::default(), "test").await
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        let mut reply = [0; 2];
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [5, 2]);
+        client.write_all(b"\x01\x05xross\x04test").await.unwrap();
+        client.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [1, 0]);
+        client.write_all(request).await.unwrap();
+        let mut bound = [0; 10];
+        client.read_exact(&mut bound).await.unwrap();
+        assert_eq!(bound[1], 0);
+        (client, task, bound)
+    }
+
+    #[tokio::test]
+    async fn authenticated_tcp_and_udp_use_the_virtual_network() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (target, data) = udp_destination(b"\x00\x00\x00\x03\x09192.0.2.2\x14\xe9payload")
+                .await
+                .unwrap();
+            assert_eq!(target.to_string(), "192.0.2.2:5353");
+            assert_eq!(data, b"payload");
+            let (local, remote) = virtual_pair();
+            let mut listener = remote
+                .tcp_bind("192.0.2.2:8080".parse().unwrap())
+                .await
+                .unwrap();
+            let echo = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut payload = [0; 4];
+                stream.read_exact(&mut payload).await.unwrap();
+                assert_eq!(&payload, b"test");
+                stream.write_all(b"done").await.unwrap();
+                stream.flush().await.unwrap();
+            });
+            let (mut client, task, _) =
+                authorized_client(local.clone(), &[5, 1, 0, 1, 192, 0, 2, 2, 31, 144]).await;
+            client.write_all(b"test").await.unwrap();
+            let mut payload = [0; 4];
+            client.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"done");
+            drop(client);
+            echo.await.unwrap();
+            // Drop of the simulated server removes its socket without a FIN.
+            // Abort the fixture relay after verifying delivery in both directions.
+            task.abort();
+            let echo = remote
+                .udp_bind("192.0.2.2:5353".parse().unwrap())
+                .await
+                .unwrap();
+            let (control, task, bound) =
+                authorized_client(local, &[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+            let relay = SocketAddr::new(
+                Ipv4Addr::LOCALHOST.into(),
+                u16::from_be_bytes([bound[8], bound[9]]),
+            );
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            udp.send_to(&[0, 0, 0, 1, 192, 0, 2, 2, 20, 233, 42], relay)
+                .await
+                .unwrap();
+            let mut packet = [0; 64];
+            let (size, source) = echo.recv_from(&mut packet).await.unwrap();
+            assert_eq!(&packet[..size], &[42]);
+            echo.send_to(&[43], source).await.unwrap();
+            let (size, _) = udp.recv_from(&mut packet).await.unwrap();
+            assert_eq!(&packet[..size], &[0, 0, 0, 1, 192, 0, 2, 2, 20, 233, 43]);
+            drop(control);
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("virtual gateway timed out");
+    }
+    #[test]
+    fn udp_rejects_fragments_and_truncated_requests() {
+        assert!(decode_udp(&[0, 0, 1, 1, 1, 1, 1, 1, 0, 53]).is_none());
+        assert!(decode_udp(&[0; 9]).is_none());
+        let (target, payload) = decode_udp(&[0, 0, 0, 1, 10, 0, 0, 1, 0, 53, 42]).unwrap();
+        assert_eq!(target.to_string(), "10.0.0.1:53");
+        assert_eq!(payload, &[42]);
+    }
+    #[tokio::test]
+    async fn socks_rejects_missing_and_wrong_authentication() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                assert!(authenticate(&mut socket, "fake-secret").await.is_err());
+            }
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut response = [0; 2];
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [5, 255]);
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(&[5, 1, 2]).await.unwrap();
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [5, 2]);
+        client.write_all(b"\x01\x05xross\x03bad").await.unwrap();
+        client.read_exact(&mut response).await.unwrap();
+        assert_eq!(response, [1, 1]);
+        server.await.unwrap();
+    }
+}

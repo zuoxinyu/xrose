@@ -1,9 +1,9 @@
 //! Unprivileged mesh controller. Only cached, redacted values reach the UI.
 use super::{
-    ipc::{self, MeshCommand, MeshRequest},
     MeshProfile, MeshProvider, MeshRuntimeView, MeshSecret, MeshSnapshot, PROTOCOL_VERSION,
+    ipc::{self, MeshCommand, MeshRequest},
 };
-use crate::{paths::AppPaths, storage::Store, Error, Result};
+use crate::{Error, Result, paths::AppPaths, storage::Store};
 use parking_lot::RwLock;
 use std::sync::Arc;
 pub struct MeshController {
@@ -43,7 +43,7 @@ impl MeshController {
                 .collect(),
             networks: self.networks.read().clone(),
             tailscale_installed: *self.installed.read(),
-            supported: cfg!(windows),
+            supported: cfg!(any(windows, target_os = "macos", target_os = "linux")),
         }
     }
     pub fn save(&self, mut profile: MeshProfile) -> Result<String> {
@@ -62,11 +62,78 @@ impl MeshController {
                 profile.network_secret = old.network_secret.clone();
             }
         }
+        if profile.outbound_secret.0.is_empty() {
+            profile.outbound_secret = profiles
+                .iter()
+                .find(|p| p.id == profile.id)
+                .map(|p| p.outbound_secret.clone())
+                .filter(|s| !s.0.is_empty())
+                .unwrap_or_else(|| MeshSecret(uuid::Uuid::new_v4().simple().to_string()));
+        }
+        if profile.outbound_port != 0
+            && profiles
+                .iter()
+                .any(|p| p.id != profile.id && p.outbound_port == profile.outbound_port)
+        {
+            return Err(Error::config("该出口出站端口已被其他组网配置使用"));
+        }
         self.store.save_mesh_profile(&profile)?;
         let id = profile.id.clone();
         profiles.retain(|p| p.id != id);
         profiles.push(profile);
         Ok(id)
+    }
+    pub fn outbound_node(&self, id: &str) -> Option<crate::model::Node> {
+        let profiles = self.profiles.read();
+        let profile = profiles
+            .iter()
+            .find(|p| p.id == id && p.outbound_port != 0)?;
+        let mut node = crate::model::Node::new(
+            format!("{} · 出口", profile.name),
+            crate::model::Protocol::Socks,
+            "127.0.0.1",
+            profile.outbound_port,
+        );
+        node.id = format!("mesh-exit-{}", profile.id);
+        node.credentials.username = Some("xross".into());
+        node.credentials.password = Some(profile.outbound_secret.0.clone());
+        node.tags = vec!["mesh-exit".into()];
+        Some(node)
+    }
+
+    /// Stable IDs keep group membership while profile ports/credentials change.
+    pub fn sync_outbounds(&self, model: &mut crate::model::AppModel) {
+        let ids: Vec<_> = self
+            .profiles
+            .read()
+            .iter()
+            .filter(|p| p.outbound_port != 0)
+            .map(|p| p.id.clone())
+            .collect();
+        let stale: Vec<_> = model
+            .nodes
+            .iter()
+            .filter(|n| {
+                n.id.starts_with("mesh-exit-")
+                    && n.tags.iter().any(|t| t == "mesh-exit")
+                    && !ids.iter().any(|id| n.id == format!("mesh-exit-{id}"))
+            })
+            .map(|n| n.id.clone())
+            .collect();
+        for id in stale {
+            model.remove_node(&id);
+        }
+        for id in ids {
+            if let Some(mut node) = self.outbound_node(&id) {
+                if let Some(old) = model.nodes.iter_mut().find(|n| n.id == node.id) {
+                    node.enabled = old.enabled;
+                    node.sort = old.sort;
+                    *old = node;
+                } else {
+                    model.add_nodes([node]);
+                }
+            }
+        }
     }
     pub fn delete(&self, id: &str) -> Result<()> {
         if self.networks.read().iter().any(|n| {
@@ -114,7 +181,10 @@ impl MeshController {
         }
         let binary = (profile.provider == MeshProvider::Tailscale)
             .then(|| super::tailscale::archive_path(&self.paths));
+        #[cfg(windows)]
         let driver_archive = super::driver::install(&self.paths).await?;
+        #[cfg(not(windows))]
+        let driver_archive = std::path::PathBuf::new();
         let provider = profile.provider;
         self.send(MeshCommand::Start {
             profile,
@@ -218,10 +288,12 @@ mod tests {
         assert!(startup_ready(&[state.clone()], "requested").unwrap());
         state.phase = MeshPhase::Failed;
         state.error = Some("模拟组件提前退出".into());
-        assert!(startup_ready(&[state], "requested")
-            .unwrap_err()
-            .to_string()
-            .contains("模拟组件提前退出"));
+        assert!(
+            startup_ready(&[state], "requested")
+                .unwrap_err()
+                .to_string()
+                .contains("模拟组件提前退出")
+        );
         assert!(startup_ready(&[], "requested").is_err());
     }
 
@@ -236,10 +308,12 @@ mod tests {
             login_url: Some("https://example.test/private-login".into()),
             ..Default::default()
         }];
-        assert!(controller
-            .refresh_with(async { Err(Error::other("模拟助手失联")) })
-            .await
-            .is_err());
+        assert!(
+            controller
+                .refresh_with(async { Err(Error::other("模拟助手失联")) })
+                .await
+                .is_err()
+        );
         let state = &controller.snapshot().networks[0];
         assert_eq!(state.phase, super::super::MeshPhase::Failed);
         assert!(state.login_url.is_none());

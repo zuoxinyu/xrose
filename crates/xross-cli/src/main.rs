@@ -177,6 +177,7 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
             runtime
                 .block_on(async {
                     mesh::tailscale::install(&paths).await?;
+                    #[cfg(windows)]
                     mesh::driver::install(&paths).await?;
                     Ok::<(), xross_core::Error>(())
                 })
@@ -206,8 +207,8 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
         }
         "save" | "list" | "delete" => {
             let store = xross_core::storage::Store::open(&paths).map_err(|e| e.to_string())?;
-            let controller =
-                mesh::controller::MeshController::new(paths, store).map_err(|e| e.to_string())?;
+            let controller = mesh::controller::MeshController::new(paths.clone(), store)
+                .map_err(|e| e.to_string())?;
             match action {
                 "save" => {
                     let source = positional.get(1).ok_or("请指定配置文件或 -（标准输入）")?;
@@ -226,7 +227,14 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                     }
                     let profile: MeshProfile = serde_json::from_slice(&bytes)
                         .map_err(|_| "组网 JSON 配置无效；请检查字段格式")?;
-                    println!("{}", controller.save(profile).map_err(|e| e.to_string())?);
+                    let service = xross_core::service::AppService::with_paths(paths.clone())
+                        .map_err(|e| e.to_string())?;
+                    println!(
+                        "{}",
+                        service
+                            .save_mesh_profile(profile)
+                            .map_err(|e| e.to_string())?
+                    );
                 }
                 "list" => println!(
                     "{}",
@@ -234,8 +242,9 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                         .map_err(|e| e.to_string())?
                 ),
                 _ => {
-                    controller
-                        .delete(positional.get(1).ok_or("请指定组网配置 ID")?)
+                    xross_core::service::AppService::with_paths(paths.clone())
+                        .map_err(|e| e.to_string())?
+                        .delete_mesh_profile(positional.get(1).ok_or("请指定组网配置 ID")?)
                         .map_err(|e| e.to_string())?;
                 }
             }

@@ -10,32 +10,47 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tonic::{client::Grpc, transport::Channel, Request};
+use tonic::{Request, client::Grpc, transport::Channel};
 use tonic_prost::ProstCodec;
 
 fn release() -> Result<(&'static str, &'static str)> {
-    if !cfg!(windows) {
-        return Err(Error::binary("Tailscale 组网组件当前仅在 Windows 启用"));
-    }
-    match std::env::consts::ARCH {
-        "x86_64" => Ok((
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => Ok((
             "sing-box-1.14.4-windows-amd64.zip",
             "99185d75d314a07dbba4a130c8ad986cbeb629a07927975636b341ca61f991df",
         )),
-        "aarch64" => Ok((
+        ("windows", "aarch64") => Ok((
             "sing-box-1.14.4-windows-arm64.zip",
             "8cd0a4d0cd8cd480be5731ac31f17038969a42d12add9feb6e031fd43d85bbae",
         )),
+        ("macos", "x86_64") => Ok((
+            "sing-box-1.14.4-darwin-amd64.tar.gz",
+            "eae86b9b033bba50b7c44ab719e4bfac0aca05efd28483390ed3aa510f32db25",
+        )),
+        ("macos", "aarch64") => Ok((
+            "sing-box-1.14.4-darwin-arm64.tar.gz",
+            "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838",
+        )),
+        ("linux", "x86_64") => Ok((
+            "sing-box-1.14.4-linux-amd64.tar.gz",
+            "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968",
+        )),
+        ("linux", "aarch64") => Ok((
+            "sing-box-1.14.4-linux-arm64.tar.gz",
+            "436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26",
+        )),
         _ => Err(Error::binary(
-            "Tailscale 组网组件仅提供 Windows x64/ARM64 构建",
+            "Tailscale 组网组件支持 Windows、macOS、Linux 的 x64/ARM64 平台",
         )),
     }
 }
+
 pub fn archive_path(paths: &crate::paths::AppPaths) -> PathBuf {
-    paths
-        .data_dir
-        .join("mesh-binaries")
-        .join("sing-box-1.14.4.zip")
+    paths.data_dir.join("mesh-binaries").join(if cfg!(windows) {
+        "sing-box-1.14.4.zip"
+    } else {
+        release().map(|r| r.0).unwrap_or("unsupported")
+    })
 }
 fn verified_bytes(path: &Path) -> Result<Vec<u8>> {
     use sha2::{Digest, Sha256};
@@ -72,23 +87,48 @@ pub async fn install(paths: &crate::paths::AppPaths) -> Result<()> {
 }
 fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
     let data = verified_bytes(archive)?;
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data))
-        .map_err(|_| Error::binary("组网组件压缩包无效"))?;
-    let executable = directory.join("sing-box.exe");
-    for i in 0..zip.len() {
-        let mut f = zip
-            .by_index(i)
-            .map_err(|_| Error::binary("读取组网组件失败"))?;
-        if f.name()
-            .map(|name| name.ends_with("/sing-box.exe"))
-            .unwrap_or(false)
-        {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut f, &mut bytes)
-                .map_err(|_| Error::binary("解压组网组件失败"))?;
-            crate::util::atomic_write(&executable, &bytes)?;
-            return Ok(executable);
+    let executable = directory.join(if cfg!(windows) {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    });
+    let mut bytes = Vec::new();
+    if cfg!(windows) {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data))
+            .map_err(|_| Error::binary("组网组件压缩包无效"))?;
+        for i in 0..zip.len() {
+            let mut f = zip
+                .by_index(i)
+                .map_err(|_| Error::binary("读取组网组件失败"))?;
+            if f.name().is_ok_and(|name| name.ends_with("/sing-box.exe")) {
+                f.read_to_end(&mut bytes)
+                    .map_err(|_| Error::binary("解压组网组件失败"))?;
+                break;
+            }
         }
+    } else {
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::io::Cursor::new(data)));
+        for entry in tar
+            .entries()
+            .map_err(|_| Error::binary("组网组件压缩包无效"))?
+        {
+            let mut entry = entry.map_err(|_| Error::binary("读取组网组件失败"))?;
+            if entry.header().entry_type().is_file()
+                && entry.path()?.file_name().is_some_and(|n| n == "sing-box")
+            {
+                entry.read_to_end(&mut bytes)?;
+                break;
+            }
+        }
+    }
+    if !bytes.is_empty() {
+        crate::util::atomic_write(&executable, &bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))?;
+        }
+        return Ok(executable);
     }
     Err(Error::binary("组网组件缺少可执行文件"))
 }
@@ -96,8 +136,9 @@ fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
 /// Syntax validation only: check never starts an endpoint or interface.
 pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
     let directory = paths.runtime_dir.join("mesh-check");
-    std::fs::create_dir_all(&directory).map_err(|_| Error::other("无法创建配置校验目录"))?;
+    super::platform::secure_directory(&directory)?;
     let binary = unpack(&archive_path(paths), &directory)?;
+    #[cfg(windows)]
     super::driver::unpack(&super::driver::archive_path(paths), &directory)?;
     let profile = MeshProfile {
         provider: MeshProvider::Tailscale,
@@ -113,6 +154,41 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             "组网配置校验失败：{}",
             report.summary()
         )));
+    }
+    for publish in [false, true] {
+        let mut profile = profile.clone();
+        profile.remote_subnets = vec!["192.168.50.0/24".into()];
+        profile.advertised_subnets = vec!["192.168.60.0/24".into()];
+        profile.advertise_exit_node = publish;
+        if !publish {
+            profile.exit_node = "100.64.1.1".into();
+            profile.outbound_port = 19081;
+            profile.outbound_secret = super::MeshSecret("offline-test-outbound".into());
+        }
+        profile.port_forwards = vec![
+            super::PortForward::parse("tcp://127.0.0.1:18080/100.64.1.2:80")?,
+            super::PortForward::parse("udp://127.0.0.1:15353/100.64.1.2:53")?,
+        ];
+        let config = crate::adapters::singbox::compile_mesh(
+            &profile,
+            &directory,
+            19090,
+            "offline-test-secret",
+        )?;
+        let path = directory.join(if publish {
+            "publish.json"
+        } else {
+            "exit-forward.json"
+        });
+        crate::util::atomic_write_json(&path, &config)?;
+        let report =
+            crate::adapters::validate(crate::model::CoreKind::SingBox, &binary, &path).await?;
+        if !report.ok {
+            return Err(Error::config(format!(
+                "组网出口或转发配置校验失败：{}",
+                report.summary()
+            )));
+        }
     }
     // Validate the proxy side of coexistence too, without starting a TUN.
     use crate::{
@@ -367,6 +443,7 @@ pub struct Backend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupFailure {
     DnsPort,
+    ForwardPort,
     ApiPort,
     Driver,
     DriverPermission,
@@ -380,6 +457,9 @@ enum StartupFailure {
 }
 impl StartupFailure {
     fn classify(line: &str) -> Option<Self> {
+        if line.contains("mesh-forward-") || line.contains("mesh-exit") {
+            return Some(Self::ForwardPort);
+        }
         let line = line.to_ascii_lowercase();
         if line.contains("bind") || line.contains("listen") {
             if line.contains("127.0.0.153:53") || line.contains("inbound/direct[mesh-dns]") {
@@ -436,9 +516,12 @@ impl StartupFailure {
     }
     fn message(self) -> &'static str {
         match self {
-            Self::DnsPort => "本地 DNS 监听 127.0.0.153:53 失败，请检查端口占用",
+            Self::DnsPort => "本地 DNS 端口 53 监听失败，请检查端口占用",
+            Self::ForwardPort => {
+                "组网转发或出口端口监听失败，请检查监听地址是否属于本机以及端口占用"
+            }
             Self::ApiPort => "本地管理 API 端口监听失败，请重试连接",
-            Self::Driver => "虚拟网卡初始化失败，请检查 Wintun 驱动和助手管理员权限",
+            Self::Driver => "虚拟网卡初始化失败，请检查系统网卡支持和提权助手权限",
             Self::DriverPermission => "Windows 拒绝虚拟网卡访问，请检查助手权限和驱动访问策略",
             Self::DriverPrivilege => "创建虚拟网卡所需的 Windows 特权不可用，请重新安装提权助手",
             Self::DriverConflict => "虚拟网卡、地址或路由已存在，请先断开重复运行的组网实例",
@@ -583,7 +666,7 @@ impl Backend {
             profile_id: p.id.clone(),
             provider: MeshProvider::Tailscale,
             phase: MeshPhase::Starting,
-            interface: format!("xross-mesh-ts-{}", &p.id[..8]),
+            interface: p.interface_name(),
             ..Default::default()
         }));
         let observed = state.clone();
@@ -613,7 +696,7 @@ impl Backend {
                                 s.addresses = e.self_peer.map(|p| p.ips).unwrap_or_default();
                                 s.dns_suffix = (!e.suffix.is_empty())
                                     .then(|| e.suffix.trim_end_matches('.').to_string());
-                                s.dns_address = Some("127.0.0.153".into());
+                                s.dns_address = Some(super::DNS_ADDRESS.into());
                                 s.peers = e
                                     .groups
                                     .into_iter()
@@ -718,7 +801,9 @@ mod tests {
     #[test]
     fn startup_diagnostics_expose_only_fixed_messages() {
         let sensitive = "https://example.test/auth?token=fake-private-key";
-        let log = format!("login at {sensitive}\nFATAL start inbound/direct[mesh-dns]: listen udp 127.0.0.153:53: bind failed {sensitive}\n");
+        let log = format!(
+            "login at {sensitive}\nFATAL start inbound/direct[mesh-dns]: listen udp 127.0.0.153:53: bind failed {sensitive}\n"
+        );
         let failure = read_startup_failure(log.as_bytes()).unwrap();
         assert_eq!(failure, StartupFailure::DnsPort);
         assert!(!failure.message().contains("fake-private-key"));

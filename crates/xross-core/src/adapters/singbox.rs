@@ -27,19 +27,45 @@ pub fn compile_mesh(
     profile.validate()?;
     let mut routes = vec!["100.64.0.0/10".to_string(), "fd7a:115c:a1e0::/48".into()];
     routes.extend(profile.remote_subnets.clone());
-    Ok(json!({
+    let mut config = json!({
         "log":{"level":"error"},
         "endpoints":[{"type":"tailscale","tag":"mesh-ts","state_directory":directory.join("identity"),"hostname":profile.hostname,
             "control_url":profile.control_url,"system_interface":false,
-            "accept_routes":!profile.remote_subnets.is_empty(),"advertise_routes":[],"advertise_exit_node":false}],
+            "accept_routes":!profile.remote_subnets.is_empty(),"advertise_routes":profile.advertised_subnets,"advertise_exit_node":profile.advertise_exit_node,"exit_node":profile.exit_node,"exit_node_allow_lan_access":false}],
         "services":[{"type":"api","listen":"127.0.0.1","listen_port":api_port,"secret":secret,"dashboard":false}],
-        "inbounds":[{"type":"direct","tag":"mesh-dns","listen":"127.0.0.153","listen_port":53},
-            {"type":"tun","tag":"mesh-tun","interface_name":format!("xross-mesh-ts-{}",&profile.id[..8]),"address":[crate::mesh::TAILSCALE_TUN_ADDRESS,crate::mesh::TAILSCALE_TUN_IPV6_ADDRESS],"mtu":1280,"stack":"gvisor","auto_route":true,"strict_route":false,"route_address":routes}],
+        "inbounds":[{"type":"direct","tag":"mesh-dns","listen":crate::mesh::DNS_ADDRESS,"listen_port":53},
+            {"type":"tun","tag":"mesh-tun","interface_name":profile.interface_name(),"address":[crate::mesh::TAILSCALE_TUN_ADDRESS,crate::mesh::TAILSCALE_TUN_IPV6_ADDRESS],"mtu":1280,"stack":"gvisor","auto_route":true,"strict_route":false,"route_address":routes}],
         "outbounds":[{"type":"direct","tag":"direct"}],
         "route":{"auto_detect_interface":true,"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
         "dns":{"servers":[{"type":"local","tag":"local"},{"type":"tailscale","tag":"mesh-dns","endpoint":"mesh-ts","accept_default_resolvers":false}],
             "rules":[{"inbound":"mesh-dns","action":"route","server":"mesh-dns"}],"final":"local"}
-    }))
+    });
+    let mut incoming = profile.advertised_subnets.clone();
+    if profile.advertise_exit_node {
+        incoming.extend(["0.0.0.0/0".into(), "::/0".into()]);
+    }
+    if !incoming.is_empty() {
+        config["route"]["rules"].as_array_mut().unwrap().insert(
+            2,
+            json!({"inbound":"mesh-ts","ip_cidr":incoming,"action":"route","outbound":"direct"}),
+        );
+    }
+    if profile.outbound_port != 0 {
+        config["inbounds"].as_array_mut().unwrap().push(json!({"type":"socks","tag":"mesh-exit","listen":"127.0.0.1","listen_port":profile.outbound_port,"users":[{"username":"xross","password":profile.outbound_secret.0}]}));
+        config["route"]["rules"].as_array_mut().unwrap().insert(
+            0,
+            json!({"inbound":"mesh-exit","action":"route","outbound":"mesh-ts"}),
+        );
+    }
+    for (index, forward) in profile.port_forwards.iter().enumerate() {
+        let tag = format!("mesh-forward-{index}");
+        config["inbounds"].as_array_mut().unwrap().push(json!({"type":"direct","tag":tag,"listen":forward.listen.ip().to_string(),"listen_port":forward.listen.port(),"network":forward.protocol.key(),"override_address":forward.target.ip().to_string(),"override_port":forward.target.port()}));
+        config["route"]["rules"].as_array_mut().unwrap().insert(
+            0,
+            json!({"inbound":tag,"action":"route","outbound":"mesh-ts"}),
+        );
+    }
+    Ok(config)
 }
 
 impl CoreAdapter for SingBoxAdapter {
@@ -77,8 +103,7 @@ impl CoreAdapter for SingBoxAdapter {
                         excludes.dedup();
                         tun["route_exclude_address"] = json!(excludes);
                         if cfg!(windows) && inbound.tun.strict_route {
-                            tun["strict_route"] = json!(false);
-                            warnings.push("异地组网运行期间暂时关闭 TUN strict_route，严格 DNS 防泄漏过滤已放宽；断开全部组网后恢复".into());
+                            warnings.push("TUN strict_route 已启用，Windows 严格 DNS 过滤可能影响组网 DNS；出现解析失败时可在设置中关闭严格路由".into());
                         }
                     }
                     inbounds.push(tun);
@@ -1457,7 +1482,7 @@ mod tests {
                 .unwrap()
                 .contains(&json!("192.0.2.0/24"))
         );
-        assert_eq!(tun["strict_route"], json!(!cfg!(windows)));
+        assert_eq!(tun["strict_route"], json!(true));
         assert_eq!(
             compiled.json["dns"]["rules"][0]["server"],
             "xross-mesh-dns-0"
@@ -1494,6 +1519,57 @@ mod tests {
         );
         assert_eq!(json["services"][0]["listen"], "127.0.0.1");
         assert_eq!(json["services"][0]["secret"], "fake-key");
+    }
+
+    #[test]
+    fn mesh_exit_gateway_forwarding_and_subnet_publication() {
+        use crate::mesh::{MeshProfile, MeshProvider, MeshSecret, PortForward};
+        let mut p = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            exit_node: "100.64.1.1".into(),
+            outbound_port: 19081,
+            outbound_secret: MeshSecret("fixture-secret".into()),
+            advertised_subnets: vec!["192.168.50.0/24".into()],
+            port_forwards: vec![PortForward::parse("udp://127.0.0.1:5533/100.64.1.2:53").unwrap()],
+            ..Default::default()
+        };
+        let config = compile_mesh(&p, Path::new("fixture"), 19090, "fixture-api").unwrap();
+        assert_eq!(config["endpoints"][0]["exit_node"], "100.64.1.1");
+        assert_eq!(config["endpoints"][0]["exit_node_allow_lan_access"], false);
+        assert_eq!(
+            config["endpoints"][0]["advertise_routes"],
+            json!(["192.168.50.0/24"])
+        );
+        assert_eq!(
+            config["inbounds"][2]["users"][0]["password"],
+            "fixture-secret"
+        );
+        assert_eq!(config["inbounds"][3]["override_port"], 53);
+        assert_eq!(config["inbounds"][3]["network"], "udp");
+        assert!(
+            !config["inbounds"][1]["route_address"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("0.0.0.0/0"))
+        );
+        p.exit_node.clear();
+        p.outbound_port = 0;
+        p.advertise_exit_node = true;
+        let config = compile_mesh(&p, Path::new("fixture"), 19090, "fixture-api").unwrap();
+        assert_eq!(config["endpoints"][0]["advertise_exit_node"], true);
+        assert!(
+            config["route"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["inbound"] == "mesh-ts" && r["outbound"] == "direct")
+        );
+        assert!(
+            !config["inbounds"][1]["route_address"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("0.0.0.0/0"))
+        );
     }
 
     #[test]

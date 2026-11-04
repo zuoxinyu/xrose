@@ -189,7 +189,6 @@ fn validate_mtu(mtu: u16) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::model::{CoreKind, NodeDraft, Protocol, TransportKind};
 
     #[test]

@@ -43,15 +43,19 @@ Xross 维护一套独立于具体内核的**用户意图模型**（节点、出�
 
 ## 已实现
 
-### 异地组网（Windows 首期）
+### 异地组网（Windows / macOS / Linux）
 
 - **EasyTier**：静态集成 EasyTier 2.6.4 核心库，由提权助手托管的独立工作进程运行。
 - **Tailscale**：基于独立运行的 sing-box 1.14.4 实例，支持浏览器设备授权、自定义控制服务器、设备探测与 MagicDNS 域名解析。
+- **连接诊断**：区分 EasyTier 入口连接、握手、自动地址分配和网卡初始化失败；Tailscale 检测到同网段客户端时提示先断开冲突连接。
 - **独立与共存**：组网连接独立于代理核心，支持双后端同时在线；配置加密存储于 SQLite，退出应用时自动清理工作进程与专属 DNS 规则。
-- **分流联动**：组网连接期间自动配置代理直连、TUN 路由排除与 PAC 绕过规则，并在 Windows 下自动关闭代理 TUN 的 `strict_route`，断开后恢复。
+- **分流联动**：组网连接期间自动配置代理直连、TUN 路由排除与 PAC 绕过规则。设置可调整 TUN `strict_route`，组网运行期间保留该选择。
+- **出口与子网**：选择远端出口、发布本机出口、发布本机子网及访问指定远端子网；Tailscale 发布须经控制端批准。
+- **出口出站**：配置本地出站端口后自动生成出口节点，可加入 Xray/sing-box 出站组和分流规则；通过代理 TUN 可用于全局流量。EasyTier 出口支持 IPv4 TCP/UDP。
+- **端口转发**：支持 TCP/UDP 本地监听端口到组网设备端口的转发。
 - **入口**：提供“组网”页面与 `xross-cli mesh` 子命令。构建要求、权限边界与验收说明见 [组网文档](docs/MESH.md)。
 
-Windows 首次构建可执行 `powershell -NoProfile -File scripts/build-windows.ps1` 准备 `protoc`（需安装 7-Zip）。当前网络功能仅在 Windows 启用，macOS 与 Linux 保持源码兼容。
+Windows 首次构建可执行 `powershell -NoProfile -File scripts/build-windows.ps1` 准备 `protoc`（需安装 7-Zip）。macOS 使用系统 utun；Linux 需要 `/dev/net/tun` 与 iproute2，系统 MagicDNS 需要 systemd-resolved。组网操作由提权助手执行。
 
 ### 1. Core 管理（`crates/xross-core/src/core/`）
 
@@ -147,7 +151,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   Windows 普通权限启动 TUN 需要已安装并运行的新版助手；仅代启已登记、摘要校验通过的
   Xray 或 sing-box 内核，不接受任意命令或参数。其他平台沿用核心自身权限。
 - 登录启动：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；可独立设置应用、系统代理、
-  Tailscale 与 EasyTier。组网登录连接选择已保存的配置（当前组网后端仅在 Windows 启用）。
+  Tailscale 与 EasyTier。组网登录连接选择已保存的配置。
   登录入口使用 `--autostart`，遵循“启动时最小化”；手动打开应用不自动连接。
   系统代理在内核启动成功后启用，两种组网服务依次连接并分别报告失败。
 - 单实例锁（文件锁 + PID）。
@@ -225,7 +229,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 
 ## 快速开始
 
-要求：Rust 1.96+（`rust-toolchain.toml` 已固定）、Linux/Wayland 或 X11 桌面。
+要求：Rust 1.95+（建议使用当前 stable），Windows、macOS 或 Linux 桌面。
 Linux 需要 GTK3 相关开发库、`libxkbcommon`、`wayland-client`（或 X11 依赖）。
 
 Core 版本：sing-box **1.12+**（推荐 1.14），Xray **1.8+**。
@@ -377,9 +381,11 @@ CLI 的 `--ca` / `--client-cert` / `--client-key` 会读取指定文件的 PEM �
 
 ### 组网
 
-- [ ] **exit node**：选择某个组网节点作为出口。
-- [ ] **subnet**：宣告/访问子网路由。
-- [ ] **Tailscale / EasyTier 作为节点**：接入出站路由与出站组，而不只是独立开关。
+- [x] **exit node**：选择远端出口，或发布本机为出口。
+- [x] **subnet**：发布本机子网，按明确网段访问远端子网。
+- [x] **Tailscale / EasyTier 出口作为节点**：生成带认证的本机出站，接入出站路由与出站组。
+- [x] **端口转发**：TCP/UDP 本地端口转发到组网目标。
+- [x] **跨平台组网**：开放 macOS/Linux 后端；TUN 严格路由可配置。
 - [ ] **通过组网同步配置**：多设备经组网通道共享同一份 profile。
 
 ### UI

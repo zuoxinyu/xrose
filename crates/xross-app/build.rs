@@ -27,6 +27,13 @@ fn main() {
     easytier_native::configure();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={ICON_PNG}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var("PROFILE").as_deref() == Ok("debug")
+    {
+        // GPUI plus static EasyTier exceeds Mach-O's 24-bit compact unwind
+        // offsets in debug builds. Keep full DWARF unwinding in that profile.
+        println!("cargo:rustc-link-arg-bins=-Wl,-no_compact_unwind");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

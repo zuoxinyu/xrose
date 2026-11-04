@@ -279,6 +279,8 @@ impl AppService {
             .map_err(|e| Error::other(format!("无法创建异步运行时：{e}")))?;
 
         let mesh = crate::mesh::controller::MeshController::new(paths.clone(), store.clone())?;
+        let mut model = model;
+        mesh.sync_outbounds(&mut model);
         let inner = Arc::new(Inner {
             mesh,
             paths,
@@ -618,6 +620,7 @@ impl AppService {
                 }
                 InboundKind::Tun => {
                     inbound.enabled = settings.tun_enabled;
+                    inbound.tun.strict_route = settings.tun_strict_route;
                 }
                 _ => {}
             }
@@ -665,7 +668,9 @@ impl AppService {
         let Some(profile) = self.inner.store.load_profile(id)? else {
             return Err(Error::other("配置不存在"));
         };
-        *self.inner.model.write() = profile.model;
+        let mut model = profile.model;
+        self.inner.mesh.sync_outbounds(&mut model);
+        *self.inner.model.write() = model;
         *self.inner.active_profile.write() = Some(id.to_string());
         self.inner.store.set_active_profile(id)?;
         self.inner.validation.write().take();
@@ -699,6 +704,8 @@ impl AppService {
         } else {
             name
         });
+        let mut model = model;
+        self.inner.mesh.sync_outbounds(&mut model);
         let id = self.inner.store.save_profile(&model)?;
         self.inner.store.set_active_profile(&id)?;
         *self.inner.model.write() = model;
@@ -1027,6 +1034,9 @@ impl AppService {
 
     /// Replaces editable node parameters without changing group references or subscription ownership.
     pub fn update_node(&self, node_id: &str, draft: NodeDraft) -> Result<()> {
+        if node_id.starts_with("mesh-exit-") {
+            return Err(Error::config("请在组网配置中编辑出口节点"));
+        }
         // An existing node remains editable when the selected core cannot run its protocol.
         let mut model = self.inner.model.write();
         let original = model
@@ -1978,6 +1988,7 @@ impl AppService {
             || new.allow_lan != old.allow_lan
             || new.listen_host != old.listen_host
             || new.tun_enabled != old.tun_enabled
+            || new.tun_strict_route != old.tun_strict_route
         {
             self.sync_model_settings();
             let _ = self.persist_model();
@@ -3223,13 +3234,38 @@ impl AppService {
     }
 
     pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
+        let settings = self.settings();
+        if profile.outbound_port != 0
+            && [
+                settings.mixed_port,
+                settings.api_port,
+                settings.stats_port,
+                settings.pac_port,
+            ]
+            .contains(&profile.outbound_port)
+        {
+            return Err(Error::config(
+                "出口出站端口与代理或管理端口冲突，请使用其他端口",
+            ));
+        }
         let id = self.inner.mesh.save(profile)?;
+        self.inner
+            .mesh
+            .sync_outbounds(&mut self.inner.model.write());
+        self.persist_model()?;
+        self.mark_dirty();
         self.toast(ToastLevel::Success, "组网配置已保存");
         Ok(id)
     }
 
     pub fn delete_mesh_profile(&self, id: &str) -> Result<()> {
         self.inner.mesh.delete(id)?;
+        self.inner
+            .model
+            .write()
+            .remove_node(&format!("mesh-exit-{id}"));
+        self.persist_model()?;
+        self.mark_dirty();
         let mut settings = self.settings();
         if settings.autostart_tailscale.as_deref() == Some(id) {
             settings.autostart_tailscale = None;
@@ -3273,8 +3309,8 @@ impl AppService {
             let result: Result<()> = async {
                 match action {
                     "connect" => {
-                        if !cfg!(windows) {
-                            return Err(Error::other("异地组网当前仅在 Windows 启用"));
+                        if !service.inner.mesh.snapshot().supported {
+                            return Err(Error::other("当前平台不支持组网连接"));
                         }
                         service.ensure_helper().await.map_err(Error::other)?;
                         if service.inner.mesh.snapshot().profiles.iter().any(|p| {
@@ -4226,6 +4262,91 @@ proxy-groups:
         assert_eq!(service.snapshot().config_dirty, was_dirty);
         let saved = crate::settings::Settings::load(&service.paths().settings_file()).unwrap();
         assert_eq!(saved.backdrop, crate::settings::BackdropStyle::Opaque);
+    }
+
+    #[test]
+    fn mesh_outbound_updates_preserve_group_references_and_secrets() {
+        use crate::mesh::{MeshProfile, MeshProvider};
+        let (service, _dir) = service();
+        let mut profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            name: "fixture".into(),
+            exit_node: "100.64.1.1".into(),
+            outbound_port: 19081,
+            ..Default::default()
+        };
+        let id = service.save_mesh_profile(profile.clone()).unwrap();
+        let node_id = format!("mesh-exit-{id}");
+        let model = service.model();
+        let original = model.node(&node_id).unwrap().clone();
+        assert_eq!(original.protocol, Protocol::Socks);
+        assert!(
+            original
+                .credentials
+                .password
+                .as_ref()
+                .is_some_and(|v| !v.is_empty())
+        );
+        assert!(model.groups.iter().any(|g| g.members.contains(&node_id)));
+        let group = model
+            .groups
+            .iter()
+            .find(|g| g.members.contains(&node_id))
+            .unwrap()
+            .id
+            .clone();
+        profile.outbound_port = 19082;
+        service.save_mesh_profile(profile.clone()).unwrap();
+        let updated = service.model();
+        assert_eq!(updated.node(&node_id).unwrap().port, 19082);
+        assert_eq!(
+            updated.node(&node_id).unwrap().credentials,
+            original.credentials
+        );
+        assert!(
+            updated
+                .groups
+                .iter()
+                .find(|g| g.id == group)
+                .unwrap()
+                .members
+                .contains(&node_id)
+        );
+        service.create_profile("second").unwrap();
+        assert!(service.model().node(&node_id).is_some());
+        profile.outbound_port = 0;
+        service.save_mesh_profile(profile).unwrap();
+        assert!(service.model().node(&node_id).is_none());
+        assert!(
+            service
+                .model()
+                .groups
+                .iter()
+                .all(|g| !g.members.contains(&node_id))
+        );
+        service.delete_mesh_profile(&id).unwrap();
+    }
+
+    #[test]
+    fn strict_route_setting_persists_and_updates_tun_intent() {
+        let (service, _dir) = service();
+        let mut settings = service.settings();
+        settings.tun_strict_route = false;
+        service.update_settings(settings);
+        assert!(!service.settings().tun_strict_route);
+        assert!(
+            service
+                .model()
+                .inbounds
+                .iter()
+                .filter(|i| i.kind == InboundKind::Tun)
+                .all(|i| !i.tun.strict_route)
+        );
+        assert!(
+            !Settings::load(&service.paths().settings_file())
+                .unwrap()
+                .tun_strict_route
+        );
     }
 
     #[test]

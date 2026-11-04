@@ -37,7 +37,8 @@
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
 | 组网访问 | 优先 freedom 规则 + 专用 DNS | 绑定组网接口直连 + TUN 排除 + 专用 DNS | `CompileContext.mesh` 注入，不改变 AppModel；MagicDNS 优先于 fake-IP |
-| Windows 组网与 TUN 共存 | 从自动路由中排除组网网段 | 暂时关闭 `strict_route` | 明确提示 DNS 防泄漏过滤放宽，全部组网断开后恢复 |
+| 组网出口出站 | 本机认证 SOCKS 出站 | 本机认证 SOCKS 出站 | 由 MeshProfile 管理稳定节点 ID，支持出站组与规则；断开组网后不回退直连 |
+| Windows 组网与 TUN 共存 | 从自动路由中排除组网网段 | 保留用户 `strict_route` 设置 | 严格路由可能影响组网 DNS，界面给出提示 |
 
 节点 HTTP 延迟与下载测试由 `runtime::probe` 启动短期测试内核，适配器生成仅含目标节点与本地 HTTP 入站的配置。
 测试客户端显式连接该入站，关闭系统代理继承、重定向与自动解压；不复用当前选择组、规则、API 端口或缓存文件。
@@ -52,16 +53,18 @@ Xray 自动路由通过 CIDR 差集排除用户与组网网段，DNS 劫持规�
 `strict_route` 与网络栈选择在 Xray 下不映射，编译时警告；Linux/macOS 不自动接管系统 DNS，Windows 配置 TUN 接口 DNS。
 提权助手从经过摘要校验的已登记二进制识别内核类型，校验对应 TUN 入站格式，生成该内核的固定启动参数，并提取 TUN 地址用于组网基线保护。
 
-组网独立于 `CoreKind`：`mesh::MeshProfile` 表达网络身份、入口和远端网段意图，
+组网独立于 `CoreKind`：`mesh::MeshProfile` 表达网络身份、入口、出口选择、子网发布、远端网段和端口转发意图，
 `MeshController` 通过带版本和调用者鉴权的助手 IPC 管理会话。EasyTier 2.6.4
 静态库只在 Xross `--mesh-worker` 初始化；Tailscale 使用固定 sing-box 1.14.4
 子进程及鉴权 gRPC。UI 只调用 AppService、读取 `UiSnapshot.mesh`。
-SQLite schema v3 的 `mesh_profiles` 全量加密，不与代理 profile 混写。
+SQLite 的 `mesh_profiles` 全量加密；新增字段使用 serde 默认值，不改变数据库结构。出口网关凭据随组网配置保存且不进入快照；生成的本机 SOCKS 节点随代理配置保存，编辑组网时保持节点 ID 与出站组引用。
+EasyTier 使用公开的 Instance/PeerManager API，出口 TCP/UDP 经独立用户态网络栈发送，路由不可达时不调用本机直连。TCP/UDP 域名请求使用系统解析器，并选择 IPv4 目标；代理核心可按自身 DNS 策略预解析目标。Tailscale 配置编译仍集中在 sing-box adapter。
 
 `CoreManager` 独立保存最后已应用的模型、设置和编译结果。组网变化串行执行
 编译、校验、必要的重启及进程检查，失败回滚已保存配置，保留用户待应用编辑。
 Tailscale 使用用户态 endpoint 和仅包含批准路由的专用 TUN，避免 `accept_routes`
-把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 NRPT。
+把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 DNS：Windows NRPT、macOS `/etc/resolver`、Linux systemd-resolved 按接口域名路由。
+出口和发布子网不加入宿主机默认路由；来自 Tailscale 的流量仅允许访问用户发布的网段，发布出口时允许互联网目的地。Unix 工作进程使用独立进程组，停止时回收子进程。
 详见 [异地组网边界与构建说明](MESH.md)。
 
 连接诊断由 `AppService` 统一提供：后台监控采样维护有界的会话录制，
@@ -198,7 +201,7 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 `Settings` 独立记录应用、系统代理以及两种组网的配置 ID。任一选项启用即注册系统登录入口
 `--autostart`；`run_login_actions()` 只由 GUI 调用且每进程执行一次，不影响 CLI 或单元测试。
 系统代理等待内核启动成功；Tailscale、EasyTier 依次走已有组网连接与路由共存入口。
-组网仍受 Windows 后端支持范围限制；缺失配置和登录授权需求通过提示呈现。
+组网支持 Windows、macOS、Linux；缺失配置和登录授权需求通过提示呈现。
 
 `AppService::toast()` 将事件投递到有界通知队列，GUI 初始化通知工作线程；无需依赖快照轮询。
 Windows 使用 WinRT toast 和 Xross 应用标识，macOS 使用 UserNotifications 授权与请求接口，

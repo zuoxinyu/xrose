@@ -2,6 +2,7 @@
 name = "xross-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
@@ -40,9 +41,14 @@ ipnet.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
+easytier.workspace = true
+async-trait.workspace = true
+tokio-smoltcp.workspace = true
+smoltcp.workspace = true
+tokio-util.workspace = true
+socket2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-easytier.workspace = true
 widestring.workspace = true
 winreg.workspace = true
 windows-sys = { version = "0.59", features = [

@@ -1,7 +1,7 @@
 //! Private worker entry point. Credentials arrive through an inherited pipe.
 use super::{
-    ipc::{Bootstrap, WorkerCommand},
     MeshPhase, MeshProvider, MeshRuntimeView,
+    ipc::{Bootstrap, WorkerCommand},
 };
 use crate::{Error, Result};
 use std::io::{BufRead, Read, Write};
@@ -65,6 +65,7 @@ pub fn main() -> Result<()> {
         let mut backend=Backend::start(&boot).await?;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(2));
         let mut dns_suffix=None;
+        let mut dns_warning=None;
         let mut probe=None;
         let mut proxy_addresses=boot.baseline.proxy_tun_addresses.clone();
         loop {tokio::select!{
@@ -105,9 +106,16 @@ pub fn main() -> Result<()> {
                 state.routes.sort();state.routes.dedup();
                 if state.phase==MeshPhase::Connected && state.dns_suffix!=dns_suffix {
                     super::platform::cleanup_dns(&boot.directory)?;
-                    if let(Some(suffix),Some(address))=(&state.dns_suffix,&state.dns_address){super::platform::set_dns(&boot.directory,&boot.profile.id,suffix,address)?;}
+                    dns_warning=None;
+                    if let(Some(suffix),Some(address))=(&state.dns_suffix,&state.dns_address){
+                        if let Err(error)=super::platform::set_dns(&boot.directory,&boot.profile.id,suffix,address) {
+                            super::platform::cleanup_dns(&boot.directory)?;
+                            dns_warning=Some(format!("系统组网域名解析未启用：{error}；可继续通过 IP 或应用代理访问"));
+                        }
+                    }
                     dns_suffix=state.dns_suffix.clone();
                 }
+                if state.error.is_none() { state.error=dns_warning.clone(); }
                 final_state=state;publish(&final_state);
             }
         }}
@@ -132,7 +140,6 @@ fn is_link_local(ip: std::net::IpAddr) -> bool {
     }
 }
 enum Backend {
-    #[cfg(windows)]
     EasyTier(super::easytier::Backend),
     Tailscale(super::tailscale::Backend),
 }
@@ -143,18 +150,9 @@ impl Backend {
             super::driver::load(&b.directory.join("wintun.dll"))?;
         }
         match b.profile.provider {
-            MeshProvider::EasyTier => {
-                #[cfg(windows)]
-                {
-                    Ok(Self::EasyTier(super::easytier::Backend::start(
-                        b.profile.clone(),
-                    )?))
-                }
-                #[cfg(not(windows))]
-                {
-                    Err(Error::other("EasyTier 当前仅在 Windows 启用"))
-                }
-            }
+            MeshProvider::EasyTier => Ok(Self::EasyTier(
+                super::easytier::Backend::start(b.profile.clone()).await?,
+            )),
             MeshProvider::Tailscale => Ok(Self::Tailscale(
                 super::tailscale::Backend::start(
                     b.profile.clone(),
@@ -169,31 +167,40 @@ impl Backend {
     }
     async fn snapshot(&mut self) -> Result<MeshRuntimeView> {
         match self {
-            #[cfg(windows)]
             Self::EasyTier(e) => e.snapshot().await,
             Self::Tailscale(t) => t.snapshot(),
         }
     }
     async fn logout(&mut self) -> Result<()> {
         match self {
-            #[cfg(windows)]
             Self::EasyTier(_) => Err(Error::other("EasyTier 使用共享网络密钥，请断开或删除配置")),
             Self::Tailscale(t) => t.logout().await,
         }
     }
     async fn probe(&mut self, ip: String) -> Result<Option<f64>> {
         match self {
-            #[cfg(windows)]
             Self::EasyTier(_) => {
                 let target = ip
                     .parse::<std::net::IpAddr>()
                     .map_err(|_| Error::config("设备地址无效"))?;
-                let output = tokio::process::Command::new("ping.exe")
-                    .args(["-n", "1", "-w", "3000", &target.to_string()])
-                    .creation_flags(0x08000000)
-                    .output()
-                    .await
-                    .map_err(|_| Error::other("启动设备探测失败"))?;
+                #[cfg(windows)]
+                let mut command = {
+                    let mut c = tokio::process::Command::new("ping.exe");
+                    c.args(["-n", "1", "-w", "3000"]).creation_flags(0x08000000);
+                    c
+                };
+                #[cfg(unix)]
+                let mut command = {
+                    let mut c = tokio::process::Command::new("ping");
+                    c.args(["-n", "-c", "1"]);
+                    c
+                };
+                command.arg(target.to_string()).kill_on_drop(true);
+                let output =
+                    tokio::time::timeout(std::time::Duration::from_secs(4), command.output())
+                        .await
+                        .map_err(|_| Error::other("设备探测超时"))?
+                        .map_err(|_| Error::other("启动设备探测失败"))?;
                 if output.status.success() {
                     let text = String::from_utf8_lossy(&output.stdout);
                     let latency = regex::Regex::new(r"[=<]\s*(\d+)\s*ms")
