@@ -1,189 +1,63 @@
 # AGENTS.md
 
-Cross-platform desktop client for **Xray** and **sing-box**, written in Rust with GPUI Kit.
-Rust workspace (3 crates), GPL-3.0-or-later. Product docs are Chinese; user-facing strings are
-Chinese with English available through `tr(lang, zh, en)`.
+Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
+产品文档与界面文案为中文，英文通过 `tr(lang, zh, en)` 提供。
 
-## Commands
+## 常用命令
 
-| Purpose | Command |
-| --- | --- |
-| Build everything | `cargo build --workspace` |
-| Run the GUI | `cargo run -p xross-app` |
-| Unit tests | `cargo test -p xross-core` |
-| One test | `cargo test -p xross-core <substring>` |
-| Compile both configs, no GUI | `cargo run -p xross-cli -- demo` |
-| Populate a throwaway profile | `cargo run -p xross-cli -- seed-demo --home <dir>` |
-| Compile the saved profile | `cargo run -p xross-cli -- compile --core sing-box -o c.json --home <dir>` |
-| Validate with a real core | `cargo run -p xross-cli -- check --core sing-box --home <dir>` |
-| Add a manual node | `cargo run -p xross-cli -- add-node --server h --protocol vless --uuid <uuid>` |
-| Privilege helper | `cargo run -p xross-cli -- helper status` / `install` / `start` / `uninstall` |
+- 构建 `cargo build --workspace`；运行 GUI `cargo run -p xross-app`
+- 测试 `cargo test -p xross-core`
+- 无界面验证优先用 `xross-cli`（`demo`、`seed-demo --home <dir>`、`check --core sing-box --home <dir>`，详见 `--help`）
+- 状态一律用 `XROSS_HOME=/tmp/xross-demo` 或 `--home` 隔离，不得触碰用户真实配置
+- 只格式化自己改动的文件（`rustfmt <file>`）；`cargo build --workspace` 无警告，新增警告视为回归
 
-`compile` on an empty profile fails with `没有可编译的出站节点` — run `seed-demo` first, or use
-`demo`, which builds both configs from a built-in sample without touching any state.
+## 结构
 
-Isolate all state with `XROSS_HOME` so you never touch the user's real profile:
+- `crates/xross-core`：非 UI 逻辑（模型、适配器、内核进程、订阅、组网、存储、系统集成、`service.rs`）
+- `crates/xross-app`：GPUI 界面（`ui/`）、托盘（`tray/`）
+- `crates/xross-cli`：无界面入口
 
-- PowerShell: `$env:XROSS_HOME = "$env:TEMP\xross-demo"; cargo run -p xross-app`
-- bash: `XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`
+## 架构约束
 
-`xross-cli` also has `parse`, `import`, `export`, `add-node`, `doctor`, `core`, `fetch-core`,
-`run`, `helper`, `mesh` and `trace` subcommands — prefer it over the GUI when verifying core logic.
+1. `AppModel` 与内核无关，只保存用户意图；协议字段名只出现在 `adapters/xray.rs` 与 `adapters/singbox.rs`。
+2. 内核不支持的能力：降级并在 `CompiledConfig::warnings` 写中文提示；仅在确实无法编译时返回 `Err`。
+3. UI 只通过 `AppService` 访问核心；方法同步、结果经 `snapshot()` 返回，耗时操作设置 `busy` 并提示。
+4. 不得阻塞 `render`/`tick`，渲染路径中不做网络或磁盘操作。
+5. 无热重载：应用配置 = 写入、内核校验、重启进程。
+6. sing-box 输出面向 1.12+，不得回退到旧版 `geoip`/`geosite` 与旧 DNS 格式。
 
-Formatting: `cargo fmt --all --check` currently reports pre-existing diffs, so format only the
-files you changed (`rustfmt <file>`). `cargo clippy` is available but not enforced.
+## 代码约定
 
-## Workspace layout
+- 模块文档与注释用英文；用户可见文本、错误、警告用中文，UI 处用 `tr` 提供双语。
+- 错误使用 `crate::error::Error`，信息需可操作。
+- 序列化枚举用 `rename_all = "snake_case"`，配置结构保留 `#[serde(default)]`。
+- 依赖统一在 `[workspace.dependencies]` 声明。
+- 持久化结构变更：提升 `SCHEMA_VERSION` 并添加迁移。
+- 提交信息采用 conventional 风格，小写 scope，一次提交一个关注点。
+- 测试写在被测文件底部 `#[cfg(test)]`，不依赖网络、真实内核、root 或显示器。
 
-| Crate | Responsibility |
-| --- | --- |
-| `crates/xross-core` | Everything that is not UI: model, adapters, core binaries/process, subscriptions, mesh, storage, runtime APIs, system integration, `service.rs` facade |
-| `crates/xross-app` | GPUI Kit UI (`ui/`), tray dashboard (`tray/`: macOS `NSMenu`, Windows `Shell_NotifyIcon`), assets |
-| `crates/xross-cli` | Headless entry points for the same core |
+## UI 与文案
 
-`xross-core/src/`: `model/` (intent), `adapters/` (compile to core JSON), `core/` (binaries,
-process, logs), `subscription/`, `mesh/` (EasyTier/Tailscale, coexistence plan), `storage/`
-(SQLite + crypto), `runtime/` (Clash API, Xray stats), `system/` (proxy, PAC, autostart, TUN,
-single instance, privilege IPC), plus `route.rs` (local rule preview), `dns.rs`
-(presets/validation), `trace.rs` (link tracer), `updates.rs`.
+- UI 相关改动前必须阅读 [docs/DESIGN.md](docs/DESIGN.md)，遵循其中的 token 与组件规范。
+- 文案简洁、正式、客观；不使用修辞性对比、行话或拟人表述，不暴露实现细节。
+- 统一术语：`提权助手`、`内核` / `Core`、`出站组`、`规则集`、`异地组网`（导航中为`组网`）、`节点订阅`、`HTTP 测速`。
 
-## Architecture invariants
+## 隐私与安全
 
-1. **`AppModel` is core-agnostic.** It describes user intent (nodes, groups, inbounds, routing,
-   DNS) and must never contain `outbounds`, `route`, `inbound.protocol` or other wire-format
-   names. Those live only in `adapters/xray.rs` and `adapters/singbox.rs`. If a change needs a
-   core-specific concept, add a `CoreKind::capabilities()` flag and resolve it inside the adapter.
-2. **Unsupported capability = degrade + warn**, not fail: push a Chinese message into
-   `CompiledConfig::warnings` (the UI displays them). Return `Err(Error::config(..))` only when
-   the input genuinely cannot be compiled (e.g. a mixed-inbound port that cannot be split).
-3. **`AppService` is the only surface the UI touches.** Methods are synchronous and dispatch to
-   an internal Tokio runtime; results reach the view through `snapshot()` → `UiSnapshot`. Slow
-   work gets a `busy` key and a toast; never block `render`/`tick`.
-4. **The view polls.** `main.rs` runs a 200 ms timer calling `AppView::tick`, which refreshes the
-   snapshot every 400 ms; an active trace short-circuits that loop to animate. Don't add network
-   or disk work to render paths.
-5. **No hot reload.** Applying the model rewrites `<runtime>/<core>-config.json`, runs
-   `xray run -test` / `sing-box check`, then restarts the process. Only sing-box selector
-   switching goes through the Clash API. Mutations persist to SQLite and set `config_dirty`.
-6. **sing-box output targets 1.12+** (typed DNS, `route.default_domain_resolver`, `action:
-   reject`, `.srs` rule sets). Do not reintroduce legacy `geoip`/`geosite` fields or pre-1.12
-   DNS schema.
+- 不得在代码、测试夹具、文档、日志或 commit 信息中泄露个人隐私，包括姓名、邮箱、用户名、本机路径、主机名、IP、设备标识等；示例一律使用虚构数据。
+- 不得记录、复制或提交凭据、订阅链接/令牌、`secrets.key` 或解密后的 `enc:v1:` 内容。
 
-## Code conventions
+## 平台注意
 
-- User-visible text is Chinese. In the UI supply both languages at the call site:
-  `tr(lang, zh, en)` / `self.tr("停止", "Stop")` — no central translation table.
-- **Copy and tone (UI, CLI, README, docs):**
-  - Keep all copy concise, formal, and objective. State what a control does or what the current
-    state is; never lecture the user or editorialize (no "最容易出错的一层", "这是有意取舍").
-  - Avoid AI-style rhetorical contrasts (`不是…而是…`, `不是事后补丁，而是一等公民`) and
-    self-justifying disclaimers (`与订阅并行：…凭据不会上传`, `不调用外部程序`).
-  - Do not leak internal implementation details, crypto algorithms, or schema history into UI
-    subtitles or button labels (write `保存` / `保存配置` instead of `加密保存`; describe
-    user-facing behavior instead of `ChaCha20-Poly1305` or `1.12+ predefined action`).
-  - Avoid colloquialisms, slang, and anthropomorphic phrasing (use `节点订阅` instead of
-    `机场订阅`, `崩溃自动重启` instead of `watchdog 自动拉起`, `发起方` / `DNS 解析` instead of
-    `谁发起` / `谁解析`, `HTTP 测速` instead of `测真连`).
-  - Use unified terminology across UI and docs: `提权助手` (not `特权助手`), `内核` / `Core`,
-    `出站组`, `规则集`, `异地组网` (`组网` in navigation).
-- Module-level `//!` docs and inline comments in English; error and warning strings in Chinese.
-- Errors go through `crate::error::Error` + `Result`; `to_string()` is rendered to the user
-  verbatim, so make messages actionable.
-- Serialized enums use `#[serde(rename_all = "snake_case")]`; config structs keep
-  `#[serde(default)]` so older files still load.
-- Flex rows with variable-length text: give the growing child `.min_w(px(0.))` plus
-  `.truncate()` / `.line_clamp(n)`, and `.flex_shrink_0()` on fixed-width controls or badges.
-  Without that, long log lines, rule summaries and node names push past the card at 150% DPI.
-  Prefer wrapping whole toolbars (`flex_wrap`) over a single row of buttons.
-- Dependencies are declared once under `[workspace.dependencies]` and pulled in with
-  `.workspace = true`; platform-only crates sit behind `[target.'cfg(...)'.dependencies]`.
-- Commits follow conventional style with a lowercase scope, e.g. `feat(ui,macos): …`;
-  one concern per commit.
+- 托盘仅 macOS / Windows；其他平台 `available()` 必须为 false，不得强制为 true。
+- 修改 `Theme::change` / `Theme::sync_system_appearance` 的调用处后，需重新执行 `window_effects::make_surface_translucent`。
+- Windows：保留 `crates/xross-app/build.rs` 中的图标资源与主线程栈设置；已知失败测试 `second_acquire_fails` 可用 `-- --skip second_acquire_fails` 跳过。
+- Windows：GUI 进程完整性级别须不低于 shell，否则 `Shell_NotifyIconW` 失败；若工作区目录带 Low 完整性标签，用 `icacls <workspace> /setintegritylevel (OI)(CI)M` 恢复。
+- Windows：`build.rs` 将图标嵌入为资源 ID 1，并把主线程栈提升至 16 MiB，修改构建时两者都要保留。
+- `objc` 宏依赖 `crates/xross-app/Cargo.toml` 中 `[lints.rust]` 的 `cfg(feature = "cargo-clippy")` 条目；不得整体放行 `unexpected_cfgs`。
+- `vendor/block` 是通过 `[patch.crates-io]` 引入的 `block 0.1.6` 补丁版本，上游修复后移除。
+- 注册表、`networksetup`、GNOME/KDE 等平台代码主要在 Linux 上验证过；声称平台修复有效前，先运行 `xross-cli doctor` / `check`。
 
-## Testing
+## 修改入口
 
-- Tests are inline `#[cfg(test)] mod tests` blocks at the bottom of the file under test. There is
-  no `tests/` directory and no mocking framework: parsers and adapters are asserted against
-  string/JSON literals.
-- Service-level tests create a throwaway store via `AppPaths::from_root(tempfile::tempdir())` and
-  `AppService::with_paths(...)`.
-- Tests must not need network access, a real `xray`/`sing-box` binary, root, or a display.
-- When changing an adapter, extend the structural assertions in that adapter's test module rather
-  than snapshotting an entire config.
-
-## Known state and gotchas
-
-- `system::single_instance::tests::second_acquire_fails` **fails on Windows**: the lock itself
-  works, but `existing_pid()` cannot read the file while the lock is held (Windows byte-range
-  locks are mandatory, so the read-back is a sharing violation). Use
-  `cargo test -p xross-core -- --skip second_acquire_fails`; 157 tests pass.
-- If the workspace tree carries a **Low mandatory integrity label** (the sandbox applied one
-  earlier in this session), a process launched from `target\debug\xross-app.exe` inherits that
-  Low IL. Low IL cannot call `Shell_NotifyIconW` against the Medium IL shell
-  (`ERROR_ACCESS_DENIED`, and `%TEMP%` writes fail too). Restore the label with
-  `icacls C:\Users\iamzu\xross /setintegritylevel (OI)(CI)M` and verify with `icacls`; inherited
-  labels on children update automatically. The tree is currently Medium again. While it was Low,
-  tests needed `$env:TEMP`/`$env:TMP` pointed at the workspace; that workaround is no longer
-  needed. The app still degrades to “close quits” and logs the reason if the tray is refused —
-  do not force `available()` to `true` in production code.
-- The tray is implemented for **macOS and Windows**; `tray/unsupported.rs` makes
-  `available()` false elsewhere, so closing the window still quits.
-- Windows cores are adopted into a `KILL_ON_JOB_CLOSE` job object
-  (`crates/xross-core/src/core/job.rs`), so a crashed or force-killed GUI cannot leave a core
-  running. A stray `sing-box.exe` keeps `data/cache.db` locked and every later start fails with
-  `initialize cache-file: timeout`; kill the leftover process once if an older build left one
-  behind.
-- Windows main window class is `Zed::Window` (GPUI), not `GPUIWindow`; `tray/windows.rs`
-  locates the main HWND by that class name. The tray message window is `XrossTrayWindow`
-  on the same GPUI main thread, so its messages are dispatched by GPUI's message loop.
-  `Shell_NotifyIcon` also needs the app to run at the same or higher integrity than the shell.
-- GPUI's **Windows backend ignores `WindowOptions.icon`**: it loads icon resource **ID 1** from
-  the executable for the window class. `crates/xross-app/build.rs` generates `xross-app.ico`
-  from `assets/app-icon-256.png` and embeds it as ID 1 — keep that ID. macOS Dock icon is set at
-  runtime in `app_icon.rs` (`NSApplication.setApplicationIconImage`); Linux gets the image via
-  `WindowOptions.icon` plus the shipped `io.xross.Xross.desktop` (`Icon=xross`).
-- `rust-toolchain.toml` is deleted in the current working tree even though the README still
-  mentions it. `Cargo.toml` declares `rust-version = "1.92"`; the installed toolchain is stable
-  1.99.
-- `cargo build --workspace` currently emits no warnings. Treat any new warning as a regression.
-  `objc`'s `msg_send!`/`class!`/`sel!` macros expand to `cfg(feature = "cargo-clippy")`; the
-  expected value is declared under `[lints.rust]` in `crates/xross-app/Cargo.toml`, so do not
-  blanket-allow `unexpected_cfgs`.
-- `vendor/block` is a patched copy of `block 0.1.6` (its `static` used an uninhabited type, a
-  future-incompat lint) wired up with `[patch.crates-io]` in the root `Cargo.toml`. Drop the
-  patch once a release of `block` contains the fix.
-- `crates/xross-app/build.rs` raises the **Windows main-thread stack to 16 MiB**. GPUI lays a page
-  out as one deep `Div` tree; in debug builds the settings page alone gets close to the 1 MiB
-  Windows default and aborts with a stack overflow once a core version row is added. Keep the
-  linker arg when touching the build; `XROSS_PAGE=settings` reproduces the old crash quickly.
-- The window backdrop (macOS vibrancy / Windows acrylic) only shows through where the UI is
-  transparent: `window_effects::make_surface_translucent` keeps `theme.tokens.background` clear,
-  and GPUI Kit's root plugin would otherwise paint it over the whole window. Anything that calls
-  `Theme::change` / `Theme::sync_system_appearance` must re-run that helper (see `ui/settings.rs`).
-- Platform code (Windows registry + `InternetSetOption`, macOS `networksetup`, GNOME/KDE) is
-  compiled but was originally validated only on Linux. Run `xross-cli doctor` / `check` before
-  claiming a platform fix works.
-- Never log, copy or commit node credentials, subscription tokens, `secrets.key` or decrypted
-  `enc:v1:` values. Test fixtures use fake IDs and passwords.
-- `README.md` (features, limitations, test list) and `docs/ARCHITECTURE.md` (Xray vs sing-box
-  difference table) describe current behavior — update them when a capability mapping changes.
-
-## Where to change what
-
-| Task | Files |
-| --- | --- |
-| Protocol/credential fields | `crates/xross-core/src/model/node.rs` |
-| Share links in/out | `subscription/links.rs`, `subscription/links_export.rs` |
-| Subscription format detection | `subscription/parse.rs` (Base64, v2rayN links, Clash YAML, SIP008, sing-box JSON) |
-| Emitted config | `adapters/{xray,singbox}.rs` + the table in `docs/ARCHITECTURE.md` |
-| Binary download/verify/lifecycle | `core/binary.rs`, `core/process.rs`, `updates.rs` |
-| Persistence/schema | `storage/mod.rs` (bump `SCHEMA_VERSION`, add a migration) |
-| Proxy/PAC/autostart/TUN | `system/*` |
-| Mesh networking | `crates/xross-core/src/mesh/`, `ui/mesh.rs`, `docs/MESH.md` |
-| Rule preview, tracer | `route.rs`, `trace.rs` |
-| Manual node form | `model/node.rs` (`NodeDraft`), `ui/manual_node.rs`, `ui/nodes.rs` |
-| Tray dashboard / window hide-show | `crates/xross-app/src/tray/` (`dashboard.rs` is shared; `macos.rs` / `windows.rs` are backends) |
-| Privilege helper install/IPC | `system/privilege.rs`, `xross-app/src/main.rs` (`helper_main` runs first), `xross-cli/src/main.rs` |
-| Window backdrop, sidebar material | `crates/xross-app/src/window_effects.rs`, `system/window_effects.rs`, `ui/theme.rs` (`Palette::sidebar`) |
-| UI page | new file in `crates/xross-app/src/ui/`, then `Page` variant + `icon()` + `zh()`/`en()` + `page_content()` arm in `ui/mod.rs` |
-| CLI subcommand | `crates/xross-cli/src/main.rs` |
+详见 `docs/ARCHITECTURE.md`。新增 UI 页面：在 `ui/` 新建文件，并在 `ui/mod.rs` 添加 `Page` 变体、`icon()`、`zh()`/`en()` 与 `page_content()` 分支。新增 CLI 子命令：`crates/xross-cli/src/main.rs`。能力映射变化时同步更新 `README.md` 与 `docs/ARCHITECTURE.md`。
