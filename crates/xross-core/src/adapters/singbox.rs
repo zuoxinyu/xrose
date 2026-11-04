@@ -13,6 +13,8 @@ use crate::model::{
 };
 use crate::settings::Settings;
 
+pub(crate) mod vpn;
+
 pub struct SingBoxAdapter;
 
 /// Standalone mesh configuration; does not require a proxy profile or nodes.
@@ -147,6 +149,7 @@ impl CoreAdapter for SingBoxAdapter {
 
         // --- outbounds ---------------------------------------------------
         let mut outbounds = Vec::new();
+        let mut endpoints = Vec::new();
         for node in &model.nodes {
             if !node.enabled {
                 continue;
@@ -159,16 +162,68 @@ impl CoreAdapter for SingBoxAdapter {
                 ));
                 continue;
             }
+            if node.protocol.is_vpn()
+                && ctx
+                    .core_version
+                    .as_ref()
+                    .is_some_and(|v| v < &semver::Version::new(1, 14, 0))
+            {
+                warnings.push(format!(
+                    "节点“{}”需要 sing-box 1.14.0 或更新版本，已跳过，请更新内核",
+                    node.name
+                ));
+                continue;
+            }
             match node_outbound(node, &mut warnings) {
-                Ok(value) => outbounds.push(value),
+                Ok(value) => {
+                    if node.protocol == Protocol::Wireguard || node.protocol.is_vpn() {
+                        endpoints.push(value);
+                    } else {
+                        outbounds.push(value);
+                    }
+                }
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
             }
         }
-        if outbounds.is_empty() {
-            return Err(Error::config("没有可编译的出站节点"));
+        if outbounds.is_empty() && endpoints.is_empty() {
+            return Err(Error::config(
+                if model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn()) {
+                    "没有可编译的出站节点；请检查 VPN 凭据并使用 sing-box 1.14.0 或更新版本"
+                } else {
+                    "没有可编译的出站节点"
+                },
+            ));
+        }
+        if model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn()) {
+            warnings.push("OpenVPN / OpenConnect 需要 sing-box 1.14.0 或更新版本".into());
         }
         // `block` is a legacy special outbound; reject is expressed as a rule action.
         outbounds.push(json!({"type": "direct", "tag": "direct"}));
+
+        // Resolve group selections against successfully compiled nodes only.
+        let valid_tags: std::collections::HashSet<String> = outbounds
+            .iter()
+            .chain(endpoints.iter())
+            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
+            .collect();
+        let mut resolved_model = model.clone();
+        for group in &mut resolved_model.groups {
+            group.members.retain(|id| {
+                model
+                    .node(id)
+                    .is_some_and(|n| valid_tags.contains(&n.outbound_tag()))
+            });
+            group.repair();
+        }
+        resolved_model.groups.retain(|g| !g.members.is_empty());
+        if resolved_model
+            .default_group
+            .as_ref()
+            .is_some_and(|id| resolved_model.group(id).is_none())
+        {
+            resolved_model.default_group = resolved_model.groups.first().map(|g| g.id.clone());
+        }
+        let model = &resolved_model;
 
         let default_group =
             proxy_group_tag(model, &model.routing.final_action).unwrap_or_else(|| "direct".into());
@@ -180,6 +235,7 @@ impl CoreAdapter for SingBoxAdapter {
                 .filter_map(|id| model.node(id))
                 .filter(|n| n.usable_with(CoreKind::SingBox))
                 .map(|n| n.outbound_tag())
+                .filter(|tag| valid_tags.contains(tag))
                 .collect();
             if members.is_empty() {
                 if group.tag() == default_group {
@@ -246,7 +302,7 @@ impl CoreAdapter for SingBoxAdapter {
 
         // --- rule sets ---------------------------------------------------
         let mut rule_set_tags: Vec<String> = Vec::new();
-        for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+        for rule in model.routing.effective_rules() {
             rule_set_tags.extend(rule.matchers.rule_sets.iter().cloned());
             for geosite in &rule.matchers.geosites {
                 rule_set_tags.push(format!("geosite-{geosite}"));
@@ -296,7 +352,7 @@ impl CoreAdapter for SingBoxAdapter {
         if model.routing.bypass_china_ips {
             rules.push(json!({"rule_set": ["geoip-cn"], "outbound": "direct"}));
         }
-        for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+        for rule in model.routing.effective_rules() {
             if let Some(value) = singbox_rule(model, rule, &mut warnings) {
                 rules.push(value);
             }
@@ -339,6 +395,35 @@ impl CoreAdapter for SingBoxAdapter {
             let (dns, dns_warnings) = build_dns(model, ctx, &default_group)?;
             dns_section = dns;
             warnings.extend(dns_warnings);
+            let mut vpn_rules = Vec::new();
+            for node in model.nodes.iter().filter(|n| {
+                n.enabled && n.protocol.is_vpn() && valid_tags.contains(&n.outbound_tag())
+            }) {
+                let use_dns = match node.protocol {
+                    Protocol::Openvpn => node
+                        .credentials
+                        .openvpn
+                        .as_ref()
+                        .is_some_and(|o| o.use_pushed_dns),
+                    Protocol::Openconnect => node
+                        .credentials
+                        .openconnect
+                        .as_ref()
+                        .is_some_and(|o| o.use_pushed_dns),
+                    _ => false,
+                };
+                if !use_dns {
+                    continue;
+                }
+                let tag = format!("vpn-dns-{}", node.id);
+                dns_section["servers"].as_array_mut().unwrap().push(json!({
+                    "type":node.protocol.as_str(),"tag":tag,"endpoint":node.outbound_tag(),
+                    "accept_default_resolvers":false,"accept_search_domain":true
+                }));
+                vpn_rules.push(json!({"preferred_by":tag,"action":"route","server":tag}));
+            }
+            vpn_rules.extend(dns_section["rules"].as_array_mut().unwrap().drain(..));
+            dns_section["rules"] = json!(vpn_rules);
         }
 
         // --- assemble ----------------------------------------------------
@@ -370,6 +455,9 @@ impl CoreAdapter for SingBoxAdapter {
         }
         root.insert("inbounds".into(), json!(inbounds));
         root.insert("outbounds".into(), json!(outbounds));
+        if !endpoints.is_empty() {
+            root.insert("endpoints".into(), json!(endpoints));
+        }
         root.insert("route".into(), route);
         root.insert(
             "experimental".into(),
@@ -419,11 +507,14 @@ fn tun_inbound(inbound: &Inbound) -> Value {
 
 /// Minimal configuration used only by private per-node probes.
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+    let endpoint = node.protocol == Protocol::Wireguard || node.protocol.is_vpn();
+    let value = node_outbound(node, &mut [])?;
     Ok(json!({
+        "endpoints": if endpoint { vec![value.clone()] } else { vec![] },
         "log": {"disabled": true},
         "dns": {"servers": [{"type": "local", "tag": "local"}]},
         "inbounds": [{"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port}],
-        "outbounds": [node_outbound(node, &mut [])?],
+        "outbounds": if endpoint { vec![] } else { vec![value] },
         "route": {"auto_detect_interface": true, "default_domain_resolver": "local", "final": node.outbound_tag()}
     }))
 }
@@ -589,11 +680,36 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
             }
             value
         }
+        Protocol::Openvpn | Protocol::Openconnect => return vpn::compile(node),
         Protocol::Wireguard => {
-            return Err(Error::config("WireGuard 出站尚未支持（模型缺少密钥字段）"));
+            let wg = node
+                .credentials
+                .wireguard
+                .as_ref()
+                .ok_or_else(|| Error::config("WireGuard 缺少密钥和地址配置"))?;
+            wg.validate()?;
+            return Ok(
+                json!({"type":"wireguard", "tag":node.outbound_tag(), "system":false,
+                "address":wg.addresses,"private_key":wg.private_key,"mtu":wg.mtu,
+                "peers":[{"address":node.server,"port":node.port,"public_key":wg.public_key,
+                    "pre_shared_key":wg.pre_shared_key,"allowed_ips":wg.allowed_ips,"reserved":wg.reserved}]}),
+            );
         }
     };
 
+    if node.protocol == Protocol::Anytls {
+        if let Some(options) = &node.credentials.anytls {
+            if let Some(value) = &options.idle_session_check_interval {
+                outbound["idle_session_check_interval"] = json!(value);
+            }
+            if let Some(value) = &options.idle_session_timeout {
+                outbound["idle_session_timeout"] = json!(value);
+            }
+            if let Some(value) = options.min_idle_session {
+                outbound["min_idle_session"] = json!(value);
+            }
+        }
+    }
     if let Some(tls) = tls_json(node) {
         outbound["tls"] = tls;
     }
@@ -1085,9 +1201,149 @@ fn build_dns(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn vpn_endpoints_groups_dns_and_version_degradation() {
+        let (mut model, settings, mut ctx) = sample();
+        let existing = model.groups[0].members[0].clone();
+        let mut vpn = crate::model::NodeDraft {
+            protocol: Protocol::Openconnect,
+            server: "vpn.example".into(),
+            username: "fixture".into(),
+            password: "fake-password".into(),
+            ..Default::default()
+        }
+        .into_node(CoreKind::SingBox)
+        .unwrap();
+        vpn.name = "office".into();
+        model.groups[0].members.push(vpn.id.clone());
+        model.groups[0].selected = Some(vpn.id.clone());
+        model.nodes.push(vpn.clone());
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(compiled.json["endpoints"][0]["type"], "openconnect");
+        assert!(
+            compiled.json["dns"]["servers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["type"] == "openconnect" && s["endpoint"] == vpn.outbound_tag())
+        );
+        assert_eq!(
+            compiled.json["dns"]["rules"][0]["preferred_by"],
+            format!("vpn-dns-{}", vpn.id)
+        );
+        let probe = compile_probe(&vpn, 18080).unwrap();
+        assert_eq!(probe["endpoints"][0]["type"], "openconnect");
+        assert!(probe["outbounds"].as_array().unwrap().is_empty());
+        ctx.core_version = Some(semver::Version::new(1, 13, 0));
+        let degraded = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(
+            degraded
+                .warnings
+                .iter()
+                .any(|s| s.contains("已跳过") && s.contains("1.14"))
+        );
+        assert!(
+            !degraded
+                .to_pretty_string()
+                .unwrap()
+                .contains(&vpn.outbound_tag())
+        );
+        assert!(
+            degraded
+                .to_pretty_string()
+                .unwrap()
+                .contains(&model.node(&existing).unwrap().outbound_tag())
+        );
+        let xray = crate::adapters::XrayAdapter
+            .compile(&model, &settings, &ctx)
+            .unwrap();
+        assert!(xray.warnings.iter().any(|s| s.contains("OpenConnect")));
+        assert!(
+            !xray
+                .to_pretty_string()
+                .unwrap()
+                .contains(&vpn.outbound_tag())
+        );
+    }
+
+    #[test]
+    fn wireguard_compiles_with_credentials_and_probe() {
+        let (mut model, settings, ctx) = sample();
+        let mut wg = Node::new("fixture wg", Protocol::Wireguard, "2001:db8::1", 51820);
+        wg.credentials.wireguard = Some(crate::model::WireguardOptions {
+            private_key: crate::util::encode_base64(&[1; 32]),
+            public_key: crate::util::encode_base64(&[2; 32]),
+            pre_shared_key: crate::util::encode_base64(&[3; 32]),
+            addresses: vec!["10.0.0.2/32".into(), "fd00::2/128".into()],
+            reserved: [1, 2, 3],
+            ..Default::default()
+        });
+        model.nodes.clear();
+        for group in &mut model.groups {
+            group.members.clear();
+            group.selected = None;
+        }
+        model.add_nodes([wg.clone()]);
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let probe = super::super::compile_probe(CoreKind::SingBox, &wg, 12345).unwrap();
+        let ep = &compiled.json["endpoints"][0];
+        assert_eq!(
+            ep["private_key"],
+            wg.credentials.wireguard.as_ref().unwrap().private_key
+        );
+        assert_eq!(ep["peers"][0]["reserved"], json!([1, 2, 3]));
+        assert_eq!(ep["peers"][0]["address"], "2001:db8::1");
+        assert_eq!(probe["endpoints"][0], *ep);
+        assert!(probe["outbounds"].as_array().unwrap().is_empty());
+        let imported = crate::subscription::parse::parse_singbox_json(&compiled.json);
+        assert_eq!(
+            imported.nodes[0].credentials.wireguard,
+            wg.credentials.wireguard
+        );
+    }
+    #[test]
+    fn custom_group_order_and_enabled_state_reach_compiler() {
+        let (mut model, settings, ctx) = sample();
+        model.routing.rules.clear();
+        for (name, enabled) in [
+            ("first.example", true),
+            ("disabled.example", false),
+            ("last.example", true),
+        ] {
+            model
+                .routing
+                .rule_groups
+                .push(crate::model::RouteRuleGroup {
+                    name: name.into(),
+                    enabled,
+                    rules: vec![crate::model::RouteRule::new(
+                        name,
+                        crate::model::Matchers {
+                            domains: vec![name.into()],
+                            ..Default::default()
+                        },
+                        crate::model::RouteAction::direct(),
+                    )],
+                    ..Default::default()
+                });
+        }
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let rules = compiled.json["route"]["rules"].as_array().unwrap();
+        let domains: Vec<_> = rules
+            .iter()
+            .filter_map(|r| r["domain"][0].as_str())
+            .collect();
+        assert_eq!(domains, ["first.example", "last.example"]);
+    }
+
+    #[test]
     fn anytls_emits_required_tls_and_private_probe_route() {
         let mut node = Node::new("test", Protocol::Anytls, "example.com", 443);
         node.credentials.password = Some("fake".into());
+        node.credentials.anytls = Some(crate::model::AnytlsOptions {
+            idle_session_timeout: Some("40s".into()),
+            min_idle_session: Some(3),
+            ..Default::default()
+        });
         node.tls.server_name = Some("tls.example.com".into());
         let (mut model, settings, ctx) = sample();
         model.add_nodes(vec![node.clone()]);
@@ -1099,6 +1355,8 @@ mod tests {
             .find(|o| o["type"] == "anytls")
             .unwrap();
         assert_eq!(outbound["password"], "fake");
+        assert_eq!(outbound["idle_session_timeout"], "40s");
+        assert_eq!(outbound["min_idle_session"], 3);
         assert_eq!(outbound["tls"]["enabled"], true);
         assert_eq!(outbound["tls"]["server_name"], "tls.example.com");
         assert!(outbound.get("transport").is_none());

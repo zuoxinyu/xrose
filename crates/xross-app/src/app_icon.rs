@@ -5,8 +5,8 @@
 //!   window class, which is what Explorer and the taskbar display; no runtime
 //!   call is needed.
 //! - **macOS**: `WindowOptions.icon` only affects the window, not the Dock.
-//!   A development build has no app bundle/`.icns`, so set
-//!   `NSApplication.applicationIconImage` explicitly from the bundled PNG.
+//!   Set `NSApplication.applicationIconImage` explicitly from the bundled PNG;
+//!   packaged applications use their `.icns` for Finder and notifications.
 //! - **Linux**: GPUI receives the same `WindowOptions.icon` and publishes it as
 //!   the X11/Wayland window icon; installed launchers use the bundled
 //!   `assets/icons/xross.png` through the `.desktop` file.
@@ -41,7 +41,7 @@ mod macos {
     use std::sync::{Once, OnceLock};
 
     use cocoa::appkit::NSApplication;
-    use cocoa::base::{id, nil, BOOL};
+    use cocoa::base::{BOOL, id, nil};
     use cocoa::foundation::{NSAutoreleasePool, NSString};
     use objc::{class, msg_send, sel, sel_impl};
 
@@ -179,6 +179,13 @@ mod macos {
 
     unsafe fn set_executable_file_icon(image: id) {
         FILE_ICON_ONCE.call_once(|| unsafe {
+            let bundle: id = msg_send![class!(NSBundle), mainBundle];
+            let identifier: id = msg_send![bundle, bundleIdentifier];
+            // Finder custom icons add resource forks to the executable and invalidate
+            // signed bundles. Bundled applications declare their icon in Info.plist.
+            if identifier != nil {
+                return;
+            }
             let Ok(exe) = std::env::current_exe() else {
                 return;
             };

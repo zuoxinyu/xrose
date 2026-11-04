@@ -50,6 +50,13 @@ pub struct Toast {
     pub at: i64,
 }
 
+/// Native notification controls are independent of the UI's toast polling.
+#[derive(Debug, Clone)]
+pub enum NotificationEvent {
+    Configure { enabled: bool, user_initiated: bool },
+    Show(Toast),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformInfo {
     pub os: String,
@@ -203,6 +210,9 @@ struct Inner {
     trace_generation: AtomicU64,
     recording: Mutex<DiagnosticRecording>,
     toast_seq: AtomicU64,
+    login_started: AtomicBool,
+    notification_sender: RwLock<Option<std::sync::mpsc::Sender<NotificationEvent>>>,
+    install_lock: tokio::sync::Mutex<()>,
 }
 
 /// Cheap to clone; all state lives behind Arc.
@@ -304,6 +314,9 @@ impl AppService {
             trace_generation: AtomicU64::new(0),
             recording: Mutex::new(DiagnosticRecording::default()),
             toast_seq: AtomicU64::new(1),
+            login_started: AtomicBool::new(false),
+            notification_sender: RwLock::new(None),
+            install_lock: tokio::sync::Mutex::new(()),
         });
         let service = Self {
             inner: inner.clone(),
@@ -499,15 +512,49 @@ impl AppService {
         self.inner.busy.read().contains(key)
     }
 
+    pub fn subscribe_notifications(&self) -> std::sync::mpsc::Receiver<NotificationEvent> {
+        // Control events must not be dropped when delivery is waiting for permission.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _ = sender.send(NotificationEvent::Configure {
+            enabled: self.settings().system_notifications,
+            user_initiated: false,
+        });
+        *self.inner.notification_sender.write() = Some(sender);
+        receiver
+    }
+
+    pub fn report_notification_error(&self, message: &str) {
+        // Do not toast delivery failures back into the notification queue.
+        self.inner.core.logs().push(
+            LogStream::App,
+            LogLevel::Warn,
+            format!("系统通知不可用，继续显示应用内提示：{message}"),
+        );
+        self.local_toast(ToastLevel::Warning, message);
+    }
+
     pub fn toast(&self, level: ToastLevel, message: impl Into<String>) {
+        self.push_toast(level, message.into(), true);
+    }
+
+    /// Permission/delivery feedback must never recursively request a native notification.
+    pub fn local_toast(&self, level: ToastLevel, message: impl Into<String>) {
+        self.push_toast(level, message.into(), false);
+    }
+
+    fn push_toast(&self, level: ToastLevel, message: String, native: bool) {
         let id = self.inner.toast_seq.fetch_add(1, Ordering::SeqCst);
-        let message = message.into();
         let toast = Toast {
             id,
             level,
             message: message.clone(),
             at: now_unix(),
         };
+        if native && self.inner.settings.read().system_notifications {
+            if let Some(sender) = self.inner.notification_sender.read().as_ref() {
+                let _ = sender.send(NotificationEvent::Show(toast.clone()));
+            }
+        }
         let mut toasts = self.inner.toasts.lock();
         toasts.push(toast);
         while toasts.len() > 20 {
@@ -940,6 +987,9 @@ impl AppService {
             ToastLevel::Success,
             format!("已导入 {} 个节点（{}）", added, parsed.format.label()),
         );
+        if !parsed.warnings.is_empty() {
+            self.toast(ToastLevel::Warning, parsed.warnings.join("；"));
+        }
         added
     }
 
@@ -1417,12 +1467,31 @@ impl AppService {
     /// Downloads any missing rule-sets before starting sing-box. The core will
     /// otherwise fetch them itself at startup, which fails behind a broken DNS
     /// path and makes the start non-deterministic.
-    async fn ensure_rule_sets(&self) -> std::result::Result<(), String> {
-        if self.inner.settings.read().core != CoreKind::SingBox {
-            return Ok(());
+    async fn ensure_rule_sets(
+        &self,
+        model: &AppModel,
+        settings: &Settings,
+    ) -> std::result::Result<(), String> {
+        if settings.core == CoreKind::Xray {
+            let binary = self
+                .inner
+                .core
+                .resolve_binary(settings.core, settings)
+                .map_err(|e| e.to_string())?;
+            let dir = binary.parent().ok_or_else(|| "内核目录无效".to_string())?;
+            let ctx = crate::adapters::CompileContext::new(
+                settings,
+                self.inner.paths.data_dir.clone(),
+                self.inner.paths.runtime_dir.clone(),
+            );
+            let compiled = crate::adapters::adapter_for(settings.core)
+                .compile(model, settings, &ctx)
+                .map_err(|e| e.to_string())?;
+            return updates::ensure_xray_geo(&compiled.json, dir)
+                .await
+                .map_err(|e| e.to_string());
         }
-        let model = self.inner.model.read().clone();
-        let sets = crate::adapters::required_rule_sets(&model);
+        let sets = crate::adapters::required_rule_sets(model);
         let dir = self.inner.paths.rule_sets_dir();
         let missing: Vec<crate::model::RuleSet> = sets
             .into_iter()
@@ -1464,6 +1533,116 @@ impl AppService {
         }
     }
 
+    async fn ensure_core_binary(&self, settings: &mut Settings) -> Result<()> {
+        let _install = self.inner.install_lock.lock().await;
+        if self
+            .inner
+            .core
+            .resolve_binary(settings.core, settings)
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // An explicit path is user intent; never silently replace it with a download.
+        if settings.binary_override(settings.core).is_some() {
+            self.inner.core.resolve_binary(settings.core, settings)?;
+        }
+        self.toast(
+            ToastLevel::Info,
+            format!("正在下载 {} 内核…", settings.core.display_name()),
+        );
+        self.set_busy("install", true);
+        let result: Result<_> = async {
+            let candidate = updates::check_core_update(settings.core, None)
+                .await?
+                .ok_or_else(|| Error::binary("未找到可下载的内核版本"))?;
+            let checksum = match candidate.checksum_url {
+                Some(url) => updates::download_checksum(&url).await?,
+                None => None,
+            };
+            self.inner
+                .core
+                .binaries()
+                .install_from_url(
+                    settings.core,
+                    &candidate.version,
+                    &candidate.asset.url,
+                    checksum,
+                )
+                .await
+        }
+        .await;
+        self.set_busy("install", false);
+        let record = result?;
+        settings
+            .active_versions
+            .insert(settings.core.as_str().into(), record.version.clone());
+        // Merge only the installed version so edits made during the download survive.
+        let mut current = self.settings();
+        current
+            .active_versions
+            .insert(settings.core.as_str().into(), record.version);
+        self.save_settings(&current)?;
+        Ok(())
+    }
+
+    /// Called only by the GUI login entry point, never by CLI/test construction.
+    pub fn run_login_actions(&self) {
+        if self.inner.login_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let settings = self.settings();
+        if settings.autostart_proxy {
+            let mut new = settings.clone();
+            new.system_proxy = true;
+            // The proxy is applied only after the core has successfully started.
+            if let Err(err) = self.save_settings(&new) {
+                self.toast(ToastLevel::Error, err.to_string());
+            } else {
+                self.start_core();
+            }
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            for (provider, id) in [
+                (
+                    crate::mesh::MeshProvider::Tailscale,
+                    settings.autostart_tailscale,
+                ),
+                (
+                    crate::mesh::MeshProvider::EasyTier,
+                    settings.autostart_easytier,
+                ),
+            ] {
+                let Some(id) = id else {
+                    continue;
+                };
+                if !service
+                    .inner
+                    .mesh
+                    .snapshot()
+                    .profiles
+                    .iter()
+                    .any(|p| p.id == id && p.provider == provider)
+                {
+                    service.toast(
+                        ToastLevel::Warning,
+                        format!("{} 登录启动配置不存在，请重新选择", provider.label()),
+                    );
+                    continue;
+                }
+                // mesh_action has a shared operation gate; await each provider rather than dropping the second request.
+                while service.is_busy("mesh") || service.is_busy("core") {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                service.mesh_connect(&id);
+                while service.is_busy("mesh") {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        });
+    }
+
     pub fn start_core(&self) {
         if self.is_running() {
             self.toast(ToastLevel::Info, "core 已在运行");
@@ -1478,9 +1657,26 @@ impl AppService {
         self.set_busy("core", true);
         let service = self.clone();
         self.spawn(async move {
-            let settings = service.inner.settings.read().clone();
+            let mut settings = service.inner.settings.read().clone();
             let model = service.inner.model.read().clone();
-            if let Err(err) = service.ensure_rule_sets().await {
+            let ctx = crate::adapters::CompileContext::new(
+                &settings,
+                service.inner.paths.data_dir.clone(),
+                service.inner.paths.runtime_dir.clone(),
+            );
+            if let Err(err) =
+                crate::adapters::adapter_for(settings.core).compile(&model, &settings, &ctx)
+            {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+            if let Err(err) = service.ensure_core_binary(&mut settings).await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, format!("准备内核失败：{err}"));
+                return;
+            }
+            if let Err(err) = service.ensure_rule_sets(&model, &settings).await {
                 service.set_busy("core", false);
                 service.toast(ToastLevel::Error, err);
                 return;
@@ -1509,7 +1705,11 @@ impl AppService {
                         service.inner.traffic.lock().reset();
                         service.inner.connections.write().clear();
                         service.inner.proxies.write().clear();
-                        service.inner.config_dirty.store(false, Ordering::SeqCst);
+                        service.inner.config_dirty.store(
+                            service.model() != model
+                                || service.settings().requires_core_restart(&settings, &model),
+                            Ordering::SeqCst,
+                        );
                         if settings.system_proxy {
                             service.enable_system_proxy();
                         }
@@ -1584,15 +1784,32 @@ impl AppService {
         self.set_busy("core", true);
         let service = self.clone();
         self.spawn(async move {
-            let settings = service.inner.settings.read().clone();
+            let mut settings = service.inner.settings.read().clone();
             let model = service.inner.model.read().clone();
+            let ctx = crate::adapters::CompileContext::new(
+                &settings,
+                service.inner.paths.data_dir.clone(),
+                service.inner.paths.runtime_dir.clone(),
+            );
+            if let Err(err) =
+                crate::adapters::adapter_for(settings.core).compile(&model, &settings, &ctx)
+            {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+            if let Err(err) = service.ensure_core_binary(&mut settings).await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, format!("准备内核失败：{err}"));
+                return;
+            }
+            // Prepare dependencies even when applying a stopped configuration.
+            if let Err(err) = service.ensure_rule_sets(&model, &settings).await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, err);
+                return;
+            }
             if was_running {
-                // Prepare dependencies before stopping the working core.
-                if let Err(err) = service.ensure_rule_sets().await {
-                    service.set_busy("core", false);
-                    service.toast(ToastLevel::Error, err);
-                    return;
-                }
                 if let Err(err) = service.ensure_tun_helper().await {
                     service.set_busy("core", false);
                     service.toast(ToastLevel::Error, err);
@@ -1635,7 +1852,11 @@ impl AppService {
                 Ok(outcome) => {
                     let ok = service.record_outcome(&outcome);
                     if was_running && ok {
-                        service.inner.config_dirty.store(false, Ordering::SeqCst);
+                        service.inner.config_dirty.store(
+                            service.model() != model
+                                || service.settings().requires_core_restart(&settings, &model),
+                            Ordering::SeqCst,
+                        );
                         if settings.system_proxy {
                             service.enable_system_proxy();
                         }
@@ -1725,6 +1946,15 @@ impl AppService {
 
     pub fn update_settings(&self, mut new: Settings) {
         let old = self.settings();
+        if self.is_busy("autostart")
+            && (new.autostart != old.autostart
+                || new.autostart_proxy != old.autostart_proxy
+                || new.autostart_tailscale != old.autostart_tailscale
+                || new.autostart_easytier != old.autostart_easytier)
+        {
+            self.toast(ToastLevel::Info, "正在设置登录启动，请稍后重试");
+            return;
+        }
         new.mixed_port = new.mixed_port.max(1);
         new.api_port = new.api_port.max(1);
         new.stats_port = new.stats_port.max(1);
@@ -1736,6 +1966,14 @@ impl AppService {
             self.toast(ToastLevel::Error, format!("保存设置失败：{err}"));
             return;
         }
+        if new.system_notifications != old.system_notifications {
+            if let Some(sender) = self.inner.notification_sender.read().as_ref() {
+                let _ = sender.send(NotificationEvent::Configure {
+                    enabled: new.system_notifications,
+                    user_initiated: true,
+                });
+            }
+        }
         if new.mixed_port != old.mixed_port
             || new.allow_lan != old.allow_lan
             || new.listen_host != old.listen_host
@@ -1744,10 +1982,34 @@ impl AppService {
             self.sync_model_settings();
             let _ = self.persist_model();
         }
-        if new.autostart != old.autostart {
-            if let Err(err) = system::autostart::set_enabled(new.autostart) {
-                self.toast(ToastLevel::Warning, format!("设置开机自启失败：{err}"));
-            }
+        if new.autostart != old.autostart
+            || new.autostart_proxy != old.autostart_proxy
+            || new.autostart_tailscale != old.autostart_tailscale
+            || new.autostart_easytier != old.autostart_easytier
+        {
+            let service = self.clone();
+            let new = new.clone();
+            let old = old.clone();
+            self.set_busy("autostart", true);
+            self.spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    system::autostart::set_enabled(new.login_enabled())
+                })
+                .await;
+                service.set_busy("autostart", false);
+                if !matches!(result, Ok(Ok(()))) {
+                    let mut current = service.settings();
+                    current.autostart = old.autostart;
+                    current.autostart_proxy = old.autostart_proxy;
+                    current.autostart_tailscale = old.autostart_tailscale;
+                    current.autostart_easytier = old.autostart_easytier;
+                    let _ = service.save_settings(&current);
+                    service.toast(
+                        ToastLevel::Error,
+                        "设置登录启动失败，已恢复原设置，请检查系统权限",
+                    );
+                }
+            });
         }
         if new.core != old.core && self.is_running() {
             self.toast(
@@ -1864,14 +2126,34 @@ impl AppService {
     }
 
     pub fn upsert_rule(&self, rule: RouteRule) {
+        self.upsert_rule_in_group(rule, None);
+    }
+
+    pub fn upsert_rule_in_group(&self, rule: RouteRule, group_id: Option<&str>) {
         {
             let mut model = self.inner.model.write();
-            if let Some(existing) = model.routing.rules.iter_mut().find(|r| r.id == rule.id) {
+            if let Some(id) = group_id {
+                if !model.routing.rule_groups.iter().any(|g| g.id == id) {
+                    drop(model);
+                    self.toast(ToastLevel::Error, "规则分组不存在，请重新选择");
+                    return;
+                }
+            }
+            if let Some(existing) = model.routing.all_rules_mut().find(|r| r.id == rule.id) {
                 *existing = rule;
+            } else if let Some(id) = group_id {
+                model
+                    .routing
+                    .rule_groups
+                    .iter_mut()
+                    .find(|g| g.id == id)
+                    .unwrap()
+                    .rules
+                    .push(rule);
             } else {
                 model.routing.rules.push(rule);
+                model.routing.preset = RoutePreset::Custom;
             }
-            model.routing.preset = RoutePreset::Custom;
         }
         let _ = self.persist_model();
         self.mark_dirty();
@@ -1890,6 +2172,9 @@ impl AppService {
         {
             let mut model = self.inner.model.write();
             model.routing.rules.retain(|r| r.id != rule_id);
+            for group in &mut model.routing.rule_groups {
+                group.rules.retain(|r| r.id != rule_id);
+            }
         }
         let _ = self.persist_model();
         self.mark_dirty();
@@ -1898,10 +2183,145 @@ impl AppService {
     pub fn set_rule_enabled(&self, rule_id: &str, enabled: bool) {
         {
             let mut model = self.inner.model.write();
-            if let Some(rule) = model.routing.rules.iter_mut().find(|r| r.id == rule_id) {
+            if let Some(rule) = model.routing.all_rules_mut().find(|r| r.id == rule_id) {
                 rule.enabled = enabled;
             }
         }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn save_rule_group(&self, id: Option<&str>, name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::config("请填写规则分组名称"));
+        }
+        let mut model = self.inner.model.write();
+        let group_id = if let Some(id) = id {
+            let group = model
+                .routing
+                .rule_groups
+                .iter_mut()
+                .find(|g| g.id == id)
+                .ok_or_else(|| Error::config("规则分组不存在"))?;
+            group.name = name.into();
+            id.to_string()
+        } else {
+            let group = crate::model::RouteRuleGroup {
+                name: name.into(),
+                ..Default::default()
+            };
+            let id = group.id.clone();
+            model.routing.rule_groups.push(group);
+            id
+        };
+        drop(model);
+        self.persist_model()?;
+        self.mark_dirty();
+        Ok(group_id)
+    }
+
+    pub fn set_rule_group_enabled(&self, id: &str, enabled: bool) {
+        if let Some(group) = self
+            .inner
+            .model
+            .write()
+            .routing
+            .rule_groups
+            .iter_mut()
+            .find(|g| g.id == id)
+        {
+            group.enabled = enabled;
+        }
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn move_rule_group(&self, id: &str, offset: isize) {
+        let mut model = self.inner.model.write();
+        let groups = &mut model.routing.rule_groups;
+        if let Some(index) = groups.iter().position(|g| g.id == id) {
+            let target = index.saturating_add_signed(offset).min(groups.len() - 1);
+            groups.swap(index, target);
+        }
+        drop(model);
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    /// Removing a group preserves its rules and individual enabled states.
+    pub fn delete_rule_group(&self, id: &str) {
+        let mut model = self.inner.model.write();
+        if let Some(index) = model.routing.rule_groups.iter().position(|g| g.id == id) {
+            let group = model.routing.rule_groups.remove(index);
+            model
+                .routing
+                .rules
+                .extend(group.rules.into_iter().map(|mut rule| {
+                    rule.enabled &= group.enabled;
+                    rule
+                }));
+            model.routing.preset = RoutePreset::Custom;
+        }
+        drop(model);
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn move_rule(&self, id: &str, group_id: Option<&str>, offset: isize) {
+        let mut model = self.inner.model.write();
+        let rules = match group_id {
+            Some(group_id) => match model
+                .routing
+                .rule_groups
+                .iter_mut()
+                .find(|g| g.id == group_id)
+            {
+                Some(group) => &mut group.rules,
+                None => return,
+            },
+            None => &mut model.routing.rules,
+        };
+        if let Some(index) = rules.iter().position(|r| r.id == id) {
+            let target = index.saturating_add_signed(offset).min(rules.len() - 1);
+            rules.swap(index, target);
+        }
+        drop(model);
+        let _ = self.persist_model();
+        self.mark_dirty();
+    }
+
+    pub fn assign_rule_group(&self, id: &str, group_id: Option<&str>) {
+        let mut model = self.inner.model.write();
+        if group_id.is_some_and(|id| !model.routing.rule_groups.iter().any(|g| g.id == id)) {
+            return;
+        }
+        let mut rule = None;
+        if let Some(index) = model.routing.rules.iter().position(|r| r.id == id) {
+            rule = Some(model.routing.rules.remove(index));
+        } else {
+            for group in &mut model.routing.rule_groups {
+                if let Some(index) = group.rules.iter().position(|r| r.id == id) {
+                    rule = Some(group.rules.remove(index));
+                    break;
+                }
+            }
+        }
+        if let Some(rule) = rule {
+            if let Some(id) = group_id {
+                model
+                    .routing
+                    .rule_groups
+                    .iter_mut()
+                    .find(|g| g.id == id)
+                    .unwrap()
+                    .rules
+                    .push(rule);
+            } else {
+                model.routing.rules.push(rule);
+            }
+        }
+        drop(model);
         let _ = self.persist_model();
         self.mark_dirty();
     }
@@ -2051,7 +2471,7 @@ impl AppService {
                     "172.16.0.0/12".to_string(),
                     "192.168.0.0/16".to_string(),
                 ];
-                for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+                for rule in model.routing.effective_rules() {
                     if rule.action.kind == crate::model::RouteActionKind::Direct {
                         direct_domains.extend(rule.matchers.domains.iter().cloned());
                         direct_domains.extend(rule.matchers.domain_suffixes.iter().cloned());
@@ -2215,6 +2635,11 @@ impl AppService {
         if !self.inner.settings.read().effective_tun() || privilege::is_elevated() {
             return Ok(());
         }
+        self.ensure_helper().await
+    }
+
+    async fn ensure_helper(&self) -> std::result::Result<(), String> {
+        self.toast(ToastLevel::Info, "正在检查提权助手，安装时请完成系统授权");
         let result = tokio::task::spawn_blocking(|| {
             let current = privilege::status();
             if current.running {
@@ -2472,6 +2897,7 @@ impl AppService {
         self.set_busy("install", true);
         let service = self.clone();
         self.spawn(async move {
+            let _install = service.inner.install_lock.lock().await;
             let current = service
                 .inner
                 .core
@@ -2691,6 +3117,27 @@ impl AppService {
                 RouteRule::new(format!("诊断 · {}", target.value(kind)), matchers, action),
             );
         }
+        if !next.routing.rule_groups.is_empty() {
+            let rule = next.routing.rules.remove(0);
+            let index = next
+                .routing
+                .rule_groups
+                .iter()
+                .position(|g| g.id == "diagnostic-overrides");
+            let mut group = index
+                .map(|i| next.routing.rule_groups.remove(i))
+                .unwrap_or_else(|| crate::model::RouteRuleGroup {
+                    id: "diagnostic-overrides".into(),
+                    name: "诊断规则".into(),
+                    ..Default::default()
+                });
+            group.enabled = true;
+            group
+                .rules
+                .retain(|r| r.matchers != rule.matchers || r.action != rule.action);
+            group.rules.insert(0, rule);
+            next.routing.rule_groups.insert(0, group);
+        }
         next.routing.preset = RoutePreset::Custom;
         next.updated_at = now_unix();
         let profile = self.inner.store.save_active_profile(&next)?;
@@ -2782,7 +3229,16 @@ impl AppService {
     }
 
     pub fn delete_mesh_profile(&self, id: &str) -> Result<()> {
-        self.inner.mesh.delete(id)
+        self.inner.mesh.delete(id)?;
+        let mut settings = self.settings();
+        if settings.autostart_tailscale.as_deref() == Some(id) {
+            settings.autostart_tailscale = None;
+        }
+        if settings.autostart_easytier.as_deref() == Some(id) {
+            settings.autostart_easytier = None;
+        }
+        self.update_settings(settings);
+        Ok(())
     }
 
     pub fn mesh_connect(&self, id: &str) {
@@ -2819,6 +3275,17 @@ impl AppService {
                     "connect" => {
                         if !cfg!(windows) {
                             return Err(Error::other("异地组网当前仅在 Windows 启用"));
+                        }
+                        service.ensure_helper().await.map_err(Error::other)?;
+                        if service.inner.mesh.snapshot().profiles.iter().any(|p| {
+                            p.id == value && p.provider == crate::mesh::MeshProvider::Tailscale
+                        }) && crate::mesh::tailscale::verify_binary(
+                            &crate::mesh::tailscale::archive_path(&service.inner.paths),
+                        )
+                        .is_err()
+                        {
+                            service.toast(ToastLevel::Info, "正在下载 Tailscale 组网组件…");
+                            service.inner.mesh.install().await?;
                         }
                         let mut preflight = service.inner.core.mesh_plan();
                         preflight.active = true;
@@ -3224,6 +3691,217 @@ fn pretty_host(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_start_preflight_clears_busy_and_is_retryable_without_downloading() {
+        let (service, _dir) = service();
+        for _ in 0..2 {
+            service.start_core();
+            service.inner.rt.block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while service.is_busy("core") {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            });
+            assert!(!service.is_running());
+            assert!(!service.is_busy("install"));
+        }
+        assert!(service.inner.core.binaries().list().is_empty());
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .any(|t| t.message.contains("没有可编译"))
+        );
+    }
+
+    #[test]
+    fn rule_groups_persist_coexist_with_presets_and_control_preview() {
+        use crate::model::{Matchers, RouteAction};
+        let (service, _dir) = service();
+        let first = service.save_rule_group(None, "first").unwrap();
+        let second = service.save_rule_group(None, "second").unwrap();
+        let matcher = Matchers {
+            domains: vec!["example.com".into()],
+            ..Default::default()
+        };
+        let direct = RouteRule::new("direct", matcher.clone(), RouteAction::direct());
+        service.upsert_rule_in_group(direct.clone(), Some(&first));
+        service.upsert_rule_in_group(
+            RouteRule::new("block", matcher, RouteAction::block()),
+            Some(&second),
+        );
+        service.set_route_preset(RoutePreset::Global);
+        let preview = || {
+            crate::route::evaluate(
+                &service.model(),
+                &crate::route::ConnectionInfo {
+                    domain: Some("example.com".into()),
+                    ..Default::default()
+                },
+            )
+            .action
+        };
+        assert_eq!(preview(), RouteAction::direct());
+        service.move_rule_group(&second, -1);
+        assert_eq!(preview(), RouteAction::block());
+        service.set_rule_group_enabled(&second, false);
+        assert_eq!(preview(), RouteAction::direct());
+        service.save_rule_group(Some(&first), "renamed").unwrap();
+        service.assign_rule_group(&direct.id, None);
+        assert_eq!(service.model().routing.rules[0].id, direct.id);
+        service.delete_rule_group(&second);
+        assert!(!service.model().routing.rules[1].enabled);
+        let stored = service
+            .inner
+            .store
+            .load_profile(service.inner.active_profile.read().as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.routing, service.model().routing);
+        assert_eq!(stored.model.routing.rule_groups[0].name, "renamed");
+    }
+
+    #[test]
+    fn notifications_queue_once_and_honor_preference_without_a_desktop() {
+        let (service, _dir) = service();
+        let receiver = service.subscribe_notifications();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NotificationEvent::Configure {
+                enabled: true,
+                user_initiated: false
+            }
+        ));
+        service.toast(ToastLevel::Success, "fixture");
+        assert!(
+            matches!(receiver.try_recv().unwrap(), NotificationEvent::Show(toast)
+            if toast.message == "fixture")
+        );
+        let _ = service.snapshot();
+        let _ = service.snapshot();
+        assert!(receiver.try_recv().is_err());
+        let mut settings = service.settings();
+        settings.system_notifications = false;
+        service.update_settings(settings.clone());
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NotificationEvent::Configure {
+                enabled: false,
+                user_initiated: true
+            }
+        ));
+        service.toast(ToastLevel::Info, "disabled");
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .any(|t| t.message == "disabled")
+        );
+        settings.system_notifications = true;
+        service.update_settings(settings.clone());
+        // Enabling must request authorization even when no toast is produced.
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NotificationEvent::Configure {
+                enabled: true,
+                user_initiated: true
+            }
+        ));
+        service.update_settings(settings);
+        assert!(receiver.try_recv().is_err());
+        service.report_notification_error("fixture permission failure");
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .any(|t| t.message == "fixture permission failure")
+        );
+    }
+
+    #[test]
+    fn notification_controls_survive_pending_delivery_and_disabled_startup() {
+        let (service, _dir) = service();
+        let mut settings = service.settings();
+        settings.system_notifications = false;
+        service.update_settings(settings.clone());
+        let receiver = service.subscribe_notifications();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            NotificationEvent::Configure {
+                enabled: false,
+                user_initiated: false
+            }
+        ));
+        settings.system_notifications = true;
+        service.update_settings(settings.clone());
+        for index in 0..40 {
+            service.toast(ToastLevel::Info, format!("fixture {index}"));
+        }
+        settings.system_notifications = false;
+        service.update_settings(settings);
+        let events: Vec<_> = receiver.try_iter().collect();
+        assert_eq!(events.len(), 42);
+        assert!(matches!(
+            events.last().unwrap(),
+            NotificationEvent::Configure {
+                enabled: false,
+                user_initiated: true
+            }
+        ));
+    }
+
+    #[test]
+    fn vpn_import_edit_and_storage_preserve_certificate_options() {
+        let (service, _dir) = service();
+        let content = r#"{"endpoints":[{"type":"openconnect","tag":"office","server":"https://vpn.example:8443/team","flavor":"gp","username":"fixture","password":"fake-vpn-password","auth_group":"team","cookie":"fake-vpn-session"}]}"#;
+        assert_eq!(service.import_content(content), 1);
+        let original = service
+            .model()
+            .nodes
+            .iter()
+            .find(|n| n.protocol == crate::model::Protocol::Openconnect)
+            .unwrap()
+            .clone();
+        let mut draft = crate::model::NodeDraft::from(&original);
+        draft.name = "office renamed".into();
+        service.update_node(&original.id, draft).unwrap();
+        let profile = service
+            .inner
+            .store
+            .load_profile(service.inner.active_profile.read().as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        let saved = profile.model.node(&original.id).unwrap();
+        assert_eq!(saved.name, "office renamed");
+        assert_eq!(saved.credentials, original.credentials);
+        let link = service.export_links(&[original.id.clone()]);
+        let restored = crate::subscription::parse_share_link(&link).unwrap();
+        assert_eq!(restored.credentials, saved.credentials);
+        assert_eq!(restored.port, 8443);
+        assert_eq!(restored.credentials.openconnect.unwrap().path, "/team");
+    }
+
+    #[test]
+    fn custom_binary_failure_does_not_fall_back_to_network() {
+        let (service, dir) = service();
+        let mut settings = service.settings();
+        settings.binary_paths.insert(
+            settings.core.as_str().into(),
+            dir.path().join("missing").display().to_string(),
+        );
+        let result = service
+            .inner
+            .rt
+            .block_on(service.ensure_core_binary(&mut settings));
+        assert!(result.unwrap_err().to_string().contains("自定义"));
+        assert!(!service.is_busy("install"));
+    }
+
     #[test]
     fn editing_node_preserves_references_metadata_and_persists_parameters() {
         let (service, dir) = service();

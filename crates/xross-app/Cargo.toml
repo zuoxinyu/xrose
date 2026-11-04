@@ -25,8 +25,15 @@ embed-resource = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.25"
 objc = "0.2"
+block.workspace = true
+fs2.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+notify-rust.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+winreg.workspace = true
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

@@ -265,6 +265,25 @@ impl CoreManager {
         core: CoreKind,
     ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
+        let mut detected_version = None;
+        if core == CoreKind::SingBox && model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn())
+        {
+            let (status, output) = crate::core::process::run_capture(
+                &binary,
+                &["version".into()],
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            detected_version = regex::Regex::new(r"\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)")
+                .unwrap()
+                .captures(&output)
+                .and_then(|c| semver::Version::parse(&c[1]).ok());
+            if status != 0 || detected_version.is_none() {
+                return Err(Error::binary(
+                    "无法确认 sing-box 版本；OpenVPN / OpenConnect 需要 1.14.0 或更新版本",
+                ));
+            }
+        }
         if core == CoreKind::Xray && uses_native_tun(model, core) {
             let (_, output) = crate::core::process::run_capture(
                 &binary,
@@ -297,6 +316,7 @@ impl CoreManager {
             self.paths.data_dir.clone(),
             self.paths.runtime_dir.clone(),
         );
+        ctx.core_version = detected_version;
         ctx.mesh = self.mesh.lock().clone();
         let compiled = adapters::adapter_for(core).compile(model, settings, &ctx)?;
         for warning in &compiled.warnings {

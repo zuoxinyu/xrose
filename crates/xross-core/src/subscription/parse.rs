@@ -19,6 +19,7 @@ pub enum SourceFormat {
     ClashYaml,
     Sip008,
     SingBoxJson,
+    OpenVpn,
     #[default]
     Unknown,
 }
@@ -31,6 +32,7 @@ impl SourceFormat {
             SourceFormat::ClashYaml => "Clash YAML",
             SourceFormat::Sip008 => "SIP008",
             SourceFormat::SingBoxJson => "sing-box JSON",
+            SourceFormat::OpenVpn => "OpenVPN 配置",
             SourceFormat::Unknown => "未知格式",
         }
     }
@@ -68,6 +70,10 @@ pub fn parse_subscription(content: &str) -> ParsedSubscription {
         };
     }
 
+    if super::openvpn::detect(content) {
+        return super::openvpn::parse(content);
+    }
+
     if looks_base64(content) && !content.contains("://") {
         if let Some(decoded) = decode_base64_any(content) {
             if let Ok(text) = String::from_utf8(decoded) {
@@ -85,7 +91,8 @@ pub fn parse_subscription(content: &str) -> ParsedSubscription {
     let lower = content.to_ascii_lowercase();
     if content.starts_with('{') || content.starts_with('[') {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(content) {
-            let mut parsed = if value.get("outbounds").is_some() {
+            let mut parsed = if value.get("outbounds").is_some() || value.get("endpoints").is_some()
+            {
                 parse_singbox_json(&value)
             } else if value.get("servers").is_some() {
                 parse_sip008(&value)
@@ -271,11 +278,68 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
             node.credentials.username = yaml_str(value, "username");
             node.credentials.password = yaml_str(value, "password");
         }
+        Protocol::Openvpn | Protocol::Openconnect => {
+            return Err("OpenVPN / OpenConnect 请使用 OpenVPN 配置或 sing-box JSON 导入".into());
+        }
         Protocol::Wireguard => {
-            return Err(format!("节点“{name}”为 WireGuard，暂不支持"));
+            let mut addresses = Vec::new();
+            for (key, prefix) in [("ip", 32), ("ipv6", 128)] {
+                if let Some(ip) = yaml_str(value, key) {
+                    addresses.push(if ip.contains('/') {
+                        ip
+                    } else {
+                        format!("{ip}/{prefix}")
+                    });
+                }
+            }
+            let reserved: Vec<u8> = match value.get("reserved") {
+                Some(v) => serde_yaml::from_value(v.clone())
+                    .map_err(|_| "WireGuard reserved 格式无效".to_string())?,
+                None => Vec::new(),
+            };
+            let wg = crate::model::WireguardOptions {
+                private_key: yaml_str(value, "private-key").unwrap_or_default(),
+                public_key: yaml_str(value, "public-key").unwrap_or_default(),
+                pre_shared_key: yaml_str(value, "pre-shared-key").unwrap_or_default(),
+                addresses,
+                mtu: yaml_u16(value, "mtu").unwrap_or(1408),
+                allowed_ips: match yaml_string_list(value, "allowed-ips") {
+                    v if v.is_empty() => vec!["0.0.0.0/0".into(), "::/0".into()],
+                    v => v,
+                },
+                reserved: if reserved.is_empty() {
+                    [0; 3]
+                } else {
+                    reserved
+                        .try_into()
+                        .map_err(|_| "WireGuard reserved 必须包含三个字节".to_string())?
+                },
+                ..Default::default()
+            };
+            wg.validate().map_err(|e| e.to_string())?;
+            node.credentials.wireguard = Some(wg);
         }
     }
 
+    if protocol == Protocol::Anytls {
+        node.credentials.anytls = Some(crate::model::AnytlsOptions {
+            idle_session_check_interval: yaml_str(value, "idle-session-check-interval").map(|v| {
+                if v.parse::<u64>().is_ok() {
+                    format!("{v}s")
+                } else {
+                    v
+                }
+            }),
+            idle_session_timeout: yaml_str(value, "idle-session-timeout").map(|v| {
+                if v.parse::<u64>().is_ok() {
+                    format!("{v}s")
+                } else {
+                    v
+                }
+            }),
+            min_idle_session: yaml_str(value, "min-idle-session").and_then(|v| v.parse().ok()),
+        });
+    }
     let network = yaml_str(value, "network")
         .unwrap_or_else(|| "tcp".into())
         .to_ascii_lowercase();
@@ -374,12 +438,92 @@ pub fn parse_sip008(value: &serde_json::Value) -> ParsedSubscription {
     parsed
 }
 
+fn parse_wireguard_json(value: &serde_json::Value) -> crate::Result<Node> {
+    let peer = match value.get("peers").and_then(|v| v.as_array()) {
+        Some(peers) if peers.len() == 1 => &peers[0],
+        Some(_) => {
+            return Err(crate::Error::config(
+                "WireGuard 节点仅支持单个对端，请拆分后导入",
+            ));
+        }
+        None => value,
+    };
+    let string = |v: &serde_json::Value, key: &str| {
+        v.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let list = |v: &serde_json::Value, key: &str| -> Vec<String> {
+        match v.get(key) {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            _ => vec![],
+        }
+    };
+    let endpoint = value.get("address").is_some();
+    let host = string(peer, if endpoint { "address" } else { "server" });
+    let port = peer
+        .get(if endpoint { "port" } else { "server_port" })
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|p| *p > 0)
+        .ok_or_else(|| crate::Error::config("WireGuard 对端端口无效"))?;
+    if host.is_empty() {
+        return Err(crate::Error::config("WireGuard 缺少对端地址"));
+    }
+    let mut node = Node::new(string(value, "tag"), Protocol::Wireguard, host, port);
+    let defaults = crate::model::WireguardOptions::default();
+    let allowed = list(peer, "allowed_ips");
+    let wg = crate::model::WireguardOptions {
+        private_key: string(value, "private_key"),
+        public_key: string(
+            peer,
+            if endpoint {
+                "public_key"
+            } else {
+                "peer_public_key"
+            },
+        ),
+        pre_shared_key: string(peer, "pre_shared_key"),
+        addresses: list(value, if endpoint { "address" } else { "local_address" }),
+        allowed_ips: if allowed.is_empty() {
+            defaults.allowed_ips
+        } else {
+            allowed
+        },
+        mtu: match value.get("mtu") {
+            Some(v) => v
+                .as_u64()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| crate::Error::config("WireGuard MTU 无效"))?,
+            None => defaults.mtu,
+        },
+        reserved: match peer.get("reserved") {
+            Some(v) => serde_json::from_value(v.clone())
+                .map_err(|_| crate::Error::config("WireGuard reserved 必须包含三个字节"))?,
+            None => [0; 3],
+        },
+    };
+    wg.validate()?;
+    node.credentials.wireguard = Some(wg);
+    Ok(node)
+}
+
 pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
     let mut parsed = ParsedSubscription {
         format: SourceFormat::SingBoxJson,
         ..Default::default()
     };
-    let Some(outbounds) = value.get("outbounds").and_then(|v| v.as_array()) else {
+    let outbounds: Vec<_> = ["outbounds", "endpoints"]
+        .into_iter()
+        .filter_map(|key| value.get(key).and_then(|v| v.as_array()))
+        .flatten()
+        .collect();
+    if outbounds.is_empty() {
         parsed
             .warnings
             .push("sing-box JSON 缺少 outbounds 数组".into());
@@ -401,10 +545,38 @@ pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
                 .push(format!("出站类型 {outbound_type} 不支持"));
             continue;
         };
-        if protocol == Protocol::Wireguard {
-            parsed.warnings.push("跳过 WireGuard 出站".into());
+        if protocol.is_vpn() {
+            match crate::adapters::singbox::vpn::parse(outbound) {
+                Ok(node) => parsed.nodes.push(node),
+                Err(error) => parsed.warnings.push(error.to_string()),
+            }
             continue;
         }
+        if protocol == Protocol::Wireguard {
+            match parse_wireguard_json(outbound) {
+                Ok(node) => parsed.nodes.push(node),
+                Err(err) => parsed.warnings.push(err.to_string()),
+            }
+            continue;
+        }
+        let anytls = if protocol == Protocol::Anytls {
+            Some(crate::model::AnytlsOptions {
+                idle_session_check_interval: outbound
+                    .get("idle_session_check_interval")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                idle_session_timeout: outbound
+                    .get("idle_session_timeout")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                min_idle_session: outbound
+                    .get("min_idle_session")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| v.try_into().ok()),
+            })
+        } else {
+            None
+        };
         let Some(host) = outbound.get("server").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -419,6 +591,7 @@ pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
             .and_then(|v| v.as_str())
             .unwrap_or(outbound_type);
         let mut node = Node::new(name, protocol, host, port as u16);
+        node.credentials.anytls = anytls;
         node.source = crate::model::NodeSource::Subscription;
         let string = |key: &str| {
             outbound
@@ -464,7 +637,7 @@ pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
                 node.credentials.username = string("username");
                 node.credentials.password = string("password");
             }
-            Protocol::Wireguard => {}
+            Protocol::Wireguard | Protocol::Openvpn | Protocol::Openconnect => {}
         }
         if let Some(tls) = outbound.get("tls") {
             node.tls.enabled = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -617,6 +790,44 @@ fn yaml_string_list(value: &Value, key: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wireguard_clash_import_preserves_address_keys_and_numeric_reserved() {
+        let key = crate::util::encode_base64(&[1; 32]);
+        let yaml = format!(
+            "proxies:\n- name: wg fixture\n  type: wireguard\n  server: 192.0.2.1\n  port: 51820\n  ip: 10.0.0.2\n  ipv6: fd00::2\n  private-key: {key}\n  public-key: {key}\n  pre-shared-key: {key}\n  reserved: [1, 2, 255]\n  allowed-ips: [10.0.0.0/8]\n"
+        );
+        let parsed = parse_subscription(&yaml);
+        assert!(parsed.warnings.is_empty());
+        let wg = parsed.nodes[0].credentials.wireguard.as_ref().unwrap();
+        assert_eq!(wg.addresses, ["10.0.0.2/32", "fd00::2/128"]);
+        assert_eq!(wg.reserved, [1, 2, 255]);
+        assert_eq!(wg.allowed_ips, ["10.0.0.0/8"]);
+        assert_eq!(wg.pre_shared_key, key);
+    }
+
+    #[test]
+    fn anytls_imports_session_parameters_from_both_subscription_formats() {
+        let clash = parse_subscription(
+            "proxies:\n- {name: fixture, type: anytls, server: example.com, port: 443, password: fake, idle-session-check-interval: 20, idle-session-timeout: 40, min-idle-session: 3}",
+        );
+        let json = parse_subscription(
+            r#"{"outbounds":[{"type":"anytls","tag":"fixture","server":"example.com","server_port":443,"password":"fake","idle_session_check_interval":"20s","idle_session_timeout":"40s","min_idle_session":3}]}"#,
+        );
+        assert_eq!(
+            clash.nodes[0].credentials.anytls,
+            json.nodes[0].credentials.anytls
+        );
+        assert_eq!(
+            json.nodes[0]
+                .credentials
+                .anytls
+                .as_ref()
+                .unwrap()
+                .min_idle_session,
+            Some(3)
+        );
+    }
+
     #[test]
     fn imports_anytls_links_clash_and_singbox() {
         let sources = [

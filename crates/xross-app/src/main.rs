@@ -1,9 +1,12 @@
 // The GUI also hosts the scheduled privilege helper; neither needs a console.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
+mod app_bundle;
 mod app_icon;
 mod brand_assets;
 mod i18n;
+mod notifications;
 mod tray;
 mod ui;
 mod window_effects;
@@ -12,10 +15,10 @@ use std::sync::Arc;
 
 use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::*;
+use xross_core::AppService;
 use xross_core::service::ToastLevel;
 use xross_core::settings::ThemeMode;
 use xross_core::system::SingleInstance;
-use xross_core::AppService;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,13 +32,24 @@ fn main() {
         }
     }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
-    let service = match AppService::new() {
+    let paths = args
+        .windows(2)
+        .find(|args| args[0] == "--home")
+        .map(|args| xross_core::paths::AppPaths::from_root(std::path::Path::new(&args[1])))
+        .unwrap_or_else(xross_core::paths::AppPaths::discover);
+    #[cfg(target_os = "macos")]
+    let bundle_error = app_bundle::ensure(&paths.data_dir.join("desktop")).err();
+    let service = match AppService::with_paths(paths) {
         Ok(service) => service,
         Err(err) => {
             eprintln!("Xross 启动失败：{err}");
             std::process::exit(1);
         }
     };
+    #[cfg(target_os = "macos")]
+    if let Some(error) = bundle_error {
+        service.report_notification_error(&format!("准备 macOS 应用包失败：{error}"));
+    }
 
     // Single instance: the lock is held for the lifetime of the process.
     let _instance = if service.settings().single_instance {
@@ -75,7 +89,9 @@ fn main() {
                 ThemeMode::Dark => Theme::change(ComponentThemeMode::Dark, None, cx),
                 ThemeMode::System => {}
             }
+            notifications::install(&app_service);
             let mut tray = tray::TrayManager::new(&app_service);
+            if args.iter().any(|arg| arg == "--autostart") { app_service.run_login_actions(); }
             // Development preview for visual regression checks with an isolated profile.
             if cfg!(debug_assertions) && std::env::var_os("XROSS_TRAY_PREVIEW").is_some() {
                 tray::queue_command(tray::TrayCommand::TogglePopup);

@@ -18,6 +18,11 @@ impl AppView {
         let lang = self.lang();
         let model = self.snapshot.model.clone();
         let routing = model.routing.clone();
+        let selected_group = routing
+            .rule_groups
+            .iter()
+            .find(|g| Some(&g.id) == self.rule_group_id.as_ref());
+        let visible_rules = selected_group.map(|g| &g.rules).unwrap_or(&routing.rules);
         let rule_sets = self.snapshot.rule_sets();
         let dirty = self.snapshot.config_dirty;
         let running = self.snapshot.process.phase.is_alive();
@@ -188,6 +193,151 @@ impl AppView {
                                     ),
                                 ),
                         ),
+                ),
+        );
+
+        // Custom groups survive preset changes and precede the ungrouped rules.
+        body = body.child(
+            card(&p)
+                .child(section_title(
+                    &p,
+                    self.tr("规则分组", "Rule groups"),
+                    self.tr(
+                        "自定义分组按顺序优先匹配，随后匹配未分组与预设规则",
+                        "Custom groups run in order before ungrouped and preset rules",
+                    ),
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            Button::new("ungrouped-rules")
+                                .compact()
+                                .label(self.tr("未分组 / 预设", "Ungrouped / preset"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.rule_group_id = None;
+                                    this.sync(cx);
+                                })),
+                        )
+                        .children(routing.rule_groups.iter().map(|group| {
+                            let id = group.id.clone();
+                            let name = group.name.clone();
+                            Button::new(SharedString::from(format!("select-{}", group.id)))
+                                .compact()
+                                .label(format!(
+                                    "{} · {}{}",
+                                    group.name,
+                                    group.rules.len(),
+                                    if group.enabled { "" } else { " (—)" }
+                                ))
+                                .when(self.rule_group_id.as_deref() == Some(&group.id), |b| {
+                                    b.primary()
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.rule_group_id = Some(id.clone());
+                                    this.rule_group_name.update(cx, |input, cx| {
+                                        input.set_value(name.clone(), window, cx)
+                                    });
+                                    this.sync(cx);
+                                }))
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(Input::new(&self.rule_group_name)),
+                        )
+                        .child(
+                            Button::new("create-rule-group")
+                                .compact()
+                                .label(self.tr("新建分组", "New group"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let name = this.rule_group_name.read(cx).value().to_string();
+                                    match this.service.save_rule_group(None, &name) {
+                                        Ok(id) => this.rule_group_id = Some(id),
+                                        Err(err) => this.service.toast(
+                                            xross_core::service::ToastLevel::Error,
+                                            err.to_string(),
+                                        ),
+                                    }
+                                    this.sync(cx);
+                                })),
+                        )
+                        .when_some(selected_group, |d, group| {
+                            let id = group.id.clone();
+                            let toggle_id = id.clone();
+                            let up_id = id.clone();
+                            let down_id = id.clone();
+                            let delete_id = id.clone();
+                            d.child(
+                                Button::new("rename-rule-group")
+                                    .compact()
+                                    .label(self.tr("重命名", "Rename"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        let name =
+                                            this.rule_group_name.read(cx).value().to_string();
+                                        if let Err(err) =
+                                            this.service.save_rule_group(Some(&id), &name)
+                                        {
+                                            this.service.toast(
+                                                xross_core::service::ToastLevel::Error,
+                                                err.to_string(),
+                                            );
+                                        }
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                toggle(
+                                    "enable-rule-group",
+                                    self.tr("启用分组", "Enable group"),
+                                    group.enabled,
+                                )
+                                .on_change(cx.listener(
+                                    move |this, value, _, cx| {
+                                        this.service.set_rule_group_enabled(&toggle_id, *value);
+                                        this.sync(cx);
+                                    },
+                                )),
+                            )
+                            .child(
+                                Button::new("group-up")
+                                    .compact()
+                                    .label(self.tr("上移", "Move up"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.move_rule_group(&up_id, -1);
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("group-down")
+                                    .compact()
+                                    .label(self.tr("下移", "Move down"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.move_rule_group(&down_id, 1);
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("group-remove")
+                                    .compact()
+                                    .label(self.tr("解散分组", "Ungroup rules"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.delete_rule_group(&delete_id);
+                                        this.rule_group_id = None;
+                                        this.sync(cx);
+                                    })),
+                            )
+                        }),
                 ),
         );
 
@@ -404,7 +554,10 @@ impl AppView {
                                                         group: None,
                                                     },
                                                 );
-                                                this.service.upsert_rule(rule);
+                                                this.service.upsert_rule_in_group(
+                                                    rule,
+                                                    this.rule_group_id.as_deref(),
+                                                );
                                                 this.show_rule_form = false;
                                                 this.sync(cx);
                                             })),
@@ -412,17 +565,20 @@ impl AppView {
                             ),
                     )
                 })
-                .when(routing.rules.is_empty(), |d| {
+                .when(visible_rules.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,
                         self.tr("当前模板没有额外规则", "No extra rules in this preset"),
                     ))
                 })
-                .children(routing.rules.iter().map(|rule| {
+                .children(visible_rules.iter().map(|rule| {
                     let rule_id = rule.id.clone();
                     let rule_id_toggle = rule.id.clone();
                     let rule_id_delete = rule.id.clone();
                     let enabled = rule.enabled;
+                    let up_id = rule.id.clone();
+                    let down_id = rule.id.clone();
+                    let assign_id = rule.id.clone();
                     div()
                         .id(SharedString::from(format!("rule-{}", rule.id)))
                         .flex()
@@ -483,6 +639,47 @@ impl AppView {
                             },
                         )))
                         .child(
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .gap_1()
+                                .child(
+                                    Button::new(SharedString::from(format!("up-{}", rule.id)))
+                                        .compact()
+                                        .label("↑")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.service.move_rule(
+                                                &up_id,
+                                                this.rule_group_id.as_deref(),
+                                                -1,
+                                            );
+                                            this.sync(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("down-{}", rule.id)))
+                                        .compact()
+                                        .label("↓")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.service.move_rule(
+                                                &down_id,
+                                                this.rule_group_id.as_deref(),
+                                                1,
+                                            );
+                                            this.sync(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("assign-{}", rule.id)))
+                                        .compact()
+                                        .label(self.tr("分组", "Group"))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.rule_move_id = Some(assign_id.clone());
+                                            this.sync(cx);
+                                        })),
+                                ),
+                        )
+                        .child(
                             div().flex_shrink_0().child(
                                 danger_icon_button(
                                     SharedString::from(format!("delete-rule-{}", rule_id)),
@@ -500,6 +697,55 @@ impl AppView {
                         )
                 })),
         );
+
+        if let Some(rule_id) = self.rule_move_id.clone() {
+            let ungroup_id = rule_id.clone();
+            body = body.child(
+                card(&p)
+                    .child(section_title(
+                        &p,
+                        self.tr("移动规则", "Move rule"),
+                        self.tr("选择目标分组", "Choose a destination"),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(
+                                Button::new("move-ungrouped")
+                                    .compact()
+                                    .label(self.tr("未分组", "Ungrouped"))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.assign_rule_group(&ungroup_id, None);
+                                        this.rule_move_id = None;
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .children(routing.rule_groups.iter().map(|group| {
+                                let id = group.id.clone();
+                                let rule_id = rule_id.clone();
+                                Button::new(SharedString::from(format!("move-to-{}", id)))
+                                    .compact()
+                                    .label(group.name.clone())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.service.assign_rule_group(&rule_id, Some(&id));
+                                        this.rule_move_id = None;
+                                        this.sync(cx);
+                                    }))
+                            }))
+                            .child(
+                                Button::new("cancel-rule-move")
+                                    .compact()
+                                    .label(self.tr("取消", "Cancel"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.rule_move_id = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            );
+        }
 
         // Rule sets / geo data.
         body = body.child(

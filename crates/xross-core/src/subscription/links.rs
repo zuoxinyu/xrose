@@ -9,7 +9,8 @@ use crate::model::{Node, Protocol, RealityOptions, TlsOptions, Transport};
 use crate::util::{decode_base64_any, truthy};
 
 pub fn is_share_link(line: &str) -> bool {
-    const SCHEMES: [&str; 10] = [
+    const SCHEMES: [&str; 13] = [
+        "xross://vpn/",
         "vmess://",
         "vless://",
         "trojan://",
@@ -20,6 +21,8 @@ pub fn is_share_link(line: &str) -> bool {
         "tuic://",
         "socks://",
         "socks5://",
+        "wireguard://",
+        "wg://",
     ];
     SCHEMES.iter().any(|s| line.starts_with(s))
 }
@@ -28,6 +31,17 @@ pub fn parse_share_link(input: &str) -> Option<Node> {
     let line = input.trim();
     if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
         return None;
+    }
+    if let Some(rest) = line.strip_prefix("xross://vpn/") {
+        let node: Node = serde_json::from_slice(&decode_base64_any(rest)?).ok()?;
+        if !node.protocol.is_vpn() {
+            return None;
+        }
+        let mut node = crate::model::NodeDraft::from(&node)
+            .into_node(crate::model::CoreKind::SingBox)
+            .ok()?;
+        node.source = crate::model::NodeSource::Import;
+        return Some(node);
     }
     if let Some(rest) = line.strip_prefix("vmess://") {
         return parse_vmess(rest);
@@ -59,7 +73,36 @@ pub fn parse_share_link(input: &str) -> Option<Node> {
     {
         return parse_plain_proxy(Protocol::Socks, rest);
     }
+    if line.starts_with("wireguard://") || line.starts_with("wg://") {
+        return parse_wireguard(line);
+    }
     None
+}
+
+fn parse_wireguard(line: &str) -> Option<Node> {
+    let url = Url::parse(line).ok()?;
+    let params: BTreeMap<_, _> = url
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let get = |keys: &[&str]| keys.iter().find_map(|key| params.get(*key).cloned());
+    let draft = crate::model::NodeDraft {
+        protocol: Protocol::Wireguard,
+        name: fragment_name(&url, "WireGuard"),
+        server: url.host_str()?.trim_matches(['[', ']']).into(),
+        port: url.port().unwrap_or(51820),
+        wireguard_private_key: percent_decode(url.username()),
+        wireguard_public_key: get(&["publickey", "public_key", "publicKey"])?,
+        wireguard_pre_shared_key: get(&["presharedkey", "pre_shared_key", "preSharedKey"])
+            .unwrap_or_default(),
+        wireguard_addresses: get(&["address", "local_address"])?,
+        wireguard_allowed_ips: get(&["allowedips", "allowed_ips"])
+            .unwrap_or_else(|| "0.0.0.0/0,::/0".into()),
+        wireguard_mtu: get(&["mtu"]).unwrap_or_else(|| "1408".into()),
+        wireguard_reserved: get(&["reserved"]).unwrap_or_else(|| "0,0,0".into()),
+        ..Default::default()
+    };
+    draft.into_node(crate::model::CoreKind::SingBox).ok()
 }
 
 fn parse_vmess(rest: &str) -> Option<Node> {
@@ -167,6 +210,13 @@ fn parse_standard_url(scheme: &str, rest: &str) -> Option<Node> {
         _ => return None,
     }
 
+    if scheme == "anytls" {
+        node.credentials.anytls = Some(crate::model::AnytlsOptions {
+            idle_session_check_interval: get("idle_session_check_interval"),
+            idle_session_timeout: get("idle_session_timeout"),
+            min_idle_session: get("min_idle_session").and_then(|v| v.parse().ok()),
+        });
+    }
     let security = get("security").unwrap_or_else(|| "none".into());
     let sni = get("sni").or_else(|| get("peer"));
     let reality = if security.eq_ignore_ascii_case("reality") {

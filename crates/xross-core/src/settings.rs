@@ -111,6 +111,11 @@ pub struct Settings {
     pub pac_port: u16,
     pub tun_enabled: bool,
     pub autostart: bool,
+    pub autostart_proxy: bool,
+    /// Explicit profile identities; None leaves that provider disconnected at login.
+    pub autostart_tailscale: Option<String>,
+    pub autostart_easytier: Option<String>,
+    pub system_notifications: bool,
     pub start_minimized: bool,
     /// Minimizing the window hides it into the tray instead of the taskbar.
     pub minimize_to_tray: bool,
@@ -153,6 +158,10 @@ impl Default for Settings {
             pac_port: 7891,
             tun_enabled: false,
             autostart: false,
+            autostart_proxy: false,
+            autostart_tailscale: None,
+            autostart_easytier: None,
+            system_notifications: true,
             start_minimized: false,
             minimize_to_tray: true,
             close_to_tray: true,
@@ -176,6 +185,13 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn login_enabled(&self) -> bool {
+        self.autostart
+            || self.autostart_proxy
+            || self.autostart_tailscale.is_some()
+            || self.autostart_easytier.is_some()
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -284,6 +300,23 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn independent_login_choices_roundtrip_and_old_settings_default_off() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.login_enabled());
+        assert!(settings.autostart_tailscale.is_none());
+        settings.autostart_proxy = true;
+        assert!(settings.login_enabled());
+        settings.autostart_proxy = false;
+        settings.autostart_tailscale = Some("test-tailnet".into());
+        settings.autostart_easytier = Some("test-network".into());
+        assert!(settings.login_enabled());
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serde_json::to_string(&settings).unwrap()).unwrap(),
+            settings
+        );
+    }
+
     #[test]
     fn client_preferences_do_not_require_a_core_restart() {
         let old = Settings::default();

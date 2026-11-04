@@ -4,16 +4,18 @@ pub mod dns;
 pub mod inbound;
 pub mod node;
 pub mod route;
+pub mod vpn;
+pub use vpn::{OpenConnectOptions, OpenVpnOptions, VpnCertificates};
 
 pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
 pub use node::{
-    Credentials, GroupKind, Network, Node, NodeDraft, NodeSource, OutboundGroup, Protocol,
-    RealityOptions, TlsOptions, Transport, TransportKind,
+    AnytlsOptions, Credentials, GroupKind, Network, Node, NodeDraft, NodeSource, OutboundGroup,
+    Protocol, RealityOptions, TlsOptions, Transport, TransportKind, WireguardOptions,
 };
 pub use route::{
-    DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule, RoutingConfig,
-    RuleSet, RuleSetFormat,
+    DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule, RouteRuleGroup,
+    RoutingConfig, RuleSet, RuleSetFormat,
 };
 
 use serde::{Deserialize, Serialize};
@@ -64,6 +66,9 @@ impl CoreKind {
                 hysteria2: false,
                 tuic: false,
                 anytls: false,
+                wireguard: true,
+                openvpn: false,
+                openconnect: false,
                 clash_connections: false,
                 fake_ip: false,
                 dns_split: true,
@@ -77,6 +82,9 @@ impl CoreKind {
                 hysteria2: true,
                 tuic: true,
                 anytls: true,
+                wireguard: true,
+                openvpn: true,
+                openconnect: true,
                 clash_connections: true,
                 fake_ip: true,
                 dns_split: true,
@@ -102,6 +110,12 @@ pub struct Capabilities {
     pub tuic: bool,
     #[serde(default)]
     pub anytls: bool,
+    #[serde(default)]
+    pub wireguard: bool,
+    #[serde(default)]
+    pub openvpn: bool,
+    #[serde(default)]
+    pub openconnect: bool,
     pub clash_connections: bool,
     pub fake_ip: bool,
     pub dns_split: bool,
@@ -380,7 +394,7 @@ impl AppModel {
         if self.dns.enabled && self.dns.servers.is_empty() {
             issues.push("DNS 已启用但没有配置服务器".into());
         }
-        if !self.routing.rules.iter().any(|r| r.enabled)
+        if self.routing.effective_rules().next().is_none()
             && self.routing.final_action.kind == RouteActionKind::Proxy
             && self.groups.iter().all(|g| g.members.is_empty())
         {

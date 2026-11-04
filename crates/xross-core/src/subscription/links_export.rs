@@ -16,8 +16,46 @@ pub fn node_to_share_link(node: &Node) -> Option<String> {
         Protocol::Tuic => export_tuic(node),
         Protocol::Socks => export_plain(node, "socks"),
         Protocol::Http => export_plain(node, "http"),
-        Protocol::Wireguard => None,
+        Protocol::Wireguard => export_wireguard(node),
+        Protocol::Openvpn | Protocol::Openconnect => {
+            let mut portable = node.clone();
+            portable.id.clear();
+            portable.subscription_id = None;
+            portable.sort = 0;
+            Some(format!(
+                "xross://vpn/{}",
+                encode_base64(&serde_json::to_vec(&portable).ok()?)
+            ))
+        }
     }
+}
+
+fn export_wireguard(node: &Node) -> Option<String> {
+    let wg = node.credentials.wireguard.as_ref()?;
+    wg.validate().ok()?;
+    let params = vec![
+        ("publickey".into(), wg.public_key.clone()),
+        ("presharedkey".into(), wg.pre_shared_key.clone()),
+        ("address".into(), wg.addresses.join(",")),
+        ("allowedips".into(), wg.allowed_ips.join(",")),
+        ("mtu".into(), wg.mtu.to_string()),
+        (
+            "reserved".into(),
+            wg.reserved
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    ];
+    Some(format!(
+        "wireguard://{}@{}:{}?{}#{}",
+        percent_encode(&wg.private_key),
+        format_host(&node.server),
+        node.port,
+        encode_query(&params),
+        percent_encode(&node.name)
+    ))
 }
 
 fn export_vmess(node: &Node) -> Option<String> {
@@ -79,6 +117,19 @@ fn export_standard(node: &Node, scheme: &str) -> Option<String> {
         "none"
     };
     params.push(("security".into(), security.into()));
+    if scheme == "anytls" {
+        if let Some(options) = &node.credentials.anytls {
+            if let Some(value) = &options.idle_session_check_interval {
+                params.push(("idle_session_check_interval".into(), value.clone()));
+            }
+            if let Some(value) = &options.idle_session_timeout {
+                params.push(("idle_session_timeout".into(), value.clone()));
+            }
+            if let Some(value) = options.min_idle_session {
+                params.push(("min_idle_session".into(), value.to_string()));
+            }
+        }
+    }
     push_tls_params(node, &mut params);
     push_transport_params(node, &mut params);
     if let Some(flow) = &node.credentials.flow {
@@ -257,6 +308,52 @@ fn encode_query(params: &[(String, String)]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wireguard_share_roundtrip_preserves_all_options() {
+        let mut wg = Node::new("fixture wg", Protocol::Wireguard, "2001:db8::1", 51820);
+        wg.credentials.wireguard = Some(crate::model::WireguardOptions {
+            private_key: crate::util::encode_base64(&[1; 32]),
+            public_key: crate::util::encode_base64(&[2; 32]),
+            pre_shared_key: crate::util::encode_base64(&[3; 32]),
+            addresses: vec!["10.0.0.2/32".into(), "fd00::2/128".into()],
+            reserved: [1, 2, 3],
+            ..Default::default()
+        });
+        let link = node_to_share_link(&wg).unwrap();
+        assert!(super::super::links::is_share_link(&link));
+        let restored = super::super::links::parse_share_link(&link).unwrap();
+        assert_eq!(restored.credentials, wg.credentials);
+        assert_eq!(restored.server, wg.server);
+        assert_eq!(restored.name, wg.name);
+        let draft = crate::model::NodeDraft::from(&restored);
+        assert_eq!(
+            draft
+                .apply_to(&restored, crate::model::CoreKind::Xray)
+                .unwrap()
+                .credentials,
+            restored.credentials
+        );
+    }
+
+    #[test]
+    fn anytls_session_options_survive_share_and_edit() {
+        let mut node = Node::new("anytls", Protocol::Anytls, "example.com", 443);
+        node.tls.enabled = true;
+        node.credentials.password = Some("fake-password:/@".into());
+        node.credentials.anytls = Some(crate::model::AnytlsOptions {
+            idle_session_check_interval: Some("30s".into()),
+            idle_session_timeout: Some("60s".into()),
+            min_idle_session: Some(4),
+        });
+        let restored =
+            super::super::links::parse_share_link(&node_to_share_link(&node).unwrap()).unwrap();
+        assert_eq!(restored.credentials, node.credentials);
+        let edited = crate::model::NodeDraft::from(&node)
+            .apply_to(&node, crate::model::CoreKind::SingBox)
+            .unwrap();
+        assert_eq!(edited.credentials, node.credentials);
+    }
+
     #[test]
     fn anytls_roundtrip_preserves_escaped_password_and_tls() {
         let mut node = Node::new("AnyTLS 测试", Protocol::Anytls, "2001:db8::1", 8443);

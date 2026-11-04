@@ -66,10 +66,7 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
             sets.entry(tag.to_string()).or_insert(set);
         }
     };
-    for set in &model.routing.rule_sets {
-        add(&set.tag);
-    }
-    for rule in model.routing.rules.iter().filter(|rule| rule.enabled) {
+    for rule in model.routing.effective_rules() {
         for tag in &rule.matchers.rule_sets {
             add(tag);
         }
@@ -99,6 +96,7 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
 
 #[derive(Debug, Clone)]
 pub struct CompileContext {
+    pub core_version: Option<semver::Version>,
     pub mesh: crate::mesh::coexist::CoexistencePlan,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
@@ -112,6 +110,7 @@ pub struct CompileContext {
 impl CompileContext {
     pub fn new(settings: &Settings, data_dir: PathBuf, runtime_dir: PathBuf) -> Self {
         Self {
+            core_version: None,
             mesh: Default::default(),
             data_dir,
             runtime_dir,

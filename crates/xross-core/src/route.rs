@@ -41,7 +41,7 @@ pub struct RulePreview {
 }
 
 pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
-    for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+    for rule in model.routing.effective_rules() {
         match matches_rule(&rule.matchers, info) {
             MatchState::Matched => {
                 return RulePreview {
@@ -49,7 +49,7 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
                     action: rule.action.clone(),
                     explanation: format!("命中规则“{}”", rule.name),
                     needs_core: false,
-                }
+                };
             }
             MatchState::NeedsCore => {
                 return RulePreview {
@@ -60,7 +60,7 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
                         rule.name
                     ),
                     needs_core: true,
-                }
+                };
             }
             MatchState::NotMatched => {}
         }

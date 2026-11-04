@@ -44,7 +44,7 @@ tonic-prost.workspace = true
 [target.'cfg(windows)'.dependencies]
 easytier.workspace = true
 widestring.workspace = true
-winreg = "0.55"
+winreg.workspace = true
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",

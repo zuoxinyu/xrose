@@ -77,7 +77,7 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - `AppModel` 以意图建模，不绑定任何 core 的 schema。
 - **Xray**：`dokodemo-door` 透明代理、`balancers` + `observatory`（leastPing）、
   `geosite:` / `geoip:` 原生字段、fake-ip 跳过并提示、Stats API 入站与策略。
-  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；支持原生 TUN；不支持 Hysteria2/TUIC/AnyTLS。
+  没有 mixed 入站（自动拆为 SOCKS + HTTP(port+1)）；支持原生 TUN；不支持 Hysteria2/TUIC/AnyTLS/OpenVPN/OpenConnect。
 - **sing-box**：内建 TUN、`selector` / `urltest`、`.srs` rule-set、
   新版路由动作（`sniff`、`hijack-dns`、`reject`）、typed DNS + fake-ip、Clash API。
   旧版 `geoip`/`geosite` 字段已移除，编译器自动生成 rule-set 引用
@@ -89,18 +89,21 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 ### 3. 订阅与节点
 
 - 定时更新；`ETag` / `If-Modified-Since`；自定义 UA 与请求头；`304` 处理。
-- 解析：**Base64**、**v2rayN 分享链接**（vmess / vless / trojan / ss / hysteria2 / tuic）、
+- 解析：**Base64**、**v2rayN 分享链接**（vmess / vless / trojan / anytls / ss / hysteria2 / tuic / wireguard）、
   **Clash YAML**（含 proxy-groups）、**SIP008**、**sing-box JSON**。
 - 统一 `Node` 模型；分享链接**双向转换**（导入/导出）；二维码（图形弹窗 / CLI 文本渲染）；
   指纹去重；订阅分组导入；排序字段。
 - **添加与编辑节点**：弹窗配置协议（VMess / VLESS / Trojan / AnyTLS / Shadowsocks / Hysteria2 / TUIC /
-  SOCKS / HTTP）、凭据、TLS / Reality（pbk + shortId）、uTLS 指纹、ALPN、
+  SOCKS / HTTP / WireGuard / OpenVPN / OpenConnect）、凭据、TLS / Reality（pbk + shortId）、uTLS 指纹、ALPN、
   传输层（TCP / WebSocket / gRPC / HTTP/2 / HTTPUpgrade）、UDP、标签。
   校验规则集中在 `NodeDraft::into_node`，界面、CLI 与测试共用同一套错误文案。
   编辑时保留节点 ID、出站组引用、订阅归属及未修改的高级参数。
 - 解析 `subscription-userinfo` 响应头，展示已用/总量/到期时间，并可视化进度。
 
 ### 4. 路由与 DNS
+
+- 自定义规则分组：命名、启停、排序、规则移动及组内排序；自定义组按顺序先于未分组/预设规则匹配。
+  切换预设保留自定义组；解散分组保留规则，已停用分组中的规则保持停用。两套内核与路由预览共用顺序；PAC 直连条件遵循分组启停。
 
 - 规则编辑器：域名 / 后缀 / 关键字 / 正则 / GeoSite / GeoIP / IP-CIDR /
   进程名 / 端口 / 网络 / rule-set / inbound；动作：直连 / 代理 / 阻止。
@@ -143,17 +146,33 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
   更新程序后重新安装助手以同步其版本。
   Windows 普通权限启动 TUN 需要已安装并运行的新版助手；仅代启已登记、摘要校验通过的
   Xray 或 sing-box 内核，不接受任意命令或参数。其他平台沿用核心自身权限。
-- 开机自启：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；支持 `--minimized`。
+- 登录启动：Linux `.desktop`、macOS LaunchAgent、Windows Run 键；可独立设置应用、系统代理、
+  Tailscale 与 EasyTier。组网登录连接选择已保存的配置（当前组网后端仅在 Windows 启用）。
+  登录入口使用 `--autostart`，遵循“启动时最小化”；手动打开应用不自动连接。
+  系统代理在内核启动成功后启用，两种组网服务依次连接并分别报告失败。
 - 单实例锁（文件锁 + PID）。
 
 ### 7. 运行时
+
+- 启动与应用配置时自动准备缺失的内核与规则数据；Xray 补齐所需 geo 数据，sing-box 预下载规则集。
+  TUN 和组网按需安装/启动提权助手，继续执行原操作；Tailscale 缺失组件自动下载。
+  自定义内核路径无效时提示修正；下载或授权失败保留可重试状态，重启前准备失败保留当前内核。
 
 - sing-box / Clash 兼容 API：`/traffic` 数据来自 `/connections` 累计值差分，
   `/connections` 列表、按进程/域名展示、一键断开、`/proxies` 组状态、
   `/proxies/{name}/delay` 真实延迟。
 - Xray：`xray api statsquery`（其内部即 gRPC StatsService）解析累计流量；
   连接列表不可得，界面会明确说明。
-- AnyTLS：sing-box 1.12+ 支持；可手动添加、导入/导出 `anytls://` 分享链接，导入 Clash YAML 与 sing-box JSON 节点。Xray 跳过该协议并提示。
+- WireGuard：Xray 用户态出站与 sing-box endpoint；支持手动添加/编辑、分享链接、Clash YAML、
+  sing-box JSON 导入；密钥随节点凭据保存。CLI 支持 `add-node --protocol wireguard --wireguard-config <JSON 文件>`。
+- OpenVPN / OpenConnect：使用 sing-box 1.14+ 客户端 endpoint，支持账号密码和 PEM 客户端证书；
+  OpenVPN 支持 UDP/TCP、数据加密与 tls-auth/tls-crypt/tls-crypt-v2，OpenConnect 支持 AnyConnect、
+  GlobalProtect、Fortinet、F5、Pulse、Network Connect 的协议类型、服务器路径、认证组和认证会话。
+  可使用 VPN 下发的分域 DNS，开关位于节点表单；用户态连接复用现有出站组和路由。
+  支持内嵌证书的 `.ovpn` 与 sing-box JSON 导入；多个 OpenVPN remote 拆分为独立节点。
+  复制链接使用 Xross 专用 `xross://vpn/` 格式，包含节点凭据和证书，支持在 Xross 中重新导入。
+  Xray 跳过这两种协议并提示；启动时检测到旧版 sing-box 会跳过不兼容节点并修复出站组引用。
+- AnyTLS：会话检查间隔、超时与最小空闲会话数支持订阅导入、分享链接往返，编辑时保留；sing-box 1.12+ 支持；可手动添加、导入/导出 `anytls://` 分享链接，导入 Clash YAML 与 sing-box JSON 节点。Xray 跳过该协议并提示。
 - 延迟测试：并发 TCP 握手测试、结果缓存（SQLite）与指定节点的 HTTP 延迟测试。TUN 运行时使用 HTTP 延迟，结果提示中标明测试类型；批量与订阅分组测试覆盖全部所选节点。
 - 下载测速：节点菜单选择「下载测速」，通过所选节点下载 Cloudflare 测试数据，显示平均 MiB/s。单次接收最多 50 MiB 或持续 10 秒（连接准备时间另计），结果保留至本次退出；同一时间执行一项下载测试，不切换当前节点。
 - 日志查看器、速率/累计流量曲线（快照轮询）。
@@ -173,7 +192,11 @@ Xray 侧已在 1.8.24 上通过 `run -test`。
 - Profile 多配置：新建/切换/重命名/删除；导入/导出 JSON 备份。
 - 节点凭据与订阅 token 使用 **ChaCha20-Poly1305** 加密后落库
   （随机 32 字节密钥，0600 权限；也支持 `XROSS_SECRET_KEY`）。
-- 桌面通知未接入系统通知中心（当前使用应用内 toast，见 [TODO](#todo)）。
+- 系统通知：Windows 通知中心、macOS UserNotifications、Linux 桌面通知；设置中可关闭。
+  通知后台投递，同一内容 30 秒内去重；系统拒绝或投递失败时保留应用内提示并记录原因。
+  macOS 首次启用时请求系统授权；被拒绝后需在系统设置 → 通知 → Xross 中允许通知。
+  `cargo run` 或直接运行 macOS 二进制时，会在可执行文件旁的 `.xross-desktop/Xross.app` 自动生成并注册本地应用包后启动，
+  保留启动参数与环境变量，无需手工打包；目录不可写时使用数据目录的 `desktop/Xross.app`，已打包的应用直接启动。
 
 ### 9. UI 与更新
 
@@ -254,14 +277,21 @@ cargo test -p xross-core
 ```
 
 覆盖：链接解析/导出往返、Clash/SIP008/sing-box 解析、去重、规则匹配、CIDR、
-AnyTLS 手动配置与订阅解析、分享链接往返、测试连接隔离与下载边界、
+AnyTLS 会话参数、WireGuard 密钥与地址校验、OpenVPN 配置导入、OpenConnect URL 与证书往返、
+VPN 分域 DNS 与旧内核降级、分享链接与订阅往返、测试连接隔离与下载边界、
 DNS 校验、加密落库、SQLite 迁移与备份、PAC HTTP 服务、日志轮转、进程退出归因、
 单实例锁、订阅合并、Profile 切换、两套 adapter 的结构约束、tar.gz 魔数解压、
-手动节点草稿校验（UUID/Reality/传输组合）、提权助手协议与状态标签等。
+手动节点草稿校验（UUID/Reality/传输组合）、提权助手协议与状态标签、规则分组排序/启停/持久化、
+登录启动参数与旧设置兼容、启动失败重试、系统通知队列、授权事件与开关等。
+macOS 应用包布局、签名与复用可用 `cargo test -p xross-app app_bundle::tests` 验证。
 连接诊断覆盖分类筛选、录制去重/关闭/容量/停止冻结、规则置顶去重与持久化、
 测试记录回看取消旧发布者、连接元数据关联和提前失败的阶段归因。
 
-另外做了真实二进制验证：
+本次新增协议的配置已通过 Xray 26.10.21 `run -test` 与 sing-box 1.14.4 `check`（隔离测试配置）。
+OpenVPN 账号密码 / 客户端证书 / tls-auth 与 OpenConnect 客户端证书 / 加密私钥配置已通过 sing-box 1.14.4 `check`；核心单元测试 203 项通过。
+macOS 已验证 `cargo run` 的应用包启动、通知授权与横幅投递；Windows / Linux 通知展示与登录启动的跨平台实机验收仍待完成。
+
+已有真实二进制验证记录：
 
 ```
 xray 1.8.24:      run -test 通过，StatsService 统计查询正常
@@ -293,15 +323,34 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 - **sing-box 版本**：仅支持 1.12+ 的 typed DNS 配置格式，不支持 1.11 及更早版本。
 - **App 自更新**：提供版本检查与下载页跳转，不执行二进制自替换。
 - **i18n**：界面主要控件与说明支持中英双语；部分底层诊断与错误提示仍为中文。
-- **WireGuard**：模型已预留协议位，密钥字段尚未实现，编译时会提示警告并跳过。
+- **OpenVPN / OpenConnect**：当前接入账号密码、客户端证书和已有认证会话；浏览器 SSO、动态认证表单、
+  OpenVPN 静态密钥模式及 TAP 暂未接入。`.ovpn` 必须内嵌证书和密钥，外部文件、脚本及未支持的指令会明确拒绝；
+  本地路由/DNS 指令需改为 Xross 的路由/DNS 设置。导入 `auth-user-pass` 未含凭据时需编辑节点补充账号密码。
+  OpenVPN 使用未加密的 PEM 私钥；OpenConnect 支持私钥密码。未经过真实 VPN 服务端登录验证。
+- **WireGuard**：一个节点对应一个对端；支持密钥、本地地址、允许网段、MTU 和 reserved。
+  多对端配置需拆分后导入；分享链接使用 `wireguard://`（兼容 `wg://`）及明确的查询参数。
+
+### OpenVPN / OpenConnect 节点
+
+```bash
+xross-cli import office.ovpn --home /tmp/xross-vpn
+xross-cli add-node --protocol openconnect --server vpn.example.com --core sing-box \
+  --username demo --password demo --vpn-flavor anyconnect --auth-group employees \
+  --vpn-path / --home /tmp/xross-vpn
+xross-cli add-node --protocol openconnect --server vpn.example.com --core sing-box \
+  --ca ca.pem --client-cert client.pem --client-key client.key --home /tmp/xross-vpn
+```
+
+`--vpn-config FILE` 可读取对应 `OpenVpnOptions` / `OpenConnectOptions` 的 JSON 参数；
+CLI 的 `--ca` / `--client-cert` / `--client-key` 会读取指定文件的 PEM 内容并保存到节点。
 
 ## TODO
 
 ### 协议与 core
 
-- [ ] 完善协议支持：AnyTLS 等（模型、手动添加、分享链接导入/导出、两套 adapter 同步补齐，
+- [x] 完善协议支持：AnyTLS、WireGuard（模型、手动添加、分享链接导入/导出、两套 adapter 同步补齐，
       不支持时按既有约定降级并给出 warning）。
-- [ ] 优化操作连贯性：缺 core 时自动下载 core，缺 rule-set 时自动下载 rules，
+- [x] 优化操作连贯性：缺 core 时自动下载 core，缺 rule-set 时自动下载 rules，
       需要提权时自动引导安装 helper，减少“先手动准备好再启动”的断点。
 
 ### 节点与订阅
@@ -311,18 +360,18 @@ sing-box 1.14.4:  check 通过，UI 启动 / Clash API / selector 热切换均�
 
 ### 路由与规则
 
-- [ ] 自定义规则分组：规则支持命名分组、分组启停与排序，编译时按组展开为路由规则，
+- [x] 自定义规则分组：规则支持命名分组、分组启停与排序，编译时按组展开为路由规则，
       与现有预设共存。
 
 ### 系统集成
 
-- [ ] 系统 toast：接入 Windows 通知中心 / macOS UserNotifications / Linux 桌面通知，
-      替代当前仅有的应用内 toast。
+- [x] 系统 toast：接入 Windows 通知中心 / macOS UserNotifications / Linux 桌面通知，
+      保留应用内提示作为不可用时的回退。
 - [ ] 清理系统副作用：退出或卸载时回收提权计划任务 / systemd service / LaunchDaemon、
       虚拟网卡、系统代理设置与 PAC 托管端口，避免端口被占用或残留规则。
 - [ ] 合并提权助手到测试页：把 helper 的状态、安装、启动、卸载收进 `doctor` 式的检查列表，
       不再分散在设置页与 CLI。
-- [ ] 开机自启扩展：除应用本体外，分别设置登录时启动系统代理、Tailscale 与 EasyTier。
+- [x] 开机自启扩展：除应用本体外，分别设置登录时启动系统代理、Tailscale 与 EasyTier。
 - [ ] 测试页补充系统诊断：网卡与默认路由、DNS 配置、当前代理模式（系统代理 / PAC / TUN）、
       监听端口占用，结果可一键复制。
 

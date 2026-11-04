@@ -3,18 +3,19 @@
 pub mod fetch;
 pub mod links;
 pub mod links_export;
+mod openvpn;
 pub mod parse;
 
-pub use fetch::{fetch_subscription, FetchRequest, FetchResponse, FetchStatus, DEFAULT_USER_AGENT};
+pub use fetch::{DEFAULT_USER_AGENT, FetchRequest, FetchResponse, FetchStatus, fetch_subscription};
 pub use links::parse_share_link;
 pub use links_export::node_to_share_link;
-pub use parse::{parse_subscription, ParsedGroup, ParsedSubscription, SourceFormat};
+pub use parse::{ParsedGroup, ParsedSubscription, SourceFormat, parse_subscription};
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::util::{new_id, now_unix, SubscriptionUserInfo};
+use crate::util::{SubscriptionUserInfo, new_id, now_unix};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SubscriptionUsage {

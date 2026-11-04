@@ -249,6 +249,9 @@ pub struct RoutingConfig {
     pub preset: RoutePreset,
     #[serde(default)]
     pub rules: Vec<RouteRule>,
+    /// Ordered custom groups, evaluated before the preset/ungrouped rules.
+    #[serde(default)]
+    pub rule_groups: Vec<RouteRuleGroup>,
     #[serde(default)]
     pub final_action: RouteAction,
     #[serde(default)]
@@ -266,12 +269,52 @@ impl Default for RoutingConfig {
         Self {
             preset: RoutePreset::BypassMainland,
             rules: Vec::new(),
+            rule_groups: Vec::new(),
             final_action: RouteAction::proxy(),
             rule_sets: default_rule_sets(),
             domain_strategy: DomainStrategy::PreferIpv4,
             bypass_lan: true,
             bypass_china_ips: false,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RouteRuleGroup {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub rules: Vec<RouteRule>,
+}
+
+impl Default for RouteRuleGroup {
+    fn default() -> Self {
+        Self {
+            id: new_id("rule-group"),
+            name: "自定义分组".into(),
+            enabled: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+impl RoutingConfig {
+    /// A single ordering shared by compilers and route previews; PAC collects enabled direct rules.
+    pub fn effective_rules(&self) -> impl Iterator<Item = &RouteRule> {
+        self.rule_groups
+            .iter()
+            .filter(|g| g.enabled)
+            .flat_map(|g| g.rules.iter())
+            .chain(self.rules.iter())
+            .filter(|r| r.enabled)
+    }
+
+    pub fn all_rules_mut(&mut self) -> impl Iterator<Item = &mut RouteRule> {
+        self.rule_groups
+            .iter_mut()
+            .flat_map(|g| g.rules.iter_mut())
+            .chain(self.rules.iter_mut())
     }
 }
 

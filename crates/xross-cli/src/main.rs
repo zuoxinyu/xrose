@@ -67,7 +67,9 @@ fn usage() {
                      [--transport ws|grpc|h2|httpupgrade|tcp] [--path /ws]
                      [--host H] [--service-name S] [--sni S] [--alpn h2]
                      [--reality-pbk KEY] [--reality-sid ID] [--no-tls]
-                     [--insecure] [--tags a,b] [--home DIR]
+                     [--insecure] [--tags a,b] [--wireguard-config FILE] [--vpn-config FILE] [--ca FILE]
+                     [--client-cert FILE] [--client-key FILE] [--vpn-flavor anyconnect]
+                     [--auth-group GROUP] [--vpn-path /] [--core sing-box] [--home DIR]
   xross-cli helper status           提权助手状态（JSON）
   xross-cli helper install          安装并启动提权助手（会请求管理员权限）
   xross-cli helper start|restart    启动/重启已安装的提权助手
@@ -488,15 +490,80 @@ fn has_flag(args: &[String], flag: &str) -> bool {
 }
 
 fn add_node(args: &[String]) -> Result<(), String> {
-    let (_, _, home, _) = parse_args(args);
+    let (core, _, home, _) = parse_args(args);
     let mut draft = NodeDraft::default();
     if let Some(name) = value_arg(args, "--name") {
         draft.name = name;
     }
     if let Some(protocol) = value_arg(args, "--protocol") {
         draft.protocol = Protocol::parse(&protocol).ok_or_else(|| {
-            format!("未知协议：{protocol}（可用 vmess/vless/trojan/anytls/ss/hysteria2/tuic/socks/http）")
+            format!("未知协议：{protocol}（可用 vmess/vless/trojan/anytls/ss/hysteria2/tuic/socks/http/wireguard/openvpn/openconnect）")
         })?;
+    }
+    draft.port = draft.protocol.default_port();
+    if let Some(path) = value_arg(args, "--wireguard-config") {
+        let json = std::fs::read(path).map_err(|e| format!("读取 WireGuard 配置失败：{e}"))?;
+        let wg: xross_core::model::WireguardOptions =
+            serde_json::from_slice(&json).map_err(|_| "WireGuard 配置格式无效".to_string())?;
+        wg.validate().map_err(|e| e.to_string())?;
+        draft.wireguard_private_key = wg.private_key;
+        draft.wireguard_public_key = wg.public_key;
+        draft.wireguard_pre_shared_key = wg.pre_shared_key;
+        draft.wireguard_addresses = wg.addresses.join(",");
+        draft.wireguard_allowed_ips = wg.allowed_ips.join(",");
+        draft.wireguard_mtu = wg.mtu.to_string();
+        draft.wireguard_reserved = wg
+            .reserved
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+    }
+    if let Some(path) = value_arg(args, "--vpn-config") {
+        let content = std::fs::read(path).map_err(|e| format!("读取 VPN 配置失败：{e}"))?;
+        match draft.protocol {
+            Protocol::Openvpn => {
+                draft.openvpn =
+                    serde_json::from_slice(&content).map_err(|_| "OpenVPN 配置格式无效")?
+            }
+            Protocol::Openconnect => {
+                draft.openconnect =
+                    serde_json::from_slice(&content).map_err(|_| "OpenConnect 配置格式无效")?
+            }
+            _ => return Err("--vpn-config 仅用于 OpenVPN / OpenConnect".into()),
+        }
+    }
+    if draft.protocol.is_vpn() {
+        let certificates = if draft.protocol == Protocol::Openvpn {
+            &mut draft.openvpn.certificates
+        } else {
+            &mut draft.openconnect.certificates
+        };
+        for (flag, target) in [
+            ("--ca", &mut certificates.authority_pem),
+            ("--client-cert", &mut certificates.certificate_pem),
+            ("--client-key", &mut certificates.private_key_pem),
+        ] {
+            if let Some(path) = value_arg(args, flag) {
+                *target = std::fs::read_to_string(path)
+                    .map_err(|_| format!("无法读取 {flag} 文件，请检查路径和 UTF-8 PEM 内容"))?;
+            }
+        }
+        if let Some(value) = value_arg(args, "--key-password") {
+            certificates.private_key_password = value;
+        }
+        if let Some(value) = value_arg(args, "--vpn-flavor") {
+            draft.openconnect.flavor = value;
+        }
+        if let Some(value) = value_arg(args, "--auth-group") {
+            draft.openconnect.auth_group = value;
+        }
+        if let Some(value) = value_arg(args, "--vpn-path") {
+            draft.openconnect.path = value;
+        }
+        if has_flag(args, "--no-udp") {
+            draft.openconnect.disable_udp = true;
+        }
     }
     draft.server =
         value_arg(args, "--server").ok_or_else(|| "缺少 --server <主机或 IP>".to_string())?;
@@ -548,14 +615,21 @@ fn add_node(args: &[String]) -> Result<(), String> {
         draft.tags = value;
     }
     if let Some(transport) = value_arg(args, "--transport") {
-        draft.transport = TransportKind::parse(&transport)
-            .ok_or_else(|| format!("未知传输：{transport}（tcp/ws/grpc/h2/httpupgrade）"))?;
+        if draft.protocol == Protocol::Openvpn {
+            draft.openvpn.transport = transport;
+        } else {
+            draft.transport = TransportKind::parse(&transport)
+                .ok_or_else(|| format!("未知传输：{transport}（tcp/ws/grpc/h2/httpupgrade）"))?;
+        }
     }
     draft.tls_enabled = !has_flag(args, "--no-tls");
     draft.insecure = has_flag(args, "--insecure");
     draft.udp = !has_flag(args, "--no-udp");
 
     let service = service(home)?;
+    if let Some(core) = core {
+        service.set_core(core);
+    }
     let id = service.add_manual_node(draft).map_err(|e| e.to_string())?;
     match service.model().node(&id).cloned() {
         Some(node) => println!(

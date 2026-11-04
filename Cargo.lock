@@ -11627,22 +11627,27 @@ name = "xross-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "block",
  "chrono",
  "cocoa",
  "embed-resource",
  "env_logger",
+ "fs2",
  "gpui-base",
  "gpui-kit",
  "image",
  "ksni",
+ "notify-rust",
  "objc",
  "parking_lot 0.13.0",
  "raw-window-handle",
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
  "tokio",
  "windows-sys 0.59.0",
+ "winreg 0.55.0",
  "xross-core",
 ]
 

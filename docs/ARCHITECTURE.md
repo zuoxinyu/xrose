@@ -20,7 +20,11 @@
 | --- | --- | --- | --- |
 | mixed 入站 | 无 | 有 | Xray 拆成 SOCKS + HTTP(port+1)，界面提示 |
 | TUN | 原生（自动路由需 26.6.27+） | 原生 | Xray 生成 `gateway`、`autoSystemRoutingTable` 与 `autoOutboundsInterface`；共享提权启动与进程回收 |
-| AnyTLS | 不支持 | 1.12+ | 密码认证与必选 TLS；Xray 跳过并警告 |
+| AnyTLS | 不支持 | 1.12+ | 密码认证、必选 TLS 与空闲会话参数；Xray 跳过并警告 |
+| OpenVPN | 不支持 | 1.14+ endpoint | TLS 客户端、UDP/TCP、账号密码与 PEM 证书、控制通道密钥、分域 DNS；旧内核跳过并修复组引用 |
+| OpenConnect | 不支持 | 1.14+ endpoint | 六种协议类型、HTTPS 路径、认证组、账号密码/证书/会话、分域 DNS；交互认证暂未接入 |
+| WireGuard | 用户态出站 | endpoint | 单对端、密钥、地址、允许网段、MTU、reserved；不创建系统 WireGuard 网卡 |
+| 自定义规则分组 | 按组展开 | 按组展开 | 启用组按顺序先于未分组/预设规则；本地预览共用 `effective_rules()`；PAC 从启用规则收集直连条件 |
 | selector 热切换 | 无 | Clash API | Xray 选择节点 = 改配置 + 重启 |
 | urltest | balancer + observatory | 原生 urltest | 分别生成 |
 | fallback / loadbalance | leastPing / random | 无 | sing-box 映射为 urltest/selector + 警告 |
@@ -39,6 +43,9 @@
 测试客户端显式连接该入站，关闭系统代理继承、重定向与自动解压；不复用当前选择组、规则、API 端口或缓存文件。
 sing-box 测试内核启用 `auto_detect_interface`；Xray TUN 下的测试内核检测默认上联网卡并设置 `sockopt.interface`，先解析节点地址并保留 TLS SNI。TUN 运行状态取自已应用配置，普通延迟测试此时改用 HTTP；未启用 TUN 时保留 TCP 连接测试。
 下载按实际接收字节计算平均速度，限制接收时间与数据量；空响应、HTTP 错误及连接中断返回失败。测试结束后停止并回收进程，删除临时配置。
+WireGuard 字段依据 [sing-box endpoint 文档](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)
+与 [Xray 出站文档](https://xtls.github.io/en/config/outbounds/wireguard.html)。`Credentials.wireguard` 随配置整体加密保存，`NodeDraft` 统一校验密钥长度与地址格式。
+新增 `RoutingConfig.rule_groups` 使用 serde 默认空数组，旧配置无需数据库结构迁移；预设只替换未分组规则。
 AnyTLS 字段依据 [sing-box 官方文档](https://sing-box.sagernet.org/configuration/outbound/anytls/)。
 Xray TUN 字段依据 [官方 TUN 文档](https://xtls.github.io/en/config/inbounds/tun.html) 及 [26.6.27 配置定义](https://github.com/XTLS/Xray-core/blob/v26.6.27/infra/conf/tun.go)。
 Xray 自动路由通过 CIDR 差集排除用户与组网网段，DNS 劫持规则先于 LAN 绕过；系统解析器在 TUN DNS 下替换为显式上游，避免解析回环。
@@ -99,7 +106,9 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 ## 启动顺序
 
 1. 同步设置到模型（端口、LAN、TUN）。
-2. sing-box：收集并预下载缺失的 `.srs` rule-set。
+2. 预编译检查模型；缺少内核时下载并选择版本，自定义路径错误保留用户选择并提示。
+   sing-box 收集启用规则/DNS 引用并预下载规则集；Xray 按配置引用补齐 geo 数据。
+   TUN/组网按需准备提权助手；Tailscale 连接前校验并补齐组件。
 3. 编译 → 写 `<runtime>/<core>-config.json`。
 4. `xray run -test` / `sing-box check`；失败则显示行号且不启动。
 5. 启动进程；stdout/stderr 进入 LogBus；watchdog 监控退出并退避重启。
@@ -183,3 +192,22 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 | 隐私、语言、主题、材质、托盘显示、最小化/关闭行为、更新偏好 | 客户端处理，不重启内核 |
 | 自启、启动时最小化、单实例、日志文件轮转限制 | 不重启内核；启动行为及日志文件限制按客户端生命周期生效 |
 | 其他内核的版本、路径、API/统计端口 | 不影响当前内核 |
+
+## 登录启动与通知
+
+`Settings` 独立记录应用、系统代理以及两种组网的配置 ID。任一选项启用即注册系统登录入口
+`--autostart`；`run_login_actions()` 只由 GUI 调用且每进程执行一次，不影响 CLI 或单元测试。
+系统代理等待内核启动成功；Tailscale、EasyTier 依次走已有组网连接与路由共存入口。
+组网仍受 Windows 后端支持范围限制；缺失配置和登录授权需求通过提示呈现。
+
+`AppService::toast()` 将事件投递到有界通知队列，GUI 初始化通知工作线程；无需依赖快照轮询。
+Windows 使用 WinRT toast 和 Xross 应用标识，macOS 使用 UserNotifications 授权与请求接口，
+Linux 使用桌面通知服务。30 秒内同内容去重；关闭通知立即停止后续投递，投递错误仅写日志，避免递归通知。
+macOS 非应用包运行、未授权或桌面服务不可用时，应用内提示继续可用。
+
+OpenVPN / OpenConnect 的适配以 sing-box 1.14.4 的类型定义和官方客户端文档为准：
+[OpenVPN](https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/)、
+[OpenConnect](https://sing-box.sagernet.org/configuration/endpoint/openconnect/)。
+VPN 参数和 PEM 内容保存在节点凭据中；导入器不会执行 `.ovpn` 指令或读取其引用的本地文件。
+配置编译与节点探测均生成用户态 endpoint，通用 TLS / v2ray transport 不叠加到 VPN。
+启动时将实际内核版本传入编译上下文，sing-box 1.14 以下跳过 VPN；纯 VPN 配置无法编译时给出升级提示。

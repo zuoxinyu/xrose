@@ -298,6 +298,39 @@ pub async fn check_app_update(current: &str) -> Result<Option<AppUpdate>> {
 
 /// Downloads rule-set files, honoring cached checksums. Returns one result per
 /// rule-set; failures are reported rather than aborting the whole batch.
+/// Download only assets actually referenced by the generated Xray config.
+pub async fn ensure_xray_geo(config: &serde_json::Value, dir: &Path) -> Result<()> {
+    fn needs(value: &serde_json::Value, prefix: &str) -> bool {
+        match value {
+            serde_json::Value::String(s) => s.starts_with(prefix),
+            serde_json::Value::Array(a) => a.iter().any(|v| needs(v, prefix)),
+            serde_json::Value::Object(o) => o.values().any(|v| needs(v, prefix)),
+            _ => false,
+        }
+    }
+    for (prefix, file) in [("geoip:", "geoip.dat"), ("geosite:", "geosite.dat")] {
+        let target = dir.join(file);
+        if !needs(config, prefix) || std::fs::metadata(&target).is_ok_and(|m| m.len() > 0) {
+            continue;
+        }
+        let url = format!(
+            "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/{file}"
+        );
+        let bytes = client()?
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        if bytes.is_empty() {
+            return Err(Error::binary(format!("{file} 下载内容为空，请重试")));
+        }
+        atomic_write(&target, &bytes)?;
+    }
+    Ok(())
+}
+
 pub async fn sync_rule_sets(rule_sets: &[crate::model::RuleSet], dir: &Path) -> Vec<RuleSetUpdate> {
     let mut results = Vec::new();
     let _ = std::fs::create_dir_all(dir);
@@ -312,7 +345,7 @@ pub async fn sync_rule_sets(rule_sets: &[crate::model::RuleSet], dir: &Path) -> 
                     error: Some(err.to_string()),
                     ..Default::default()
                 })
-                .collect()
+                .collect();
         }
     };
     for set in rule_sets {

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::{OpenConnectOptions, OpenVpnOptions};
 use crate::util::new_id;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -18,10 +19,12 @@ pub enum Protocol {
     Socks,
     Http,
     Wireguard,
+    Openvpn,
+    Openconnect,
 }
 
 impl Protocol {
-    pub fn all() -> [Protocol; 10] {
+    pub fn all() -> [Protocol; 12] {
         [
             Protocol::Vmess,
             Protocol::Vless,
@@ -33,31 +36,18 @@ impl Protocol {
             Protocol::Socks,
             Protocol::Http,
             Protocol::Wireguard,
+            Protocol::Openvpn,
+            Protocol::Openconnect,
         ]
     }
 
-    /// Protocols the manual "add node" form can produce. WireGuard has no key
-    /// fields in the model yet, so offering it would only create a dead end.
-    pub fn manual() -> [Protocol; 9] {
-        [
-            Protocol::Vmess,
-            Protocol::Vless,
-            Protocol::Trojan,
-            Protocol::Anytls,
-            Protocol::Shadowsocks,
-            Protocol::Hysteria2,
-            Protocol::Tuic,
-            Protocol::Socks,
-            Protocol::Http,
-        ]
+    pub fn manual() -> [Protocol; 12] {
+        Self::all()
     }
 
     /// Whether the protocol carries credentials derived from a UUID.
     pub fn needs_uuid(&self) -> bool {
-        matches!(
-            self,
-            Protocol::Vmess | Protocol::Vless | Protocol::Tuic | Protocol::Wireguard
-        )
+        matches!(self, Protocol::Vmess | Protocol::Vless | Protocol::Tuic)
     }
 
     /// Whether the protocol is a plain proxy (no TLS / v2ray transport).
@@ -80,6 +70,8 @@ impl Protocol {
             Protocol::Socks => "socks",
             Protocol::Http => "http",
             Protocol::Wireguard => "wireguard",
+            Protocol::Openvpn => "openvpn",
+            Protocol::Openconnect => "openconnect",
         }
     }
     pub fn display_name(&self) -> &'static str {
@@ -94,6 +86,8 @@ impl Protocol {
             Protocol::Socks => "SOCKS",
             Protocol::Http => "HTTP",
             Protocol::Wireguard => "WireGuard",
+            Protocol::Openvpn => "OpenVPN",
+            Protocol::Openconnect => "OpenConnect",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -108,11 +102,22 @@ impl Protocol {
             "socks" | "socks5" => Some(Protocol::Socks),
             "http" | "https" => Some(Protocol::Http),
             "wireguard" | "wg" => Some(Protocol::Wireguard),
+            "openvpn" | "openvpn-client" => Some(Protocol::Openvpn),
+            "openconnect" => Some(Protocol::Openconnect),
             _ => None,
         }
     }
     pub fn supported_by(&self, core: crate::model::CoreKind) -> bool {
         use crate::model::CoreKind;
+        if *self == Protocol::Openvpn {
+            return core.capabilities().openvpn;
+        }
+        if *self == Protocol::Openconnect {
+            return core.capabilities().openconnect;
+        }
+        if *self == Protocol::Wireguard {
+            return core.capabilities().wireguard;
+        }
         if *self == Protocol::Anytls {
             return core.capabilities().anytls;
         }
@@ -121,11 +126,16 @@ impl Protocol {
             CoreKind::SingBox => true,
         }
     }
+    pub fn is_vpn(&self) -> bool {
+        matches!(self, Self::Openvpn | Self::Openconnect)
+    }
+
     pub fn default_port(&self) -> u16 {
         match self {
             Protocol::Http => 80,
             Protocol::Socks => 1080,
             Protocol::Wireguard => 51820,
+            Protocol::Openvpn => 1194,
             _ => 443,
         }
     }
@@ -249,6 +259,10 @@ pub struct Credentials {
     pub obfs_password: Option<String>,
     pub congestion_control: Option<String>,
     pub udp_relay_mode: Option<String>,
+    pub wireguard: Option<WireguardOptions>,
+    pub anytls: Option<AnytlsOptions>,
+    pub openvpn: Option<OpenVpnOptions>,
+    pub openconnect: Option<OpenConnectOptions>,
 }
 
 impl Credentials {
@@ -260,8 +274,83 @@ impl Credentials {
                 secret.push_str(v);
             }
         }
+        if let Some(wg) = &self.wireguard {
+            secret.push_str(&serde_json::to_string(wg).unwrap_or_default());
+        }
+        if let Some(options) = &self.openvpn {
+            secret.push_str(&serde_json::to_string(options).unwrap_or_default());
+        }
+        if let Some(options) = &self.openconnect {
+            secret.push_str(&serde_json::to_string(options).unwrap_or_default());
+        }
         crate::util::sha256_bytes(secret.as_bytes())[..16].to_string()
     }
+}
+
+/// One remote peer per proxy node. Keys remain in the encrypted credential payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct WireguardOptions {
+    pub private_key: String,
+    pub public_key: String,
+    pub pre_shared_key: String,
+    pub addresses: Vec<String>,
+    pub allowed_ips: Vec<String>,
+    pub mtu: u16,
+    pub reserved: [u8; 3],
+}
+impl Default for WireguardOptions {
+    fn default() -> Self {
+        Self {
+            private_key: String::new(),
+            public_key: String::new(),
+            pre_shared_key: String::new(),
+            addresses: Vec::new(),
+            allowed_ips: vec!["0.0.0.0/0".into(), "::/0".into()],
+            mtu: 1408,
+            reserved: [0; 3],
+        }
+    }
+}
+impl WireguardOptions {
+    pub fn validate(&self) -> crate::Result<()> {
+        for (label, key, required) in [
+            ("私钥", &self.private_key, true),
+            ("公钥", &self.public_key, true),
+            ("预共享密钥", &self.pre_shared_key, false),
+        ] {
+            if key.is_empty() && !required {
+                continue;
+            }
+            if crate::util::decode_base64_any(key).is_none_or(|bytes| bytes.len() != 32) {
+                return Err(crate::Error::config(format!(
+                    "WireGuard {label}必须是 32 字节的 Base64 密钥"
+                )));
+            }
+        }
+        if self.addresses.is_empty() || self.allowed_ips.is_empty() {
+            return Err(crate::Error::config("请填写 WireGuard 本地地址和允许网段"));
+        }
+        for address in self.addresses.iter().chain(&self.allowed_ips) {
+            if address.parse::<ipnet::IpNet>().is_err() {
+                return Err(crate::Error::config(
+                    "WireGuard 地址和网段必须使用 IP/前缀格式",
+                ));
+            }
+        }
+        if self.mtu < 1280 {
+            return Err(crate::Error::config("WireGuard MTU 必须在 1280–65535 之间"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct AnytlsOptions {
+    pub idle_session_check_interval: Option<String>,
+    pub idle_session_timeout: Option<String>,
+    pub min_idle_session: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -462,6 +551,15 @@ pub struct NodeDraft {
     pub udp: bool,
     /// Comma separated tags.
     pub tags: String,
+    pub wireguard_private_key: String,
+    pub wireguard_public_key: String,
+    pub wireguard_pre_shared_key: String,
+    pub wireguard_addresses: String,
+    pub wireguard_allowed_ips: String,
+    pub wireguard_mtu: String,
+    pub wireguard_reserved: String,
+    pub openvpn: OpenVpnOptions,
+    pub openconnect: OpenConnectOptions,
 }
 
 impl Default for NodeDraft {
@@ -489,6 +587,15 @@ impl Default for NodeDraft {
             transport_service_name: String::new(),
             udp: true,
             tags: String::new(),
+            wireguard_private_key: String::new(),
+            wireguard_public_key: String::new(),
+            wireguard_pre_shared_key: String::new(),
+            wireguard_addresses: String::new(),
+            wireguard_allowed_ips: "0.0.0.0/0, ::/0".into(),
+            wireguard_mtu: "1408".into(),
+            wireguard_reserved: "0,0,0".into(),
+            openvpn: OpenVpnOptions::default(),
+            openconnect: OpenConnectOptions::default(),
         }
     }
 }
@@ -506,7 +613,22 @@ impl From<&Node> for NodeDraft {
             Transport::Grpc { service_name } => ("/".into(), String::new(), service_name.clone()),
             _ => ("/".into(), String::new(), String::new()),
         };
+        let wg = node.credentials.wireguard.clone().unwrap_or_default();
         Self {
+            openvpn: node.credentials.openvpn.clone().unwrap_or_default(),
+            openconnect: node.credentials.openconnect.clone().unwrap_or_default(),
+            wireguard_private_key: wg.private_key,
+            wireguard_public_key: wg.public_key,
+            wireguard_pre_shared_key: wg.pre_shared_key,
+            wireguard_addresses: wg.addresses.join(", "),
+            wireguard_allowed_ips: wg.allowed_ips.join(", "),
+            wireguard_mtu: wg.mtu.to_string(),
+            wireguard_reserved: wg
+                .reserved
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
             name: node.name.clone(),
             protocol: node.protocol,
             server: node.server.clone(),
@@ -562,6 +684,9 @@ impl NodeDraft {
             credentials.username = node.credentials.username;
             credentials.method = node.credentials.method;
             credentials.flow = node.credentials.flow;
+            credentials.wireguard = node.credentials.wireguard;
+            credentials.openvpn = node.credentials.openvpn;
+            credentials.openconnect = node.credentials.openconnect;
             node.credentials = credentials;
             match (&mut node.transport, &original.transport) {
                 (
@@ -601,11 +726,6 @@ impl NodeDraft {
             return Err(crate::error::Error::other("端口必须是 1-65535"));
         }
         let protocol = self.protocol;
-        if protocol == Protocol::Wireguard {
-            return Err(crate::error::Error::other(
-                "WireGuard 出站尚未支持（模型缺少密钥字段），请使用分享链接导入或等待后续版本",
-            ));
-        }
         if !protocol.supported_by(core) {
             return Err(crate::error::Error::other(format!(
                 "{} 不支持 {}，请切换到 sing-box 后再添加",
@@ -675,7 +795,48 @@ impl NodeDraft {
                     credentials.password = Some(password.to_string());
                 }
             }
-            Protocol::Wireguard => unreachable!("rejected above"),
+            Protocol::Openvpn | Protocol::Openconnect => {
+                credentials.username = none_if_empty(self.username.trim());
+                credentials.password = none_if_empty(&self.password);
+                if protocol == Protocol::Openvpn {
+                    self.openvpn.validate()?;
+                    if self.insecure {
+                        return Err(crate::Error::config(
+                            "OpenVPN 不支持跳过证书验证，请填写 CA 或服务器证书指纹",
+                        ));
+                    }
+                    credentials.openvpn = Some(self.openvpn.clone());
+                } else {
+                    self.openconnect.validate()?;
+                    credentials.openconnect = Some(self.openconnect.clone());
+                }
+            }
+            Protocol::Wireguard => {
+                let reserved = split_list(&self.wireguard_reserved)
+                    .iter()
+                    .map(|v| v.parse::<u8>())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|_| {
+                        crate::Error::config("WireGuard reserved 必须是三个 0–255 的整数")
+                    })?;
+                let wg = WireguardOptions {
+                    private_key: self.wireguard_private_key.trim().into(),
+                    public_key: self.wireguard_public_key.trim().into(),
+                    pre_shared_key: self.wireguard_pre_shared_key.trim().into(),
+                    addresses: split_list(&self.wireguard_addresses),
+                    allowed_ips: split_list(&self.wireguard_allowed_ips),
+                    mtu: self
+                        .wireguard_mtu
+                        .trim()
+                        .parse()
+                        .map_err(|_| crate::Error::config("WireGuard MTU 必须是整数"))?,
+                    reserved: reserved
+                        .try_into()
+                        .map_err(|_| crate::Error::config("WireGuard reserved 必须包含三个整数"))?,
+                };
+                wg.validate()?;
+                credentials.wireguard = Some(wg);
+            }
         }
         node.credentials = credentials;
 
@@ -683,12 +844,16 @@ impl NodeDraft {
         let reality_key = self.reality_public_key.trim();
         let reality_short = self.reality_short_id.trim();
         let mut tls = TlsOptions::default();
-        if !protocol.is_plain_proxy() {
+        if !protocol.is_plain_proxy() && protocol != Protocol::Wireguard {
             // Hysteria2/TUIC/AnyTLS require TLS; Reality also implies TLS.
             tls.enabled = self.tls_enabled
                 || matches!(
                     protocol,
-                    Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+                    Protocol::Hysteria2
+                        | Protocol::Tuic
+                        | Protocol::Anytls
+                        | Protocol::Openvpn
+                        | Protocol::Openconnect
                 )
                 || !reality_key.is_empty();
             tls.server_name = none_if_empty(self.sni.trim());
@@ -736,14 +901,62 @@ impl NodeDraft {
         };
         if matches!(
             protocol,
-            Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+            Protocol::Hysteria2
+                | Protocol::Tuic
+                | Protocol::Anytls
+                | Protocol::Wireguard
+                | Protocol::Openvpn
+                | Protocol::Openconnect
         ) && !matches!(transport, Transport::Tcp)
         {
             return Err(crate::error::Error::other(
-                "Hysteria2 / TUIC / AnyTLS 使用自有传输层，不能叠加 WebSocket / gRPC 等传输",
+                "Hysteria2 / TUIC / AnyTLS / WireGuard / OpenVPN / OpenConnect 使用自有传输层，不能叠加 WebSocket / gRPC 等传输",
             ));
         }
         node.transport = transport;
+
+        if protocol.is_vpn() {
+            if node.tls.reality.is_some()
+                || node.tls.fingerprint.is_some()
+                || !node.tls.alpn.is_empty()
+            {
+                return Err(crate::Error::config(
+                    "OpenVPN / OpenConnect 不支持通用 Reality、uTLS 或 ALPN 选项，请使用 VPN 参数",
+                ));
+            }
+            let certificate = node
+                .credentials
+                .openvpn
+                .as_ref()
+                .map(|o| &o.certificates)
+                .or_else(|| {
+                    node.credentials
+                        .openconnect
+                        .as_ref()
+                        .map(|o| &o.certificates)
+                })
+                .unwrap();
+            let password_auth = node
+                .credentials
+                .username
+                .as_ref()
+                .is_some_and(|s| !s.is_empty())
+                && node
+                    .credentials
+                    .password
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty());
+            let session_auth = node
+                .credentials
+                .openconnect
+                .as_ref()
+                .is_some_and(|o| !o.cookie.is_empty());
+            if !password_auth && certificate.certificate_pem.is_empty() && !session_auth {
+                return Err(crate::Error::config(
+                    "请填写 VPN 账号密码、客户端证书或已认证会话",
+                ));
+            }
+        }
 
         Ok(node)
     }
@@ -907,6 +1120,29 @@ impl OutboundGroup {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wireguard_rejects_invalid_keys_addresses_and_reserved_bytes() {
+        let mut draft = NodeDraft {
+            protocol: Protocol::Wireguard,
+            server: "example.com".into(),
+            port: 51820,
+            wireguard_private_key: crate::util::encode_base64(&[1; 32]),
+            wireguard_public_key: crate::util::encode_base64(&[2; 32]),
+            wireguard_addresses: "10.0.0.2/32".into(),
+            ..Default::default()
+        };
+        assert!(draft.into_node(CoreKind::SingBox).is_ok());
+        draft.wireguard_reserved = "1,2,256".into();
+        assert!(draft.into_node(CoreKind::SingBox).is_err());
+        draft.wireguard_reserved = "1,2,3".into();
+        draft.wireguard_addresses = "invalid".into();
+        assert!(draft.into_node(CoreKind::SingBox).is_err());
+        draft.wireguard_addresses = "10.0.0.2/32".into();
+        draft.wireguard_private_key = "secret-invalid-key".into();
+        let error = draft.into_node(CoreKind::SingBox).unwrap_err().to_string();
+        assert!(!error.contains("secret-invalid-key"));
+    }
+
     #[test]
     fn editing_roundtrips_imported_parameters_and_all_transports() {
         let transports = [

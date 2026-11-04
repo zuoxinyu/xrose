@@ -181,6 +181,9 @@ pub struct AppView {
     pub(crate) log_search: Entity<InputState>,
     log_list: logs::LogListState,
     pub(crate) rule_name: Entity<InputState>,
+    pub(crate) rule_group_name: Entity<InputState>,
+    pub(crate) rule_group_id: Option<String>,
+    pub(crate) rule_move_id: Option<String>,
     pub(crate) rule_value: Entity<InputState>,
     pub(crate) dns_tag: Entity<InputState>,
     pub(crate) dns_address: Entity<InputState>,
@@ -234,6 +237,7 @@ impl AppView {
         let node_search = text_input(window, cx, "按名称或地址过滤节点…");
         let log_search = text_input(window, cx, "搜索日志…");
         let rule_name = text_input(window, cx, "规则名称");
+        let rule_group_name = text_input(window, cx, "分组名称");
         let rule_value = text_input(window, cx, "example.com, 或 cn（Geo），或 10.0.0.0/8");
         let dns_tag = text_input(window, cx, "tag，例如 remote");
         let dns_address = text_input(window, cx, "1.1.1.1 或 https://1.1.1.1/dns-query");
@@ -310,6 +314,9 @@ impl AppView {
             log_search,
             log_list: logs::LogListState::new(),
             rule_name,
+            rule_group_name,
+            rule_group_id: None,
+            rule_move_id: None,
             rule_value,
             dns_tag,
             dns_address,

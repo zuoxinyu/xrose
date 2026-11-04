@@ -163,6 +163,30 @@ impl CoreAdapter for XrayAdapter {
             );
         }
 
+        // Resolve group selections against successfully compiled nodes only.
+        let valid_tags: std::collections::HashSet<String> = outbounds
+            .iter()
+            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
+            .collect();
+        let mut resolved_model = model.clone();
+        for group in &mut resolved_model.groups {
+            group.members.retain(|id| {
+                model
+                    .node(id)
+                    .is_some_and(|n| valid_tags.contains(&n.outbound_tag()))
+            });
+            group.repair();
+        }
+        resolved_model.groups.retain(|g| !g.members.is_empty());
+        if resolved_model
+            .default_group
+            .as_ref()
+            .is_some_and(|id| resolved_model.group(id).is_none())
+        {
+            resolved_model.default_group = resolved_model.groups.first().map(|g| g.id.clone());
+        }
+        let model = &resolved_model;
+
         // --- Groups / balancers -----------------------------------------
         let mut balancers = Vec::new();
         let mut observatory_needed = false;
@@ -238,7 +262,7 @@ impl CoreAdapter for XrayAdapter {
                 "outboundTag": "direct"
             }));
         }
-        for rule in model.routing.rules.iter().filter(|r| r.enabled) {
+        for rule in model.routing.effective_rules() {
             if let Some(value) = xray_rule(model, rule, &mut warnings) {
                 rules.push(value);
             }
@@ -715,9 +739,23 @@ fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
             }]}
         }),
         Protocol::Wireguard => {
-            return Err(Error::config("WireGuard 出站尚未支持（模型缺少密钥字段）"));
+            let wg = cred
+                .wireguard
+                .as_ref()
+                .ok_or_else(|| Error::config("WireGuard 缺少密钥和地址配置"))?;
+            wg.validate()?;
+            return Ok(
+                json!({"tag":node.outbound_tag(),"protocol":"wireguard","settings":{
+                "secretKey":wg.private_key,"address":wg.addresses,"mtu":wg.mtu,"reserved":wg.reserved,"noKernelTun":true,
+                "peers":[{"endpoint":format!("{}:{}",crate::subscription::links::format_host(address),port),
+                    "publicKey":wg.public_key,"preSharedKey":wg.pre_shared_key,"allowedIPs":wg.allowed_ips}]}}),
+            );
         }
-        Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls => {
+        Protocol::Hysteria2
+        | Protocol::Tuic
+        | Protocol::Anytls
+        | Protocol::Openvpn
+        | Protocol::Openconnect => {
             return Err(Error::other(format!(
                 "{} 仅 sing-box 支持",
                 node.protocol.display_name()
@@ -899,6 +937,81 @@ fn xray_rule(model: &AppModel, rule: &RouteRule, warnings: &mut Vec<String>) -> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wireguard_compiles_with_credentials_and_probe() {
+        let (mut model, settings, ctx) = sample();
+        let mut wg = Node::new("fixture wg", Protocol::Wireguard, "2001:db8::1", 51820);
+        wg.credentials.wireguard = Some(crate::model::WireguardOptions {
+            private_key: crate::util::encode_base64(&[1; 32]),
+            public_key: crate::util::encode_base64(&[2; 32]),
+            pre_shared_key: crate::util::encode_base64(&[3; 32]),
+            addresses: vec!["10.0.0.2/32".into(), "fd00::2/128".into()],
+            reserved: [1, 2, 3],
+            ..Default::default()
+        });
+        model.nodes.clear();
+        for group in &mut model.groups {
+            group.members.clear();
+            group.selected = None;
+        }
+        model.add_nodes([wg.clone()]);
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let probe = super::super::compile_probe(CoreKind::Xray, &wg, 12345).unwrap();
+        let out = compiled.json["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["protocol"] == "wireguard")
+            .unwrap();
+        assert_eq!(
+            out["settings"]["secretKey"],
+            wg.credentials.wireguard.as_ref().unwrap().private_key
+        );
+        assert_eq!(
+            out["settings"]["peers"][0]["endpoint"],
+            "[2001:db8::1]:51820"
+        );
+        assert_eq!(
+            out["settings"]["peers"][0]["preSharedKey"],
+            wg.credentials.wireguard.as_ref().unwrap().pre_shared_key
+        );
+        assert_eq!(probe["outbounds"][0], *out);
+    }
+    #[test]
+    fn custom_group_order_and_enabled_state_reach_compiler() {
+        let (mut model, settings, ctx) = sample();
+        model.routing.rules.clear();
+        for (name, enabled) in [
+            ("first.example", true),
+            ("disabled.example", false),
+            ("last.example", true),
+        ] {
+            model
+                .routing
+                .rule_groups
+                .push(crate::model::RouteRuleGroup {
+                    name: name.into(),
+                    enabled,
+                    rules: vec![crate::model::RouteRule::new(
+                        name,
+                        crate::model::Matchers {
+                            domains: vec![name.into()],
+                            ..Default::default()
+                        },
+                        crate::model::RouteAction::direct(),
+                    )],
+                    ..Default::default()
+                });
+        }
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let rules = compiled.json["routing"]["rules"].as_array().unwrap();
+        let domains: Vec<_> = rules
+            .iter()
+            .filter_map(|r| r["domain"][0].as_str())
+            .collect();
+        assert_eq!(domains, ["full:first.example", "full:last.example"]);
+    }
+
     #[test]
     fn native_tun_compiles_without_proxy_ports_and_routes_dns_before_lan() {
         let (mut model, settings, ctx) = sample();
