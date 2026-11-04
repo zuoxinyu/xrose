@@ -155,3 +155,53 @@ pub fn latency_age_secs(entry: &LatencyEntry) -> i64 {
         .saturating_sub(entry.checked_at)
         .max(0)
 }
+
+pub fn latency_label(
+    entry: Option<&LatencyEntry>,
+    testing: bool,
+    lang: xross_core::settings::Language,
+) -> String {
+    if testing {
+        return crate::i18n::tr(lang, "测速中", "Testing").to_string();
+    }
+    match entry {
+        Some(entry) => entry.delay_ms.map_or_else(
+            || crate::i18n::tr(lang, "超时", "Timeout").to_string(),
+            |ms| format!("{ms} ms"),
+        ),
+        None => "—".into(),
+    }
+}
+
+/// Shared geometry and opacity tokens for the desktop surfaces.
+pub const PAGE_PAD: f32 = 24.;
+pub const CONTROL_HEIGHT: f32 = 32.;
+pub const HEADER_HEIGHT: f32 = 54.;
+pub const HEADER_DRAG_GAP: f32 = 24.;
+pub const STATUS_HEIGHT: f32 = 28.;
+pub const STATUS_INNER_HEIGHT: f32 = 24.;
+pub const STATUS_END_RADIUS: f32 = 12.;
+pub const STATUS_NODE_WIDTH: f32 = 220.;
+pub const STATUS_ACTION_WIDTH: f32 = 72.;
+pub const ICON_BUTTON_SIZE: f32 = 28.;
+pub const ICON_SIZE: f32 = 16.;
+pub const NODE_ROW_HEIGHT: f32 = 64.;
+pub const SETTING_LABEL_WIDTH: f32 = 120.;
+pub const FORM_FIELD_WIDTH: f32 = 240.;
+pub const EMPTY_HEIGHT: f32 = 160.;
+pub const DISABLED_OPACITY: f32 = 0.45;
+pub const SEMANTIC_ALPHA: f32 = 0.14;
+pub const TRAFFIC_HEIGHT: f32 = 48.;
+pub const TRAFFIC_WINDOW_MS: i64 = 60_000;
+pub const TRAFFIC_STROKE: f32 = 2.;
+pub const TRAFFIC_DASH: f32 = 4.;
+pub const TRACE_CANVAS_PAD: f32 = 12.;
+pub const PROGRESS_HEIGHT: f32 = 4.;
+pub const DRAG_EDGE: f32 = 32.;
+pub const DRAG_SCROLL_STEP: f32 = 12.;
+pub const INSERTION_LINE: f32 = 2.;
+pub const DIALOG_WIDTH: f32 = 440.;
+
+pub fn switch_off() -> Hsla {
+    hsl(0., 0., 0.5)
+}

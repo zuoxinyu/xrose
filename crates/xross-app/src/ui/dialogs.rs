@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui_base::{Disableable, Selectable};
+use gpui_base::Disableable;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
@@ -12,7 +12,7 @@ use gpui_kit::*;
 use xross_core::model::Node;
 use xross_core::service::ToastLevel;
 
-use super::{AppView, theme::palette};
+use super::{AppView, theme::palette, widgets::ChoiceGroup};
 
 impl AppView {
     pub(crate) fn open_node_dialog(
@@ -66,33 +66,22 @@ impl AppView {
             });
         if !editing {
             dialog = dialog.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_2()
-                    .pb_3()
-                    .child(
-                        Button::new("add-mode-link")
-                            .selected(self.show_import_box)
-                            .label(self.tr("链接导入", "Import links"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_import_box = true;
-                                this.show_manual_form = false;
-                                this.manual_error = None;
-                                cx.notify();
-                            })),
+                div().flex().pb_3().child(
+                    ChoiceGroup::new(
+                        "add-node-mode",
+                        vec![
+                            self.tr("链接导入", "Import links"),
+                            self.tr("手动填写", "Enter manually"),
+                        ],
+                        usize::from(self.show_manual_form),
                     )
-                    .child(
-                        Button::new("add-mode-manual")
-                            .selected(self.show_manual_form)
-                            .label(self.tr("手动填写", "Enter manually"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.show_import_box = false;
-                                this.show_manual_form = true;
-                                this.manual_error = None;
-                                cx.notify();
-                            })),
-                    ),
+                    .on_change(cx.listener(|this, index: &usize, _, cx| {
+                        this.show_import_box = *index == 0;
+                        this.show_manual_form = *index == 1;
+                        this.manual_error = None;
+                        cx.notify();
+                    })),
+                ),
             );
         }
         if self.show_manual_form {

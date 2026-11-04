@@ -14,8 +14,8 @@ pub use node::{
     Protocol, RealityOptions, TlsOptions, Transport, TransportKind, WireguardOptions,
 };
 pub use route::{
-    DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule, RouteRuleGroup,
-    RoutingConfig, RuleSet, RuleSetFormat,
+    DomainStrategy, Matchers, Placement, RouteAction, RouteActionKind, RoutePreset, RouteRule,
+    RouteRuleGroup, RoutingConfig, RuleSet, RuleSetFormat,
 };
 
 use serde::{Deserialize, Serialize};

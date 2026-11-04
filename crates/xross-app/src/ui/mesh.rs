@@ -5,7 +5,7 @@ use super::{
     tr,
     widgets::*,
 };
-use gpui_base::{Disableable, Selectable, SelectableText};
+use gpui_base::{Disableable, SelectableText};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::WindowExt;
@@ -217,6 +217,7 @@ impl AppView {
                 .child(
                     Button::new(SharedString::from(format!("{id}-copy")))
                         .compact()
+                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                         .ghost()
                         .w(px(26.))
                         .h(px(26.))
@@ -236,6 +237,7 @@ impl AppView {
                     d.child(
                         Button::new(SharedString::from(format!("{id}-expand")))
                             .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                             .ghost()
                             .w(px(26.))
                             .h(px(26.))
@@ -325,31 +327,27 @@ impl AppView {
             .gap_3()
             .min_w(px(0.))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .flex_shrink_0()
-                    .gap_2()
-                    .child(
-                        Button::new("mesh-kind-et")
-                            .label("EasyTier")
-                            .disabled(self.mesh_form.editing)
-                            .selected(self.mesh_form.provider == MeshProvider::EasyTier)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mesh_form.provider = MeshProvider::EasyTier;
-                                cx.notify();
-                            })),
+                div().flex().flex_shrink_0().child(
+                    ChoiceGroup::new(
+                        "mesh-provider",
+                        vec!["EasyTier".into(), "Tailscale".into()],
+                        usize::from(self.mesh_form.provider == MeshProvider::Tailscale),
                     )
-                    .child(
-                        Button::new("mesh-kind-ts")
-                            .label("Tailscale")
-                            .disabled(self.mesh_form.editing)
-                            .selected(self.mesh_form.provider == MeshProvider::Tailscale)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mesh_form.provider = MeshProvider::Tailscale;
-                                cx.notify();
-                            })),
-                    ),
+                    .disabled(self.mesh_form.editing || busy)
+                    .on_change(cx.listener(|this, index: &usize, _, cx| {
+                        if this.mesh_form.editing
+                            || this.snapshot.busy.iter().any(|key| key == "mesh")
+                        {
+                            return;
+                        }
+                        this.mesh_form.provider = if *index == 0 {
+                            MeshProvider::EasyTier
+                        } else {
+                            MeshProvider::Tailscale
+                        };
+                        cx.notify();
+                    })),
+                ),
             );
         let mut fields = vec![
             (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
@@ -564,7 +562,7 @@ impl AppView {
                                 .when(!self.snapshot.mesh.tailscale_installed, |d| {
                                     d.child(
                                         Button::new("mesh-install")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .label(self.tr("安装 Tailscale 组件", "Install Tailscale component"))
                                             .disabled(busy)
                                             .on_click(cx.listener(|this, _, _, _| {
@@ -575,7 +573,7 @@ impl AppView {
                                 .when(!self.snapshot.platform.helper_available, |d| {
                                     d.child(
                                         Button::new("mesh-helper")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .label(self.tr("启用提权助手", "Enable privilege helper"))
                                             .on_click(cx.listener(|this, _, _, _| {
                                                 if this.snapshot.platform.helper_installed {
@@ -588,7 +586,7 @@ impl AppView {
                                 })
                                 .child(
                                     Button::new("mesh-new")
-                                        .compact()
+                                        .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
                                         .icon(IconName::Plus)
                                         .label(self.tr("添加网络", "Add network"))
@@ -788,15 +786,18 @@ impl AppView {
                                         delete.clone()
                                     )))
                                     .compact()
-                                    .danger()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                    .ghost()
                                     .icon(IconName::Trash)
                                     .label(tr(lang, "删除配置", "Delete profile"))
                                     .disabled(active || busy)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if let Err(e) = this.service.delete_mesh_profile(&delete) {
-                                            this.service.toast(ToastLevel::Error, e.to_string());
-                                        }
-                                        this.sync(cx);
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.run_command(
+                                            super::menus::Command::DeleteMesh(delete.clone()),
+                                            false,
+                                            window,
+                                            cx,
+                                        );
                                     })),
                                 )
                                 .when(active && provider == MeshProvider::Tailscale, |d| {
@@ -971,6 +972,7 @@ impl AppView {
                                         peer_id
                                     )))
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .ghost()
                                     .w(px(26.))
                                     .h(px(26.))

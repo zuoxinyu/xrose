@@ -6,11 +6,14 @@ use gpui_kit::*;
 use xross_core::model::{
     DomainStrategy, Matchers, RouteAction, RouteActionKind, RoutePreset, RouteRule,
 };
-use xross_core::route::action_label;
 
+use super::menus::{self, MenuTarget};
+use super::route_drag::{self, RouteDrag};
 use super::theme::palette;
 use super::widgets::*;
 use super::{AppView, MatcherKind};
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
+use gpui_kit::component::tooltip::Tooltip;
 
 impl AppView {
     pub(crate) fn page_routing(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -24,50 +27,7 @@ impl AppView {
             .find(|g| Some(&g.id) == self.rule_group_id.as_ref());
         let visible_rules = selected_group.map(|g| &g.rules).unwrap_or(&routing.rules);
         let rule_sets = self.snapshot.rule_sets();
-        let dirty = self.snapshot.config_dirty;
-        let running = self.snapshot.process.phase.is_alive();
-
         let mut body = div().flex().flex_col().gap_4().w_full();
-
-        if dirty {
-            body = body.child(
-                card(&p).border_color(p.warning).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(p.fg)
-                                        .child(self.tr(
-                                            "路由已修改，尚未生效",
-                                            "Routing changed, not applied",
-                                        )),
-                                )
-                                .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                                    "应用路由变更将重启内核以生效",
-                                    "Applying routing changes will restart the core.",
-                                ))),
-                        )
-                        .child(
-                            Button::new("routing-apply")
-                                .compact()
-                                .warning()
-                                .label(self.tr("应用配置", "Apply"))
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.service.apply_config();
-                                })),
-                        ),
-                ),
-            );
-        }
 
         // Presets.
         body = body.child(
@@ -80,30 +40,24 @@ impl AppView {
                         "Select a routing preset or configure custom rules",
                     ),
                 ))
-                .child(div().flex().flex_wrap().gap_2().children(
-                    RoutePreset::all().into_iter().map(|preset| {
-                        let selected = routing.preset == preset;
-                        div()
-                            .id(SharedString::from(format!("preset-{preset:?}")))
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(if selected { p.primary } else { p.border })
-                            .bg(if selected { p.accent } else { p.bg })
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.service.set_route_preset(preset);
-                                this.sync(cx);
-                            }))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(if selected { p.fg } else { p.muted_fg })
-                                    .child(self.route_preset_label(preset)),
-                            )
-                    }),
-                ))
+                .child(
+                    ChoiceGroup::new(
+                        "route-preset",
+                        RoutePreset::all()
+                            .iter()
+                            .map(|preset| self.route_preset_label(*preset))
+                            .collect(),
+                        RoutePreset::all()
+                            .iter()
+                            .position(|preset| *preset == routing.preset)
+                            .unwrap_or(0),
+                    )
+                    .cards()
+                    .on_change(cx.listener(|this, index, _, cx| {
+                        this.service.set_route_preset(RoutePreset::all()[*index]);
+                        this.sync(cx);
+                    })),
+                )
                 .child(
                     div()
                         .flex()
@@ -162,35 +116,40 @@ impl AppView {
                                         .child(self.tr("域名策略", "Domain strategy")),
                                 )
                                 .child(
-                                    button_group(&p).children(
+                                    ChoiceGroup::new(
+                                        "domain-strategy",
+                                        vec![
+                                            self.tr("保持域名", "Keep domain"),
+                                            self.tr("优先 IPv4", "Prefer IPv4"),
+                                            self.tr("优先 IPv6", "Prefer IPv6"),
+                                            self.tr("未匹配时解析", "Resolve if unmatched"),
+                                        ],
                                         [
-                                            (DomainStrategy::AsIs, "AsIs"),
-                                            (DomainStrategy::PreferIpv4, "IPv4"),
-                                            (DomainStrategy::PreferIpv6, "IPv6"),
-                                            (DomainStrategy::IpIfNonMatch, "IPIfNonMatch"),
+                                            DomainStrategy::AsIs,
+                                            DomainStrategy::PreferIpv4,
+                                            DomainStrategy::PreferIpv6,
+                                            DomainStrategy::IpIfNonMatch,
                                         ]
-                                        .into_iter()
-                                        .map(
-                                            |(strategy, label)| {
-                                                let selected = routing.domain_strategy == strategy;
-                                                button_group_item(
-                                                    &p,
-                                                    SharedString::from(format!("strategy-{label}")),
-                                                    label,
-                                                    selected,
-                                                )
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    let model = &this.snapshot.model.routing;
-                                                    this.service.set_routing_flags(
-                                                        model.bypass_lan,
-                                                        model.bypass_china_ips,
-                                                        strategy,
-                                                    );
-                                                    this.sync(cx);
-                                                }))
-                                            },
-                                        ),
-                                    ),
+                                        .iter()
+                                        .position(|v| *v == routing.domain_strategy)
+                                        .unwrap_or(0),
+                                    )
+                                    .on_change(cx.listener(
+                                        |this, index, _, cx| {
+                                            let route = &this.snapshot.model.routing;
+                                            this.service.set_routing_flags(
+                                                route.bypass_lan,
+                                                route.bypass_china_ips,
+                                                [
+                                                    DomainStrategy::AsIs,
+                                                    DomainStrategy::PreferIpv4,
+                                                    DomainStrategy::PreferIpv6,
+                                                    DomainStrategy::IpIfNonMatch,
+                                                ][*index],
+                                            );
+                                            this.sync(cx);
+                                        },
+                                    )),
                                 ),
                         ),
                 ),
@@ -212,37 +171,75 @@ impl AppView {
                         .flex()
                         .flex_wrap()
                         .gap_2()
+                        .children(routing.rule_groups.iter().map(|group| {
+                            let id = group.id.clone();
+                            let name = group.name.clone();
+                            let menu_target = MenuTarget::Group(id.clone());
+                            let row = div()
+                                .id(SharedString::from(format!("group-tab-{id}")))
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(if self.rule_group_id.as_deref() == Some(&id) {
+                                    p.primary
+                                } else {
+                                    p.border
+                                })
+                                .bg(if self.rule_group_id.as_deref() == Some(&id) {
+                                    p.accent
+                                } else {
+                                    p.bg
+                                })
+                                .child(route_drag::handle(
+                                    RouteDrag {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                        group: None,
+                                        groups: true,
+                                        epoch: self.route_drag_epoch,
+                                    },
+                                    cx.entity().downgrade(),
+                                ))
+                                .child(
+                                    Button::new(SharedString::from(format!("select-{id}")))
+                                        .compact()
+                                        .ghost()
+                                        .label(format!("{} · {}", name, group.rules.len()))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.route_drag_epoch += 1;
+                                            this.rule_group_id = Some(id.clone());
+                                            this.rule_group_name.update(cx, |input, cx| {
+                                                input.set_value(name.clone(), window, cx)
+                                            });
+                                            this.sync(cx);
+                                        })),
+                                )
+                                .child(
+                                    more_button(
+                                        SharedString::from(format!("group-menu-{}", group.id)),
+                                        self.tr("分组操作", "Group actions"),
+                                    )
+                                    .dropdown_menu(
+                                        menus::builder(
+                                            cx.entity().downgrade(),
+                                            menu_target.clone(),
+                                        ),
+                                    ),
+                                );
+                            route_drag::target(row, group.id.clone(), None, true, self, cx)
+                                .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
+                        }))
                         .child(
                             Button::new("ungrouped-rules")
                                 .compact()
                                 .label(self.tr("未分组 / 预设", "Ungrouped / preset"))
                                 .on_click(cx.listener(|this, _, _, cx| {
+                                    this.route_drag_epoch += 1;
                                     this.rule_group_id = None;
                                     this.sync(cx);
                                 })),
-                        )
-                        .children(routing.rule_groups.iter().map(|group| {
-                            let id = group.id.clone();
-                            let name = group.name.clone();
-                            Button::new(SharedString::from(format!("select-{}", group.id)))
-                                .compact()
-                                .label(format!(
-                                    "{} · {}{}",
-                                    group.name,
-                                    group.rules.len(),
-                                    if group.enabled { "" } else { " (—)" }
-                                ))
-                                .when(self.rule_group_id.as_deref() == Some(&group.id), |b| {
-                                    b.primary()
-                                })
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.rule_group_id = Some(id.clone());
-                                    this.rule_group_name.update(cx, |input, cx| {
-                                        input.set_value(name.clone(), window, cx)
-                                    });
-                                    this.sync(cx);
-                                }))
-                        })),
+                        ),
                 )
                 .child(
                     div()
@@ -252,13 +249,13 @@ impl AppView {
                         .gap_2()
                         .child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.))
+                                .w(px(super::theme::FORM_FIELD_WIDTH))
                                 .child(Input::new(&self.rule_group_name)),
                         )
                         .child(
                             Button::new("create-rule-group")
                                 .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .label(self.tr("新建分组", "New group"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let name = this.rule_group_name.read(cx).value().to_string();
@@ -275,12 +272,10 @@ impl AppView {
                         .when_some(selected_group, |d, group| {
                             let id = group.id.clone();
                             let toggle_id = id.clone();
-                            let up_id = id.clone();
-                            let down_id = id.clone();
-                            let delete_id = id.clone();
                             d.child(
                                 Button::new("rename-rule-group")
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .label(self.tr("重命名", "Rename"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         let name =
@@ -308,34 +303,6 @@ impl AppView {
                                         this.sync(cx);
                                     },
                                 )),
-                            )
-                            .child(
-                                Button::new("group-up")
-                                    .compact()
-                                    .label(self.tr("上移", "Move up"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.move_rule_group(&up_id, -1);
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("group-down")
-                                    .compact()
-                                    .label(self.tr("下移", "Move down"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.move_rule_group(&down_id, 1);
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("group-remove")
-                                    .compact()
-                                    .label(self.tr("解散分组", "Ungroup rules"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.delete_rule_group(&delete_id);
-                                        this.rule_group_id = None;
-                                        this.sync(cx);
-                                    })),
                             )
                         }),
                 ),
@@ -366,6 +333,7 @@ impl AppView {
                                 .child(
                                     Button::new("validate-route")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("校验", "Validate"))
                                         .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
                                         .on_click(cx.listener(|this, _, _, _| {
@@ -375,6 +343,7 @@ impl AppView {
                                 .child(
                                     Button::new("toggle-rule-form")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
                                         .icon(if self.show_rule_form {
                                             IconName::X
@@ -508,6 +477,7 @@ impl AppView {
                                     .child(
                                         Button::new("save-rule")
                                             .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .primary()
                                             .label(self.tr("保存规则", "Save rule"))
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -572,41 +542,40 @@ impl AppView {
                     ))
                 })
                 .children(visible_rules.iter().map(|rule| {
-                    let rule_id = rule.id.clone();
-                    let rule_id_toggle = rule.id.clone();
-                    let rule_id_delete = rule.id.clone();
-                    let enabled = rule.enabled;
-                    let up_id = rule.id.clone();
-                    let down_id = rule.id.clone();
-                    let assign_id = rule.id.clone();
-                    div()
-                        .id(SharedString::from(format!("rule-{}", rule.id)))
+                    let id = rule.id.clone();
+                    let toggle_id = id.clone();
+                    let menu_target = MenuTarget::Rule(id.clone(), self.rule_group_id.clone());
+                    let summary = rule.matchers.summary().replace(',', ", ");
+                    let (fg, bg) = match rule.action.kind {
+                        RouteActionKind::Proxy => (p.primary, p.accent),
+                        RouteActionKind::Direct => (p.muted_fg, p.panel_alt),
+                        RouteActionKind::Block => (
+                            p.danger_text,
+                            p.danger.opacity(super::theme::SEMANTIC_ALPHA),
+                        ),
+                    };
+                    let row = div()
+                        .id(SharedString::from(format!("rule-{id}")))
                         .flex()
                         .items_center()
                         .gap_3()
                         .p_3()
                         .w_full()
                         .min_w(px(0.))
-                        .overflow_hidden()
                         .rounded_md()
                         .bg(p.bg)
                         .border_1()
                         .border_color(p.border)
-                        .child(
-                            div().flex_shrink_0().child(
-                                toggle(
-                                    SharedString::from(format!("rule-enabled-{}", rule.id)),
-                                    "",
-                                    enabled,
-                                )
-                                .on_change(cx.listener(
-                                    move |this, checked, _, cx| {
-                                        this.service.set_rule_enabled(&rule_id_toggle, *checked);
-                                        this.sync(cx);
-                                    },
-                                )),
-                            ),
-                        )
+                        .child(route_drag::handle(
+                            RouteDrag {
+                                id: id.clone(),
+                                name: rule.name.clone(),
+                                group: self.rule_group_id.clone(),
+                                groups: false,
+                                epoch: self.route_drag_epoch,
+                            },
+                            cx.entity().downgrade(),
+                        ))
                         .child(
                             div()
                                 .flex()
@@ -614,138 +583,79 @@ impl AppView {
                                 .gap_0p5()
                                 .flex_1()
                                 .min_w(px(0.))
+                                .when(!rule.enabled, |d| d.opacity(super::theme::DISABLED_OPACITY))
                                 .child(
                                     div()
                                         .text_sm()
-                                        .text_color(if enabled { p.fg } else { p.muted_fg })
+                                        .text_color(p.fg)
                                         .truncate()
                                         .child(rule.name.clone()),
                                 )
                                 .child(
                                     div()
+                                        .id(SharedString::from(format!("rule-summary-{id}")))
                                         .text_xs()
                                         .text_color(p.muted_fg)
-                                        .line_clamp(2)
-                                        .child(rule.matchers.summary().replace(',', ", ")),
+                                        .truncate()
+                                        .child(summary.clone())
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(summary.clone()).build(window, cx)
+                                        }),
                                 ),
                         )
-                        .child(div().flex_shrink_0().child(pill(
-                            action_label(&model, &rule.action),
-                            p.primary_fg,
+                        .child(pill(
                             match rule.action.kind {
-                                RouteActionKind::Proxy => p.primary,
-                                RouteActionKind::Direct => p.success,
-                                RouteActionKind::Block => p.danger,
+                                RouteActionKind::Direct => self.tr("直连", "Direct").to_string(),
+                                RouteActionKind::Block => self.tr("阻止", "Block").to_string(),
+                                RouteActionKind::Proxy => {
+                                    let label = self.tr("代理", "Proxy");
+                                    rule.action
+                                        .group
+                                        .as_ref()
+                                        .and_then(|id| model.group(id))
+                                        .or_else(|| {
+                                            model.default_group_id().and_then(|id| model.group(&id))
+                                        })
+                                        .filter(|group| {
+                                            group.name != "代理"
+                                                && !group.name.eq_ignore_ascii_case("proxy")
+                                        })
+                                        .map(|group| format!("{label} → {}", group.name))
+                                        .unwrap_or_else(|| label.to_string())
+                                }
                             },
-                        )))
+                            fg,
+                            bg,
+                        ))
                         .child(
-                            div()
-                                .flex()
-                                .flex_shrink_0()
-                                .gap_1()
-                                .child(
-                                    Button::new(SharedString::from(format!("up-{}", rule.id)))
-                                        .compact()
-                                        .label("↑")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.move_rule(
-                                                &up_id,
-                                                this.rule_group_id.as_deref(),
-                                                -1,
-                                            );
-                                            this.sync(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("down-{}", rule.id)))
-                                        .compact()
-                                        .label("↓")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.service.move_rule(
-                                                &down_id,
-                                                this.rule_group_id.as_deref(),
-                                                1,
-                                            );
-                                            this.sync(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!("assign-{}", rule.id)))
-                                        .compact()
-                                        .label(self.tr("分组", "Group"))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.rule_move_id = Some(assign_id.clone());
-                                            this.sync(cx);
-                                        })),
-                                ),
+                            more_button(
+                                SharedString::from(format!("rule-menu-{id}")),
+                                self.tr("规则操作", "Rule actions"),
+                            )
+                            .dropdown_menu(menus::builder(
+                                cx.entity().downgrade(),
+                                menu_target.clone(),
+                            )),
                         )
                         .child(
-                            div().flex_shrink_0().child(
-                                danger_icon_button(
-                                    SharedString::from(format!("delete-rule-{}", rule_id)),
-                                    IconName::Trash,
-                                    self.tr("删除规则", "Delete rule"),
-                                    &p,
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.service.delete_rule(&rule_id_delete);
-                                        this.sync(cx);
-                                    },
-                                )),
-                            ),
-                        )
+                            toggle(
+                                SharedString::from(format!("rule-enabled-{id}")),
+                                "",
+                                rule.enabled,
+                            )
+                            .accessibility_label(self.tr("启用规则", "Enable rule"))
+                            .tooltip(self.tr("启用此规则参与匹配", "Include this rule in matching"))
+                            .on_change(cx.listener(
+                                move |this, checked, _, cx| {
+                                    this.service.set_rule_enabled(&toggle_id, *checked);
+                                    this.sync(cx);
+                                },
+                            )),
+                        );
+                    route_drag::target(row, id, self.rule_group_id.clone(), false, self, cx)
+                        .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
                 })),
         );
-
-        if let Some(rule_id) = self.rule_move_id.clone() {
-            let ungroup_id = rule_id.clone();
-            body = body.child(
-                card(&p)
-                    .child(section_title(
-                        &p,
-                        self.tr("移动规则", "Move rule"),
-                        self.tr("选择目标分组", "Choose a destination"),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(
-                                Button::new("move-ungrouped")
-                                    .compact()
-                                    .label(self.tr("未分组", "Ungrouped"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.assign_rule_group(&ungroup_id, None);
-                                        this.rule_move_id = None;
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .children(routing.rule_groups.iter().map(|group| {
-                                let id = group.id.clone();
-                                let rule_id = rule_id.clone();
-                                Button::new(SharedString::from(format!("move-to-{}", id)))
-                                    .compact()
-                                    .label(group.name.clone())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.assign_rule_group(&rule_id, Some(&id));
-                                        this.rule_move_id = None;
-                                        this.sync(cx);
-                                    }))
-                            }))
-                            .child(
-                                Button::new("cancel-rule-move")
-                                    .compact()
-                                    .label(self.tr("取消", "Cancel"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.rule_move_id = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    ),
-            );
-        }
 
         // Rule sets / geo data.
         body = body.child(
@@ -765,7 +675,7 @@ impl AppView {
                         ))
                         .child(
                             Button::new("sync-rulesets")
-                                .compact()
+                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .label(self.tr("更新规则集", "Update rule-sets"))
                                 .loading(self.snapshot.busy.iter().any(|b| b == "rulesets"))
                                 .on_click(cx.listener(|this, _, _, _| {
@@ -860,7 +770,7 @@ impl AppView {
             }
         }
 
-        let _ = (lang, running);
+        let _ = lang;
         body
     }
 }

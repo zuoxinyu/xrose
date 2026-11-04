@@ -2,9 +2,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 struct CreditItem {
     name: &'static str,
@@ -178,7 +178,7 @@ impl AppView {
                                     .gap_2()
                                     .child(
                                         Button::new("about-github")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .icon(IconName::ExternalLink)
                                             .label("GitHub")
                                             .on_click(cx.listener(|this, _, _, _| {
@@ -188,7 +188,7 @@ impl AppView {
                                     )
                                     .child(
                                         Button::new("about-issues")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .ghost()
                                             .label(self.tr("问题反馈", "Issues"))
                                             .on_click(cx.listener(|this, _, _, _| {
@@ -234,7 +234,7 @@ impl AppView {
                                     .child(pill("GPL-3.0-or-later", p.primary, p.accent))
                                     .child(
                                         Button::new("open-gpl3")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .ghost()
                                             .icon(IconName::ExternalLink)
                                             .label(self.tr("许可证全文", "Full license"))
@@ -368,8 +368,10 @@ impl AppView {
                 div().flex_shrink_0().child(
                     Button::new(SharedString::from(format!("credit-{}", item.name)))
                         .compact()
+                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                         .ghost()
                         .icon(IconName::ExternalLink)
+                        .accessibility_label(format!("{} {}", self.tr("打开", "Open"), item.name))
                         .tooltip(url)
                         .on_click(cx.listener(move |this, _, _, _| {
                             this.service.open_url(url);

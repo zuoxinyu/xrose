@@ -15,7 +15,9 @@ use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
 use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarget};
 use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
-use crate::model::{AppModel, CoreKind, InboundKind, Node, NodeDraft, RoutePreset, RouteRule};
+use crate::model::{
+    AppModel, CoreKind, InboundKind, Node, NodeDraft, Placement, RoutePreset, RouteRule,
+};
 use crate::paths::AppPaths;
 use crate::runtime::location::{self, NodeLocation};
 use crate::runtime::{
@@ -144,6 +146,14 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    pub fn dns_preset(&self) -> Option<DnsPreset> {
+        dns::detect_preset(&self.model.dns)
+    }
+
+    pub fn dns_deletion_reason(&self, tag: &str) -> Option<&'static str> {
+        dns::deletion_reason(&self.model.dns, tag)
+    }
+
     pub fn rule_sets(&self) -> Vec<crate::model::RuleSet> {
         crate::adapters::required_rule_sets(&self.model)
     }
@@ -505,6 +515,97 @@ impl AppService {
         });
     }
 
+    /// Refresh enabled servers in a bounded batch, sharing the per-server cache.
+    pub fn request_all_node_locations(&self) {
+        self.request_all_node_locations_with(|server, language| async move {
+            location::lookup(&server, language).await
+        });
+    }
+
+    fn request_all_node_locations_with<F, Fut>(&self, lookup: F)
+    where
+        F: Fn(String, crate::settings::Language) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Option<String>> + Send,
+    {
+        if !self.inner.busy.write().insert("node-locations".into()) {
+            return;
+        }
+        let language = self.settings().language;
+        let targets: BTreeMap<_, _> = self
+            .inner
+            .model
+            .read()
+            .nodes
+            .iter()
+            .filter(|node| node.enabled && !node.server.trim().is_empty())
+            .map(|node| {
+                (
+                    location::cache_key(&node.server, language),
+                    node.server.clone(),
+                )
+            })
+            .collect();
+        let targets: Vec<_> = {
+            let mut locations = self.inner.node_locations.write();
+            targets
+                .into_iter()
+                .filter(|(key, _)| {
+                    let entry = locations.entry(key.clone()).or_default();
+                    if entry.pending {
+                        false
+                    } else {
+                        entry.pending = true;
+                        true
+                    }
+                })
+                .collect()
+        };
+        if targets.is_empty() {
+            self.set_busy("node-locations", false);
+            self.toast(
+                ToastLevel::Info,
+                "没有可探测的服务器，节点可能已禁用或正在探测",
+            );
+            return;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            use futures_util::{StreamExt, stream};
+            let total = targets.len();
+            let mut results = stream::iter(targets)
+                .map(|(key, server)| {
+                    let lookup = &lookup;
+                    async move { (key, lookup(server, language).await) }
+                })
+                .buffer_unordered(4);
+            let mut found = 0;
+            while let Some((key, label)) = results.next().await {
+                found += usize::from(label.is_some());
+                service.inner.node_locations.write().insert(
+                    key,
+                    NodeLocation {
+                        label,
+                        pending: false,
+                        checked_at: now_unix(),
+                    },
+                );
+            }
+            service.set_busy("node-locations", false);
+            service.toast(
+                if found == total {
+                    ToastLevel::Success
+                } else {
+                    ToastLevel::Warning
+                },
+                if found == total {
+                    format!("归属地探测完成：{found}/{total} 个服务器")
+                } else {
+                    format!("归属地探测完成：{found}/{total} 个服务器，未知项可稍后重新探测")
+                },
+            );
+        });
+    }
+
     fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
@@ -609,6 +710,49 @@ impl AppService {
                 Err(err)
             }
         }
+    }
+
+    /// Publish only after durable storage succeeds; failed edits keep the old snapshot.
+    fn commit_model_change(
+        &self,
+        change: impl FnOnce(&mut AppModel) -> Result<bool>,
+    ) -> Result<bool> {
+        let mut current = self.inner.model.write();
+        let mut next = current.clone();
+        if !change(&mut next)? {
+            return Ok(false);
+        }
+        let profile = self.inner.store.save_active_profile(&next)?;
+        *current = next;
+        drop(current);
+        *self.inner.active_profile.write() = Some(profile);
+        self.mark_dirty();
+        Ok(true)
+    }
+
+    pub fn move_rule_to(
+        &self,
+        id: &str,
+        group: Option<&str>,
+        target: &str,
+        placement: Placement,
+    ) -> Result<bool> {
+        let changed = self.commit_model_change(|model| {
+            model.routing.move_rule_to(id, group, target, placement)
+        })?;
+        if changed {
+            self.inner.config_dirty.store(true, Ordering::SeqCst);
+        }
+        Ok(changed)
+    }
+
+    pub fn move_rule_group_to(&self, id: &str, target: &str, placement: Placement) -> Result<bool> {
+        let changed =
+            self.commit_model_change(|model| model.routing.move_group_to(id, target, placement))?;
+        if changed {
+            self.inner.config_dirty.store(true, Ordering::SeqCst);
+        }
+        Ok(changed)
     }
 
     fn mark_dirty(&self) {
@@ -2243,15 +2387,22 @@ impl AppService {
     }
 
     pub fn move_rule_group(&self, id: &str, offset: isize) {
-        let mut model = self.inner.model.write();
-        let groups = &mut model.routing.rule_groups;
+        let model = self.model();
+        let groups = &model.routing.rule_groups;
         if let Some(index) = groups.iter().position(|g| g.id == id) {
             let target = index.saturating_add_signed(offset).min(groups.len() - 1);
-            groups.swap(index, target);
+            let placement = if target < index {
+                Placement::Before
+            } else {
+                Placement::After
+            };
+            if let Err(err) = self.move_rule_group_to(id, &groups[target].id, placement) {
+                self.toast(
+                    ToastLevel::Error,
+                    format!("保存分组顺序失败，请重试：{err}"),
+                );
+            }
         }
-        drop(model);
-        let _ = self.persist_model();
-        self.mark_dirty();
     }
 
     /// Removing a group preserves its rules and individual enabled states.
@@ -2274,26 +2425,28 @@ impl AppService {
     }
 
     pub fn move_rule(&self, id: &str, group_id: Option<&str>, offset: isize) {
-        let mut model = self.inner.model.write();
+        let model = self.model();
         let rules = match group_id {
-            Some(group_id) => match model
-                .routing
-                .rule_groups
-                .iter_mut()
-                .find(|g| g.id == group_id)
-            {
-                Some(group) => &mut group.rules,
+            Some(id) => match model.routing.rule_groups.iter().find(|g| g.id == id) {
+                Some(group) => &group.rules,
                 None => return,
             },
-            None => &mut model.routing.rules,
+            None => &model.routing.rules,
         };
         if let Some(index) = rules.iter().position(|r| r.id == id) {
             let target = index.saturating_add_signed(offset).min(rules.len() - 1);
-            rules.swap(index, target);
+            let placement = if target < index {
+                Placement::Before
+            } else {
+                Placement::After
+            };
+            if let Err(err) = self.move_rule_to(id, group_id, &rules[target].id, placement) {
+                self.toast(
+                    ToastLevel::Error,
+                    format!("保存规则顺序失败，请重试：{err}"),
+                );
+            }
         }
-        drop(model);
-        let _ = self.persist_model();
-        self.mark_dirty();
     }
 
     pub fn assign_rule_group(&self, id: &str, group_id: Option<&str>) {
@@ -2407,16 +2560,21 @@ impl AppService {
         self.mark_dirty();
     }
 
-    pub fn delete_dns_server(&self, tag: &str) {
-        {
-            let mut model = self.inner.model.write();
-            model.dns.servers.retain(|s| s.tag != tag);
-            if model.dns.final_server.as_deref() == Some(tag) {
-                model.dns.final_server = model.dns.servers.first().map(|s| s.tag.clone());
+    pub fn delete_dns_server(&self, tag: &str) -> Result<()> {
+        self.commit_model_change(|model| {
+            if let Some(reason) = dns::deletion_reason(&model.dns, tag) {
+                return Err(Error::config(reason));
             }
-        }
-        let _ = self.persist_model();
-        self.mark_dirty();
+            let index = model
+                .dns
+                .servers
+                .iter()
+                .position(|s| s.tag == tag)
+                .ok_or_else(|| Error::config("DNS 服务器已不存在，请刷新后重试"))?;
+            model.dns.servers.remove(index);
+            Ok(true)
+        })?;
+        Ok(())
     }
 
     pub fn set_final_dns(&self, tag: impl Into<String>) {
@@ -3775,6 +3933,121 @@ mod tests {
     }
 
     #[test]
+    fn rule_reorder_preserves_presets_and_noops_do_not_write() {
+        let (service, dir) = service();
+        let initial = service.model().routing;
+        assert!(initial.rules.len() >= 3);
+        let first = initial.rules[0].id.clone();
+        let last = initial.rules.last().unwrap().id.clone();
+        service.set_rule_enabled(&first, false);
+        let disabled = service.model().routing.rules[0].clone();
+        assert!(
+            service
+                .move_rule_to(&first, None, &last, Placement::After)
+                .unwrap()
+        );
+        let after = service.model().routing;
+        assert_eq!(after.rules.last(), Some(&disabled));
+        assert_eq!(after.preset, initial.preset);
+        assert_eq!(&after.rules[..after.rules.len() - 1], &initial.rules[1..]);
+        let profile = service.snapshot().active_profile.unwrap();
+        assert_eq!(
+            service
+                .inner
+                .store
+                .load_profile(&profile)
+                .unwrap()
+                .unwrap()
+                .model
+                .routing,
+            after
+        );
+
+        let db = rusqlite::Connection::open(AppPaths::from_root(dir.path()).database()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_profile_update BEFORE UPDATE ON profiles BEGIN SELECT RAISE(FAIL, 'test storage failure'); END;").unwrap();
+        assert!(
+            !service
+                .move_rule_to(&first, None, &last, Placement::After)
+                .unwrap()
+        );
+        assert!(
+            !service
+                .move_rule_to(&first, None, &first, Placement::Before)
+                .unwrap()
+        );
+        assert!(
+            service
+                .move_rule_to(&first, None, &last, Placement::Before)
+                .is_err()
+        );
+        assert!(
+            service
+                .move_rule_to(&first, Some("missing-group"), &last, Placement::Before)
+                .is_err()
+        );
+        assert_eq!(service.model().routing, after);
+    }
+
+    #[test]
+    fn reorder_is_durable_and_storage_failure_keeps_snapshot() {
+        let (service, dir) = service();
+        let first = service.save_rule_group(None, "first").unwrap();
+        let middle = service.save_rule_group(None, "middle").unwrap();
+        let last = service.save_rule_group(None, "last").unwrap();
+        assert!(
+            service
+                .move_rule_group_to(&first, &last, Placement::After)
+                .unwrap()
+        );
+        assert_eq!(
+            service
+                .model()
+                .routing
+                .rule_groups
+                .iter()
+                .map(|g| g.id.clone())
+                .collect::<Vec<_>>(),
+            [middle.clone(), last.clone(), first.clone()]
+        );
+        let stored = service
+            .inner
+            .store
+            .load_profile(service.snapshot().active_profile.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.routing, service.model().routing);
+        assert!(service.snapshot().config_dirty);
+        let db = rusqlite::Connection::open(AppPaths::from_root(dir.path()).database()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_profile_update BEFORE UPDATE ON profiles BEGIN SELECT RAISE(FAIL, 'test storage failure'); END;").unwrap();
+        let before = service.model();
+        assert!(
+            service
+                .move_rule_group_to(&first, &middle, Placement::Before)
+                .is_err()
+        );
+        assert_eq!(service.model(), before);
+    }
+
+    #[test]
+    fn dns_deletion_checks_references_without_mutating_on_error() {
+        let (service, _dir) = service();
+        let before = service.model();
+        assert!(service.delete_dns_server("local").is_err());
+        assert!(service.delete_dns_server("fakeip").is_err());
+        assert!(service.delete_dns_server("missing").is_err());
+        assert_eq!(service.model(), before);
+        service.delete_dns_server("remote").unwrap();
+        assert!(
+            !service
+                .model()
+                .dns
+                .servers
+                .iter()
+                .any(|s| s.tag == "remote")
+        );
+    }
+
+    #[test]
     fn rule_groups_persist_coexist_with_presets_and_control_preview() {
         use crate::model::{Matchers, RouteAction};
         let (service, _dir) = service();
@@ -4607,6 +4880,101 @@ proxy-groups:
         snapshot.process.phase = crate::core::ProcessPhase::Running;
         snapshot.settings.core = CoreKind::Xray;
         assert_eq!(snapshot.selected_node(Some(&auto.id)).unwrap().id, b.id);
+    }
+
+    #[test]
+    fn location_batch_deduplicates_bounds_concurrency_and_refreshes_results() {
+        use std::sync::atomic::AtomicUsize;
+        let (service, _dir) = service();
+        let language = service.settings().language;
+        let mut nodes: Vec<_> = (0..6)
+            .map(|i| {
+                Node::new(
+                    format!("演示节点 {i}"),
+                    Protocol::Vless,
+                    format!("server-{i}.example"),
+                    443,
+                )
+            })
+            .collect();
+        nodes.push(Node::new(
+            "重复服务器",
+            Protocol::Vless,
+            "SERVER-0.EXAMPLE",
+            8443,
+        ));
+        let mut disabled = Node::new("已禁用", Protocol::Vless, "disabled.example", 443);
+        disabled.enabled = false;
+        nodes.push(disabled);
+        nodes.push(Node::new(
+            "正在探测",
+            Protocol::Vless,
+            "pending.example",
+            443,
+        ));
+        service.inner.model.write().nodes = nodes;
+        let pending_key = location::cache_key("pending.example", language);
+        service.inner.node_locations.write().insert(
+            pending_key.clone(),
+            NodeLocation {
+                pending: true,
+                ..Default::default()
+            },
+        );
+        let refreshed_key = location::cache_key("server-0.example", language);
+        service.inner.node_locations.write().insert(
+            refreshed_key.clone(),
+            NodeLocation {
+                label: Some("旧位置".into()),
+                checked_at: now_unix(),
+                pending: false,
+            },
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        service.request_all_node_locations_with({
+            let calls = calls.clone();
+            let gate = gate.clone();
+            move |server, _| {
+                let calls = calls.clone();
+                let gate = gate.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    gate.acquire().await.unwrap().forget();
+                    (!server.contains("server-5")).then(|| "演示位置".into())
+                }
+            }
+        });
+        assert!(service.is_busy("node-locations"));
+        service.request_all_node_locations_with(|_, _| async { panic!("duplicate batch") });
+        service.inner.rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while calls.load(Ordering::SeqCst) < 4 {
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 4);
+                gate.add_permits(6);
+                while service.is_busy("node-locations") {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        let locations = service.inner.node_locations.read();
+        assert_eq!(locations[&refreshed_key].label.as_deref(), Some("演示位置"));
+        let failed = &locations[&location::cache_key("server-5.example", language)];
+        assert!(!failed.pending && failed.label.is_none() && failed.checked_at > 0);
+        assert!(locations[&pending_key].pending);
+        assert!(!locations.contains_key(&location::cache_key("disabled.example", language)));
+    }
+
+    #[test]
+    fn empty_location_batch_clears_busy_without_lookup() {
+        let (service, _dir) = service();
+        service.request_all_node_locations_with(|_, _| async { panic!("empty batch") });
+        assert!(!service.is_busy("node-locations"));
     }
 
     #[test]

@@ -1,14 +1,17 @@
+use super::menus::{self, MenuTarget};
+use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::subscription::Subscription;
-use xross_core::util::{format_bytes, format_duration_secs};
+use xross_core::util::format_bytes;
 
+use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
-use super::AppView;
 
 impl AppView {
     pub(crate) fn page_subscriptions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -30,8 +33,8 @@ impl AppView {
                             &p,
                             self.tr("订阅列表", "Subscription list"),
                             self.tr(
-                                "定时更新，支持 ETag / If-Modified-Since 增量拉取",
-                                "Scheduled refresh with ETag / If-Modified-Since",
+                                "管理节点订阅、自动更新与流量用量",
+                                "Manage node subscriptions, automatic refresh, and data usage",
                             ),
                         ))
                         .child(
@@ -42,15 +45,17 @@ impl AppView {
                                 .gap_2()
                                 .child(
                                     Button::new("refresh-all-subs")
-                                        .compact()
+                                        .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("全部更新", "Refresh all"))
+                                        .loading(self.snapshot.busy.iter().any(|key| key.starts_with("sub:")))
+                                        .disabled(subscriptions.is_empty())
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.service.refresh_all_subscriptions();
                                         })),
                                 )
                                 .child(
                                     Button::new("toggle-sub-form")
-                                        .compact()
+                                        .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
                                         .icon(if self.show_subscription_form {
                                             IconName::X
@@ -79,7 +84,7 @@ impl AppView {
                             .child(div().flex_1().child(Input::new(&self.sub_url)))
                             .child(
                                 Button::new("add-subscription")
-                                    .compact()
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
                                     .label(self.tr("添加", "Add"))
                                     .on_click(cx.listener(|this, _, window, cx| {
@@ -146,15 +151,25 @@ impl AppView {
                 .last_updated
                 .map(|ts| {
                     let ago = (now - ts).max(0);
-                    format!("{} {}", format_duration_secs(ago), self.tr("前", "ago"))
+                    crate::i18n::relative_time(lang, ago)
                 })
                 .unwrap_or_else(|| self.tr("从未更新", "never").to_string());
             let sub_id_refresh = sub.id.clone();
-            let sub_id_delete = sub.id.clone();
+            let menu_target = MenuTarget::Subscription(sub.id.clone());
+            let refreshing = self
+                .snapshot
+                .busy
+                .iter()
+                .any(|key| key == &format!("sub:{}", sub.id));
+            let expiring = usage
+                .as_ref()
+                .and_then(|u| u.expire)
+                .is_some_and(|ts| ts >= now && ts - now <= 7 * 86400);
             let sub_for_toggle = sub.clone();
 
             body = body.child(
                 card(&p)
+                    .id(SharedString::from(format!("subscription-{}", sub.id)))
                     .child(
                         div()
                             .flex()
@@ -180,8 +195,8 @@ impl AppView {
                                             .when(expired, |d| {
                                                 d.child(pill(
                                                     self.tr("已过期", "expired"),
-                                                    p.primary_fg,
-                                                    p.danger,
+                                                    p.danger_text,
+                                                    p.danger.opacity(super::theme::SEMANTIC_ALPHA),
                                                 ))
                                             })
                                             .child(pill(
@@ -212,7 +227,9 @@ impl AppView {
                                             sub.id
                                         )))
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("更新", "Refresh"))
+                                        .loading(refreshing)
                                         .on_click(
                                             cx.listener(move |this, _, _, _| {
                                                 this.service.refresh_subscription(&sub_id_refresh);
@@ -220,21 +237,15 @@ impl AppView {
                                         ),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "delete-sub-{}",
-                                            sub.id
-                                        )))
-                                        .compact()
-                                        .danger()
-                                        .icon(IconName::Trash)
-                                        .label(self.tr("删除", "Delete"))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                let _ = this
-                                                    .service
-                                                    .delete_subscription(&sub_id_delete);
-                                                this.sync(cx);
-                                            }),
+                                        more_button(
+                                            SharedString::from(format!("sub-menu-{}", sub.id)),
+                                            self.tr("订阅操作", "Subscription actions"),
+                                        )
+                                        .dropdown_menu(
+                                            menus::builder(
+                                                cx.entity().downgrade(),
+                                                menu_target.clone(),
+                                            ),
                                         ),
                                     )
                                     .child(
@@ -243,6 +254,13 @@ impl AppView {
                                             "",
                                             sub.enabled,
                                         )
+                                        .accessibility_label(
+                                            self.tr("启用自动更新", "Enable automatic refresh"),
+                                        )
+                                        .tooltip(self.tr(
+                                            "允许此订阅自动更新",
+                                            "Allow automatic updates for this subscription",
+                                        ))
                                         .on_change(
                                             cx.listener(move |this, checked, _, cx| {
                                                 let mut updated = sub_for_toggle.clone();
@@ -272,16 +290,20 @@ impl AppView {
                             )
                             .child(
                                 div()
-                                    .h(px(6.))
+                                    .h(px(super::theme::PROGRESS_HEIGHT))
                                     .w_full()
                                     .rounded_full()
                                     .bg(p.panel_alt)
                                     .overflow_hidden()
                                     .child(
                                         div()
-                                            .h(px(6.))
+                                            .h(px(super::theme::PROGRESS_HEIGHT))
                                             .w(relative((percent as f32 / 100.0).clamp(0.0, 1.0)))
-                                            .bg(if percent > 90.0 { p.danger } else { p.primary }),
+                                            .bg(match usage_grade(percent) {
+                                                2 => p.danger,
+                                                1 => p.warning,
+                                                _ => p.primary,
+                                            }),
                                     ),
                             ),
                     )
@@ -292,24 +314,32 @@ impl AppView {
                             .gap_5()
                             .text_xs()
                             .text_color(p.muted_fg)
-                            .child(format!("{}：{}", self.tr("到期", "Expires"), expire_text))
+                            .child(
+                                div()
+                                    .text_color(if expired {
+                                        p.danger_text
+                                    } else if expiring {
+                                        p.warn_text
+                                    } else {
+                                        p.muted_fg
+                                    })
+                                    .child(format!(
+                                        "{}：{}",
+                                        self.tr("到期", "Expires"),
+                                        expire_text
+                                    )),
+                            )
                             .child(format!(
                                 "{}：{}",
                                 self.tr("最后更新", "Updated"),
                                 last_updated
-                            ))
-                            .when(sub.etag.is_some(), |d| {
-                                d.child(pill("ETag", p.muted_fg, p.panel_alt))
-                            })
-                            .when(sub.usage.is_some(), |d| {
-                                d.child(pill("userinfo", p.muted_fg, p.panel_alt))
-                            }),
+                            )),
                     )
                     .when(sub.last_error.is_some(), |d| {
                         d.child(
                             div()
                                 .text_xs()
-                                .text_color(p.danger)
+                                .text_color(p.danger_text)
                                 .child(sub.last_error.clone().unwrap_or_default()),
                         )
                     })
@@ -317,14 +347,36 @@ impl AppView {
                         d.child(
                             div()
                                 .text_xs()
-                                .text_color(p.warning)
+                                .text_color(p.warn_text)
                                 .child(self.tr("已暂停自动更新", "Auto update paused")),
                         )
-                    }),
+                    })
+                    .context_menu(menus::builder(cx.entity().downgrade(), menu_target)),
             );
         }
 
         let _ = lang;
         body
+    }
+}
+
+fn usage_grade(percent: f32) -> u8 {
+    if percent >= 95. {
+        2
+    } else if percent >= 80. {
+        1
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn usage_thresholds_are_inclusive() {
+        assert_eq!(super::usage_grade(79.9), 0);
+        assert_eq!(super::usage_grade(80.), 1);
+        assert_eq!(super::usage_grade(94.9), 1);
+        assert_eq!(super::usage_grade(95.), 2);
     }
 }

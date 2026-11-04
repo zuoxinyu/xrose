@@ -1,11 +1,12 @@
+use super::theme::*;
+use gpui_kit::App;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::Icon;
-use gpui_kit::prelude::FluentBuilder;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::{
-    div, px, Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    Stateful, StatefulInteractiveElement, Styled,
+    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
+    div, px,
 };
 
 use super::theme::Palette;
@@ -20,7 +21,6 @@ pub fn card(p: &Palette) -> Div {
         .bg(p.panel)
         .border_1()
         .border_color(p.border)
-        .when(!p.is_dark, |d| d.shadow_xs())
 }
 
 pub fn section_title(
@@ -69,6 +69,8 @@ pub fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, checked:
 
 pub fn empty_hint(p: &Palette, text: impl Into<SharedString>) -> impl IntoElement {
     div()
+        .flex()
+        .flex_col()
         .w_full()
         .py_8()
         .items_center()
@@ -82,128 +84,226 @@ pub fn divider(p: &Palette) -> impl IntoElement {
     div().h(px(1.)).w_full().bg(p.border)
 }
 
-/// Container of a segmented control; items come from [`segment_item`].
-pub fn segmented(p: &Palette) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .flex_shrink_0()
-        .gap_0p5()
-        .p_0p5()
-        .rounded_lg()
-        .bg(p.panel_alt)
+/// The core start action keeps the interaction accent.
+pub fn start_button(cx: &App) -> ButtonCustomVariant {
+    let p = super::theme::palette(cx);
+    ButtonCustomVariant::new(cx)
+        .color(p.primary)
+        .foreground(p.primary_fg)
+        .hover(p.primary)
+        .active(p.primary)
+        .shadow(false)
 }
 
-/// One option of a segmented control; the caller attaches `on_click`.
-pub fn segment_item(
+pub fn more_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    let label = label.into();
+    Button::new(id)
+        .compact()
+        .ghost()
+        .icon(IconName::Ellipsis)
+        .w(px(ICON_BUTTON_SIZE))
+        .h(px(ICON_BUTTON_SIZE))
+        .accessibility_label(label.clone())
+        .tooltip(label)
+}
+
+pub fn empty_state(
     p: &Palette,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    selected: bool,
-) -> Stateful<Div> {
-    let hover_bg = p.panel;
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .text_sm()
-        .cursor_pointer()
-        .font_weight(if selected {
-            gpui_kit::FontWeight::MEDIUM
-        } else {
-            gpui_kit::FontWeight::NORMAL
-        })
-        .text_color(if selected { p.primary } else { p.muted_fg })
-        .when(selected, |d| d.bg(p.panel).shadow_xs())
-        .when(!selected, |d| d.hover(move |h| h.bg(hover_bg.opacity(0.6))))
-        .child(label.into())
-}
-
-/// Container for a grouped segment / button group.
-pub fn button_group(p: &Palette) -> Div {
+    icon: IconName,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+) -> Div {
     div()
         .flex()
-        .items_center()
-        .flex_shrink_0()
-        .p_0p5()
-        .gap_0p5()
-        .rounded_md()
-        .border_1()
-        .border_color(p.border)
-        .bg(p.panel_alt.opacity(0.35))
-}
-
-/// One item in a `button_group`.
-/// Selected state uses the app's signature cyan theme:
-/// `p.primary` for text/active border, `p.accent` (cyan tint) for background.
-pub fn button_group_item(
-    p: &Palette,
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    selected: bool,
-) -> Stateful<Div> {
-    let hover_bg = p.panel;
-    div()
-        .id(id)
-        .flex()
+        .flex_col()
+        .min_h(px(EMPTY_HEIGHT))
         .items_center()
         .justify_center()
-        .h(px(26.))
-        .px_3()
-        .rounded_sm()
-        .text_xs()
-        .cursor_pointer()
-        .font_weight(if selected {
-            gpui_kit::FontWeight::MEDIUM
-        } else {
-            gpui_kit::FontWeight::NORMAL
-        })
-        .border_1()
-        .border_color(if selected {
-            p.primary
-        } else {
-            gpui_kit::hsla(0., 0., 0., 0.)
-        })
-        .bg(if selected {
-            p.accent
-        } else {
-            gpui_kit::hsla(0., 0., 0., 0.)
-        })
-        .text_color(if selected { p.primary } else { p.muted_fg })
-        .when(!selected, |d| {
-            d.hover(move |h| h.bg(hover_bg).text_color(p.fg))
-        })
-        .child(label.into())
+        .gap_3()
+        .child(
+            Icon::new(icon)
+                .size(px(CONTROL_HEIGHT))
+                .text_color(p.muted_fg),
+        )
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(p.fg)
+                .child(title.into()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(p.muted_fg)
+                .child(description.into()),
+        )
 }
 
-/// Danger icon button with subtle red resting state, warning red on hover, and tooltip.
+/// Destructive tools stay neutral until hover and use the standard focus behavior.
 pub fn danger_icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
     tip: impl Into<SharedString>,
-    p: &Palette,
-) -> Stateful<Div> {
-    let del_fg = p.danger.opacity(0.72);
-    let del_hover_fg = p.danger;
-    let del_hover_bg = p.danger.opacity(0.14);
-    let del_active_bg = p.danger.opacity(0.22);
-    let tip_text: SharedString = tip.into();
-    div()
-        .id(id)
-        .cursor_pointer()
-        .flex()
-        .items_center()
-        .justify_center()
-        .w(px(28.))
-        .h(px(28.))
-        .rounded_md()
-        .text_color(del_fg)
-        .hover(move |s| s.bg(del_hover_bg).text_color(del_hover_fg))
-        .active(move |s| s.bg(del_active_bg).text_color(del_hover_fg))
-        .tooltip(move |window, cx| Tooltip::new(tip_text.clone()).build(window, cx))
-        .child(Icon::new(icon).size(px(14.)))
+    cx: &App,
+) -> Button {
+    let label = tip.into();
+    Button::new(id)
+        .compact()
+        .custom(danger_tool_style(cx))
+        .icon(icon)
+        .tooltip(label.clone())
+        .accessibility_label(label)
+        .w(px(ICON_BUTTON_SIZE))
+        .h(px(ICON_BUTTON_SIZE))
+}
+
+pub fn danger_tool_style(cx: &App) -> ButtonCustomVariant {
+    let p = super::theme::palette(cx);
+    ButtonCustomVariant::new(cx)
+        .foreground(p.muted_fg)
+        .hover(p.danger.opacity(SEMANTIC_ALPHA))
+        .active(p.danger.opacity(SEMANTIC_ALPHA))
+}
+
+/// Controlled radio group with roving focus and arrow-key selection.
+#[derive(gpui_kit::IntoElement)]
+pub struct ChoiceGroup {
+    id: ElementId,
+    labels: Vec<SharedString>,
+    selected: usize,
+    cards: bool,
+    disabled: bool,
+    handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
+}
+impl ChoiceGroup {
+    pub fn new(id: impl Into<ElementId>, labels: Vec<SharedString>, selected: usize) -> Self {
+        Self {
+            id: id.into(),
+            labels,
+            selected,
+            cards: false,
+            disabled: false,
+            handler: None,
+        }
+    }
+    pub fn cards(mut self) -> Self {
+        self.cards = true;
+        self
+    }
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+    pub fn on_change(
+        mut self,
+        handler: impl Fn(&usize, &mut gpui_kit::Window, &mut App) + 'static,
+    ) -> Self {
+        self.handler = Some(std::rc::Rc::new(handler));
+        self
+    }
+}
+impl gpui_kit::RenderOnce for ChoiceGroup {
+    fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
+        let p = super::theme::palette(cx);
+        let count = self.labels.len();
+        let handles: Vec<_> = (0..count)
+            .map(|index| {
+                window
+                    .use_keyed_state((self.id.clone(), index.to_string()), cx, |_, cx| {
+                        cx.focus_handle()
+                    })
+                    .read(cx)
+                    .clone()
+            })
+            .collect();
+        let key_handles = handles.clone();
+        let key_handler = self.handler.clone();
+        let selected = self.selected;
+        let cards = self.cards;
+        let disabled = self.disabled;
+        let mut group = gpui_base::RadioGroup::new(self.id.clone())
+            .axis(gpui_kit::Axis::Horizontal)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_0p5()
+            .p_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(p.border)
+            .bg(p.bg)
+            .opacity(if disabled { DISABLED_OPACITY } else { 1. })
+            .on_key_down(move |event, window, cx| {
+                if disabled || count == 0 {
+                    return;
+                }
+                let next = match event.keystroke.key.as_str() {
+                    "left" | "up" => Some((selected + count - 1) % count.max(1)),
+                    "right" | "down" => Some((selected + 1) % count.max(1)),
+                    "home" => Some(0),
+                    "end" => count.checked_sub(1),
+                    _ => None,
+                };
+                if let Some(next) = next.filter(|n| *n < count) {
+                    key_handles[next].focus(window, cx);
+                    if let Some(handler) = &key_handler {
+                        handler(&next, window, cx);
+                    }
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            });
+        for (index, label) in self.labels.into_iter().enumerate() {
+            let checked = index == selected;
+            let focused = handles[index].is_focused(window);
+            let handler = self.handler.clone();
+            group = group.child(
+                gpui_base::Radio::new((self.id.clone(), index.to_string()))
+                    .checked(checked)
+                    .disabled(disabled)
+                    .tab_stop(checked && !disabled)
+                    .track_focus(&handles[index])
+                    .accessibility_label(label.clone())
+                    .on_change(move |_, _, window, cx| {
+                        if disabled {
+                            return;
+                        }
+                        if let Some(handler) = &handler {
+                            handler(&index, window, cx);
+                        }
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(if cards {
+                        CONTROL_HEIGHT
+                    } else {
+                        ICON_BUTTON_SIZE
+                    }))
+                    .px_3()
+                    .cursor_pointer()
+                    // Subtract the track's 1px border and 2px padding from its 6px radius.
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if checked || focused {
+                        p.primary
+                    } else {
+                        p.border.opacity(0.)
+                    })
+                    .bg(if checked { p.accent } else { p.bg })
+                    .text_sm()
+                    .text_color(if checked { p.primary } else { p.muted_fg })
+                    .hover(move |s| {
+                        if disabled {
+                            s
+                        } else {
+                            s.bg(if checked { p.accent } else { p.panel_alt })
+                        }
+                    })
+                    .child(label),
+            );
+        }
+        group
+    }
 }

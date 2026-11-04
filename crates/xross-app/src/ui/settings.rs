@@ -1,8 +1,8 @@
+use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, Theme, ThemeMode as ComponentThemeMode};
+use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::CoreKind;
@@ -37,609 +37,367 @@ impl AppView {
 
         let mut body = div().flex().flex_col().gap_4().w_full();
 
-        // General ------------------------------------------------------
-        body = body.child(
-            card(&p)
-                .child(section_title(
-                    &p,
-                    self.tr("通用", "General"),
-                    self.tr(
-                        "语言、主题、Core 与启动行为",
-                        "Language, theme, core and startup",
-                    ),
-                ))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .w(px(120.))
-                                        .text_sm()
-                                        .text_color(p.muted_fg)
-                                        .child(self.tr("语言", "Language")),
-                                )
-                                .child(
-                                    button_group(&p).children(
-                                        [Language::Zh, Language::En].into_iter().map(|language| {
-                                            let selected = settings.language == language;
-                                            button_group_item(
-                                                &p,
-                                                SharedString::from(format!("lang-{:?}", language)),
-                                                language.label(),
-                                                selected,
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.service.set_language(language);
-                                                this.sync(cx);
-                                                this.localize_inputs(window, cx);
-                                            }))
-                                        }),
-                                    ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .w(px(120.))
-                                        .text_sm()
-                                        .text_color(p.muted_fg)
-                                        .child(self.tr("主题", "Theme")),
-                                )
-                                .child(
-                                    button_group(&p).children(
-                                        [
-                                            (ThemeMode::System, self.tr("跟随系统", "System")),
-                                            (ThemeMode::Light, self.tr("浅色", "Light")),
-                                            (ThemeMode::Dark, self.tr("深色", "Dark")),
-                                        ]
-                                        .into_iter()
-                                        .map(|(mode, label)| {
-                                            let selected = settings.theme == mode;
-                                            button_group_item(
-                                                &p,
-                                                SharedString::from(format!("theme-{:?}", mode)),
-                                                label,
-                                                selected,
-                                            )
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.service.set_theme(mode);
-                                                match mode {
-                                                    ThemeMode::Light => {
-                                                        crate::window_effects::set_follow_system(
-                                                            false,
-                                                        );
-                                                        Theme::change(
-                                                            ComponentThemeMode::Light,
-                                                            Some(window),
-                                                            cx,
-                                                        );
-                                                    }
-                                                    ThemeMode::Dark => {
-                                                        crate::window_effects::set_follow_system(
-                                                            false,
-                                                        );
-                                                        Theme::change(
-                                                            ComponentThemeMode::Dark,
-                                                            Some(window),
-                                                            cx,
-                                                        );
-                                                    }
-                                                    ThemeMode::System => {
-                                                        crate::window_effects::sync_system_appearance(
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    }
-                                                }
-                                                // Applying a theme rewrites the root surface
-                                                // color; keep it clear so the backdrop shows.
-                                                crate::window_effects::refresh_all(
-                                                    this.service.settings().backdrop,
-                                                    cx,
-                                                );
-                                                this.sync(cx);
-                                            }))
-                                        }),
-                                    ),
-                                ),
-                        )
-                        .child({
-                            let backdrop_tip = self.tr(
-                                "同时应用到主窗口和托盘浮窗；系统不支持时使用纯色背景。",
-                                "Applies to both windows. Uses a solid background when unavailable.",
-                            );
-                            let label_tip = backdrop_tip.clone();
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .id("backdrop-label")
-                                        .w(px(120.))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .text_sm()
-                                        .text_color(p.muted_fg)
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(label_tip.clone()).build(window, cx)
-                                        })
-                                        .child(self.tr("窗口材质", "Backdrop"))
-                                        .child(
-                                            Icon::new(IconName::Info)
-                                                .size(px(12.))
-                                                .text_color(p.muted_fg.opacity(0.75)),
-                                        ),
-                                )
-                                .child(
-                                    button_group(&p).children(
-                                        backdrop_choices().into_iter().map(|(style, zh, en)| {
-                                            let selected = settings.backdrop == style;
-                                            button_group_item(
-                                                &p,
-                                                SharedString::from(format!("backdrop-{style:?}")),
-                                                self.tr(zh, en),
-                                                selected,
-                                            )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.service.set_backdrop(style);
-                                                crate::window_effects::refresh_all(
-                                                    this.service.settings().backdrop,
-                                                    cx,
-                                                );
-                                                this.sync(cx);
-                                            }))
-                                        }),
-                                    ),
-                                )
-                        })
-                        .child({
-                            let core_tip = self.tr(
-                                "修改 Core 后需重启方可生效",
-                                "Restart required after changing core",
-                            );
-                            let label_tip = core_tip.clone();
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .id("core-label")
-                                        .w(px(120.))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .text_sm()
-                                        .text_color(p.muted_fg)
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(label_tip.clone()).build(window, cx)
-                                        })
-                                        .child(self.tr("Core", "Core"))
-                                        .child(
-                                            Icon::new(IconName::Info)
-                                                .size(px(12.))
-                                                .text_color(p.muted_fg.opacity(0.75)),
-                                        ),
-                                )
-                                .child(
-                                    button_group(&p).children(
-                                        CoreKind::all().into_iter().map(|core| {
-                                            let selected = settings.core == core;
-                                            button_group_item(
-                                                &p,
-                                                SharedString::from(format!("core-{core:?}")),
-                                                core.display_name(),
-                                                selected,
-                                            )
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.service.set_core(core);
-                                                this.sync(cx);
-                                            }))
-                                        }),
-                                    ),
-                                )
-                        }),
-                )
-                .child(divider(&p))
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .h(px(32.))
-                                .flex()
-                                .items_center()
-                                .flex_shrink_0()
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("网络", "Network")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .items_center()
-                                .gap_x_6()
-                                .gap_y_2()
-                                .child(
-                                    settings_toggle(
-                                        "allow-lan",
-                                        self.tr("允许局域网连接", "Allow LAN"),
-                                        settings.allow_lan,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.allow_lan = *checked
-                                            });
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    settings_toggle("tun", "TUN", settings.tun_enabled).on_change(
-                                        cx.listener(
-                                            |this, checked, _, cx| {
-                                                this.service.set_tun_enabled(*checked);
-                                                this.sync(cx);
-                                            },
-                                        ),
-                                    ),
-                                )
-                                .child(settings_toggle("tun-strict-route", self.tr("TUN 严格路由", "TUN strict route"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.tun_strict_route = *checked); })))
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .h(px(32.))
-                                .flex()
-                                .items_center()
-                                .flex_shrink_0()
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("代理", "Proxy")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .items_center()
-                                .gap_x_6()
-                                .gap_y_2()
-                                .child(
-                                    settings_toggle(
-                                        "system-proxy",
-                                        self.tr("系统代理", "System proxy"),
-                                        settings.system_proxy,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, _| {
-                                            this.service.set_system_proxy(*checked);
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    settings_toggle("pac", "PAC", settings.pac_enabled).on_change(
-                                        cx.listener(
-                                            |this, checked, _, cx| {
-                                                this.modify_settings(cx, |s| {
-                                                    s.pac_enabled = *checked
-                                                });
-                                                this.service.reapply_system_proxy();
-                                                cx.notify();
-                                            },
-                                        ),
-                                    ),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .h(px(32.))
-                                .flex()
-                                .items_center()
-                                .flex_shrink_0()
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("启动", "Startup")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .items_center()
-                                .gap_x_6()
-                                .gap_y_2()
-                                .child(
-                                    settings_toggle(
-                                        "autostart",
-                                        self.tr("登录时启动应用", "Launch app at login"),
-                                        settings.autostart,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.autostart = *checked
-                                            });
-                                        },
-                                    )),
-                                )
-                                .child(settings_toggle("autostart-proxy", self.tr("应用启动时开启代理", "Start proxy when app starts"), settings.startup_proxy)
-                                    .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.startup_proxy = *checked); })))
-                                .child(settings_toggle("system-notifications", self.tr("系统通知", "System notifications"), settings.system_notifications)
-                                    .on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.system_notifications = *checked); })))
-                                .children(self.snapshot.mesh.profiles.iter().filter(|_| self.snapshot.mesh.supported).map(|profile| {
-                                    let id = profile.id.clone(); let provider = profile.provider;
-                                    let selected = settings.mesh_startup_profile(provider) == Some(id.as_str());
-                                    settings_toggle(SharedString::from(format!("login-mesh-{id}")),
-                                        format!("{} {} · {}", self.tr("应用启动时连接", "Connect on app launch"), provider.label(), profile.name), selected)
-                                        .on_change(cx.listener(move |this, checked: &bool, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.set_mesh_startup_profile(provider, &id, *checked);
-                                            });
-                                        }))
-                                }))
-                                .child(
-                                    settings_toggle(
-                                        "watchdog",
-                                        self.tr("崩溃自动重启", "Auto-restart on crash"),
-                                        settings.watchdog,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.watchdog = *checked
-                                            });
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    settings_toggle(
-                                        "start-minimized",
-                                        self.tr("启动时最小化", "Start minimized"),
-                                        settings.start_minimized,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.start_minimized = *checked
-                                            });
-                                        },
-                                    )),
-                                ),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .h(px(32.))
-                                .flex()
-                                .items_center()
-                                .flex_shrink_0()
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("窗口", "Window")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .items_center()
-                                .gap_x_6()
-                                .gap_y_2()
-                                .child(
-                                    settings_toggle(
-                                        "minimize-to-tray",
-                                        self.tr("最小化到托盘", "Minimize to tray"),
-                                        settings.minimize_to_tray,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.minimize_to_tray = *checked
-                                            });
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    settings_toggle(
-                                        "close-to-tray",
-                                        self.tr("关闭到托盘", "Close to tray"),
-                                        settings.close_to_tray,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.close_to_tray = *checked
-                                            });
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    settings_toggle(
-                                        "show-tray-speed",
-                                        self.tr(
-                                            if cfg!(target_os = "macos") {
-                                                "菜单栏显示网速"
-                                            } else {
-                                                "托盘显示网速"
-                                            },
-                                            if cfg!(target_os = "macos") {
-                                                "Show speed in menu bar"
-                                            } else {
-                                                "Show speed in tray"
-                                            },
-                                        ),
-                                        settings.show_tray_speed,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.modify_settings(cx, |s| {
-                                                s.show_tray_speed = *checked
-                                            });
-                                        },
-                                    )),
-                                ),
-                        ),
-                )
-                .when(!crate::tray::available(), |d| {
-                    d.child(div().text_xs().text_color(p.warning).child(self.tr(
-                        "当前环境不支持系统托盘，关闭窗口将直接退出",
-                        "System tray is unavailable in the current environment; closing the window will quit the app",
-                    )))
-                })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("混合端口", "Mixed port")),
-                        )
-                        .child(div().w(px(120.)).child(Input::new(&self.port_input)))
-                        .child(
-                            Button::new("save-ports")
-                                .compact()
-                                .primary()
-                                .label(self.tr("应用", "Apply"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let raw = this.port_input.read(cx).value().to_string();
-                                    match raw.trim().parse::<u16>() {
-                                        Ok(port) if port > 0 => {
-                                            this.modify_settings(cx, |s| s.mixed_port = port);
-                                        }
-                                        _ => this.service.toast(
-                                            xross_core::service::ToastLevel::Warning,
-                                            "端口必须是 1-65535",
-                                        ),
-                                    }
-                                })),
-                        )
-                        .when(settings.core == CoreKind::Xray, |d| {
-                            d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                                "Xray 模式下：SOCKS 监听此端口，HTTP 监听端口 +1",
-                                "Xray has no mixed inbound: SOCKS uses this port, HTTP uses +1",
-                            )))
-                        }),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            div()
-                                .w(px(120.))
-                                .text_sm()
-                                .text_color(p.muted_fg)
-                                .child(self.tr("日志级别", "Log level")),
-                        )
-                        .child(
-                            button_group(&p).children(
-                                [
-                                    (LogLevel::Debug, "Debug"),
-                                    (LogLevel::Info, "Info"),
-                                    (LogLevel::Warn, "Warn"),
-                                    (LogLevel::Error, "Error"),
-                                ]
-                                .into_iter()
-                                .map(|(level, label)| {
-                                    let selected = settings.log_level == level;
-                                    button_group_item(
-                                        &p,
-                                        SharedString::from(format!("set-log-{label}")),
-                                        label,
-                                        selected,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.modify_settings(cx, |s| s.log_level = level);
-                                    }))
-                                }),
-                            ),
-                        ),
+        // Appearance uses controlled radio groups and keeps native material handling.
+        let appearance = card(&p)
+            .child(section_title(
+                &p,
+                self.tr("外观", "Appearance"),
+                self.tr(
+                    "语言、主题与窗口材质",
+                    "Language, theme and window material",
                 ),
-        );
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("语言", "Language"),
+                "",
+                ChoiceGroup::new(
+                    "language",
+                    vec!["简体中文".into(), "English".into()],
+                    usize::from(settings.language == Language::En),
+                )
+                .on_change(cx.listener(|this, index: &usize, window, cx| {
+                    this.service.set_language(if *index == 0 {
+                        Language::Zh
+                    } else {
+                        Language::En
+                    });
+                    this.sync(cx);
+                    this.localize_inputs(window, cx);
+                })),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("主题", "Theme"),
+                "",
+                ChoiceGroup::new(
+                    "theme",
+                    vec![
+                        self.tr("跟随系统", "System"),
+                        self.tr("浅色", "Light"),
+                        self.tr("深色", "Dark"),
+                    ],
+                    match settings.theme {
+                        ThemeMode::System => 0,
+                        ThemeMode::Light => 1,
+                        ThemeMode::Dark => 2,
+                    },
+                )
+                .on_change(cx.listener(|this, index: &usize, window, cx| {
+                    let mode = [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark][*index];
+                    this.service.set_theme(mode);
+                    match mode {
+                        ThemeMode::System => {
+                            crate::window_effects::sync_system_appearance(window, cx)
+                        }
+                        _ => {
+                            crate::window_effects::set_follow_system(false);
+                            Theme::change(
+                                if mode == ThemeMode::Light {
+                                    ComponentThemeMode::Light
+                                } else {
+                                    ComponentThemeMode::Dark
+                                },
+                                Some(window),
+                                cx,
+                            );
+                        }
+                    }
+                    crate::window_effects::make_surface_translucent(cx);
+                    crate::window_effects::refresh_all(this.service.settings().backdrop, cx);
+                    this.sync(cx);
+                })),
+            ))
+            .when(cfg!(any(windows, target_os = "macos")), |card| {
+                let choices = backdrop_choices();
+                let selected = choices
+                    .iter()
+                    .position(|(style, _, _)| *style == settings.backdrop)
+                    .unwrap_or(0);
+                card.child(setting_row(
+                    &p,
+                    self.tr("窗口材质", "Backdrop"),
+                    self.tr(
+                        "同时应用到主窗口和浮窗",
+                        "Applies to the main window and popup",
+                    ),
+                    ChoiceGroup::new(
+                        "backdrop",
+                        choices.iter().map(|(_, zh, en)| self.tr(zh, en)).collect(),
+                        selected,
+                    )
+                    .on_change(cx.listener(
+                        move |this, index: &usize, _, cx| {
+                            this.service.set_backdrop(choices[*index].0);
+                            crate::window_effects::refresh_all(
+                                this.service.settings().backdrop,
+                                cx,
+                            );
+                            this.sync(cx);
+                        },
+                    )),
+                ))
+            });
+        body = body.child(appearance);
+
+        let port_raw = self.port_input.read(cx).value().to_string();
+        let port_dirty = port_raw.trim() != settings.mixed_port.to_string();
+        let port_valid = valid_port(&port_raw);
+        let network_card = card(&p)
+            .child(section_title(&p, self.tr("网络与代理", "Network & proxy"), self.tr("连接范围、流量接管与本地端口", "Access scope, traffic routing and local ports")))
+            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重启", "Allow devices on your LAN to use this proxy; restart required"),
+                toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
+            .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重启", "Route system traffic through the proxy; requires the privilege helper and restart"),
+                toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
+            .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重启", "Restrict traffic from bypassing TUN; restart required"),
+                toggle("tun-strict-route", self.tr("启用严格路由", "Enable strict routing"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.tun_strict_route = *checked)))))
+            .child(setting_row(&p, self.tr("系统代理", "System proxy"), self.tr("供遵循系统代理设置的应用使用", "For applications that use the system proxy settings"),
+                toggle("system-proxy", self.tr("启用系统代理", "Enable system proxy"), settings.system_proxy).on_change(cx.listener(|this, checked, _, _| this.service.set_system_proxy(*checked)))))
+            .child(setting_row(&p, "PAC", self.tr("根据路由规则自动选择代理", "Choose the proxy automatically using routing rules"),
+                toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
+            .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重启", "Apply after editing; restart required"),
+                div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.port_input)))
+                    .when(port_dirty, |d| d.child(Button::new("save-ports").primary().label(self.tr("应用", "Apply")).disabled(port_valid.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| { if let Some(port) = valid_port(this.port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.mixed_port = port); } }))))))
+            .when(port_dirty && port_valid.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text).child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))
+            .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))));
+
+        let startup_card = card(&p)
+            .child(section_title(
+                &p,
+                self.tr("启动与窗口", "Startup & window"),
+                self.tr(
+                    "启动行为、常驻入口与通知",
+                    "Startup behavior, background access and notifications",
+                ),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("登录启动", "Login"),
+                "",
+                toggle(
+                    "autostart",
+                    self.tr("登录时启动应用", "Launch at login"),
+                    settings.autostart,
+                )
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.modify_settings(cx, |s| s.autostart = *checked)
+                })),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("启动代理", "Proxy startup"),
+                "",
+                toggle(
+                    "autostart-proxy",
+                    self.tr("应用启动时开启代理", "Start proxy on app launch"),
+                    settings.startup_proxy,
+                )
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.modify_settings(cx, |s| s.startup_proxy = *checked)
+                })),
+            ))
+            .children(
+                self.snapshot
+                    .mesh
+                    .profiles
+                    .iter()
+                    .filter(|_| self.snapshot.mesh.supported)
+                    .map(|profile| {
+                        let id = profile.id.clone();
+                        let provider = profile.provider;
+                        setting_row(
+                            &p,
+                            self.tr("启动组网", "Mesh startup"),
+                            "",
+                            toggle(
+                                SharedString::from(format!("login-mesh-{id}")),
+                                format!("{} · {}", provider.label(), profile.name),
+                                settings.mesh_startup_profile(provider) == Some(id.as_str()),
+                            )
+                            .on_change(cx.listener(
+                                move |this, checked, _, cx| {
+                                    this.modify_settings(cx, |s| {
+                                        s.set_mesh_startup_profile(provider, &id, *checked)
+                                    })
+                                },
+                            )),
+                        )
+                    }),
+            )
+            .child(setting_row(
+                &p,
+                self.tr("启动窗口", "Launch window"),
+                "",
+                toggle(
+                    "start-minimized",
+                    self.tr("启动时最小化", "Start minimized"),
+                    settings.start_minimized,
+                )
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.modify_settings(cx, |s| s.start_minimized = *checked)
+                })),
+            ))
+            .when(crate::tray::available(), |d| {
+                d.child(setting_row(
+                    &p,
+                    self.tr("最小化", "Minimize"),
+                    "",
+                    toggle(
+                        "minimize-to-tray",
+                        self.tr(
+                            if cfg!(target_os = "macos") {
+                                "最小化到菜单栏"
+                            } else {
+                                "最小化到系统托盘"
+                            },
+                            if cfg!(target_os = "macos") {
+                                "Minimize to menu bar"
+                            } else {
+                                "Minimize to system tray"
+                            },
+                        ),
+                        settings.minimize_to_tray,
+                    )
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.modify_settings(cx, |s| s.minimize_to_tray = *checked)
+                    })),
+                ))
+                .child(setting_row(
+                    &p,
+                    self.tr("关闭窗口", "Close window"),
+                    "",
+                    toggle(
+                        "close-to-tray",
+                        self.tr(
+                            if cfg!(target_os = "macos") {
+                                "关闭到菜单栏"
+                            } else {
+                                "关闭到系统托盘"
+                            },
+                            if cfg!(target_os = "macos") {
+                                "Close to menu bar"
+                            } else {
+                                "Close to system tray"
+                            },
+                        ),
+                        settings.close_to_tray,
+                    )
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.modify_settings(cx, |s| s.close_to_tray = *checked)
+                    })),
+                ))
+                .child(setting_row(
+                    &p,
+                    self.tr("网速显示", "Traffic speed"),
+                    "",
+                    toggle(
+                        "show-tray-speed",
+                        self.tr(
+                            if cfg!(target_os = "macos") {
+                                "菜单栏显示网速"
+                            } else {
+                                "系统托盘显示网速"
+                            },
+                            if cfg!(target_os = "macos") {
+                                "Show speed in menu bar"
+                            } else {
+                                "Show speed in system tray"
+                            },
+                        ),
+                        settings.show_tray_speed,
+                    )
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.modify_settings(cx, |s| s.show_tray_speed = *checked)
+                    })),
+                ))
+            })
+            .child(setting_row(
+                &p,
+                self.tr("通知", "Notifications"),
+                "",
+                toggle(
+                    "system-notifications",
+                    self.tr("系统通知", "System notifications"),
+                    settings.system_notifications,
+                )
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.modify_settings(cx, |s| s.system_notifications = *checked)
+                })),
+            ));
 
         // Core & updates ------------------------------------------------
         let is_installing = self.snapshot.busy.iter().any(|b| b == "install");
         let is_checking_updates = self.snapshot.busy.iter().any(|b| b == "updates");
 
         let mut core_card = card(&p)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(section_title(
-                        &p,
-                        self.tr("Core 与更新", "Core & updates"),
-                        self.tr(
-                            "管理已安装的内核版本、检查组件更新与数据备份",
-                            "Manage installed core versions, check updates, and back up data",
-                        ),
-                    ))
-                    .child(
-                        Button::new("check-updates")
-                            .compact()
-                            .label(self.tr("检查更新", "Check updates"))
-                            .loading(is_checking_updates)
-                            .on_click(cx.listener(|this, _, _, _| {
-                                this.service.check_updates();
-                            })),
-                    ),
-            )
-            .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                "{}：{} / {}",
-                self.tr("当前平台", "Platform"),
-                platform.os,
-                platform.arch,
-            )));
+            .child(section_title(
+                &p,
+                self.tr("Core", "Core"),
+                self.tr(
+                    "内核选择、版本与运行选项",
+                    "Core selection, versions and runtime options",
+                ),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("内核", "Core"),
+                self.tr("需重启", "Restart required"),
+                ChoiceGroup::new(
+                    "core",
+                    CoreKind::all()
+                        .iter()
+                        .map(|c| c.display_name().into())
+                        .collect(),
+                    usize::from(settings.core == CoreKind::SingBox),
+                )
+                .on_change(cx.listener(|this, index: &usize, _, cx| {
+                    this.service.set_core(CoreKind::all()[*index]);
+                    this.sync(cx);
+                })),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("日志级别", "Log level"),
+                self.tr("需重启", "Restart required"),
+                ChoiceGroup::new(
+                    "log-level",
+                    vec!["Debug".into(), "Info".into(), "Warn".into(), "Error".into()],
+                    [
+                        LogLevel::Debug,
+                        LogLevel::Info,
+                        LogLevel::Warn,
+                        LogLevel::Error,
+                    ]
+                    .iter()
+                    .position(|l| *l == settings.log_level)
+                    .unwrap_or(1),
+                )
+                .on_change(cx.listener(|this, index: &usize, _, cx| {
+                    this.modify_settings(cx, |s| {
+                        s.log_level = [
+                            LogLevel::Debug,
+                            LogLevel::Info,
+                            LogLevel::Warn,
+                            LogLevel::Error,
+                        ][*index]
+                    })
+                })),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("故障恢复", "Recovery"),
+                "",
+                toggle(
+                    "watchdog",
+                    self.tr("崩溃自动重启", "Auto-restart on crash"),
+                    settings.watchdog,
+                )
+                .on_change(cx.listener(|this, checked, _, cx| {
+                    this.modify_settings(cx, |s| s.watchdog = *checked)
+                })),
+            ))
+            .child(divider(&p));
 
         for (idx, core) in [CoreKind::SingBox, CoreKind::Xray].into_iter().enumerate() {
             if idx > 0 {
@@ -692,6 +450,7 @@ impl AppView {
                     .child(
                         Button::new(SharedString::from(format!("install-{core:?}")))
                             .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                             .primary()
                             .label(self.tr("下载 / 更新", "Download / update"))
                             .loading(is_installing && settings.core == core)
@@ -771,6 +530,7 @@ impl AppView {
                                                 "use-version-{core:?}-{version}"
                                             )))
                                             .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .label(self.tr("使用", "Use"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.service.set_active_version(core, &version);
@@ -785,12 +545,19 @@ impl AppView {
                                             )),
                                             IconName::Trash,
                                             self.tr("删除此版本", "Delete version"),
-                                            &p,
+                                            cx,
                                         )
                                         .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.service.remove_binary(core, &delete_version);
-                                                this.sync(cx);
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.run_command(
+                                                    super::menus::Command::DeleteVersion(
+                                                        core,
+                                                        delete_version.clone(),
+                                                    ),
+                                                    false,
+                                                    window,
+                                                    cx,
+                                                );
                                             }),
                                         ),
                                     ),
@@ -803,39 +570,65 @@ impl AppView {
         }
 
         body = body.child(
-            core_card
+            core_card.child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(Input::new(&self.endpoint_input)))
+                    .child(
+                        Button::new("use-custom-path")
+                            .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                            .label(self.tr("使用自定义路径", "Use custom path"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let path = this.endpoint_input.read(cx).value().trim().to_string();
+                                let core = this.snapshot.settings.core;
+                                if path.is_empty() {
+                                    this.service.set_binary_override(core, None);
+                                } else {
+                                    this.service.set_binary_override(core, Some(path));
+                                }
+                                this.sync(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("clear-custom-path")
+                            .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                            .ghost()
+                            .label(self.tr("清除覆盖", "Clear override"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let core = this.snapshot.settings.core;
+                                this.service.set_binary_override(core, None);
+                                this.sync(cx);
+                            })),
+                    ),
+            ),
+        );
+        body = body.child(network_card).child(startup_card);
+        body = body.child(
+            card(&p)
                 .child(
                     div()
                         .flex()
-                        .gap_2()
                         .items_center()
-                        .child(div().flex_1().child(Input::new(&self.endpoint_input)))
+                        .justify_between()
+                        .child(section_title(
+                            &p,
+                            self.tr("更新与备份", "Updates & backups"),
+                            self.tr(
+                                "检查更新与保存配置备份",
+                                "Check for updates and back up configuration",
+                            ),
+                        ))
                         .child(
-                            Button::new("use-custom-path")
-                                .compact()
-                                .label(self.tr("使用自定义路径", "Use custom path"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let path =
-                                        this.endpoint_input.read(cx).value().trim().to_string();
-                                    let core = this.snapshot.settings.core;
-                                    if path.is_empty() {
-                                        this.service.set_binary_override(core, None);
-                                    } else {
-                                        this.service.set_binary_override(core, Some(path));
-                                    }
-                                    this.sync(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("clear-custom-path")
-                                .compact()
-                                .ghost()
-                                .label(self.tr("清除覆盖", "Clear override"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let core = this.snapshot.settings.core;
-                                    this.service.set_binary_override(core, None);
-                                    this.sync(cx);
-                                })),
+                            Button::new("check-updates")
+                                .label(self.tr("检查更新", "Check updates"))
+                                .loading(is_checking_updates)
+                                .on_click(
+                                    cx.listener(|this, _, _, _| this.service.check_updates()),
+                                ),
                         ),
                 )
                 .child(divider(&p))
@@ -871,6 +664,7 @@ impl AppView {
                                             .child(
                                                 Button::new("install-candidate")
                                                     .compact()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                                     .primary()
                                                     .label(self.tr("安装", "Install"))
                                                     .on_click(cx.listener(move |this, _, _, _| {
@@ -908,6 +702,7 @@ impl AppView {
                                             .child(
                                                 Button::new("open-release")
                                                     .compact()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                                     .label(self.tr("打开下载页", "Open download"))
                                                     .on_click(cx.listener(move |this, _, _, _| {
                                                         this.service.open_url(&url);
@@ -937,6 +732,7 @@ impl AppView {
                         .child(
                             Button::new("backup-db")
                                 .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .label(self.tr("备份数据库", "Backup database"))
                                 .on_click(cx.listener(|this, _, _, _| {
                                     let _ = this.service.backup_database();
@@ -945,6 +741,7 @@ impl AppView {
                         .child(
                             Button::new("export-backup")
                                 .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .label(self.tr("导出 JSON 备份", "Export JSON"))
                                 .on_click(cx.listener(|this, _, _, _| {
                                     let _ = this.service.export_backup();
@@ -953,6 +750,7 @@ impl AppView {
                         .child(
                             Button::new("open-data")
                                 .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .ghost()
                                 .label(self.tr("打开数据目录", "Open data dir"))
                                 .on_click(cx.listener(|this, _, _, _| {
@@ -1072,7 +870,7 @@ impl AppView {
                         .when(platform.helper_supported && !platform.helper_installed, |d| {
                             d.child(
                                 Button::new("install-helper")
-                                    .compact()
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
                                     .label(self.tr("安装并启动", "Install & start"))
                                     .loading(helper_busy)
@@ -1088,7 +886,7 @@ impl AppView {
                             |d| {
                                 d.child(
                                     Button::new("start-helper")
-                                        .compact()
+                                        .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
                                         .label(self.tr("启动", "Start"))
                                         .loading(helper_busy)
@@ -1101,7 +899,7 @@ impl AppView {
                         .when(platform.helper_supported && platform.helper_installed, |d| {
                             d.child(
                                 Button::new("restart-helper")
-                                    .compact()
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .label(self.tr("重启", "Restart"))
                                     .loading(helper_busy)
                                     .on_click(cx.listener(|this, _, _, _| {
@@ -1110,7 +908,7 @@ impl AppView {
                             )
                             .child(
                                 Button::new("uninstall-helper")
-                                    .compact()
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .danger()
                                     .label(self.tr("卸载", "Uninstall"))
                                     .loading(helper_busy)
@@ -1121,7 +919,7 @@ impl AppView {
                         })
                         .child(
                             Button::new("refresh-doctor")
-                                .compact()
+                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .loading(doctor_busy || helper_busy)
                                 .label(self.tr("重新检查", "Re-check"))
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -1204,16 +1002,65 @@ impl AppView {
     }
 }
 
-/// Keep each setting in an aligned column while allowing whole switches to wrap.
-fn settings_toggle(
-    id: impl Into<ElementId>,
+/// A single settings row, with descriptions below the aligned control.
+fn setting_row(
+    p: &super::theme::Palette,
     label: impl Into<SharedString>,
-    checked: bool,
-) -> gpui_kit::component::switch::Switch {
-    toggle(id, label, checked)
-        .w(px(216.))
-        .min_h(px(32.))
-        .flex_shrink_0()
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    let description = description.into();
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .py_1()
+        .child(
+            div()
+                .w(px(super::theme::SETTING_LABEL_WIDTH))
+                .h(px(super::theme::CONTROL_HEIGHT))
+                .flex()
+                .items_center()
+                .flex_shrink_0()
+                .text_sm()
+                .text_color(p.muted_fg)
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .flex_1()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .min_h(px(super::theme::CONTROL_HEIGHT))
+                        .child(control),
+                )
+                .when(!description.is_empty(), |d| {
+                    d.child(div().text_xs().text_color(p.muted_fg).child(description))
+                }),
+        )
+}
+
+fn valid_port(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok().filter(|port| *port > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn port_validation_rejects_empty_zero_and_overflow() {
+        for raw in ["", "0", "65536", "-1", "abc"] {
+            assert_eq!(super::valid_port(raw), None);
+        }
+        assert_eq!(super::valid_port(" 7890 "), Some(7890));
+        assert_eq!(super::valid_port("65535"), Some(65535));
+    }
 }
 
 /// Offer native materials only on the platforms that implement them.

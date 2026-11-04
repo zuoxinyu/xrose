@@ -39,6 +39,28 @@ impl DnsPreset {
     }
 }
 
+/// Identify resolver policy independently from the enable switch and Hosts.
+pub fn detect_preset(config: &DnsConfig) -> Option<DnsPreset> {
+    DnsPreset::all().into_iter().find(|preset| {
+        let mut expected = DnsConfig::default();
+        apply_preset(&mut expected, *preset);
+        expected.enabled = config.enabled;
+        expected.hosts = config.hosts.clone();
+        expected == *config
+    })
+}
+
+/// Referenced resolvers must be detached before deletion.
+pub fn deletion_reason(config: &DnsConfig, tag: &str) -> Option<&'static str> {
+    if config.final_server.as_deref() == Some(tag) {
+        Some("此服务器是默认 DNS，请先选择其他默认服务器")
+    } else if config.fake_ip && config.servers.iter().any(|s| s.tag == tag && s.is_fakeip()) {
+        Some("此服务器正在被 Fake-IP 使用，请先关闭 Fake-IP")
+    } else {
+        None
+    }
+}
+
 pub fn apply_preset(config: &mut DnsConfig, preset: DnsPreset) {
     match preset {
         DnsPreset::SplitFakeIp => {
@@ -151,6 +173,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recognizes_all_presets_but_not_custom_resolvers() {
+        for preset in DnsPreset::all() {
+            let mut config = DnsConfig::default();
+            apply_preset(&mut config, preset);
+            config.enabled = false;
+            config
+                .hosts
+                .insert("host.example".into(), vec!["192.0.2.1".into()]);
+            assert_eq!(detect_preset(&config), Some(preset));
+            config.servers.last_mut().unwrap().address = "192.0.2.2".into();
+            assert_eq!(detect_preset(&config), None);
+        }
+    }
+
+    #[test]
+    fn protects_default_and_active_fakeip_resolvers() {
+        let mut config = DnsConfig::default();
+        assert!(deletion_reason(&config, "local").is_some());
+        assert!(deletion_reason(&config, "fakeip").is_some());
+        assert!(deletion_reason(&config, "remote").is_none());
+        config.fake_ip = false;
+        assert!(deletion_reason(&config, "fakeip").is_none());
+    }
+
+    #[test]
     fn default_config_is_valid() {
         let config = DnsConfig::default();
         assert!(validate(&config).is_empty(), "{:?}", validate(&config));
@@ -177,9 +224,11 @@ mod tests {
         assert_eq!(config.servers.len(), 1);
         assert!(!config.fake_ip);
         apply_preset(&mut config, DnsPreset::Encrypted);
-        assert!(config
-            .servers
-            .iter()
-            .all(|s| s.server_type == DnsServerType::Https));
+        assert!(
+            config
+                .servers
+                .iter()
+                .all(|s| s.server_type == DnsServerType::Https)
+        );
     }
 }

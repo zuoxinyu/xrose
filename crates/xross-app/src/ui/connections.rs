@@ -9,17 +9,19 @@ use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::diagnostics::{
-    connection_test_target, ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget,
+    ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget, connection_test_target,
 };
 use xross_core::model::{CoreKind, RouteAction, RouteActionKind};
 use xross_core::runtime::ClashConnection;
 use xross_core::service::ToastLevel;
 use xross_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
-use xross_core::util::{format_bytes, format_speed};
+use xross_core::util::format_bytes;
 
-use super::theme::{palette, Palette};
+use super::menus::{self, MenuTarget};
+use super::theme::{Palette, palette};
 use super::widgets::*;
 use super::{AppView, Page};
+use gpui_kit::component::menu::DropdownMenu;
 
 const CONNECTIONS_PAGE_STEP: usize = 50;
 
@@ -76,98 +78,255 @@ impl AppView {
             .busy
             .iter()
             .any(|key| key == "recording-export");
-        let down_speed = self.snapshot.runtime.down_speed;
-        let up_speed = self.snapshot.runtime.up_speed;
-        let down_total = self.snapshot.runtime.down_total;
-        let up_total = self.snapshot.runtime.up_total;
         let active_conn_len = self.snapshot.runtime.connections.len();
 
         let header = card(&p)
-            .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
-                .child(section_title(&p, self.tr("实时连接", "Live connections"), self.tr("查看请求发起方、规则与出站，录制后可复盘已结束的连接", "Inspect sources, rules and outbounds; record to review closed connections")))
-                .child(div().flex().items_center().gap_2().flex_wrap()
-                    .child(Button::new("record-connections").compact().when(recording_active, |b| b.danger())
-                        .icon(if recording_active { IconName::Square } else { IconName::Play })
-                        .label(if recording_active { self.tr("停止录制", "Stop recording") } else { self.tr("开始录制", "Start recording") })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            if this.snapshot.recording.active { this.service.stop_recording(); } else { this.service.start_recording(); }
-                            this.sync(cx);
-                        })))
-                    .child(Button::new("export-recording").compact().label(self.tr("导出录制", "Export recording"))
-                        .disabled(!recording_started).loading(export_busy)
-                        .on_click(cx.listener(|this, _, _, _| this.service.export_recording())))
-                    .child(Button::new("refresh-connections").compact().label(self.tr("刷新", "Refresh")).disabled(!running || !supported)
-                        .on_click(cx.listener(|this, _, _, _| this.service.refresh_connections())))
-                    .child(Button::new("kill-all").compact().danger().label(self.tr("全部断开", "Close all")).disabled(!running || !supported)
-                        .on_click(cx.listener(|this, _, _, _| this.service.kill_all_connections())))))
-            .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
-                .child(div().flex().flex_col().gap_1()
-                    .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).text_color(p.fg).child(format!("↓ {}   ↑ {}", format_speed(down_speed), format_speed(up_speed))))
-                    .child(div().text_xs().text_color(p.muted_fg).child(format!("{} {} · {} {}", self.tr("累计下行", "Downloaded"), format_bytes(down_total), self.tr("累计上行", "Uploaded"), format_bytes(up_total)))))
-                .child(pill(format!("{active_conn_len} {}", self.tr("活动连接", "active")), p.primary, p.primary.opacity(0.12))))
-            .child(self.sparkline(&p))
-            .child(div().flex().items_center().gap_2().flex_wrap()
-                .children([(ConnectionFilterKind::All, self.tr("全部", "All")), (ConnectionFilterKind::Domain, self.tr("域名", "Domain")), (ConnectionFilterKind::Ip, self.tr("IP", "IP")), (ConnectionFilterKind::Process, self.tr("进程", "Process"))].into_iter().enumerate().map(|(i, (kind, label))| {
-                    chip(format!("connection-filter-{i}"), label, self.connection_filter == kind, &p)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.connection_filter = kind;
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .flex_wrap()
+                    .child(section_title(
+                        &p,
+                        self.tr("连接", "Connections"),
+                        self.tr(
+                            "查看连接详情，录制后可查看已结束的连接",
+                            "Inspect connections and record them for later review",
+                        ),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("record-connections")
+                                    .label(if recording_active {
+                                        self.tr("停止录制", "Stop recording")
+                                    } else {
+                                        self.tr("开始录制", "Start recording")
+                                    })
+                                    .icon(if recording_active {
+                                        IconName::Square
+                                    } else {
+                                        IconName::Play
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.snapshot.recording.active {
+                                            this.service.stop_recording();
+                                        } else {
+                                            this.service.start_recording();
+                                        }
+                                        this.sync(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("export-recording")
+                                    .label(self.tr("导出录制", "Export recording"))
+                                    .disabled(!recording_started)
+                                    .loading(export_busy)
+                                    .on_click(
+                                        cx.listener(|this, _, _, _| {
+                                            this.service.export_recording()
+                                        }),
+                                    ),
+                            )
+                            .child(
+                                more_button(
+                                    "connection-actions",
+                                    self.tr("连接操作", "Connection actions"),
+                                )
+                                .dropdown_menu(menus::builder(
+                                    cx.entity().downgrade(),
+                                    MenuTarget::Connections,
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        ChoiceGroup::new(
+                            "connection-view",
+                            vec![
+                                self.tr("实时", "Live"),
+                                format!("{} {recorded_conn_len}", self.tr("录制", "Recorded"))
+                                    .into(),
+                            ],
+                            usize::from(self.show_recorded_connections),
+                        )
+                        .on_change(cx.listener(|this, index, _, cx| {
+                            this.show_recorded_connections = *index == 1;
                             this.connections_limit = CONNECTIONS_PAGE_STEP;
                             cx.notify();
-                        }))
-                }))
-                .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.connection_search)))
-                .child(Button::new("clear-connection-filter").compact().ghost().label(self.tr("重置", "Reset"))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.connection_search.update(cx, |input, cx| input.set_value("", window, cx));
-                        this.connection_filter = ConnectionFilterKind::All;
-                        this.connections_limit = CONNECTIONS_PAGE_STEP;
-                        cx.notify();
-                    }))))
-            .child(div().flex().items_center().gap_2().flex_wrap()
-                .child(chip("connection-live", self.tr("实时", "Live"), !self.show_recorded_connections, &p)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_recorded_connections = false;
-                        this.connections_limit = CONNECTIONS_PAGE_STEP;
-                        cx.notify();
-                    })))
-                .child(chip("connection-recorded", format!("{} {recorded_conn_len}", self.tr("录制", "Recorded")), self.show_recorded_connections, &p)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_recorded_connections = true;
-                        this.connections_limit = CONNECTIONS_PAGE_STEP;
-                        cx.notify();
-                    })))
-                .child(div().text_xs().text_color(if recording_active { p.danger } else { p.muted_fg }).child(format!("{} · {recorded_trace_len} {} · {count} / {total}", if recording_active { self.tr("录制中", "Recording") } else { self.tr("录制已停止", "Recording off") }, self.tr("次测试", "tests"))))
-                .when(recording_started, |d| d.child(Button::new("clear-recording").compact().ghost().label(self.tr("清空录制", "Clear recording"))
-                    .on_click(cx.listener(|this, _, _, cx| { this.service.clear_recording(); this.sync(cx); })))))
-            .when(recording_started, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅保留本次会话元数据，不采集正文；最多 2000 条连接 / 100 次测试，新录制替换旧记录。短于采样间隔的连接可能遗漏。", "Session metadata only, no bodies; up to 2,000 connections / 100 tests. A new recording replaces the previous one. Short-lived connections may be missed."))))
-            .when(evicted_conns + evicted_traces > 0, |d| d.child(div().text_xs().text_color(p.warning).child(format!("{} {evicted_conns} / {evicted_traces}", self.tr("容量限制已移除旧连接/测试：", "Older connections/tests evicted:")))));
+                        })),
+                    )
+                    .child(pill(
+                        format!("{active_conn_len} {}", self.tr("活动连接", "active")),
+                        p.primary,
+                        p.accent,
+                    ))
+                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                        "{} · {recorded_trace_len} {} · {count} / {total}",
+                        if recording_active {
+                            self.tr("录制中", "Recording")
+                        } else {
+                            self.tr("录制已停止", "Recording off")
+                        },
+                        self.tr("次测试", "tests")
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
+                    .child(
+                        ChoiceGroup::new(
+                            "connection-filter",
+                            vec![
+                                self.tr("全部", "All"),
+                                self.tr("域名", "Domain"),
+                                self.tr("IP", "IP"),
+                                self.tr("进程", "Process"),
+                            ],
+                            [
+                                ConnectionFilterKind::All,
+                                ConnectionFilterKind::Domain,
+                                ConnectionFilterKind::Ip,
+                                ConnectionFilterKind::Process,
+                            ]
+                            .iter()
+                            .position(|kind| *kind == filter)
+                            .unwrap_or(0),
+                        )
+                        .on_change(cx.listener(|this, index, _, cx| {
+                            this.connection_filter = [
+                                ConnectionFilterKind::All,
+                                ConnectionFilterKind::Domain,
+                                ConnectionFilterKind::Ip,
+                                ConnectionFilterKind::Process,
+                            ][*index];
+                            this.connections_limit = CONNECTIONS_PAGE_STEP;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(super::theme::FORM_FIELD_WIDTH))
+                            .child(Input::new(&self.connection_search)),
+                    )
+                    .child(
+                        Button::new("clear-connection-filter")
+                            .ghost()
+                            .label(self.tr("重置", "Reset"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connection_search
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                this.connection_filter = ConnectionFilterKind::All;
+                                this.connections_limit = CONNECTIONS_PAGE_STEP;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .when(recording_started, |d| {
+                d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                    "仅保留本次会话的连接与测试信息，不采集正文。",
+                    "Stores connection and test metadata for this session, without message bodies.",
+                )))
+            })
+            .when(evicted_conns + evicted_traces > 0, |d| {
+                d.child(div().text_xs().text_color(p.warn_text).child(self.tr(
+                    "容量已满，较早的记录已移除。",
+                    "Capacity reached; older records have been removed.",
+                )))
+            });
 
         let shown = visible.len();
         let mut rows = div().flex().flex_col().gap_2().w_full();
-        if !self.show_recorded_connections && (!running || !supported) {
-            rows = rows.child(empty_hint(
-                &p,
-                if !running {
+        if !self.show_recorded_connections && !supported {
+            rows = rows.child(
+                empty_state(
+                    &p,
+                    IconName::Info,
+                    self.tr("当前 Core 不提供连接列表", "Connection list unavailable"),
                     self.tr(
-                        "core 未运行，启动后可查看连接；可在「测试」页面发起链路探测",
-                        "Start the core to inspect connections; link probes are available on the Diagnostics page",
-                    )
-                } else {
+                        "可使用 sing-box 查看连接，或前往测试页面",
+                        "Use sing-box to inspect connections, or open Diagnostics",
+                    ),
+                )
+                .child(
+                    Button::new("connections-diagnostics")
+                        .primary()
+                        .label(self.tr("前往测试", "Open diagnostics"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page = Page::Diagnostics;
+                            cx.notify();
+                        })),
+                ),
+            );
+        } else if !self.show_recorded_connections && !running {
+            rows = rows.child(
+                empty_state(
+                    &p,
+                    IconName::Power,
+                    self.tr("Core 未运行", "Core stopped"),
                     self.tr(
-                        "Xray 仅提供流量统计，连接列表需要 sing-box；可在「测试」页面发起链路探测",
-                        "Xray exposes counters only. Use sing-box for connections; link probes are available on the Diagnostics page",
-                    )
-                },
-            ));
+                        "启动后可查看实时连接",
+                        "Start the core to view live connections",
+                    ),
+                )
+                .child(
+                    Button::new("connections-start")
+                        .custom(start_button(cx))
+                        .bg(p.primary)
+                        .label(self.tr("启动", "Start"))
+                        .loading(self.snapshot.busy.iter().any(|key| key == "core"))
+                        .on_click(cx.listener(|this, _, _, _| this.service.start_core())),
+                ),
+            );
         } else if count == 0 {
-            rows = rows.child(empty_hint(
-                &p,
-                if query.trim().is_empty() {
-                    self.tr("暂无连接记录", "No connections yet")
-                } else {
-                    self.tr("没有符合筛选条件的连接", "No matching connections")
-                },
-            ));
+            let filtered = !query.trim().is_empty() || filter != ConnectionFilterKind::All;
+            rows = rows.child(
+                empty_state(
+                    &p,
+                    IconName::ArrowLeftRight,
+                    if filtered {
+                        self.tr("没有符合条件的连接", "No matching connections")
+                    } else {
+                        self.tr("暂无连接记录", "No connections yet")
+                    },
+                    if filtered {
+                        self.tr("尝试清除筛选条件", "Try clearing the filters")
+                    } else {
+                        self.tr(
+                            "连接产生后会显示在这里",
+                            "Connections will appear here when available",
+                        )
+                    },
+                )
+                .when(filtered, |d| {
+                    d.child(
+                        Button::new("empty-reset-connections")
+                            .primary()
+                            .label(self.tr("清除筛选", "Clear filters"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.connection_search
+                                    .update(cx, |input, cx| input.set_value("", window, cx));
+                                this.connection_filter = ConnectionFilterKind::All;
+                                cx.notify();
+                            })),
+                    )
+                }),
+            )
         }
         for (connection, closed) in visible {
             rows = rows.child(self.connection_row(connection, closed, &p, cx));
@@ -194,6 +353,7 @@ impl AppView {
                                 d.child(
                                     Button::new("load-more-connections")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .ghost()
                                         .label(self.tr("加载更多 (+50)", "Load 50 more"))
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -206,6 +366,7 @@ impl AppView {
                                 d.child(
                                     Button::new("collapse-connections")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .ghost()
                                         .label(self.tr("收起", "Show less"))
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -266,9 +427,9 @@ impl AppView {
                         ))
                         .child(
                             Button::new("go-to-connections")
-                                .compact()
+                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .ghost()
-                                .icon(IconName::Activity)
+                                .icon(Page::Connections.icon())
                                 .label(self.tr("前往连接列表", "Go to connections"))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.page = Page::Connections;
@@ -303,6 +464,7 @@ impl AppView {
                         let id = trace.id;
                         Button::new(SharedString::from(format!("replay-trace-{id}")))
                             .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                             .ghost()
                             .label(format!(
                                 "{} · {}",
@@ -673,8 +835,9 @@ impl AppView {
                             .child(
                                 Button::new("back-to-connections")
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .ghost()
-                                    .icon(IconName::Activity)
+                                    .icon(Page::Connections.icon())
                                     .label(self.tr("返回连接", "Back to connections"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.page = Page::Connections;
@@ -684,6 +847,7 @@ impl AppView {
                             .child(
                                 Button::new("close-connection-inspector")
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .ghost()
                                     .icon(IconName::X)
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -808,7 +972,7 @@ impl AppView {
                     )
                     .child(
                         Button::new(SharedString::from(format!("{prefix}-add-rule")))
-                            .compact()
+                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                             .primary()
                             .label(self.tr("置顶添加", "Add at top"))
                             .disabled(value.is_empty())
@@ -857,9 +1021,9 @@ impl AppView {
                 .child(pill(if active { self.tr("● 探测中", "● Probing") } else if success == Some(true) { self.tr("✓ 请求完成", "✓ Completed") } else if success == Some(false) { self.tr("! 发现问题", "! Issue found") } else { self.tr("就绪", "Ready") }, if success == Some(false) { p.danger } else { p.primary }, p.primary.opacity(0.1))))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.trace_input)))
-                .child(Button::new("trace-start").compact().primary().label(if trace.is_some() { self.tr("重新测试", "Run again") } else { self.tr("开始测试", "Start test") }).loading(active)
+                .child(Button::new("trace-start").compact().h(px(crate::ui::theme::CONTROL_HEIGHT)).primary().label(if trace.is_some() { self.tr("重新测试", "Run again") } else { self.tr("开始测试", "Start test") }).loading(active)
                     .on_click(cx.listener(|this, _, _, cx| { let target = this.trace_input.read(cx).value().to_string(); this.run_trace(&target, cx); })))
-                .child(Button::new("trace-clear").compact().ghost().label(self.tr("清除", "Clear"))
+                .child(Button::new("trace-clear").compact().h(px(crate::ui::theme::CONTROL_HEIGHT)).ghost().label(self.tr("清除", "Clear"))
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_trace(); this.expanded_trace_step = None; this.sync(cx); }))))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .children([("HTTPS", "https://www.gstatic.com/generate_204"), ("TCP", "tcp://1.1.1.1:443"), ("UDP", "udp://8.8.8.8:53"), ("ICMP", "icmp://1.1.1.1")].into_iter().map(|(label, value)| chip(format!("trace-example-{label}"), label, false, &p)
@@ -909,7 +1073,7 @@ impl AppView {
         let animation_phase = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
         let paint_phase = animation_phase.clone();
         let response = trace.and_then(|t| t.step(TraceStepKind::Response));
-        let response_color = response.map_or(p.border, |s| status_color(s.status, &p));
+        let response_color = response.map_or(p.muted_fg, |s| status_color(s.status, &p));
         let detail = response
             .map(|s| s.detail.clone())
             .filter(|s| !s.is_empty())
@@ -925,9 +1089,13 @@ impl AppView {
             move |bounds, _, window, _| {
                 let anim = paint_phase.get();
                 let gap = 10.;
-                let cell = (f32::from(bounds.size.width) + gap) / 6.;
+                let padding = super::theme::TRACE_CANVAS_PAD;
+                let width = (f32::from(bounds.size.width) - padding * 2.).max(0.);
+                let cell = (width + gap) / 6.;
                 let node_w = cell - gap;
-                let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+                let at = |x: f32, y: f32| {
+                    point(bounds.origin.x + px(padding + x), bounds.origin.y + px(y))
+                };
                 for index in 0..6 {
                     let x = index as f32 * cell + node_w / 2.;
                     let mut line = PathBuilder::stroke(px(1.));
@@ -1022,7 +1190,7 @@ impl AppView {
                         div()
                             .absolute()
                             .top(px(8.))
-                            .left(px(12.))
+                            .left(px(super::theme::TRACE_CANVAS_PAD))
                             .text_xs()
                             .text_color(p.muted_fg)
                             .child(self.tr("请求发出 →", "REQUEST SENT →")),
@@ -1031,8 +1199,8 @@ impl AppView {
                         div()
                             .absolute()
                             .top(px(36.))
-                            .left_0()
-                            .right_0()
+                            .left(px(super::theme::TRACE_CANVAS_PAD))
+                            .right(px(super::theme::TRACE_CANVAS_PAD))
                             .flex()
                             .gap(px(10.))
                             .children(kinds.into_iter().enumerate().map(|(index, kind)| {
@@ -1122,7 +1290,7 @@ impl AppView {
                         div()
                             .absolute()
                             .bottom(px(4.))
-                            .left(px(12.))
+                            .left(px(super::theme::TRACE_CANVAS_PAD))
                             .text_xs()
                             .text_color(response_color)
                             .child(self.tr("← 响应返回", "← RESPONSE RECEIVED")),
@@ -1174,12 +1342,12 @@ fn chip(
 
 fn status_color(status: TraceStatus, p: &Palette) -> Hsla {
     match status {
-        TraceStatus::Ok => p.success,
-        TraceStatus::Active => p.info,
-        TraceStatus::Warn => p.warning,
-        TraceStatus::Error => p.danger,
+        TraceStatus::Ok => p.ok_text,
+        TraceStatus::Active => p.primary,
+        TraceStatus::Warn => p.warn_text,
+        TraceStatus::Error => p.danger_text,
         TraceStatus::Skipped => p.muted_fg,
-        TraceStatus::Pending => p.border,
+        TraceStatus::Pending => p.muted_fg,
     }
 }
 

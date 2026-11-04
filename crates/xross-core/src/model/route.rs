@@ -300,6 +300,39 @@ impl Default for RouteRuleGroup {
 }
 
 impl RoutingConfig {
+    /// Move one rule inside its existing group without changing rule semantics.
+    pub fn move_rule_to(
+        &mut self,
+        id: &str,
+        group: Option<&str>,
+        target: &str,
+        placement: Placement,
+    ) -> crate::error::Result<bool> {
+        let rules = match group {
+            Some(group) => {
+                &mut self
+                    .rule_groups
+                    .iter_mut()
+                    .find(|g| g.id == group)
+                    .ok_or_else(|| crate::error::Error::config("规则分组已不存在，请刷新后重试"))?
+                    .rules
+            }
+            None => &mut self.rules,
+        };
+        move_relative(rules, id, target, placement, |rule| rule.id.as_str())
+    }
+
+    pub fn move_group_to(
+        &mut self,
+        id: &str,
+        target: &str,
+        placement: Placement,
+    ) -> crate::error::Result<bool> {
+        move_relative(&mut self.rule_groups, id, target, placement, |group| {
+            group.id.as_str()
+        })
+    }
+
     /// A single ordering shared by compilers and route previews; PAC collects enabled direct rules.
     pub fn effective_rules(&self) -> impl Iterator<Item = &RouteRule> {
         self.rule_groups
@@ -316,6 +349,45 @@ impl RoutingConfig {
             .flat_map(|g| g.rules.iter_mut())
             .chain(self.rules.iter_mut())
     }
+}
+
+/// Insertion side, shared by drag targets and keyboard reorder commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Before,
+    After,
+}
+
+fn move_relative<T>(
+    items: &mut Vec<T>,
+    id: &str,
+    target: &str,
+    placement: Placement,
+    key: impl Fn(&T) -> &str,
+) -> crate::error::Result<bool> {
+    let from = items
+        .iter()
+        .position(|item| key(item) == id)
+        .ok_or_else(|| {
+            crate::error::Error::config("待移动项目已不存在或不在当前分组，请刷新后重试")
+        })?;
+    let to = items
+        .iter()
+        .position(|item| key(item) == target)
+        .ok_or_else(|| {
+            crate::error::Error::config("目标项目已不存在或不在当前分组，请刷新后重试")
+        })?;
+    if from == to {
+        return Ok(false);
+    }
+    let insertion = to + usize::from(placement == Placement::After);
+    let insertion = insertion - usize::from(from < insertion);
+    if from == insertion {
+        return Ok(false);
+    }
+    let item = items.remove(from);
+    items.insert(insertion, item);
+    Ok(true)
 }
 
 pub fn default_rule_sets() -> Vec<RuleSet> {
@@ -342,4 +414,54 @@ pub fn default_rule_sets() -> Vec<RuleSet> {
             update_interval_hours: 168,
         },
     ]
+}
+
+#[cfg(test)]
+mod reorder_tests {
+    use super::*;
+
+    #[test]
+    fn insertion_preserves_intermediate_order_and_checks_boundaries() {
+        let mut items = vec!["a", "b", "c", "d"];
+        assert!(move_relative(&mut items, "a", "c", Placement::After, |x| *x).unwrap());
+        assert_eq!(items, ["b", "c", "a", "d"]);
+        assert!(move_relative(&mut items, "d", "b", Placement::Before, |x| *x).unwrap());
+        assert_eq!(items, ["d", "b", "c", "a"]);
+        assert!(!move_relative(&mut items, "b", "c", Placement::Before, |x| *x).unwrap());
+        assert!(!move_relative(&mut items, "b", "b", Placement::After, |x| *x).unwrap());
+        assert!(move_relative(&mut items, "missing", "b", Placement::After, |x| *x).is_err());
+        assert!(move_relative(&mut items, "b", "missing", Placement::After, |x| *x).is_err());
+        assert_eq!(items, ["d", "b", "c", "a"]);
+        let mut empty: Vec<&str> = vec![];
+        assert!(move_relative(&mut empty, "a", "a", Placement::Before, |x| *x).is_err());
+        let mut single = vec!["a"];
+        assert!(!move_relative(&mut single, "a", "a", Placement::After, |x| *x).unwrap());
+    }
+
+    #[test]
+    fn group_scope_and_rule_semantics_survive_reordering() {
+        let mut config = RoutingConfig::default();
+        let mut a = RouteRule::new("a", Matchers::default(), RouteAction::direct());
+        a.enabled = false;
+        let b = RouteRule::new("b", Matchers::default(), RouteAction::block());
+        config.rules = vec![a.clone(), b.clone()];
+        let group = RouteRuleGroup {
+            rules: vec![a.clone()],
+            ..Default::default()
+        };
+        config.rule_groups.push(group.clone());
+        assert!(
+            config
+                .move_rule_to(&a.id, Some(&group.id), &b.id, Placement::After)
+                .is_err()
+        );
+        assert!(
+            config
+                .move_rule_to(&a.id, None, &b.id, Placement::After)
+                .unwrap()
+        );
+        assert_eq!(config.rules, [b, a]);
+        assert_eq!(config.rule_groups, [group]);
+        assert_eq!(config.preset, RoutePreset::BypassMainland);
+    }
 }

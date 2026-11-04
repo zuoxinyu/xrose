@@ -4,8 +4,10 @@ mod dialogs;
 mod dns;
 mod logs;
 mod manual_node;
+mod menus;
 mod mesh;
 mod nodes;
+mod route_drag;
 mod routing;
 mod settings;
 mod subscriptions;
@@ -15,10 +17,12 @@ mod widgets;
 
 use std::time::Duration;
 
+use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::InputState;
-use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -70,7 +74,7 @@ impl Page {
             Page::Subscriptions => IconName::Rss,
             Page::Routing => IconName::Route,
             Page::Dns => IconName::Globe,
-            Page::Connections => IconName::Activity,
+            Page::Connections => IconName::ArrowLeftRight,
             Page::Diagnostics => IconName::Radar,
             Page::Logs => IconName::Terminal,
             Page::Settings => IconName::Settings,
@@ -163,18 +167,15 @@ pub struct AppView {
     pub(crate) manual_error: Option<String>,
     pub(crate) editing_node: Option<String>,
     pub(crate) hide_ips: bool,
-    /// Overflow menu of the node list toolbar (batch management, cleanup).
-    pub(crate) toolbar_menu_open: bool,
+    pub(crate) hide_traffic_chart: bool,
     /// Nodes of the latency run started from this window; they show a spinner
     /// instead of a stale value while the run is busy.
     pub(crate) latency_pending: std::collections::HashSet<String>,
-    pub(crate) node_menu_open: Option<String>,
     pub(crate) sort_by_latency: bool,
     pub(crate) group_by_subscription: bool,
     pub(crate) collapsed_subs: std::collections::HashSet<String>,
     pub(crate) batch_mode: bool,
     pub(crate) batch_selected: std::collections::HashSet<String>,
-    pub(crate) show_clean_confirm: bool,
     pub(crate) sub_name: Entity<InputState>,
     pub(crate) sub_url: Entity<InputState>,
     pub(crate) import_input: Entity<InputState>,
@@ -183,7 +184,11 @@ pub struct AppView {
     pub(crate) rule_name: Entity<InputState>,
     pub(crate) rule_group_name: Entity<InputState>,
     pub(crate) rule_group_id: Option<String>,
-    pub(crate) rule_move_id: Option<String>,
+    route_drag_epoch: u64,
+    route_scroll_running: bool,
+    action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
+    active_route_drag: Option<route_drag::RouteDrag>,
+    content_scroll: ScrollHandle,
     pub(crate) rule_value: Entity<InputState>,
     pub(crate) dns_tag: Entity<InputState>,
     pub(crate) dns_address: Entity<InputState>,
@@ -299,15 +304,13 @@ impl AppView {
             manual_error: None,
             editing_node: None,
             hide_ips,
-            toolbar_menu_open: false,
+            hide_traffic_chart: false,
             latency_pending: std::collections::HashSet::new(),
-            node_menu_open: None,
             sort_by_latency: false,
             group_by_subscription: false,
             collapsed_subs: std::collections::HashSet::new(),
             batch_mode: false,
             batch_selected: std::collections::HashSet::new(),
-            show_clean_confirm: false,
             sub_name,
             sub_url,
             import_input,
@@ -316,7 +319,11 @@ impl AppView {
             rule_name,
             rule_group_name,
             rule_group_id: None,
-            rule_move_id: None,
+            route_drag_epoch: 0,
+            route_scroll_running: false,
+            action_menu: None,
+            active_route_drag: None,
+            content_scroll: ScrollHandle::new(),
             rule_value,
             dns_tag,
             dns_address,
@@ -386,6 +393,7 @@ impl AppView {
                 self.tr("订阅名称（可选）", "Subscription name (optional)"),
             ),
             (&self.rule_name, self.tr("规则名称", "Rule name")),
+            (&self.rule_group_name, self.tr("分组名称", "Group name")),
             (
                 &self.rule_value,
                 self.tr(
@@ -517,8 +525,6 @@ impl AppView {
             .flex()
             .flex_col()
             .bg(p.sidebar())
-            .border_r_1()
-            .border_color(p.border)
             .when(cfg!(target_os = "macos"), |d| {
                 d.child(
                     div()
@@ -565,457 +571,337 @@ impl AppView {
             .child(div().flex().flex_col().gap_1().p_2().flex_1().children(
                 Page::all().into_iter().map(|page| {
                     let active = self.page == page;
-                    div()
-                        .id(SharedString::from(format!("nav-{page:?}")))
-                        .flex()
-                        .items_center()
-                        .justify_start()
-                        .gap_3()
-                        .px_3()
-                        .h(px(40.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(active, |d| d.bg(p.accent))
-                        .hover(move |s| s.bg(p.panel_alt))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.page = page;
-                            cx.notify();
-                        }))
-                        .child(Icon::new(page.icon()).size(px(18.)).text_color(if active {
-                            p.primary
-                        } else {
-                            p.muted_fg
-                        }))
-                        .child(
-                            div()
-                                .text_sm()
-                                .font_weight(if active {
-                                    FontWeight::MEDIUM
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .text_color(if active { p.fg } else { p.muted_fg })
-                                .child(tr(lang, page.zh(), page.en())),
-                        )
+                    div().child(
+                        Button::new(SharedString::from(format!("nav-{page:?}")))
+                            .ghost()
+                            .selected(active)
+                            .w_full()
+                            .h(px(40.))
+                            .justify_start()
+                            .accessibility_label(tr(lang, page.zh(), page.en()))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(Icon::new(page.icon()).size(px(18.)))
+                                    .child(tr(lang, page.zh(), page.en())),
+                            )
+                            .text_color(if active { p.primary } else { p.muted_fg })
+                            .when(active, |b| b.bg(p.accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.route_drag_epoch += 1;
+                                this.dismiss_action_menu(cx);
+                                this.page = page;
+                                cx.notify();
+                            })),
+                    )
                 }),
             ))
+            .child(self.sidebar_traffic(cx))
             .child({
                 let about_active = self.page == Page::About;
-                div().p_2().border_t_1().border_color(p.border).child(
-                    div()
-                        .id("nav-About")
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_3()
+                div().p_2().child(
+                    Button::new("nav-About")
+                        .ghost()
+                        .w_full()
                         .h(px(36.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(about_active, |d| d.bg(p.accent))
-                        .hover(move |s| s.bg(p.panel_alt))
+                        .selected(about_active)
+                        .accessibility_label(self.tr("关于", "About"))
+                        .when(about_active, |b| b.bg(p.accent))
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.route_drag_epoch += 1;
+                            this.dismiss_action_menu(cx);
                             this.page = Page::About;
                             cx.notify();
                         }))
                         .child(
                             div()
                                 .flex()
+                                .w_full()
                                 .items_center()
-                                .gap_1p5()
-                                .text_xs()
-                                .font_weight(if about_active {
-                                    FontWeight::MEDIUM
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .text_color(if about_active { p.primary } else { p.fg })
-                                .child(Icon::new(IconName::Info).size(px(13.)))
-                                .child(self.tr("关于", "About")),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(p.muted_fg)
-                                .child(format!("v{}", self.snapshot.app_version)),
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .child(Icon::new(IconName::Info).size(px(theme::ICON_SIZE)))
+                                        .child(self.tr("关于", "About")),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(format!("v{}", self.snapshot.app_version)),
+                                ),
                         ),
                 )
             })
     }
 
+    fn sidebar_traffic(&self, cx: &App) -> impl IntoElement {
+        let p = palette(cx);
+        let running = self.snapshot.process.phase.is_alive();
+        div()
+            .id("sidebar-traffic")
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .px_4()
+            .py_2()
+            .gap_1()
+            .text_xs()
+            .children(
+                [
+                    (
+                        self.tr("↓ 下行", "↓ Download"),
+                        self.snapshot.runtime.down_speed,
+                        p.data_down,
+                    ),
+                    (
+                        self.tr("↑ 上行", "↑ Upload"),
+                        self.snapshot.runtime.up_speed,
+                        p.data_up,
+                    ),
+                ]
+                .into_iter()
+                .map(|(label, speed, color)| {
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .text_color(if running { color } else { p.muted_fg })
+                        .child(label)
+                        .child(
+                            div()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .child(xross_core::util::format_speed(speed)),
+                        )
+                }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .text_color(p.muted_fg)
+                    .child(self.tr("累计", "Total"))
+                    .child(xross_core::util::format_bytes(
+                        self.snapshot
+                            .runtime
+                            .up_total
+                            .saturating_add(self.snapshot.runtime.down_total),
+                    )),
+            )
+    }
+
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let hide = self.hide_ips;
-        let is_nodes_page = self.page == Page::Nodes;
         let running = self.snapshot.process.phase.is_alive();
         let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
-        let status_color = if running { p.success } else { p.muted_fg };
+        let failed = self.snapshot.process.phase == xross_core::core::ProcessPhase::Failed;
         let node = self.snapshot.selected_node(self.selected_group.as_deref());
-        let latency = node.and_then(|n| self.snapshot.latency.get(&n.id));
-        let delay = latency
-            .map(|entry| {
-                entry
-                    .delay_ms
-                    .map(|ms| format!("{ms} ms"))
-                    .unwrap_or_else(|| self.tr("超时", "Timeout").to_string())
-            })
-            .unwrap_or_else(|| self.tr("未测速", "Untested").to_string());
-        let delay_color = theme::latency_color(&p, latency);
-        let delay_stale =
-            latency.is_some_and(|e| theme::latency_age_secs(e) > theme::LATENCY_STALE_SECS);
-        // Privacy mode masks everything derived from the server address, so a
-        // screenshot of the title bar cannot reveal where the node is.
         let node_name = node
             .map(|n| {
-                if hide && !n.server.is_empty() {
+                if self.hide_ips && !n.server.is_empty() {
                     n.name.replace(&n.server, "•••")
                 } else {
                     n.name.clone()
                 }
             })
-            .unwrap_or_else(|| self.tr("未选择节点", "No node selected").to_string());
-        let location = node.and_then(|n| self.snapshot.node_location(n));
-        let location_label = if hide {
-            self.tr("位置已隐藏", "Location hidden").to_string()
-        } else {
-            location
-                .and_then(|entry| entry.label.clone())
-                .unwrap_or_else(|| {
-                    if location.is_none_or(|entry| entry.pending) {
-                        self.tr("归属地查询中…", "Looking up location…").to_string()
+            .unwrap_or_else(|| self.tr("选择节点", "Select node").to_string());
+        let state_label = match self.snapshot.process.phase {
+            xross_core::core::ProcessPhase::Stopped => self.tr("已停止", "Stopped"),
+            xross_core::core::ProcessPhase::Starting => self.tr("启动中", "Starting"),
+            xross_core::core::ProcessPhase::Running => self.tr("运行中", "Running"),
+            xross_core::core::ProcessPhase::Stopping => self.tr("停止中", "Stopping"),
+            xross_core::core::ProcessPhase::Failed => self.tr("启动失败", "Failed"),
+        };
+        let mut node_tip = format!("{node_name} · {state_label}");
+        let latency = node.and_then(|n| self.snapshot.latency.get(&n.id));
+        let testing = node.is_some_and(|n| self.latency_pending.contains(&n.id))
+            && self.snapshot.busy.iter().any(|key| key == "latency");
+        let node_delay = theme::latency_label(latency, testing, self.lang());
+        if let Some(entry) = node.and_then(|n| self.snapshot.latency.get(&n.id)) {
+            if let Some(ms) = entry.delay_ms {
+                node_tip.push_str(&format!(" · {ms} ms"));
+            }
+        }
+        if running && !self.hide_ips {
+            if let Some(label) = node
+                .and_then(|n| self.snapshot.node_location(n))
+                .and_then(|l| l.label.as_ref())
+            {
+                node_tip.push_str(&format!("\n{label}"));
+            }
+            if !self.snapshot.active_proxy_addresses.is_empty() {
+                node_tip.push_str(&format!(
+                    "\n{}: {}",
+                    self.tr("代理地址", "Proxy"),
+                    self.snapshot.active_proxy_addresses.join(", ")
+                ));
+            }
+            if let Some(interface) = &self.snapshot.active_tun_interface {
+                node_tip.push_str(&format!(
+                    "\n{}: {interface}",
+                    self.tr("TUN 网卡", "TUN interface")
+                ));
+            }
+        }
+        let drag_region = |id| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(theme::HEADER_DRAG_GAP))
+                .h_full()
+                .when(cfg!(target_os = "windows"), |d| {
+                    d.window_control_area(WindowControlArea::Drag)
+                })
+                .on_mouse_down(MouseButton::Left, |ev, window, _| {
+                    if ev.click_count == 2 {
+                        window.titlebar_double_click();
                     } else {
-                        self.tr("归属地未知", "Location unknown").to_string()
+                        window.start_window_move();
                     }
                 })
         };
-        let stop_hover_bg = p.danger;
-        let start_hover_bg = p.primary.opacity(0.85);
-        let location_tip = if hide {
-            self.tr(
-                "已隐藏服务器地址与位置，点击显示",
-                "Addresses and location hidden — click to reveal",
-            )
-        } else {
-            self.tr(
-                "点击隐藏服务器地址与位置",
-                "Click to hide server addresses and location",
-            )
-        };
         div()
             .id("header-bar")
-            .h(px(54.))
+            .relative()
+            .h(px(theme::HEADER_HEIGHT))
+            .flex_shrink_0()
             .flex()
             .items_center()
             .border_b_1()
             .border_color(p.border)
             .bg(if p.is_dark { p.bg } else { p.panel })
+            .child(drag_region("header-drag-left"))
             .child(
-                // Noninteractive node metadata shares the caption drag region;
-                // clicking the location line toggles privacy mode.
-                div()
-                    .id("header-drag")
-                    .flex()
-                    .items_center()
-                    .px_4()
-                    .h_full()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .when(cfg!(target_os = "windows"), |d| {
-                        d.window_control_area(WindowControlArea::Drag)
-                    })
-                    .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                        if ev.click_count == 2 {
-                            window.titlebar_double_click();
-                        } else {
-                            window.start_window_move();
-                        }
-                    })
-                    .when(!is_nodes_page, |d| {
-                        d.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .gap_0p5()
-                                .min_w(px(0.))
-                                .w_full()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .min_w(px(0.))
-                                        .w_full()
-                                        .child(
-                                            div()
-                                                .min_w(px(0.))
-                                                .truncate()
-                                                .text_sm()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(p.fg)
-                                                .child(node_name),
-                                        )
-                                        .when(node.is_some(), |d| {
-                                            d.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_xs()
-                                                    .text_color(delay_color)
-                                                    .when(delay_stale, |d| d.opacity(0.6))
-                                                    .font_family(
-                                                        cx.theme().mono_font_family.clone(),
-                                                    )
-                                                    .child(delay),
-                                            )
-                                        }),
-                                )
-                                .when(node.is_some(), |d| {
-                                    d.child(
-                                        div()
-                                            .id("header-location-toggle")
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .min_w(px(0.))
-                                            .max_w_full()
-                                            .cursor_pointer()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .hover(move |s| s.text_color(p.fg))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(location_tip.clone()).build(window, cx)
-                                            })
-                                            .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                                                cx.stop_propagation();
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.hide_ips = !this.hide_ips;
-                                                let mut settings = this.snapshot.settings.clone();
-                                                settings.privacy_mode = this.hide_ips;
-                                                this.service.update_settings(settings);
-                                                this.sync(cx);
-                                            }))
-                                            .child(
-                                                Icon::new(if hide {
-                                                    IconName::EyeOff
-                                                } else {
-                                                    IconName::MapPin
-                                                })
-                                                .size(px(12.))
-                                                .flex_shrink_0(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w(px(0.))
-                                                    .truncate()
-                                                    .child(location_label),
-                                            ),
-                                    )
-                                }),
-                        )
-                    }),
-            )
-            .child(
-                // Centered status pill: 1px inner padding + rounded right corners on
-                // the action segment keep its fill strictly inside the pill border.
                 div()
                     .id("header-status")
                     .flex()
                     .items_center()
                     .flex_shrink_0()
-                    .px_2()
+                    .h(px(theme::STATUS_HEIGHT))
+                    .p(px(1.))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(p.panel)
+                    .border_1()
+                    .border_color(p.border)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(28.))
-                            .p(px(1.))
-                            .rounded_full()
-                            .overflow_hidden()
-                            .bg(p.panel)
-                            .border_1()
-                            .border_color(p.border)
-                            .child({
-                                let status_tip = running.then(|| {
-                                    let proxy_text =
-                                        if self.snapshot.active_proxy_addresses.is_empty() {
-                                            self.tr("未启用", "Disabled").to_string()
-                                        } else {
-                                            self.snapshot.active_proxy_addresses.join(", ")
-                                        };
-                                    let tun_text =
-                                        self.snapshot.active_tun_interface.clone().unwrap_or_else(
-                                            || self.tr("未启用", "Disabled").to_string(),
-                                        );
-                                    (
-                                        format!("{}：{}", self.tr("代理地址", "Proxy"), proxy_text),
-                                        format!(
-                                            "{}：{}",
-                                            self.tr("TUN 网卡", "TUN interface"),
-                                            tun_text
-                                        ),
-                                    )
-                                });
-                                div()
-                                    .id("header-status-phase")
-                                    .flex()
-                                    .items_center()
-                                    .h_full()
-                                    .gap_2()
-                                    .pl_3()
-                                    .pr_2p5()
-                                    .when_some(status_tip, |d, (proxy_line, tun_line)| {
-                                        d.tooltip(move |window, cx| {
-                                            let proxy_line = proxy_line.clone();
-                                            let tun_line = tun_line.clone();
-                                            Tooltip::element(move |_, _| {
-                                                div()
-                                                    .flex()
-                                                    .flex_col()
-                                                    .gap_0p5()
-                                                    .child(proxy_line.clone())
-                                                    .child(tun_line.clone())
-                                            })
-                                            .build(window, cx)
-                                        })
-                                    })
-                                    .child(dot(status_color))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(if running { p.fg } else { p.muted_fg })
-                                            .child(match self.snapshot.process.phase {
-                                                xross_core::core::ProcessPhase::Stopped => {
-                                                    self.tr("已停止", "Stopped")
-                                                }
-                                                xross_core::core::ProcessPhase::Starting => {
-                                                    self.tr("启动中", "Starting")
-                                                }
-                                                xross_core::core::ProcessPhase::Running => {
-                                                    self.tr("运行中", "Running")
-                                                }
-                                                xross_core::core::ProcessPhase::Stopping => {
-                                                    self.tr("停止中", "Stopping")
-                                                }
-                                                xross_core::core::ProcessPhase::Failed => {
-                                                    self.tr("启动失败", "Failed")
-                                                }
-                                            }),
-                                    )
-                            })
+                        Button::new("header-node-selector")
+                            .compact()
+                            .ghost()
+                            .h(px(theme::STATUS_INNER_HEIGHT))
+                            .w(px(theme::STATUS_NODE_WIDTH))
+                            .rounded(gpui_kit::component::button::ButtonRounded::None)
+                            .rounded_tl(px(theme::STATUS_END_RADIUS))
+                            .rounded_bl(px(theme::STATUS_END_RADIUS))
+                            .disabled(core_busy)
+                            .accessibility_label(format!(
+                                "{}: {node_name}, {node_delay}",
+                                self.tr("切换节点", "Switch node")
+                            ))
+                            .tooltip(node_tip)
                             .child(
                                 div()
-                                    .id("toggle-core")
                                     .flex()
                                     .items_center()
-                                    .justify_center()
-                                    .h_full()
-                                    .px_3()
-                                    .rounded_r_full()
-                                    .cursor_pointer()
-                                    .border_l_1()
-                                    .border_color(p.border)
-                                    .when(running, |d| {
-                                        d.text_color(p.danger_text).hover(move |style| {
-                                            style
-                                                .bg(stop_hover_bg)
-                                                .text_color(gpui_kit::hsla(0., 0., 1., 1.))
+                                    .gap_2()
+                                    .w_full()
+                                    .min_w(px(0.))
+                                    .child(if core_busy {
+                                        Spinner::new().into_any_element()
+                                    } else {
+                                        dot(if failed {
+                                            p.danger_text
+                                        } else if running {
+                                            p.ok_text
+                                        } else {
+                                            p.muted_fg
                                         })
+                                        .into_any_element()
                                     })
-                                    .when(!running, |d| {
-                                        d.bg(p.primary)
-                                            .text_color(p.primary_fg)
-                                            .hover(move |style| style.bg(start_hover_bg))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        this.service.toggle_core();
-                                    }))
                                     .child(
-                                        div().text_xs().font_weight(FontWeight::SEMIBOLD).child(
-                                            if core_busy {
-                                                "…".to_string()
-                                            } else if running {
-                                                self.tr("停止", "Stop").to_string()
-                                            } else {
-                                                self.tr("启动", "Start").to_string()
-                                            },
-                                        ),
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_xs()
+                                            .child(node_name),
+                                    )
+                                    .when(node.is_some(), |d| {
+                                        d.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_xs()
+                                                .font_family(cx.theme().mono_font_family.clone())
+                                                .text_color(if testing {
+                                                    p.muted_fg
+                                                } else {
+                                                    theme::latency_color(&p, latency)
+                                                })
+                                                .when(
+                                                    latency.is_some_and(|entry| {
+                                                        theme::latency_age_secs(entry)
+                                                            > theme::LATENCY_STALE_SECS
+                                                    }),
+                                                    |d| d.opacity(theme::DISABLED_OPACITY),
+                                                )
+                                                .child(node_delay),
+                                        )
+                                    })
+                                    .child(
+                                        Icon::new(IconName::ChevronDown)
+                                            .size(px(theme::ICON_SIZE))
+                                            .flex_shrink_0(),
                                     ),
-                            ),
+                            )
+                            .dropdown_menu(menus::builder(
+                                cx.entity().downgrade(),
+                                menus::MenuTarget::NodeSelector,
+                            )),
+                    )
+                    .child(
+                        Button::new("toggle-core")
+                            .compact()
+                            .h(px(theme::STATUS_INNER_HEIGHT))
+                            .w(px(theme::STATUS_ACTION_WIDTH))
+                            .flex_shrink_0()
+                            .rounded(gpui_kit::component::button::ButtonRounded::None)
+                            .rounded_tr(px(theme::STATUS_END_RADIUS))
+                            .rounded_br(px(theme::STATUS_END_RADIUS))
+                            .border_l_1()
+                            .border_color(p.border)
+                            .ghost()
+                            .when(!running, |b| {
+                                b.custom(widgets::start_button(cx)).bg(p.primary)
+                            })
+                            .when(running, |b| b.custom(widgets::danger_tool_style(cx)))
+                            .disabled(core_busy)
+                            .label(if running {
+                                self.tr("停止", "Stop")
+                            } else if failed {
+                                self.tr("重试", "Retry")
+                            } else {
+                                self.tr("启动", "Start")
+                            })
+                            .on_click(cx.listener(|this, _, _, _| this.service.toggle_core())),
                     ),
             )
+            .child(drag_region("header-drag-right"))
             .child(
-                // Traffic figures on the right; the empty span before them is a drag region.
                 div()
-                    .id("header-traffic")
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .flex_1()
-                    .min_w(px(0.))
+                    .absolute()
+                    .right_0()
+                    .top_0()
                     .h_full()
-                    .child(
-                        div()
-                            .id("header-traffic-drag")
-                            .flex_1()
-                            .min_w(px(8.))
-                            .h_full()
-                            .when(cfg!(target_os = "windows"), |d| {
-                                d.window_control_area(WindowControlArea::Drag)
-                            })
-                            .on_mouse_down(MouseButton::Left, |ev, window, _| {
-                                if ev.click_count == 2 {
-                                    window.titlebar_double_click();
-                                } else {
-                                    window.start_window_move();
-                                }
-                            }),
-                    )
-                    .when(!is_nodes_page, |d| {
-                        d.child(
-                            div()
-                                .id("header-traffic-figures")
-                                .flex()
-                                .flex_col()
-                                .items_end()
-                                .justify_center()
-                                .h_full()
-                                .flex_shrink_0()
-                                .when(cfg!(target_os = "windows"), |d| d.pr_2())
-                                .when(!cfg!(target_os = "windows"), |d| d.pr_4())
-                                .gap_0p5()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_end()
-                                        .gap_2()
-                                        .text_xs()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .child(div().text_color(p.data_down).child(format!(
-                                            "↓ {}",
-                                            xross_core::util::format_speed(
-                                                self.snapshot.runtime.down_speed
-                                            )
-                                        )))
-                                        .child(div().text_color(p.data_up).child(format!(
-                                            "↑ {}",
-                                            xross_core::util::format_speed(
-                                                self.snapshot.runtime.up_speed
-                                            )
-                                        ))),
-                                )
-                                .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                    "{} {}",
-                                    self.tr("累计", "Total"),
-                                    xross_core::util::format_bytes(
-                                        self.snapshot.runtime.up_total
-                                            + self.snapshot.runtime.down_total
-                                    )
-                                ))),
-                        )
-                    })
                     .child(WindowControls::new(p)),
             )
     }
@@ -1049,17 +935,30 @@ impl AppView {
                             .text_sm()
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(p.fg)
-                            .child(self.tr(
-                                "有未应用的配置变更，需重启 Core 生效",
-                                "Unapplied config changes. Restart Core to apply.",
-                            )),
+                            .child(if self.snapshot.process.phase.is_alive() {
+                                self.tr(
+                                    "有未应用的配置变更，需重启 Core 生效",
+                                    "Unapplied config changes. Restart Core to apply.",
+                                )
+                            } else {
+                                self.tr(
+                                    "配置变更已保存，启动 Core 时生效",
+                                    "Changes saved. They take effect when Core starts.",
+                                )
+                            }),
                     ),
             )
             .child(
                 Button::new("apply-dirty-config")
                     .compact()
+                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                     .primary()
-                    .label(self.tr("立即应用并重启", "Apply & Restart"))
+                    .label(if self.snapshot.process.phase.is_alive() {
+                        self.tr("立即应用并重启", "Apply & Restart")
+                    } else {
+                        self.tr("校验配置", "Validate configuration")
+                    })
+                    .loading(self.snapshot.busy.iter().any(|key| key == "core"))
                     .on_click(cx.listener(|this, _, _, _| {
                         this.service.apply_config();
                     })),
@@ -1143,6 +1042,7 @@ impl AppView {
                             .child(
                                 Button::new(SharedString::from(format!("toast-{id}")))
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .ghost()
                                     .icon(IconName::X)
                                     .flex_shrink_0()
@@ -1154,32 +1054,107 @@ impl AppView {
             )
     }
 
-    fn sparkline(&self, p: &Palette) -> impl IntoElement {
-        let samples = self.snapshot.runtime.history.clone();
-        let max = samples
+    fn traffic_chart(&self, p: &Palette) -> impl IntoElement {
+        let now = chrono::Utc::now().timestamp_millis();
+        let samples: Vec<_> = self
+            .snapshot
+            .runtime
+            .history
             .iter()
-            .map(|s| s.up_speed + s.down_speed)
+            .filter(|s| (0..=theme::TRAFFIC_WINDOW_MS).contains(&now.saturating_sub(s.at_ms)))
+            .cloned()
+            .collect();
+        let peak = samples
+            .iter()
+            .map(|s| s.up_speed.max(s.down_speed))
             .max()
-            .unwrap_or(1)
-            .max(1);
-        let recent: Vec<_> = samples.iter().rev().take(72).cloned().collect();
+            .unwrap_or(0);
+        let down_color = p.data_down;
+        let up_color = p.data_up;
         div()
-            .h(px(48.))
-            .w_full()
             .flex()
-            .items_end()
-            .gap_0p5()
-            .children(recent.into_iter().rev().map(|sample| {
-                let value = sample.up_speed + sample.down_speed;
-                let height = ((value as f32 / max as f32) * 44.0).max(2.0);
-                div().flex_1().h(px(height)).rounded_sm().bg(
-                    if sample.down_speed >= sample.up_speed {
-                        p.data_down
-                    } else {
-                        p.data_up
-                    },
-                )
-            }))
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(p.muted_fg)
+                    .child(self.tr("近 60 秒", "Last 60 seconds"))
+                    .child(
+                        div()
+                            .text_color(p.data_down)
+                            .child(self.tr("↓ 下行 · 实线", "↓ Download · solid")),
+                    )
+                    .child(
+                        div()
+                            .text_color(p.data_up)
+                            .child(self.tr("↑ 上行 · 虚线", "↑ Upload · dashed")),
+                    )
+                    .child(format!(
+                        "{} {}",
+                        self.tr("单方向峰值", "Peak per direction"),
+                        xross_core::util::format_speed(peak)
+                    )),
+            )
+            .child(
+                div()
+                    .h(px(theme::TRAFFIC_HEIGHT))
+                    .w_full()
+                    .border_b_1()
+                    .border_color(p.muted_fg.opacity(theme::DISABLED_OPACITY))
+                    .child(
+                        canvas(
+                            move |_, _, _| (),
+                            move |bounds, _, window, _| {
+                                if peak == 0 {
+                                    return;
+                                }
+                                for (upload, color) in [(false, down_color), (true, up_color)] {
+                                    let mut path = PathBuilder::stroke(px(theme::TRAFFIC_STROKE));
+                                    if upload {
+                                        path = path.dash_array(&[
+                                            px(theme::TRAFFIC_DASH),
+                                            px(theme::TRAFFIC_DASH),
+                                        ]);
+                                    }
+                                    let inset = px(theme::TRAFFIC_STROKE / 2.);
+                                    let width = (bounds.size.width - inset * 2.).max(px(0.));
+                                    let height = (bounds.size.height - inset * 2.).max(px(0.));
+                                    for (index, sample) in samples.iter().enumerate() {
+                                        let value = if upload {
+                                            sample.up_speed
+                                        } else {
+                                            sample.down_speed
+                                        };
+                                        let Some((x, y)) =
+                                            traffic_position(sample.at_ms, value, now, peak)
+                                        else {
+                                            continue;
+                                        };
+                                        let point = point(
+                                            bounds.left() + inset + width * x,
+                                            bounds.top() + inset + height * y,
+                                        );
+                                        if index == 0 {
+                                            path.move_to(point);
+                                        } else {
+                                            path.line_to(point);
+                                        }
+                                    }
+                                    if let Ok(path) = path.build() {
+                                        window.paint_path(path, color);
+                                    }
+                                }
+                            },
+                        )
+                        .w_full()
+                        .h_full(),
+                    ),
+            )
     }
 
     fn route_preset_label(&self, preset: RoutePreset) -> SharedString {
@@ -1207,9 +1182,22 @@ impl Render for AppView {
         let p = palette(cx);
         div()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let mods = event.keystroke.modifiers;
                 let key = event.keystroke.key.as_str();
+                if key == "escape" && cx.stop_active_drag(window) {
+                    this.active_route_drag = None;
+                    this.route_drag_epoch += 1;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                if mods.platform
+                    && matches!(key, "," | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
+                {
+                    this.route_drag_epoch += 1;
+                    this.dismiss_action_menu(cx);
+                }
                 // Development shortcut for repeated flyout lifecycle checks.
                 #[cfg(debug_assertions)]
                 if (mods.control || mods.platform) && mods.shift && key == "t" {
@@ -1292,6 +1280,39 @@ impl Render for AppView {
                     .child(
                         div()
                             .id("content-scroll")
+                            .track_scroll(&self.content_scroll)
+                            .on_drag_move(cx.listener(
+                                |this, event: &DragMoveEvent<route_drag::RouteDrag>, window, cx| {
+                                    if this.page != Page::Routing
+                                        || !event.bounds.contains(&event.event.position)
+                                    {
+                                        return;
+                                    }
+                                    cx.notify();
+                                    let y = event.event.position.y;
+                                    let delta = if y < event.bounds.top() + px(theme::DRAG_EDGE) {
+                                        theme::DRAG_SCROLL_STEP
+                                    } else if y > event.bounds.bottom() - px(theme::DRAG_EDGE) {
+                                        -theme::DRAG_SCROLL_STEP
+                                    } else {
+                                        0.
+                                    };
+                                    if delta != 0. && !this.route_scroll_running {
+                                        this.route_scroll_running = true;
+                                        route_drag::scroll_next_frame(
+                                            cx.entity().downgrade(),
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                    if delta != 0. {
+                                        let mut offset = this.content_scroll.offset();
+                                        offset.y += px(delta);
+                                        this.content_scroll.set_offset(offset);
+                                        cx.notify();
+                                    }
+                                },
+                            ))
                             .flex_1()
                             .min_h(px(0.))
                             .w_full()
@@ -1299,10 +1320,55 @@ impl Render for AppView {
                                 d.flex().flex_col().overflow_hidden()
                             })
                             .when(self.page != Page::Logs, |d| d.overflow_y_scroll())
-                            .p_6()
+                            .p(px(theme::PAGE_PAD))
                             .child(self.page_content(window, cx)),
                     ),
             )
             .child(self.toasts(cx))
+    }
+}
+
+/// Map real timestamps into the fixed time window; zero traffic remains on the baseline.
+fn traffic_position(at_ms: i64, value: u64, now: i64, peak: u64) -> Option<(f32, f32)> {
+    let age = now.saturating_sub(at_ms);
+    if !(0..=theme::TRAFFIC_WINDOW_MS).contains(&age) {
+        return None;
+    }
+    let x = 1. - age as f32 / theme::TRAFFIC_WINDOW_MS as f32;
+    let ratio = if peak == 0 {
+        0.
+    } else {
+        (value as f32 / peak as f32).clamp(0., 1.)
+    };
+    Some((x, 1. - ratio))
+}
+
+#[cfg(test)]
+mod traffic_tests {
+    #[test]
+    fn line_uses_real_time_and_preserves_small_values() {
+        let now = 100_000;
+        assert_eq!(
+            super::traffic_position(40_000, 0, now, 1000),
+            Some((0., 1.))
+        );
+        assert_eq!(
+            super::traffic_position(100_000, 1000, now, 1000),
+            Some((1., 0.))
+        );
+        let (x, y) = super::traffic_position(70_000, 1, now, 1000).unwrap();
+        assert_eq!(x, 0.5);
+        assert!(y < 1. && y > 0.99);
+        assert_eq!(super::traffic_position(39_999, 1, now, 1000), None);
+        assert_eq!(super::traffic_position(100_001, 1, now, 1000), None);
+    }
+
+    #[test]
+    fn empty_and_zero_traffic_have_a_finite_baseline() {
+        assert_eq!(super::traffic_position(1000, 0, 1000, 0), Some((1., 1.)));
+        assert_eq!(
+            super::traffic_position(1000, 200, 1000, 100),
+            Some((1., 0.))
+        );
     }
 }

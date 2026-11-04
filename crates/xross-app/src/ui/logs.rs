@@ -4,16 +4,17 @@ use std::rc::Rc;
 
 use gpui_base::SelectableText;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::*;
 use xross_core::core::LogEntry;
 use xross_core::settings::LogLevel;
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::menus::Command;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 pub(super) struct LogListState {
     list: ListState,
@@ -141,8 +142,8 @@ impl AppView {
                             &p,
                             self.tr("实时日志", "Live logs"),
                             self.tr(
-                                "实时收集 core 的 stdout/stderr，并按大小滚动写入日志文件",
-                                "Collects core stdout/stderr and rotates a log file by size",
+                                "查看运行记录，按级别或关键字筛选",
+                                "View runtime logs and filter by level or keyword",
                             ),
                         ))
                         .child(
@@ -153,6 +154,7 @@ impl AppView {
                                 .child(
                                     Button::new("copy-logs")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .icon(IconName::Copy)
                                         .label(self.tr("复制日志", "Copy logs"))
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -183,6 +185,7 @@ impl AppView {
                                 .child(
                                     Button::new("export-logs")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("导出", "Export"))
                                         .on_click(cx.listener(|this, _, _, _| {
                                             let _ = this.service.export_logs();
@@ -191,11 +194,11 @@ impl AppView {
                                 .child(
                                     Button::new("clear-logs")
                                         .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .ghost()
                                         .label(self.tr("清空", "Clear"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.service.clear_logs();
-                                            this.sync(cx);
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.run_command(Command::ClearLogs, false, window, cx)
                                         })),
                                 ),
                         ),
@@ -213,31 +216,38 @@ impl AppView {
                                 .child(Input::new(&self.log_search)),
                         )
                         .child(
-                            button_group(&p).children(
+                            ChoiceGroup::new(
+                                "log-filter",
+                                vec![
+                                    "Trace".into(),
+                                    "Debug".into(),
+                                    "Info".into(),
+                                    "Warn".into(),
+                                    "Error".into(),
+                                ],
                                 [
-                                    (LogLevel::Trace, "Trace"),
-                                    (LogLevel::Debug, "Debug"),
-                                    (LogLevel::Info, "Info"),
-                                    (LogLevel::Warn, "Warn"),
-                                    (LogLevel::Error, "Error"),
+                                    LogLevel::Trace,
+                                    LogLevel::Debug,
+                                    LogLevel::Info,
+                                    LogLevel::Warn,
+                                    LogLevel::Error,
                                 ]
-                                .into_iter()
-                                .map(|(level, label)| {
-                                    let selected = self.log_level == level;
-                                    button_group_item(
-                                        &p,
-                                        SharedString::from(format!("loglevel-{label}")),
-                                        label,
-                                        selected,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            this.log_level = level;
-                                            cx.notify();
-                                        },
-                                    ))
-                                }),
-                            ),
+                                .iter()
+                                .position(|l| *l == self.log_level)
+                                .unwrap_or(2),
+                            )
+                            .on_change(cx.listener(
+                                |this, index, _, cx| {
+                                    this.log_level = [
+                                        LogLevel::Trace,
+                                        LogLevel::Debug,
+                                        LogLevel::Info,
+                                        LogLevel::Warn,
+                                        LogLevel::Error,
+                                    ][*index];
+                                    cx.notify();
+                                },
+                            )),
                         ),
                 )
                 .child(
@@ -248,13 +258,34 @@ impl AppView {
                         .gap_3()
                         .text_xs()
                         .text_color(p.muted_fg)
-                        .child(div().flex_1().min_w(px(0.)).truncate().child(format!(
-                            "{} {} · {}：{}",
+                        .child(div().flex_1().min_w(px(0.)).text_xs().child(format!(
+                            "{} {}",
                             rows.len(),
-                            self.tr("条", "entries"),
-                            self.tr("日志目录", "log dir"),
-                            self.snapshot.platform.log_dir
+                            self.tr("条", "entries")
                         )))
+                        .child(
+                            Button::new("open-log-dir")
+                                .ghost()
+                                .label(self.tr("打开日志目录", "Open log folder"))
+                                .on_click(cx.listener(|this, _, _, _| {
+                                    this.service.open_url(&format!(
+                                        "file://{}",
+                                        this.snapshot.platform.log_dir
+                                    ));
+                                })),
+                        )
+                        .child(
+                            Button::new("copy-log-dir")
+                                .ghost()
+                                .icon(IconName::Copy)
+                                .tooltip(self.tr("复制日志目录", "Copy log folder"))
+                                .accessibility_label(self.tr("复制日志目录", "Copy log folder"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        this.snapshot.platform.log_dir.clone(),
+                                    ));
+                                })),
+                        )
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -305,8 +336,8 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
     let color = match entry.level {
         LogLevel::Trace | LogLevel::Debug => p.muted_fg,
         LogLevel::Info => p.fg,
-        LogLevel::Warn => p.warning,
-        LogLevel::Error => p.danger,
+        LogLevel::Warn => p.warn_text,
+        LogLevel::Error => p.danger_text,
     };
     let timestamp = entry
         .timestamp
@@ -376,7 +407,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::LogListState;
-    use gpui_kit::{px, ListOffset};
+    use gpui_kit::{ListOffset, px};
     use std::rc::Rc;
     use xross_core::core::LogEntry;
     use xross_core::core::LogStream;

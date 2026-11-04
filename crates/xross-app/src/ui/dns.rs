@@ -6,9 +6,13 @@ use gpui_kit::*;
 use xross_core::dns::{self, DnsPreset};
 use xross_core::model::{DnsServer, DnsServerType};
 
+use super::AppView;
+use super::menus::{self, MenuTarget};
 use super::theme::palette;
 use super::widgets::*;
-use super::AppView;
+use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
+use gpui_kit::component::radio::Radio;
 
 impl AppView {
     pub(crate) fn page_dns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -22,6 +26,7 @@ impl AppView {
         } else {
             issues
         };
+        let current_preset = self.snapshot.dns_preset();
         let final_tag = dns_config.final_server.clone().unwrap_or_default();
 
         let mut body = div().flex().flex_col().gap_4().w_full();
@@ -49,34 +54,12 @@ impl AppView {
                                 })),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_2()
-                        .children(DnsPreset::all().into_iter().map(|preset| {
-                            div()
-                                .id(SharedString::from(format!("dns-preset-{preset:?}")))
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .text_sm()
-                                .border_1()
-                                .border_color(p.border)
-                                .bg(p.bg)
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.service.set_dns_preset(preset);
-                                    this.sync(cx);
-                                }))
-                                .child(match preset {
-                                    DnsPreset::SplitFakeIp => self.tr("分流 + fake-ip（推荐 sing-box）", "Split + fake-ip (sing-box)"),
-                                    DnsPreset::Split => self.tr("分流 DNS（兼容 Xray）", "Split DNS (Xray compatible)"),
-                                    DnsPreset::Encrypted => self.tr("全加密 DNS（DoH/DoT）", "Encrypted DNS (DoH/DoT)"),
-                                    DnsPreset::System => self.tr("系统 DNS", "System DNS"),
-                                })
-                        })),
-                )
+                .child({
+                    let mut labels = vec![self.tr("分流 + Fake-IP", "Split + Fake-IP"), self.tr("分流 DNS", "Split DNS"), self.tr("加密 DNS", "Encrypted DNS"), self.tr("系统 DNS", "System DNS")];
+                    if current_preset.is_none() { labels.push(self.tr("自定义", "Custom")); }
+                    ChoiceGroup::new("dns-presets", labels, current_preset.and_then(|p| DnsPreset::all().iter().position(|v| *v == p)).unwrap_or(4)).cards()
+                        .on_change(cx.listener(|this, index, _, cx| { if let Some(preset) = DnsPreset::all().get(*index) { this.service.set_dns_preset(*preset); this.sync(cx); } }))
+                })
                 .child(
                     div()
                         .flex()
@@ -95,7 +78,8 @@ impl AppView {
                                 .items_center()
                                 .gap_2()
                                 .child(div().text_xs().text_color(p.muted_fg).child(self.tr("fake-ip 网段", "fake-ip range")))
-                                .child(div().text_sm().text_color(p.fg).child(dns_config.fake_ip_range.clone())),
+                                .child(div().text_sm().font_family(cx.theme().mono_font_family.clone()).text_color(p.fg).child(dns_config.fake_ip_range.clone()))
+                                .child(pill(self.tr("只读", "Read only"), p.muted_fg, p.panel_alt)),
                         )
                         .child(
                             div()
@@ -125,7 +109,7 @@ impl AppView {
                         ))
                         .child(
                             Button::new("toggle-dns-form")
-                                .compact()
+                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .primary()
                                 .icon(if self.show_dns_form {
                                     IconName::X
@@ -178,7 +162,7 @@ impl AppView {
                                     )
                                     .child(
                                         Button::new("save-dns-server")
-                                            .compact()
+                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .primary()
                                             .label(self.tr("保存", "Save"))
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -230,90 +214,24 @@ impl AppView {
                 })
                 .children(dns_config.servers.iter().map(|server| {
                     let tag = server.tag.clone();
-                    let tag_delete = server.tag.clone();
-                    let is_final = final_tag == server.tag;
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .p_3()
-                        .rounded_md()
-                        .bg(p.bg)
-                        .border_1()
-                        .border_color(if is_final { p.primary } else { p.border })
-                        .child(
-                            div()
-                                .w(px(90.))
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
+                    let is_final = final_tag == tag;
+                    let menu_target = MenuTarget::Dns(tag.clone());
+                    div().id(SharedString::from(format!("dns-row-{tag}"))).flex().items_center().gap_3().p_3().rounded_md()
+                        .bg(if is_final { p.accent } else { p.bg }).border_l_2().border_color(if is_final { p.primary } else { p.border.opacity(0.) })
+                        .child(Radio::new(SharedString::from(format!("final-{tag}"))).checked(is_final).disabled(server.is_fakeip())
+                            .accessibility_label(self.tr("设为默认 DNS", "Use as default DNS"))
+                            .tooltip(self.tr("未匹配其他规则时使用此服务器", "Use this server when no other rule matches"))
+                            .on_change(cx.listener(move |this, _, _, cx| { this.service.set_final_dns(tag.clone()); this.sync(cx); })))
+                        .child(div().flex().flex_col().gap_1().flex_1().min_w(px(0.))
+                            .child(div().flex().items_center().gap_2()
                                 .child(div().text_sm().text_color(p.fg).child(server.tag.clone()))
-                                .child(pill(server.server_type.as_str(), p.muted_fg, p.panel_alt)),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_0p5()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(p.fg)
-                                        .child(server.display_address()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(if server.domains.is_empty() {
-                                            self.tr("匹配所有域名", "all domains").to_string()
-                                        } else {
-                                            server.domains.join(", ")
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .when(server.is_fakeip(), |d| {
-                                    d.child(pill(
-                                        self.tr("由 fake-ip 规则使用", "used by fake-ip rules"),
-                                        p.muted_fg,
-                                        p.panel_alt,
-                                    ))
-                                })
-                                .when(!server.is_fakeip(), |d| {
-                                    d.child(
-                                        Button::new(SharedString::from(format!("final-{tag}")))
-                                            .compact()
-                                            .ghost()
-                                            .label(if is_final {
-                                                self.tr("当前 final", "final")
-                                            } else {
-                                                self.tr("设为 final", "set final")
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.service.set_final_dns(tag.clone());
-                                                this.sync(cx);
-                                            })),
-                                    )
-                                })
-                                .child(
-                                    danger_icon_button(
-                                        SharedString::from(format!("del-dns-{tag_delete}")),
-                                        IconName::Trash,
-                                        self.tr("删除 DNS 服务器", "Delete DNS server"),
-                                        &p,
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.service.delete_dns_server(&tag_delete);
-                                        this.sync(cx);
-                                    })),
-                                ),
-                        )
+                                .when(server.tag != server.server_type.as_str(), |d| d.child(pill(server.server_type.as_str(), p.muted_fg, p.panel_alt)))
+                                .when(is_final, |d| d.child(pill(self.tr("默认", "Default"), p.primary, p.panel))))
+                            .when(!server.is_fakeip(), |d| d.child(div().text_sm().text_color(p.muted_fg).truncate().child(server.display_address())))
+                            .child(div().text_xs().text_color(p.muted_fg).truncate().child(if server.is_fakeip() { self.tr("用于 Fake-IP 解析", "Used for Fake-IP resolution").to_string() } else if server.domains.is_empty() { self.tr("匹配所有域名", "All domains").to_string() } else { server.domains.join(", ") })))
+                        .child(more_button(SharedString::from(format!("dns-menu-{}", server.tag)), self.tr("服务器操作", "Server actions"))
+                            .dropdown_menu(menus::builder(cx.entity().downgrade(), menu_target.clone())))
+                        .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
                 })),
         );
 
@@ -336,6 +254,7 @@ impl AppView {
                         .child(
                             Button::new("toggle-host-form")
                                 .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                 .primary()
                                 .icon(if self.show_host_form {
                                     IconName::X
@@ -364,6 +283,7 @@ impl AppView {
                             .child(
                                 Button::new("save-host")
                                     .compact()
+                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
                                     .label(self.tr("保存", "Save"))
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -400,41 +320,42 @@ impl AppView {
                     ))
                 })
                 .children(dns_config.hosts.iter().map(|(domain, ips)| {
-                    let domain = domain.clone();
-                    let domain_delete = domain.clone();
+                    let target = MenuTarget::Host(domain.clone());
                     div()
+                        .id(SharedString::from(format!("host-{domain}")))
                         .flex()
                         .items_center()
-                        .justify_between()
                         .gap_3()
                         .p_2()
                         .rounded_md()
                         .bg(p.bg)
                         .child(
                             div()
-                                .flex()
-                                .flex_col()
-                                .child(div().text_sm().text_color(p.fg).child(domain))
-                                .child(
-                                    div().text_xs().text_color(p.muted_fg).child(ips.join(", ")),
-                                ),
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_sm()
+                                .text_color(p.fg)
+                                .truncate()
+                                .child(domain.clone()),
                         )
                         .child(
-                            danger_icon_button(
-                                SharedString::from(format!("del-host-{domain_delete}")),
-                                IconName::Trash,
-                                self.tr("删除静态解析", "Delete host mapping"),
-                                &p,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    let mut hosts = this.snapshot.model.dns.hosts.clone();
-                                    hosts.remove(&domain_delete);
-                                    this.service.set_hosts(hosts);
-                                    this.sync(cx);
-                                },
-                            )),
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_sm()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(p.muted_fg)
+                                .truncate()
+                                .child(ips.join(", ")),
                         )
+                        .child(
+                            more_button(
+                                SharedString::from(format!("host-menu-{domain}")),
+                                self.tr("静态解析操作", "Host mapping actions"),
+                            )
+                            .dropdown_menu(menus::builder(cx.entity().downgrade(), target.clone())),
+                        )
+                        .context_menu(menus::builder(cx.entity().downgrade(), target))
                 })),
         );
 

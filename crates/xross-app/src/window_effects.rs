@@ -1,7 +1,7 @@
 //! Native window materials shared by the main window and tray flyout.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(windows, target_os = "macos"))]
 use gpui_kit::component::ActiveTheme;
@@ -93,6 +93,7 @@ pub fn make_surface_translucent(cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
         let dark = theme.mode.is_dark();
+        theme.tokens.switch = crate::ui::theme::switch_off().into();
         // One interaction color (cyan) for primary buttons, toggles and focus;
         // the soft tint drives hover/selection surfaces. Red stays reserved for
         // destructive actions.
@@ -117,6 +118,19 @@ pub fn make_surface_translucent(cx: &mut App) {
         theme.tokens.primary_hover = hover.into();
         theme.colors.primary_active = active;
         theme.tokens.primary_active = active.into();
+        // Button tokens are independent from the interaction tokens in GPUI Kit.
+        theme.colors.button_primary = theme.colors.foreground;
+        theme.tokens.button_primary = theme.colors.button_primary.into();
+        theme.colors.button_primary_foreground = if dark {
+            theme.colors.secondary
+        } else {
+            crate::ui::theme::hsl(0., 0., 1.)
+        };
+        theme.tokens.button_primary_foreground = theme.colors.button_primary_foreground.into();
+        theme.colors.button_primary_hover = theme.colors.muted_foreground;
+        theme.tokens.button_primary_hover = theme.colors.button_primary_hover.into();
+        theme.colors.button_primary_active = theme.colors.foreground;
+        theme.tokens.button_primary_active = theme.colors.button_primary_active.into();
         theme.colors.accent = tint;
         theme.tokens.accent = tint.into();
         theme.colors.ring = primary;
