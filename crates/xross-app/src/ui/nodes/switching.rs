@@ -42,15 +42,16 @@ impl AppView {
         } else {
             self.tr("展开高级设置", "Expand advanced settings")
         };
-        let heading = Button::new("switch-advanced")
+        let expand_button = Button::new("switch-advanced")
             .compact()
             .ghost()
-            .label(self.tr("自动切换", "Auto switch"))
             .icon(if expanded {
-                IconName::ChevronDown
+                IconName::ChevronUp
             } else {
-                IconName::ChevronRight
+                IconName::ChevronDown
             })
+            .size(px(crate::ui::theme::ICON_BUTTON_SIZE))
+            .flex_shrink_0()
             .accessibility_label(format!(
                 "{} · {disclosure}",
                 self.tr("自动切换", "Auto switch")
@@ -98,28 +99,39 @@ impl AppView {
         let controls = div().flex().flex_col().gap_2().child(
             div()
                 .flex()
-                .flex_wrap()
+                .w_full()
                 .items_center()
                 .gap_2()
-                .child(heading)
-                .child(modes),
+                .child(
+                    row(self.tr("自动切换", "Auto switch"))
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(modes),
+                )
+                .child(expand_button),
         );
         if !expanded {
             return controls;
         }
-        let controls = controls.when(self.snapshot.model.groups.len() > 1, |d| {
-            d.child(
-                row(self.tr("配置出站组", "Configure group")).child(
-                    Button::new("switch-policy-group")
-                        .compact()
-                        .label(self.outbound_group_label(group))
-                        .icon(IconName::ChevronDown)
-                        .dropdown_menu(menus::builder(
-                            cx.entity().downgrade(),
-                            MenuTarget::SwitchPolicyGroups,
-                        )),
-                ),
+        let groups = &self.snapshot.model.groups;
+        let controls = controls.when(groups.len() > 1, |d| {
+            let ids: Vec<_> = groups.iter().map(|g| g.id.clone()).collect();
+            let choices = ChoiceGroup::new(
+                "switch-policy-group",
+                groups
+                    .iter()
+                    .map(|g| self.outbound_group_label(g))
+                    .collect(),
+                groups.iter().position(|g| g.id == group.id),
             )
+            .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                let id = &ids[*index];
+                if this.expanded_switch_group.is_some() && this.snapshot.model.group(id).is_some() {
+                    this.expanded_switch_group = Some(id.clone());
+                    cx.notify();
+                }
+            }));
+            d.child(row(self.tr("配置出站组", "Configure group")).child(choices))
         });
         if mode == SwitchMode::GroupDefault {
             return controls.child(note(self.tr(

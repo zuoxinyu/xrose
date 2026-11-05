@@ -13,7 +13,6 @@ pub(super) enum MenuTarget {
     RoutingFiles,
     NodeSelector,
     DefaultOutbound,
-    SwitchPolicyGroups,
     FrontProxy,
     Node(String),
     Nodes,
@@ -31,7 +30,6 @@ pub(super) enum Command {
     ExportRoute(ExportScope),
     SelectNode(String, String),
     SetDefaultOutbound(String),
-    EditSwitchGroup(String),
     SetFrontProxy(Option<String>),
     EditNode(String),
     TestNode(String),
@@ -213,31 +211,23 @@ impl AppView {
                     );
                 }
             }
-            MenuTarget::DefaultOutbound | MenuTarget::SwitchPolicyGroups => {
+            MenuTarget::DefaultOutbound => {
                 let model = &self.snapshot.model;
-                let routing = matches!(target, MenuTarget::DefaultOutbound);
-                let current = if routing {
-                    model.default_group_id()
-                } else {
-                    self.expanded_switch_group.clone()
-                };
+                let current = model.default_group_id();
                 for group in &model.groups {
-                    let (enabled, command) = if routing {
-                        let usable = group.members.iter().any(|id| {
-                            model
-                                .node(id)
-                                .is_some_and(|node| node.usable_with(self.snapshot.settings.core))
-                        });
-                        (
+                    let usable = group.members.iter().any(|id| {
+                        model
+                            .node(id)
+                            .is_some_and(|node| node.usable_with(self.snapshot.settings.core))
+                    });
+                    menu = menu.item(
+                        item(
+                            &view,
+                            self.outbound_group_label(group),
                             group.enabled && usable && !busy("core"),
                             Command::SetDefaultOutbound(group.id.clone()),
                         )
-                    } else {
-                        (true, Command::EditSwitchGroup(group.id.clone()))
-                    };
-                    menu = menu.item(
-                        item(&view, self.outbound_group_label(group), enabled, command)
-                            .checked(current.as_ref() == Some(&group.id)),
+                        .checked(current.as_ref() == Some(&group.id)),
                     );
                 }
             }
@@ -661,7 +651,6 @@ impl AppView {
             Command::CopyNode(_)
                 | Command::QrNode(_)
                 | Command::BatchNodes
-                | Command::EditSwitchGroup(_)
                 | Command::ClearLogs
                 | Command::ClearRecording
         ) && busy("core")
@@ -743,12 +732,6 @@ impl AppView {
                     self.service.toast(ToastLevel::Error, err.to_string());
                 } else {
                     self.expanded_switch_group = None;
-                }
-            }
-            Command::EditSwitchGroup(id) => {
-                if self.expanded_switch_group.is_some() && self.snapshot.model.group(&id).is_some()
-                {
-                    self.expanded_switch_group = Some(id);
                 }
             }
             Command::SetFrontProxy(id) => {
