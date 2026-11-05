@@ -28,7 +28,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, GetWindowRect, IsIconic, IsWindow, LoadCursorW, PeekMessageW,
     PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow, HICON,
     ICONINFO, IDC_ARROW, MSG, PM_NOREMOVE, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP,
-    WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW, WS_OVERLAPPED,
+    WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 
 use super::dashboard::{self, Dashboard};
@@ -75,6 +76,7 @@ fn post_popup(operation: PopupOp) {
 const TRAY_UID: u32 = 1;
 const CLASS_NAME: &str = "XrossTrayWindow";
 static NEEDS_READD: AtomicBool = AtomicBool::new(false);
+static DARK_TASKBAR: AtomicBool = AtomicBool::new(true);
 static READY: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<Mutex<usize>> = OnceLock::new();
@@ -88,7 +90,7 @@ struct IconState {
 
 pub struct Backend {
     last_tip: String,
-    last_running: Option<bool>,
+    white_icon: bool,
     added: bool,
     add_attempts: u32,
     reported_failure: bool,
@@ -143,7 +145,9 @@ impl Backend {
                 return None;
             }
             let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
-            let icon = make_icon(false);
+            let white_icon = taskbar_is_dark();
+            DARK_TASKBAR.store(white_icon, Ordering::Relaxed);
+            let icon = make_icon(white_icon);
             if icon == 0 {
                 debug_log("make_icon failed");
                 DestroyWindow(hwnd);
@@ -159,7 +163,7 @@ impl Backend {
             });
             let mut backend = Self {
                 last_tip: tip,
-                last_running: Some(false),
+                white_icon,
                 added: false,
                 add_attempts: 0,
                 reported_failure: false,
@@ -204,7 +208,7 @@ impl Backend {
         false
     }
 
-    pub fn tick(&mut self, service: &AppService) -> Option<Command> {
+    pub fn tick(&mut self, service: &AppService, _cx: &gpui_kit::App) -> Option<Command> {
         if NEEDS_READD.swap(false, Ordering::Relaxed) {
             self.added = false;
             self.retry_ticks = 0;
@@ -228,16 +232,16 @@ impl Backend {
         let dashboard = dashboard::build(service);
         if self.added {
             self.refresh_tooltip(&dashboard);
-            self.refresh_icon(&dashboard);
+            self.refresh_icon();
         }
         None
     }
 
     fn refresh_tooltip(&mut self, dashboard: &Dashboard) {
-        let tip = dashboard
-            .traffic_line
-            .clone()
-            .unwrap_or_else(|| dashboard.status_line.clone());
+        let tip = match &dashboard.traffic_line {
+            Some(traffic) => format!("{}\n{traffic}", dashboard.status_line),
+            None => dashboard.status_line.clone(),
+        };
         if tip == self.last_tip {
             return;
         }
@@ -254,29 +258,32 @@ impl Backend {
         self.last_tip = tip;
     }
 
-    fn refresh_icon(&mut self, dashboard: &Dashboard) {
-        if self.last_running == Some(dashboard.running) {
+    fn refresh_icon(&mut self) {
+        let white_icon = DARK_TASKBAR.load(Ordering::Relaxed);
+        if self.white_icon == white_icon {
             return;
         }
-        let icon = make_icon(dashboard.running);
+        let Some((hwnd, old_icon, tip)) = icon_snapshot() else {
+            return;
+        };
+        let icon = make_icon(white_icon);
         if icon == 0 {
             return;
         }
-        if let Some((hwnd, old_icon, tip)) = icon_snapshot() {
-            let data = notify_data(hwnd as HWND, icon as HICON, &tip);
-            if let Some(mut state) = icon_state() {
-                state.icon = icon;
+        let data = notify_data(hwnd as HWND, icon as HICON, &tip);
+        if let Some(mut state) = icon_state() {
+            state.icon = icon;
+        }
+        // SAFETY: the shell copies the icon; we own both source handles.
+        unsafe {
+            if Shell_NotifyIconW(NIM_MODIFY, &data) == 0 {
+                NEEDS_READD.store(true, Ordering::Relaxed);
             }
-            // SAFETY: data is a fully initialized NOTIFYICONDATAW; the old
-            // icon is no longer referenced by the shell after NIM_MODIFY.
-            unsafe {
-                Shell_NotifyIconW(NIM_MODIFY, &data);
-                if old_icon != 0 {
-                    DestroyIcon(old_icon as HICON);
-                }
+            if old_icon != 0 {
+                DestroyIcon(old_icon as HICON);
             }
         }
-        self.last_running = Some(dashboard.running);
+        self.white_icon = white_icon;
     }
 }
 
@@ -439,11 +446,15 @@ unsafe extern "system" fn wnd_proc(
             }
             return 0;
         }
+        if matches!(message, WM_SETTINGCHANGE | WM_THEMECHANGED) {
+            DARK_TASKBAR.store(taskbar_is_dark(), Ordering::Relaxed);
+        }
         if TASKBAR_CREATED
             .get()
             .map(|registered| *registered == message)
             .unwrap_or(false)
         {
+            DARK_TASKBAR.store(taskbar_is_dark(), Ordering::Relaxed);
             NEEDS_READD.store(true, Ordering::Relaxed);
             return 0;
         }
@@ -451,22 +462,31 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-/// Builds a small HICON from the bundled PNG, with a status dot in the
-/// bottom-right corner (green = core running, gray = stopped).
-fn make_icon(running: bool) -> isize {
+/// The shell and applications can use different Windows color modes.
+fn taskbar_is_dark() -> bool {
+    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("SystemUsesLightTheme"))
+        .unwrap_or(0)
+        == 0
+}
+
+/// Builds a borderless monochrome HICON from the template's alpha channel.
+fn make_icon(white: bool) -> isize {
     // SAFETY: GetSystemMetrics has no preconditions.
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
-    let Ok(image) = image::load_from_memory(include_bytes!("../../assets/app-icon-256.png")) else {
+    let Ok(image) = image::load_from_memory(crate::brand_assets::TRAY_TEMPLATE) else {
         return 0;
     };
     let resized = image
         .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
         .to_rgba8();
-    let mut pixels = resized.into_raw();
-    draw_status_dot(&mut pixels, size as usize, running);
-    let mut bgra = Vec::with_capacity(pixels.len());
-    for pixel in pixels.chunks_exact(4) {
-        bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    let mut bgra = Vec::with_capacity(resized.as_raw().len());
+    for pixel in resized.pixels() {
+        let alpha = pixel[3];
+        let ink = if white { alpha } else { 0 };
+        bgra.extend_from_slice(&[ink, ink, ink, alpha]);
     }
 
     // SAFETY: every GDI object is created and released in this function.
@@ -513,26 +533,6 @@ fn make_icon(running: bool) -> isize {
         DeleteObject(mask as HGDIOBJ);
         DeleteObject(color as HGDIOBJ);
         icon as isize
-    }
-}
-
-fn draw_status_dot(pixels: &mut [u8], size: usize, running: bool) {
-    let radius = (size / 5).max(3) as i32;
-    let center = (size as i32 - radius - 1, size as i32 - radius - 1);
-    let color = if running {
-        [52u8, 199, 89, 255]
-    } else {
-        [150, 150, 150, 255]
-    };
-    for y in 0..size as i32 {
-        for x in 0..size as i32 {
-            let dx = x - center.0;
-            let dy = y - center.1;
-            if dx * dx + dy * dy <= radius * radius {
-                let index = (y as usize * size + x as usize) * 4;
-                pixels[index..index + 4].copy_from_slice(&color);
-            }
-        }
     }
 }
 

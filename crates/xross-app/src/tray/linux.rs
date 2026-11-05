@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender};
 
-use gpui_kit::{point, px, Window};
+use gpui_kit::{point, px, Window, WindowAppearance};
 use ksni::blocking::TrayMethods;
 use parking_lot::Mutex;
 use xross_core::AppService;
@@ -19,7 +19,8 @@ static ANCHOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 
 struct Item {
     dashboard: Dashboard,
-    pixels: Vec<u8>,
+    alpha: Vec<u8>,
+    ink: u8,
 }
 
 impl ksni::Tray for Item {
@@ -33,7 +34,12 @@ impl ksni::Tray for Item {
         vec![ksni::Icon {
             width: 32,
             height: 32,
-            data: self.pixels.clone(),
+            // StatusNotifierItem uses network-order ARGB, with straight alpha.
+            data: self
+                .alpha
+                .iter()
+                .flat_map(|&a| [a, self.ink, self.ink, self.ink])
+                .collect(),
         }]
     }
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -86,31 +92,29 @@ impl ksni::Tray for Item {
 }
 
 pub struct Backend {
-    updates: SyncSender<Dashboard>,
+    updates: SyncSender<(Dashboard, u8)>,
 }
 
 impl Backend {
-    pub fn new(service: &AppService) -> Option<Self> {
+    pub fn new(_service: &AppService) -> Option<Self> {
         let (updates, receiver) = sync_channel(1);
-        let initial = super::dashboard::build(service);
         std::thread::Builder::new()
             .name("xross-status-notifier".into())
             .spawn(move || {
-                let Ok(image) =
-                    image::load_from_memory(include_bytes!("../../assets/app-icon-256.png"))
-                else {
+                let Ok(image) = image::load_from_memory(crate::brand_assets::TRAY_TEMPLATE) else {
                     return;
                 };
                 let image = image
                     .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
                     .to_rgba8();
-                let pixels = image
-                    .pixels()
-                    .flat_map(|p| [p[3], p[0], p[1], p[2]])
-                    .collect();
+                let (dashboard, ink) = match receiver.recv() {
+                    Ok(update) => update,
+                    Err(_) => return,
+                };
                 let item = Item {
-                    dashboard: initial,
-                    pixels,
+                    dashboard,
+                    alpha: image.pixels().map(|p| p[3]).collect(),
+                    ink,
                 };
                 let handle = match item.assume_sni_available(true).spawn() {
                     Ok(handle) => handle,
@@ -120,8 +124,14 @@ impl Backend {
                     }
                 };
                 READY.store(!WATCHER_OFFLINE.load(Ordering::Relaxed), Ordering::Relaxed);
-                while let Ok(dashboard) = receiver.recv() {
-                    if handle.update(|item| item.dashboard = dashboard).is_none() {
+                while let Ok((dashboard, ink)) = receiver.recv() {
+                    if handle
+                        .update(|item| {
+                            item.dashboard = dashboard;
+                            item.ink = ink;
+                        })
+                        .is_none()
+                    {
                         break;
                     }
                 }
@@ -131,8 +141,15 @@ impl Backend {
             .ok()?;
         Some(Self { updates })
     }
-    pub fn tick(&mut self, service: &AppService) -> Option<TrayCommand> {
-        let _ = self.updates.try_send(super::dashboard::build(service));
+    pub fn tick(&mut self, service: &AppService, cx: &gpui_kit::App) -> Option<TrayCommand> {
+        let dark = matches!(
+            cx.window_appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        );
+        let ink = if dark { 255 } else { 0 };
+        let _ = self
+            .updates
+            .try_send((super::dashboard::build(service), ink));
         None
     }
 }

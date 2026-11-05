@@ -75,7 +75,11 @@ impl TrayManager {
     /// Polls the platform queue and refreshes tooltip/icon. Returns a command
     /// that needs the GPUI window or app context.
     pub fn tick(&mut self, service: &AppService, cx: &mut App) -> Option<TrayCommand> {
-        if let Some(command) = self.inner.as_mut().and_then(|inner| inner.tick(service)) {
+        if let Some(command) = self
+            .inner
+            .as_mut()
+            .and_then(|inner| inner.tick(service, cx))
+        {
             queue_command(command);
         }
         let commands = std::mem::take(&mut *COMMANDS.lock());

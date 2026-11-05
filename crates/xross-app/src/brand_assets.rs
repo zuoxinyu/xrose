@@ -14,6 +14,8 @@ const APP_ICON_256: &[u8] = include_bytes!("../assets/app-icon-256.png");
 const APP_ICON_128: &[u8] = include_bytes!("../assets/app-icon-128.png");
 const APP_ICON_96: &[u8] = include_bytes!("../assets/app-icon-96.png");
 const APP_ICON_64: &[u8] = include_bytes!("../assets/app-icon-64.png");
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+pub(crate) const TRAY_TEMPLATE: &[u8] = include_bytes!("../assets/tray-template.png");
 
 const BRAND_PATHS: [(&str, &[u8]); 6] = [
     ("logo-mark.png", LOGO_MARK),

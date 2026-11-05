@@ -110,26 +110,7 @@ fn format_fixed_speed(bytes_per_sec: u64) -> String {
 }
 
 unsafe fn build_template_logo_image() -> id {
-    let raw_bytes = include_bytes!("../../assets/app-icon-64.png");
-    let png_bytes = if let Ok(decoded) = image::load_from_memory(raw_bytes) {
-        let mut rgba = decoded.to_rgba8();
-        for pixel in rgba.pixels_mut() {
-            let boosted_alpha = ((pixel[3] as u16 * 5) / 4).min(255) as u8;
-            *pixel = image::Rgba([0, 0, 0, boosted_alpha]);
-        }
-        let mut buf = Vec::new();
-        if rgba
-            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
-            .is_ok()
-        {
-            buf
-        } else {
-            raw_bytes.to_vec()
-        }
-    } else {
-        raw_bytes.to_vec()
-    };
-
+    let png_bytes = crate::brand_assets::TRAY_TEMPLATE;
     unsafe {
         let data: id = msg_send![
             class!(NSData),
@@ -262,7 +243,11 @@ impl Backend {
         }
     }
 
-    pub fn tick(&mut self, service: &AppService) -> Option<super::TrayCommand> {
+    pub fn tick(
+        &mut self,
+        service: &AppService,
+        _cx: &gpui_kit::App,
+    ) -> Option<super::TrayCommand> {
         let dashboard = super::dashboard::build(service);
         let show_speed = dashboard.running && dashboard.show_speed;
         let speeds = (dashboard.up_speed, dashboard.down_speed);

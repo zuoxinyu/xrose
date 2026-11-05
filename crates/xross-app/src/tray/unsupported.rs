@@ -12,7 +12,7 @@ impl Backend {
         None
     }
 
-    pub fn tick(&mut self, _service: &AppService) -> Option<TrayCommand> {
+    pub fn tick(&mut self, _service: &AppService, _cx: &gpui_kit::App) -> Option<TrayCommand> {
         None
     }
 }
