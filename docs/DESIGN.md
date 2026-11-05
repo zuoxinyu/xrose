@@ -122,24 +122,26 @@ Xross：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 
 ### 3.2 字体
 
-来源：gpui-kit `Theme`（`font_family = ".SystemUIFont"`、`font_size = 16px`、`mono_font_family` = 平台默认等宽字体，未安装时自动回退、`mono_font_size = 13px`）。应用未覆盖字体；根节点仅设置 `font_family(theme.font_family)`。
+Windows 界面首选 Segoe UI，缺失字形由 DirectWrite 回退。其他平台使用 `.SystemUIFont`。等宽文本使用平台默认等宽字体，基础字号为 13px。
 
-GPUI 将 `rem` 设为 `theme.font_size`（16px），Tailwind 风格字号按 rem 换算：
+主窗口、托盘浮窗和新组件均使用 GPUI 原有的字号与间距，布局基准为 1rem = 16 个逻辑像素。`vendor/gpui-pre` 在 Windows 上解析完文字样式继承后，将字号增加 1 个逻辑像素，供测量与绘制共用。显式字号和等宽文本适用同一规则。
 
-| GPUI 方法 | 字号 |
-|---|---|
-| `text_xs` | 12px |
-| `text_sm` | 14px |
-| `text_base` | 16px |
-| `text_lg` | 18px |
-| `text_xl` | 20px |
+| GPUI 方法 | 基础字号 | Windows 实际字号 |
+|---|---:|---:|
+| `text_xs` | 12px | 13px |
+| `text_sm` | 14px | 15px |
+| `text_base` | 16px | 17px |
+| `text_lg` | 18px | 19px |
+| `text_xl` | 20px | 21px |
+
+`vendor/gpui-pre-windows` 使用 DirectWrite 的 `Natural Symmetric` 字形渲染模式，并沿用字体推荐的像素网格对齐策略。Mica 和 Acrylic 使用灰度抗锯齿，纯色窗口按系统设置选择 ClearType 或灰度抗锯齿。
 
 ```css
 --font-sans: system-ui;   /* GPUI ".SystemUIFont"：macOS SF Pro / PingFang SC，Windows Segoe UI / 微软雅黑 UI */
 --font-mono: 平台默认等宽字体;   /* 通过 theme.mono_font_family 取用 */
 ```
 
-| 角色 | 字号 / 字重 | 实现 | 用法 |
+| 角色 | 基础字号 / 字重 | 实现 | 用法 |
 |---|---|---|---|
 | title | 18 / 600 | `text_lg` + `SEMIBOLD`（`section_title`） | 卡片标题 |
 | stat | 20 / 600 | `text_xl` + `SEMIBOLD`（连接页速率） | 大号数值 |

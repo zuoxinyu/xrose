@@ -91,6 +91,10 @@ pub fn window_background() -> WindowBackgroundAppearance {
 /// across both dark and light modes.
 pub fn make_surface_translucent(cx: &mut App) {
     Theme::update(cx, |theme| {
+        #[cfg(windows)]
+        {
+            theme.font_family = "Segoe UI".into();
+        }
         theme.tokens.background = gpui_kit::hsla(0., 0., 0., 0.).into();
         let dark = theme.mode.is_dark();
         theme.tokens.switch = crate::ui::theme::switch_off().into();
