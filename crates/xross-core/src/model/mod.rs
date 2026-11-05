@@ -193,15 +193,13 @@ impl AppModel {
         }
     }
 
-    /// Creates the two groups every new profile starts with.
+    /// Creates the initial manual proxy group for a new profile.
     pub fn ensure_default_groups(&mut self) {
         if self.groups.is_empty() {
             let mut select = OutboundGroup::new("代理", GroupKind::Selector);
             select.id = "proxy".into();
-            let mut auto = OutboundGroup::new("自动选择", GroupKind::UrlTest);
-            auto.id = "auto".into();
+            select.switch_policy.mode = SwitchMode::Off;
             self.groups.push(select);
-            self.groups.push(auto);
         }
         if self.default_group.is_none() {
             self.default_group = self
@@ -280,7 +278,7 @@ impl AppModel {
             for group in &mut self.groups {
                 let native_mesh_group = mesh_gateway
                     && !group.managed()
-                    && matches!(group.kind, GroupKind::Selector | GroupKind::UrlTest);
+                    && (group.manually_selectable() || group.kind == GroupKind::UrlTest);
                 if matches!(group.id.as_str(), "proxy" | "auto") || native_mesh_group {
                     if !group.members.contains(&node.id) {
                         group.members.push(node.id.clone());
@@ -542,6 +540,10 @@ mod tests {
     #[test]
     fn new_nodes_do_not_expand_custom_policy_groups() {
         let mut model = AppModel::default();
+        // Existing profiles still contain the former built-in latency group.
+        let mut legacy = OutboundGroup::new("自动选择", GroupKind::UrlTest);
+        legacy.id = "auto".into();
+        model.groups.push(legacy);
         let mut restricted = OutboundGroup::new("限定组", GroupKind::Selector);
         restricted.switch_policy.mode = SwitchMode::Latency;
         model.groups.push(restricted);
@@ -572,7 +574,8 @@ mod tests {
     #[test]
     fn default_model_is_usable() {
         let model = AppModel::default();
-        assert_eq!(model.groups.len(), 2);
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].switch_mode(), SwitchMode::Off);
         assert!(model.default_group.is_some());
         assert!(!model.inbounds.is_empty());
         // Empty model legitimately reports "no nodes".

@@ -171,17 +171,21 @@ pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant 
 pub struct ChoiceGroup {
     id: ElementId,
     labels: Vec<SharedString>,
-    selected: usize,
+    selected: Option<usize>,
     cards: bool,
     disabled: bool,
     handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
 }
 impl ChoiceGroup {
-    pub fn new(id: impl Into<ElementId>, labels: Vec<SharedString>, selected: usize) -> Self {
+    pub fn new(
+        id: impl Into<ElementId>,
+        labels: Vec<SharedString>,
+        selected: impl Into<Option<usize>>,
+    ) -> Self {
         Self {
             id: id.into(),
             labels,
-            selected,
+            selected: selected.into(),
             cards: false,
             disabled: false,
             handler: None,
@@ -239,8 +243,8 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     return;
                 }
                 let next = match event.keystroke.key.as_str() {
-                    "left" | "up" => Some((selected + count - 1) % count.max(1)),
-                    "right" | "down" => Some((selected + 1) % count.max(1)),
+                    "left" | "up" => Some(selected.map_or(count - 1, |i| (i + count - 1) % count)),
+                    "right" | "down" => Some(selected.map_or(0, |i| (i + 1) % count)),
                     "home" => Some(0),
                     "end" => count.checked_sub(1),
                     _ => None,
@@ -255,14 +259,14 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                 }
             });
         for (index, label) in self.labels.into_iter().enumerate() {
-            let checked = index == selected;
+            let checked = selected == Some(index);
             let focused = handles[index].is_focused(window);
             let handler = self.handler.clone();
             group = group.child(
                 gpui_base::Radio::new((self.id.clone(), index.to_string()))
                     .checked(checked)
                     .disabled(disabled)
-                    .tab_stop(checked && !disabled)
+                    .tab_stop(index == selected.unwrap_or(0) && !disabled)
                     .track_focus(&handles[index])
                     .accessibility_label(label.clone())
                     .on_change(move |_, _, window, cx| {

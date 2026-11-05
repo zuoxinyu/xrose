@@ -368,7 +368,7 @@ pub fn action_tag(core: CoreKind, model: &AppModel, action: &RouteAction) -> Opt
                 // Manual and client-managed groups route directly to the selected node.
                 if let Some(group_id) = model.resolve_proxy_group(action) {
                     if let Some(group) = model.group(&group_id) {
-                        if group.kind == crate::model::GroupKind::Selector || group.managed() {
+                        if group.manually_selectable() || group.managed() {
                             if let Some(node_id) = group.active_node() {
                                 if let Some(node) = model.node(node_id) {
                                     return Some(node.outbound_tag());

@@ -408,6 +408,11 @@ mod tests {
             1080,
         );
         model.add_nodes([ordinary.clone()]);
+        let mut group =
+            crate::model::OutboundGroup::new("测速组", crate::model::GroupKind::UrlTest);
+        group.id = "auto".into();
+        group.members = vec![ordinary.id.clone()];
+        model.groups.push(group);
         let active = store.save_active_profile(&model).unwrap();
         let next = MeshProfile {
             exit_node: "100.64.0.2".into(),

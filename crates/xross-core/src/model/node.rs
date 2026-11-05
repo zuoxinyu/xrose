@@ -1077,6 +1077,7 @@ fn default_true() -> bool {
 pub enum SwitchMode {
     #[default]
     GroupDefault,
+    Off,
     Failover,
     Latency,
     Throughput,
@@ -1151,17 +1152,21 @@ impl OutboundGroup {
     }
     pub fn switch_mode(&self) -> SwitchMode {
         match (self.switch_policy.mode, self.kind) {
+            (SwitchMode::GroupDefault, GroupKind::Selector) => SwitchMode::Off,
             (SwitchMode::GroupDefault, GroupKind::Fallback) => SwitchMode::Failover,
             (mode, _) => mode,
         }
     }
 
     pub fn managed(&self) -> bool {
-        self.switch_mode() != SwitchMode::GroupDefault
+        matches!(
+            self.switch_mode(),
+            SwitchMode::Failover | SwitchMode::Latency | SwitchMode::Throughput
+        )
     }
 
     pub fn manually_selectable(&self) -> bool {
-        self.kind == GroupKind::Selector && !self.managed()
+        self.switch_mode() == SwitchMode::Off
     }
 
     pub fn active_node(&self) -> Option<&String> {

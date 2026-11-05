@@ -328,42 +328,40 @@ impl CoreAdapter for SingBoxAdapter {
                 continue;
             }
             let interval = format!("{}s", group.interval_secs.max(30));
-            let value = match (group.managed(), group.kind) {
-                (true, _) | (_, GroupKind::Fallback | GroupKind::Selector) => {
-                    let selected = group
-                        .active_node()
-                        .and_then(|id| model.node(id))
-                        .map(Node::outbound_tag)
-                        .unwrap_or_else(|| members[0].clone());
-                    // A pinned group must not restore a different choice from the Clash cache.
-                    let choices = if group.managed() {
-                        vec![selected.clone()]
-                    } else {
-                        members
-                    };
-                    json!({"type": "selector", "tag": group.tag(), "outbounds": choices,
+            let value = if group.managed() || group.manually_selectable() {
+                let selected = group
+                    .active_node()
+                    .and_then(|id| model.node(id))
+                    .map(Node::outbound_tag)
+                    .unwrap_or_else(|| members[0].clone());
+                // A pinned group must not restore a different choice from the Clash cache.
+                let choices = if group.managed() {
+                    vec![selected.clone()]
+                } else {
+                    members
+                };
+                json!({"type": "selector", "tag": group.tag(), "outbounds": choices,
                            "default": selected, "interrupt_exist_connections": true})
-                }
-                (false, GroupKind::UrlTest) => json!({
+            } else if group.kind == GroupKind::UrlTest {
+                json!({
                     "type": "urltest",
                     "tag": group.tag(),
                     "outbounds": members,
                     "url": group.url.clone().unwrap_or_else(|| ctx.urltest_url.clone()),
                     "interval": interval,
                     "tolerance": group.tolerance_ms
-                }),
-                (false, GroupKind::LoadBalance) => {
-                    warnings.push(format!(
-                        "sing-box 没有 loadbalance 出站，“{}”已编译为 selector",
-                        group.name
-                    ));
-                    json!({
-                        "type": "selector",
-                        "tag": group.tag(),
-                        "outbounds": members,
-                        "interrupt_exist_connections": true
-                    })
-                }
+                })
+            } else {
+                warnings.push(format!(
+                    "sing-box 没有 loadbalance 出站，“{}”已编译为 selector",
+                    group.name
+                ));
+                json!({
+                    "type": "selector",
+                    "tag": group.tag(),
+                    "outbounds": members,
+                    "interrupt_exist_connections": true
+                })
             };
             outbounds.push(value);
         }
@@ -1298,6 +1296,7 @@ mod tests {
         model.add_nodes([valid.clone()]);
         for g in &mut model.groups {
             g.kind = GroupKind::Fallback;
+            g.switch_policy = Default::default();
             g.selected = Some(unavailable.clone());
         }
         let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
@@ -1677,11 +1676,35 @@ mod tests {
 
     #[test]
     fn selector_uses_singbox_native_type() {
-        let (model, settings, ctx) = sample();
+        let (mut model, settings, ctx) = sample();
+        let mut group = crate::model::OutboundGroup::new("测速组", GroupKind::UrlTest);
+        group.members = model.groups[0].members.clone();
+        let group_id = group.id.clone();
+        model.groups.push(group);
         let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
         let outbounds = compiled.json["outbounds"].as_array().unwrap();
         assert!(outbounds.iter().any(|o| o["type"] == "selector"));
         assert!(outbounds.iter().any(|o| o["type"] == "urltest"));
+
+        let second = Node::new("备用", Protocol::Socks, "backup.example", 1080);
+        model.add_nodes([second.clone()]);
+        let group = model.group_mut(&group_id).unwrap();
+        group.members.push(second.id.clone());
+        group.selected = Some(second.id.clone());
+        group.switch_policy.mode = crate::model::SwitchMode::Off;
+        let tag = group.tag();
+        model.default_group = Some(group_id);
+        let manual = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(manual.managed_groups.is_empty());
+        let outbound = manual.json["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == tag)
+            .unwrap();
+        assert_eq!(outbound["type"], "selector");
+        assert_eq!(outbound["default"], second.outbound_tag());
+        assert_eq!(outbound["outbounds"].as_array().unwrap().len(), 2);
     }
 
     #[test]

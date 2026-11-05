@@ -18,7 +18,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -181,8 +181,8 @@ impl Store {
                 }
             }
         }
-        if version < 5 {
-            // Patch only missing group policies, preserving unknown fields in encrypted profiles.
+        if version < 6 {
+            // v5 added per-group policies. v6 makes the built-in proxy group’s manual setting explicit.
             let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
@@ -196,6 +196,13 @@ impl Store {
                 for group in model["groups"].as_array_mut().into_iter().flatten() {
                     if group.get("switch_policy").is_none() {
                         group["switch_policy"] = default.clone();
+                        changed = true;
+                    }
+                    if group["id"] == "proxy"
+                        && group["kind"] == "selector"
+                        && group["switch_policy"]["mode"] == "group_default"
+                    {
+                        group["switch_policy"]["mode"] = "off".into();
                         changed = true;
                     }
                 }
@@ -703,6 +710,7 @@ mod tests {
         let mut expected = profile.clone();
         expected["groups"][0]["switch_policy"] =
             serde_json::to_value(crate::model::NodeSwitchPolicy::default()).unwrap();
+        expected["groups"][0]["switch_policy"]["mode"] = "off".into();
         let payload = store.secrets.encrypt(&profile.to_string());
         store
             .conn
@@ -730,6 +738,46 @@ mod tests {
         let result: serde_json::Value =
             serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn v5_migration_preserves_the_routed_group_and_its_policy() {
+        let (store, dir) = store();
+        let id = store.active_profile_id().unwrap();
+        let mut profile = serde_json::to_value(AppModel::default()).unwrap();
+        profile["groups"][0]["switch_policy"]["mode"] = "group_default".into();
+        let mut existing = profile["groups"][0].clone();
+        existing["id"] = "auto".into();
+        existing["kind"] = "url_test".into();
+        existing["switch_policy"] = serde_json::json!({
+            "mode": "throughput", "fallback": "same_region", "consecutive_failures": 3
+        });
+        profile["groups"].as_array_mut().unwrap().push(existing);
+        profile["default_group"] = "auto".into();
+        let payload = store.secrets.encrypt(&profile.to_string());
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "UPDATE profiles SET model=?1 WHERE id=?2",
+                params![payload, id],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 5).unwrap();
+        }
+        drop(store);
+        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        let raw: String = reopened
+            .conn
+            .lock()
+            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(SecretBox::is_encrypted(&raw));
+        profile["groups"][0]["switch_policy"]["mode"] = "off".into();
+        let actual: serde_json::Value =
+            serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
+        assert_eq!(actual, profile);
     }
 
     #[test]

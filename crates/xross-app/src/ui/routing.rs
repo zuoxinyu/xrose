@@ -32,14 +32,47 @@ impl AppView {
         // Presets.
         body = body.child(
             card(&p)
-                .child(section_title(
-                    &p,
-                    self.tr("路由模板", "Routing presets"),
-                    self.tr(
-                        "选择预设分流模式，或配置自定义分流规则",
-                        "Select a routing preset or configure custom rules",
-                    ),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(section_title(
+                            &p,
+                            self.tr("路由模板", "Routing presets"),
+                            self.tr(
+                                "选择预设分流模式，或配置自定义分流规则",
+                                "Select a routing preset or configure custom rules",
+                            ),
+                        ))
+                        .when(model.groups.len() > 1, |d| {
+                            let name = model
+                                .default_group_id()
+                                .and_then(|id| model.group(&id))
+                                .map(|g| self.outbound_group_label(g))
+                                .unwrap_or_else(|| self.tr("选择出站组", "Choose group"));
+                            d.child(
+                                Button::new("route-default-outbound")
+                                    .compact()
+                                    .label(format!(
+                                        "{} · {}",
+                                        self.tr("默认代理出站", "Default proxy group"),
+                                        name
+                                    ))
+                                    .icon(IconName::ChevronDown)
+                                    .tooltip(self.tr(
+                                        "用于未指定出站组的代理规则",
+                                        "Used by proxy rules without an explicit outbound group",
+                                    ))
+                                    .dropdown_menu(menus::builder(
+                                        cx.entity().downgrade(),
+                                        MenuTarget::DefaultOutbound,
+                                    )),
+                            )
+                        }),
+                )
                 .child(
                     ChoiceGroup::new(
                         "route-preset",

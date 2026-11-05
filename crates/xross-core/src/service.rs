@@ -215,7 +215,7 @@ impl UiSnapshot {
         if self.process.phase.is_alive()
             && self.settings.core == CoreKind::SingBox
             && !group.managed()
-            && group.kind != crate::model::GroupKind::Selector
+            && !group.manually_selectable()
         {
             if let Some(tag) = self
                 .runtime
@@ -1442,6 +1442,9 @@ impl AppService {
                 return;
             };
             group.kind = kind;
+            if group.switch_policy.mode == crate::model::SwitchMode::Off {
+                group.switch_policy.mode = crate::model::SwitchMode::GroupDefault;
+            }
         }
         let _ = self.persist_model();
         self.mark_dirty();
@@ -5175,6 +5178,11 @@ proxy-groups:
         let a = Node::new("A", Protocol::Socks, "a.example", 1080);
         let b = Node::new("B", Protocol::Socks, "b.example", 1080);
         model.add_nodes([a.clone(), b.clone()]);
+        let mut group =
+            crate::model::OutboundGroup::new("测速组", crate::model::GroupKind::UrlTest);
+        group.id = "auto".into();
+        group.members = vec![a.id.clone(), b.id.clone()];
+        model.groups.push(group);
         *service.inner.model.write() = model;
         let policy = NodeSwitchPolicy {
             mode: SwitchMode::Throughput,

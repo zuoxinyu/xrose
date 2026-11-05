@@ -216,7 +216,7 @@ impl CoreAdapter for XrayAdapter {
                 .filter(|n| n.usable_with(CoreKind::Xray))
                 .map(|n| n.outbound_tag())
                 .collect();
-            if group.kind == GroupKind::Selector || group.managed() {
+            if group.manually_selectable() || group.managed() {
                 // Selector is compiled via routing target resolution; no
                 // balancer is necessary and Xray cannot switch it at runtime.
                 if group.active_node().is_none() {
@@ -1014,6 +1014,7 @@ mod tests {
         model.add_nodes([valid.clone()]);
         for g in &mut model.groups {
             g.kind = GroupKind::Fallback;
+            g.switch_policy = Default::default();
             g.selected = Some(unavailable.clone());
         }
         let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
@@ -1336,6 +1337,10 @@ mod tests {
     #[test]
     fn uses_balancer_for_urltest() {
         let (mut model, settings, ctx) = sample();
+        let mut group = crate::model::OutboundGroup::new("测速组", GroupKind::UrlTest);
+        group.id = "auto".into();
+        group.members = model.groups[0].members.clone();
+        model.groups.push(group);
         model.default_group = Some("auto".into());
         let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
         let balancers = compiled.json["routing"]["balancers"].as_array().unwrap();
@@ -1344,6 +1349,17 @@ mod tests {
         assert_eq!(rules.last().unwrap()["balancerTag"], "group-auto");
         assert!(rules.iter().all(|r| r["outboundTag"] != "group-auto"));
         assert!(compiled.json["observatory"].is_object());
+
+        model.group_mut("auto").unwrap().switch_policy.mode = crate::model::SwitchMode::Off;
+        let manual = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(manual.managed_groups.is_empty());
+        assert!(manual.json.get("observatory").is_none());
+        assert!(manual.json["routing"].get("balancers").is_none());
+        let rules = manual.json["routing"]["rules"].as_array().unwrap();
+        assert_eq!(
+            rules.last().unwrap()["outboundTag"],
+            model.nodes[0].outbound_tag()
+        );
     }
 
     #[test]

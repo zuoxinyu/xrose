@@ -374,7 +374,7 @@ impl Settings {
         }
         let automatic = model.groups.iter().filter(|g| {
             g.enabled
-                && !g.managed()
+                && g.switch_mode() == crate::model::SwitchMode::GroupDefault
                 && g.members
                     .iter()
                     .filter_map(|id| model.node(id))

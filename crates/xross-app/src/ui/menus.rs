@@ -12,6 +12,8 @@ pub(super) enum MenuTarget {
     Mesh(String),
     RoutingFiles,
     NodeSelector,
+    DefaultOutbound,
+    SwitchPolicyGroups,
     FrontProxy,
     Node(String),
     Nodes,
@@ -28,6 +30,8 @@ pub(super) enum Command {
     ImportRoute,
     ExportRoute(ExportScope),
     SelectNode(String, String),
+    SetDefaultOutbound(String),
+    EditSwitchGroup(String),
     SetFrontProxy(Option<String>),
     EditNode(String),
     TestNode(String),
@@ -209,17 +213,40 @@ impl AppView {
                     );
                 }
             }
+            MenuTarget::DefaultOutbound | MenuTarget::SwitchPolicyGroups => {
+                let model = &self.snapshot.model;
+                let routing = matches!(target, MenuTarget::DefaultOutbound);
+                let current = if routing {
+                    model.default_group_id()
+                } else {
+                    self.expanded_switch_group.clone()
+                };
+                for group in &model.groups {
+                    let (enabled, command) = if routing {
+                        let usable = group.members.iter().any(|id| {
+                            model
+                                .node(id)
+                                .is_some_and(|node| node.usable_with(self.snapshot.settings.core))
+                        });
+                        (
+                            group.enabled && usable && !busy("core"),
+                            Command::SetDefaultOutbound(group.id.clone()),
+                        )
+                    } else {
+                        (true, Command::EditSwitchGroup(group.id.clone()))
+                    };
+                    menu = menu.item(
+                        item(&view, self.outbound_group_label(group), enabled, command)
+                            .checked(current.as_ref() == Some(&group.id)),
+                    );
+                }
+            }
             MenuTarget::NodeSelector => {
                 let group = self
-                    .selected_group
-                    .as_deref()
-                    .and_then(|id| self.snapshot.model.group(id))
-                    .or_else(|| {
-                        self.snapshot
-                            .model
-                            .default_group_id()
-                            .and_then(|id| self.snapshot.model.group(&id))
-                    });
+                    .snapshot
+                    .model
+                    .default_group_id()
+                    .and_then(|id| self.snapshot.model.group(&id));
                 let Some(group) = group else {
                     return menu.label(tr(lang, "请先添加节点", "Add a node first"));
                 };
@@ -253,7 +280,10 @@ impl AppView {
                                 )
                             )
                             .into(),
-                            !busy("core") && group.enabled && node.enabled && !automatic,
+                            !busy("core")
+                                && group.enabled
+                                && node.usable_with(self.snapshot.settings.core)
+                                && !automatic,
                             Command::SelectNode(group.id.clone(), node.id.clone()),
                         )
                         .checked(selected.is_some_and(|n| n.id == node.id)),
@@ -631,6 +661,7 @@ impl AppView {
             Command::CopyNode(_)
                 | Command::QrNode(_)
                 | Command::BatchNodes
+                | Command::EditSwitchGroup(_)
                 | Command::ClearLogs
                 | Command::ClearRecording
         ) && busy("core")
@@ -707,6 +738,19 @@ impl AppView {
         match command {
             Command::ImportRoute => self.pick_route_import(cx),
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
+            Command::SetDefaultOutbound(id) => {
+                if let Err(err) = self.service.set_default_outbound_group(&id) {
+                    self.service.toast(ToastLevel::Error, err.to_string());
+                } else {
+                    self.expanded_switch_group = None;
+                }
+            }
+            Command::EditSwitchGroup(id) => {
+                if self.expanded_switch_group.is_some() && self.snapshot.model.group(&id).is_some()
+                {
+                    self.expanded_switch_group = Some(id);
+                }
+            }
             Command::SetFrontProxy(id) => {
                 if let Err(err) = self.service.set_front_proxy(id) {
                     self.service.toast(ToastLevel::Error, err.to_string());

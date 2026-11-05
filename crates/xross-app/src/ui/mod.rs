@@ -225,7 +225,7 @@ pub struct AppView {
     pub(crate) show_host_form: bool,
     pub(crate) matcher_kind: MatcherKind,
     pub(crate) rule_action: RouteActionKind,
-    pub(crate) selected_group: Option<String>,
+    expanded_switch_group: Option<String>,
     pub(crate) log_level: LogLevel,
 }
 
@@ -233,11 +233,6 @@ impl AppView {
     pub fn new(service: AppService, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let snapshot = service.snapshot();
         let mixed_port = snapshot.settings.mixed_port.to_string();
-        let model = snapshot.model.clone();
-        let default_group = model
-            .default_group_id()
-            .or_else(|| model.groups.first().map(|g| g.id.clone()));
-
         let sub_name = text_input(window, cx, "订阅名称（可选）");
         let sub_url = text_input(
             window,
@@ -380,7 +375,7 @@ impl AppView {
             show_host_form: false,
             matcher_kind: MatcherKind::Suffix,
             rule_action: RouteActionKind::Proxy,
-            selected_group: default_group,
+            expanded_switch_group: None,
             log_level: LogLevel::Info,
         };
         view.refresh_header_location();
@@ -478,7 +473,7 @@ impl AppView {
     }
 
     fn refresh_header_location(&self) {
-        if let Some(node) = self.snapshot.selected_node(self.selected_group.as_deref()) {
+        if let Some(node) = self.snapshot.selected_node(None) {
             self.service.request_node_location(&node.id);
         }
     }
@@ -519,12 +514,11 @@ impl AppView {
                 self.latency_pending.clear();
             }
             if self
-                .selected_group
-                .as_ref()
-                .map(|id| self.snapshot.model.group(id).is_none())
-                .unwrap_or(true)
+                .expanded_switch_group
+                .as_deref()
+                .is_some_and(|id| self.snapshot.model.group(id).is_none())
             {
-                self.selected_group = self.snapshot.model.default_group_id();
+                self.expanded_switch_group = None;
             }
             self.refresh_header_location();
             cx.notify();
@@ -756,7 +750,7 @@ impl AppView {
         } else {
             (IconName::Play, self.tr("启动", "Start"))
         };
-        let node = self.snapshot.selected_node(self.selected_group.as_deref());
+        let node = self.snapshot.selected_node(None);
         let node_name = node
             .map(|n| {
                 if self.hide_ips && !n.server.is_empty() {
