@@ -84,14 +84,17 @@ impl CoreAdapter for SingBoxAdapter {
     fn compile(
         &self,
         model: &AppModel,
-        _settings: &Settings,
+        settings: &Settings,
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
         let mut warnings = Vec::new();
         let mut inbounds = Vec::new();
         let mut compiled_inbounds = Vec::new();
 
-        for inbound in model.inbounds.iter().filter(|i| i.enabled) {
+        let listeners = crate::model::inbound::effective_inbounds(model, settings);
+        crate::model::inbound::validate_listeners(&listeners, CoreKind::SingBox, settings)?;
+        for inbound in &listeners {
+            let account = (inbound.allow_lan && settings.lan_auth).then_some(&settings.lan_account);
             match inbound.kind {
                 InboundKind::Tun => {
                     let mut tun = tun_inbound(inbound);
@@ -108,6 +111,7 @@ impl CoreAdapter for SingBoxAdapter {
                     }
                     inbounds.push(tun);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: "tun".into(),
                         port: 0,
@@ -130,6 +134,7 @@ impl CoreAdapter for SingBoxAdapter {
                         "network": if inbound.udp { "tcp,udp" } else { "tcp" }
                     }));
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: inbound.kind.as_str().into(),
                         port: inbound.port,
@@ -156,8 +161,12 @@ impl CoreAdapter for SingBoxAdapter {
                     if inbound.kind == InboundKind::Socks {
                         value["udp"] = json!(inbound.udp);
                     }
+                    if let Some(a) = account {
+                        value["users"] = json!([{"username":a.username, "password":a.password}]);
+                    }
                     inbounds.push(value);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: inbound_type.into(),
                         port: inbound.port,
@@ -175,6 +184,7 @@ impl CoreAdapter for SingBoxAdapter {
         // --- outbounds ---------------------------------------------------
         let mut outbounds = Vec::new();
         let mut endpoints = Vec::new();
+        let front = model.front_node(CoreKind::SingBox)?;
         for node in &model.nodes {
             if !node.enabled {
                 continue;
@@ -199,7 +209,7 @@ impl CoreAdapter for SingBoxAdapter {
                 ));
                 continue;
             }
-            match node_outbound(node, &mut warnings) {
+            match chained_outbound(node, front, &mut warnings) {
                 Ok(value) => {
                     if node.protocol == Protocol::Wireguard || node.protocol.is_vpn() {
                         endpoints.push(value);
@@ -208,6 +218,14 @@ impl CoreAdapter for SingBoxAdapter {
                     }
                 }
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
+            }
+        }
+        if let Some(front) = front {
+            let tag = front.outbound_tag();
+            if !outbounds.iter().chain(&endpoints).any(|v| v["tag"] == tag) {
+                return Err(Error::config(
+                    "前置节点无法编译，请检查节点配置或重新选择前置代理",
+                ));
             }
         }
         if outbounds.is_empty() && endpoints.is_empty() {
@@ -531,17 +549,33 @@ fn tun_inbound(inbound: &Inbound) -> Value {
 }
 
 /// Minimal configuration used only by private per-node probes.
-pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
-    let endpoint = node.protocol == Protocol::Wireguard || node.protocol.is_vpn();
-    let value = node_outbound(node, &mut [])?;
+pub(super) fn compile_probe(node: &Node, port: u16, front: Option<&Node>) -> Result<Value> {
+    let mut endpoints = Vec::new();
+    let mut outbounds = Vec::new();
+    for n in std::iter::once(node).chain(front.filter(|f| node.needs_front(f))) {
+        let value = chained_outbound(n, front, &mut [])?;
+        if n.protocol == Protocol::Wireguard || n.protocol.is_vpn() {
+            endpoints.push(value);
+        } else {
+            outbounds.push(value);
+        }
+    }
     Ok(json!({
-        "endpoints": if endpoint { vec![value.clone()] } else { vec![] },
+        "endpoints": endpoints,
         "log": {"disabled": true},
         "dns": {"servers": [{"type": "local", "tag": "local"}]},
         "inbounds": [{"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port}],
-        "outbounds": if endpoint { vec![] } else { vec![value] },
+        "outbounds": outbounds,
         "route": {"auto_detect_interface": true, "default_domain_resolver": "local", "final": node.outbound_tag()}
     }))
+}
+
+fn chained_outbound(node: &Node, front: Option<&Node>, warnings: &mut [String]) -> Result<Value> {
+    let mut outbound = node_outbound(node, warnings)?;
+    if let Some(front) = front.filter(|f| node.needs_front(f)) {
+        outbound["detour"] = json!(front.outbound_tag());
+    }
+    Ok(outbound)
 }
 
 fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
@@ -1255,7 +1289,7 @@ mod tests {
             compiled.json["dns"]["rules"][0]["preferred_by"],
             format!("vpn-dns-{}", vpn.id)
         );
-        let probe = compile_probe(&vpn, 18080).unwrap();
+        let probe = compile_probe(&vpn, 18080, None).unwrap();
         assert_eq!(probe["endpoints"][0]["type"], "openconnect");
         assert!(probe["outbounds"].as_array().unwrap().is_empty());
         ctx.core_version = Some(semver::Version::new(1, 13, 0));
@@ -1309,7 +1343,7 @@ mod tests {
         }
         model.add_nodes([wg.clone()]);
         let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
-        let probe = super::super::compile_probe(CoreKind::SingBox, &wg, 12345).unwrap();
+        let probe = super::super::compile_probe(CoreKind::SingBox, &wg, 12345, None).unwrap();
         let ep = &compiled.json["endpoints"][0];
         assert_eq!(
             ep["private_key"],
@@ -1385,7 +1419,7 @@ mod tests {
         assert_eq!(outbound["tls"]["enabled"], true);
         assert_eq!(outbound["tls"]["server_name"], "tls.example.com");
         assert!(outbound.get("transport").is_none());
-        let probe = super::super::compile_probe(CoreKind::SingBox, &node, 12345).unwrap();
+        let probe = super::super::compile_probe(CoreKind::SingBox, &node, 12345, None).unwrap();
         assert_eq!(probe["outbounds"].as_array().unwrap().len(), 1);
         assert_eq!(probe["route"]["final"], node.outbound_tag());
         assert_eq!(probe["route"]["auto_detect_interface"], true);
@@ -1393,7 +1427,7 @@ mod tests {
         assert!(probe.get("experimental").is_none());
         assert!(probe["route"].get("rules").is_none());
         node.credentials.password = None;
-        assert!(super::super::compile_probe(CoreKind::SingBox, &node, 12345).is_err());
+        assert!(super::super::compile_probe(CoreKind::SingBox, &node, 12345, None).is_err());
     }
 
     use super::*;
@@ -1640,5 +1674,41 @@ mod tests {
             resolve_rule_set(&model, "geosite-gfw").unwrap().url,
             "https://example.com/custom-gfw.srs"
         );
+    }
+    #[test]
+    fn compiles_separate_authenticated_lan_and_chains_only_other_nodes() {
+        let (mut model, mut settings, ctx) = sample();
+        let front = Node::new("fixture", Protocol::Socks, "proxy.invalid", 1080);
+        model.add_nodes([front.clone()]);
+        model.front_proxy = Some(front.id.clone());
+        let password = uuid::Uuid::new_v4().to_string();
+        settings.allow_lan = true;
+        settings.separate_lan_port = true;
+        settings.lan_auth = true;
+        settings.lan_account = crate::settings::ProxyAccount {
+            username: "fixture".into(),
+            password: password.clone(),
+        };
+        settings.sync_inbounds(&mut model);
+        let config = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let items = config.json["inbounds"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["listen"], "127.0.0.1");
+        assert!(items[0]["users"].is_null());
+        assert_eq!(items[1]["listen"], "0.0.0.0");
+        assert_eq!(items[1]["listen_port"], settings.lan_port);
+        assert_eq!(items[1]["users"][0]["password"], password);
+        assert_eq!(config.json["outbounds"][0]["detour"], front.outbound_tag());
+        assert!(config.json["outbounds"][1]["detour"].is_null());
+        let probe =
+            super::super::compile_probe(CoreKind::SingBox, &model.nodes[0], 12345, Some(&front))
+                .unwrap();
+        assert_eq!(probe["outbounds"].as_array().unwrap().len(), 2);
+        settings.separate_lan_port = false;
+        settings.sync_inbounds(&mut model);
+        let shared = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(shared.json["inbounds"][0]["users"][0]["password"], password);
+        model.remove_node(&front.id);
+        assert!(SingBoxAdapter.compile(&model, &settings, &ctx).is_err());
     }
 }

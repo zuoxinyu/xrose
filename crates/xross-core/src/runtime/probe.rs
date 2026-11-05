@@ -30,11 +30,19 @@ struct Probe {
 }
 
 impl Probe {
-    async fn start(binary: &Path, core: CoreKind, node: &Node, bypass_tun: bool) -> Result<Self> {
+    async fn start(
+        binary: &Path,
+        core: CoreKind,
+        node: &Node,
+        front: Option<&Node>,
+        bypass_tun: bool,
+    ) -> Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let mut node = node.clone();
+        let mut front = front.filter(|f| node.needs_front(f)).cloned();
+        let mut target = node.clone();
         let interface = if core == CoreKind::Xray && bypass_tun {
+            let node = front.as_mut().unwrap_or(&mut target);
             let interface = default_uplink().await?;
             // Resolve before timing the request; the probe core must not recurse
             // through a TUN-controlled system resolver while dialing its server.
@@ -67,13 +75,13 @@ impl Probe {
         } else {
             None
         };
-        let mut config = crate::adapters::compile_probe(core, &node, port)?;
+        let mut config = crate::adapters::compile_probe(core, &target, port, front.as_ref())?;
         if let Some(interface) = interface {
             crate::adapters::xray::bind_probe_interface(&mut config, &interface);
         }
         let directory = tempfile::Builder::new().prefix("xross-probe-").tempdir()?;
         let path = directory.path().join("config.json");
-        crate::util::atomic_write(&path, &serde_json::to_vec(&config)?)?;
+        crate::util::atomic_write_private(&path, &serde_json::to_vec(&config)?)?;
         let mut command = tokio::process::Command::new(std::fs::canonicalize(binary)?);
         command
             .args(crate::core::run_args(core, &path))
@@ -198,9 +206,10 @@ pub async fn http_latency(
     core: CoreKind,
     node: &Node,
     url: &str,
+    front: Option<&Node>,
     bypass_tun: bool,
 ) -> Result<u32> {
-    let mut probe = Probe::start(binary, core, node, bypass_tun).await?;
+    let mut probe = Probe::start(binary, core, node, front, bypass_tun).await?;
     let started = Instant::now();
     let result = probe
         .client
@@ -225,9 +234,10 @@ pub async fn download(
     binary: &Path,
     core: CoreKind,
     node: &Node,
+    front: Option<&Node>,
     bypass_tun: bool,
 ) -> Result<DownloadResult> {
-    let mut probe = Probe::start(binary, core, node, bypass_tun).await?;
+    let mut probe = Probe::start(binary, core, node, front, bypass_tun).await?;
     let result = measure_download(
         &probe.client,
         DOWNLOAD_URL,

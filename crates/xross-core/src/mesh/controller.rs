@@ -168,7 +168,7 @@ impl MeshController {
         *self.networks.write() = reply.networks;
         Ok(())
     }
-    pub async fn connect(&self, id: &str) -> Result<()> {
+    pub async fn connect(&self, id: &str, _network: &crate::updates::UpdateNetwork) -> Result<()> {
         let profile = self
             .profiles
             .read()
@@ -182,7 +182,7 @@ impl MeshController {
         let binary = (profile.provider == MeshProvider::Tailscale)
             .then(|| super::tailscale::archive_path(&self.paths));
         #[cfg(windows)]
-        let driver_archive = super::driver::install(&self.paths).await?;
+        let driver_archive = super::driver::install(&self.paths, _network).await?;
         #[cfg(not(windows))]
         let driver_archive = std::path::PathBuf::new();
         let provider = profile.provider;
@@ -241,8 +241,8 @@ impl MeshController {
     pub async fn probe(&self, provider: MeshProvider, ip: String) -> Result<()> {
         self.send(MeshCommand::Probe { provider, ip }).await
     }
-    pub async fn install(&self) -> Result<()> {
-        super::tailscale::install(&self.paths).await?;
+    pub async fn install(&self, network: &crate::updates::UpdateNetwork) -> Result<()> {
+        super::tailscale::install(&self.paths, network).await?;
         *self.installed.write() = true;
         Ok(())
     }

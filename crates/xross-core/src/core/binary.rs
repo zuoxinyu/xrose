@@ -270,10 +270,9 @@ impl BinaryManager {
         version: &str,
         url: &str,
         sha_expected: Option<String>,
+        network: &crate::updates::UpdateNetwork,
     ) -> Result<BinaryRecord> {
-        let client = reqwest::Client::builder()
-            .user_agent(format!("Xross/{}", env!("CARGO_PKG_VERSION")))
-            .build()?;
+        let client = network.client(std::time::Duration::from_secs(300))?;
         let response = client.get(url).send().await?;
         if !response.status().is_success() {
             return Err(Error::binary(format!(

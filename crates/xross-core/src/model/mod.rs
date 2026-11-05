@@ -141,6 +141,9 @@ pub struct AppModel {
     /// Default group used for `Proxy` actions without an explicit group.
     #[serde(default)]
     pub default_group: Option<String>,
+    /// Stable node identity used to reach other proxy nodes in this profile.
+    #[serde(default)]
+    pub front_proxy: Option<String>,
     #[serde(default)]
     pub updated_at: i64,
 }
@@ -159,6 +162,7 @@ impl Default for AppModel {
             routing: RoutingConfig::default(),
             dns: DnsConfig::default(),
             default_group: None,
+            front_proxy: None,
             updated_at: now_unix(),
         };
         model.ensure_default_groups();
@@ -168,6 +172,19 @@ impl Default for AppModel {
 }
 
 impl AppModel {
+    pub fn front_node(&self, core: CoreKind) -> crate::Result<Option<&Node>> {
+        self.front_proxy
+            .as_deref()
+            .map(|id| {
+                self.node(id)
+                    .filter(|n| n.usable_with(core))
+                    .ok_or_else(|| {
+                        crate::Error::config("前置节点已失效，请重新选择前置代理或关闭该功能")
+                    })
+            })
+            .transpose()
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

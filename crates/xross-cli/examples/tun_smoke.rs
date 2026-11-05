@@ -28,7 +28,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     runtime.block_on(async {
         let baseline = xross_core::mesh::platform::baseline()?;
         xross_core::mesh::coexist::check_networks(&["10.254.254.0/30".into()], &baseline.protected)?;
-        let archive = xross_core::mesh::driver::install(&paths).await?;
+        let settings = Settings::load(&paths.settings_file())?;
+        let network = xross_core::updates::UpdateNetwork::offline_resources(&settings);
+        let archive = xross_core::mesh::driver::install(&paths, &network).await?;
         xross_core::mesh::driver::unpack(&archive, binary.parent().unwrap())?;
         xross_core::util::atomic_write_json(&config, &serde_json::json!({
             "log":{"level":"info"},

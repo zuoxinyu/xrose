@@ -17,7 +17,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -153,6 +153,32 @@ impl Store {
         }
         if version < 3 {
             tx.execute_batch("CREATE TABLE IF NOT EXISTS mesh_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL);")?;
+        }
+        if version < 4 {
+            // The old UI persisted a literal default UA for every subscription.
+            // Empty now means inherit. Preserve custom agents and unknown fields.
+            let mut stmt = tx.prepare("SELECT id, payload FROM subscriptions")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, payload) in rows {
+                let mut sub: serde_json::Value =
+                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                if sub["user_agent"] == crate::subscription::DEFAULT_USER_AGENT {
+                    sub["user_agent"] = "".into();
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&sub)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("订阅加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE subscriptions SET payload = ?1 WHERE id = ?2",
+                        params![encrypted, id],
+                    )?;
+                }
+            }
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
@@ -480,7 +506,9 @@ impl Store {
         }
         for sub in bundle.subscriptions {
             let mut s = Subscription::new(sub.name, sub.url);
-            s.user_agent = sub.user_agent;
+            if sub.user_agent != crate::subscription::DEFAULT_USER_AGENT {
+                s.user_agent = sub.user_agent;
+            }
             s.headers = sub.headers;
             self.save_subscription(&s)?;
             imported += 1;
@@ -579,6 +607,26 @@ mod tests {
         assert!(export.exists());
         let imported = store.import_json(&export).unwrap();
         assert!(imported >= 2);
+    }
+
+    #[test]
+    fn v3_subscriptions_inherit_global_agent_but_keep_custom_overrides() {
+        let (store, dir) = store();
+        for agent in [crate::subscription::DEFAULT_USER_AGENT, "Custom/1"] {
+            let mut s = Subscription::new("fixture", "https://updates.invalid/");
+            s.user_agent = agent.into();
+            store.save_subscription(&s).unwrap();
+        }
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 3)
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        let subs = reopened.subscriptions().unwrap();
+        assert!(subs[0].user_agent.is_empty());
+        assert_eq!(subs[1].user_agent, "Custom/1");
     }
 
     #[test]

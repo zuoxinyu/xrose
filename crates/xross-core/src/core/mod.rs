@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::model::{AppModel, CoreKind};
 use crate::paths::AppPaths;
 use crate::settings::Settings;
-use crate::util::atomic_write;
+use crate::util::atomic_write_private;
 
 pub use binary::{BinaryManager, BinaryRecord};
 pub use logs::{LogBus, LogEntry, LogStream};
@@ -109,6 +109,46 @@ impl CoreManager {
             })
     }
 
+    pub(crate) fn active_proxy(&self, protocol: &str) -> Option<crate::updates::LocalProxy> {
+        if self.state().phase != ProcessPhase::Running {
+            return None;
+        }
+        let guard = self.applied.lock();
+        let applied = guard.as_ref()?;
+        let inbound = applied
+            .compiled
+            .inbounds
+            .iter()
+            .find(|i| i.kind == "mixed" || i.kind == protocol)?;
+        let host = match inbound.listen.as_str() {
+            "0.0.0.0" | "" => "127.0.0.1",
+            "::" => "::1",
+            host => host,
+        };
+        Some(crate::updates::LocalProxy {
+            host: host.into(),
+            port: inbound.port,
+            account: (inbound.allow_lan && applied.settings.lan_auth)
+                .then(|| applied.settings.lan_account.clone()),
+        })
+    }
+
+    pub(crate) fn update_network(
+        &self,
+        settings: &Settings,
+        via_core: bool,
+    ) -> crate::updates::UpdateNetwork {
+        crate::updates::UpdateNetwork {
+            via_core,
+            proxy: if via_core {
+                self.active_proxy("http")
+            } else {
+                None
+            },
+            user_agent: settings.update_user_agent.clone(),
+        }
+    }
+
     /// Listen addresses of proxy inbounds in the currently running configuration.
     pub fn active_proxy_addresses(&self) -> Vec<String> {
         if !self.state().phase.is_alive() {
@@ -128,21 +168,7 @@ impl CoreManager {
         proxy_inbounds
             .into_iter()
             .map(|inbound| {
-                let listen = applied
-                    .model
-                    .inbounds
-                    .iter()
-                    .find(|i| i.tag == inbound.tag || format!("{}-http", i.tag) == inbound.tag)
-                    .map(|i| i.listen_address().to_string())
-                    .unwrap_or_else(|| {
-                        if inbound.allow_lan {
-                            "0.0.0.0".into()
-                        } else if applied.settings.listen_host.is_empty() {
-                            "127.0.0.1".into()
-                        } else {
-                            applied.settings.listen_host.clone()
-                        }
-                    });
+                let listen = &inbound.listen;
                 if single_mixed {
                     format!("{listen}:{}", inbound.port)
                 } else {
@@ -303,7 +329,11 @@ impl CoreManager {
         }
         #[cfg(windows)]
         if uses_native_tun(model, core) {
-            let archive = crate::mesh::driver::install(&self.paths).await?;
+            let archive = crate::mesh::driver::install(
+                &self.paths,
+                &self.update_network(settings, settings.proxy_resource_updates),
+            )
+            .await?;
             crate::mesh::driver::unpack(
                 &archive,
                 binary
@@ -325,7 +355,7 @@ impl CoreManager {
         }
         let pretty = compiled.to_pretty_string()?;
         let config_path = self.paths.generated_config(core.as_str());
-        atomic_write(&config_path, pretty.as_bytes())?;
+        atomic_write_private(&config_path, pretty.as_bytes())?;
         self.logs.push(
             LogStream::App,
             crate::settings::LogLevel::Info,
@@ -444,7 +474,7 @@ impl CoreManager {
         ctx.mesh = plan.clone();
         let compiled = adapters::adapter_for(old.core).compile(&old.model, &old.settings, &ctx)?;
         let candidate = self.paths.runtime_dir.join("mesh-candidate.json");
-        atomic_write(&candidate, compiled.to_pretty_string()?.as_bytes())?;
+        atomic_write_private(&candidate, compiled.to_pretty_string()?.as_bytes())?;
         let binary = self.resolve_binary(old.core, &old.settings)?;
         let validation = adapters::validate(old.core, &binary, &candidate).await;
         let _ = std::fs::remove_file(&candidate);
@@ -470,7 +500,7 @@ impl CoreManager {
     }
 
     async fn spawn_applied(&self, applied: &AppliedConfig) -> Result<()> {
-        atomic_write(
+        atomic_write_private(
             &applied.path,
             applied.compiled.to_pretty_string()?.as_bytes(),
         )?;
@@ -563,7 +593,7 @@ impl CoreManager {
             .paths
             .runtime_dir
             .join(format!("{}-manual.json", core.as_str()));
-        atomic_write(&path, raw.as_bytes())?;
+        atomic_write_private(&path, raw.as_bytes())?;
         let report = adapters::validate(core, &binary, &path).await?;
         Ok(report)
     }

@@ -63,11 +63,12 @@ fn verified_bytes(path: &Path) -> Result<Vec<u8>> {
 pub fn verify_binary(path: &Path) -> Result<()> {
     verified_bytes(path).map(|_| ())
 }
-pub async fn install(paths: &crate::paths::AppPaths) -> Result<()> {
+pub async fn install(
+    paths: &crate::paths::AppPaths,
+    network: &crate::updates::UpdateNetwork,
+) -> Result<()> {
     let (asset, hash) = release()?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()?;
+    let client = network.client(std::time::Duration::from_secs(180))?;
     let response = client
         .get(format!(
             "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/{asset}"

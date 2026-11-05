@@ -196,6 +196,10 @@ pub struct AppView {
     pub(crate) host_domain: Entity<InputState>,
     pub(crate) host_ips: Entity<InputState>,
     pub(crate) port_input: Entity<InputState>,
+    lan_port_input: Entity<InputState>,
+    lan_user_input: Entity<InputState>,
+    lan_password_input: Entity<InputState>,
+    update_agent_input: Entity<InputState>,
     pub(crate) endpoint_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
@@ -257,6 +261,21 @@ impl AppView {
             InputState::new(window, cx)
                 .placeholder("7890")
                 .default_value(mixed_port)
+        });
+        let lan_port_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(snapshot.settings.lan_port.to_string())
+        });
+        let lan_user_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(snapshot.settings.lan_account.username.clone())
+        });
+        let lan_password_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .default_value(snapshot.settings.lan_account.password.clone())
+        });
+        let update_agent_input = cx.new(|cx| {
+            InputState::new(window, cx).default_value(snapshot.settings.update_user_agent.clone())
         });
         let endpoint_input = text_input(
             window,
@@ -331,6 +350,10 @@ impl AppView {
             host_domain,
             host_ips,
             port_input,
+            lan_port_input,
+            lan_user_input,
+            lan_password_input,
+            update_agent_input,
             endpoint_input,
             trace_input,
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),

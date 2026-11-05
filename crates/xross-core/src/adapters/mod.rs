@@ -139,6 +139,8 @@ pub struct CompiledConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CompiledInbound {
+    #[serde(default)]
+    pub listen: String,
     pub tag: String,
     pub kind: String,
     pub port: u16,
@@ -182,13 +184,18 @@ static SINGBOX: SingBoxAdapter = SingBoxAdapter;
 
 /// A private HTTP listener routed exclusively through the requested node.
 /// No selectors, TUN, cache file, API ports or user routing are shared.
-pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16) -> Result<Value> {
-    if !node.usable_with(core) {
+pub(crate) fn compile_probe(
+    core: CoreKind,
+    node: &crate::model::Node,
+    port: u16,
+    front: Option<&crate::model::Node>,
+) -> Result<Value> {
+    if !node.usable_with(core) || front.is_some_and(|f| !f.usable_with(core)) {
         return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
     }
     match core {
-        CoreKind::SingBox => singbox::compile_probe(node, port),
-        CoreKind::Xray => xray::compile_probe(node, port),
+        CoreKind::SingBox => singbox::compile_probe(node, port, front),
+        CoreKind::Xray => xray::compile_probe(node, port, front),
     }
 }
 

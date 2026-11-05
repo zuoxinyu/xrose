@@ -39,7 +39,10 @@ impl CoreAdapter for XrayAdapter {
         let mut compiled_inbounds = Vec::new();
         let mut inbounds = Vec::new();
 
-        for inbound in model.inbounds.iter().filter(|i| i.enabled) {
+        let listeners = crate::model::inbound::effective_inbounds(model, settings);
+        crate::model::inbound::validate_listeners(&listeners, CoreKind::Xray, settings)?;
+        for inbound in &listeners {
+            let account = (inbound.allow_lan && settings.lan_auth).then_some(&settings.lan_account);
             match inbound.kind {
                 InboundKind::Mixed => {
                     // Xray has no "mixed" inbound. SOCKS and HTTP must use
@@ -50,15 +53,17 @@ impl CoreAdapter for XrayAdapter {
                             "mixed 入站端口过大，无法为 HTTP 分配相邻端口",
                         ));
                     }
-                    inbounds.push(socks_inbound(inbound)?);
-                    inbounds.push(http_inbound(inbound, http_port)?);
+                    inbounds.push(socks_inbound(inbound, account)?);
+                    inbounds.push(http_inbound(inbound, http_port, account)?);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: "socks".into(),
                         port: inbound.port,
                         allow_lan: inbound.allow_lan,
                     });
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: format!("{}-http", inbound.tag),
                         kind: "http".into(),
                         port: http_port,
@@ -70,8 +75,9 @@ impl CoreAdapter for XrayAdapter {
                     ));
                 }
                 InboundKind::Socks => {
-                    inbounds.push(socks_inbound(inbound)?);
+                    inbounds.push(socks_inbound(inbound, account)?);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: "socks".into(),
                         port: inbound.port,
@@ -79,8 +85,9 @@ impl CoreAdapter for XrayAdapter {
                     });
                 }
                 InboundKind::Http => {
-                    inbounds.push(http_inbound(inbound, inbound.port)?);
+                    inbounds.push(http_inbound(inbound, inbound.port, account)?);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: "http".into(),
                         port: inbound.port,
@@ -90,6 +97,7 @@ impl CoreAdapter for XrayAdapter {
                 InboundKind::Tun => {
                     inbounds.push(tun_inbound(inbound, ctx, model.dns.enabled, &mut warnings)?);
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: "tun".into(),
                         port: 0,
@@ -106,6 +114,7 @@ impl CoreAdapter for XrayAdapter {
                     }
                     inbounds.push(transparent_inbound(inbound));
                     compiled_inbounds.push(CompiledInbound {
+                        listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
                         kind: inbound.kind.as_str().into(),
                         port: inbound.port,
@@ -132,6 +141,7 @@ impl CoreAdapter for XrayAdapter {
 
         // --- Outbounds ---------------------------------------------------
         let mut outbounds = Vec::new();
+        let front = model.front_node(CoreKind::Xray)?;
         for node in &model.nodes {
             if !node.enabled {
                 continue;
@@ -144,9 +154,17 @@ impl CoreAdapter for XrayAdapter {
                 ));
                 continue;
             }
-            match node_outbound(node, &mut warnings) {
+            match chained_outbound(node, front, &mut warnings) {
                 Ok(value) => outbounds.push(value),
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
+            }
+        }
+        if let Some(front) = front {
+            let tag = front.outbound_tag();
+            if !outbounds.iter().any(|v| v["tag"] == tag) {
+                return Err(Error::config(
+                    "前置节点无法编译，请检查节点配置或重新选择前置代理",
+                ));
             }
         }
         if !outbounds
@@ -427,30 +445,46 @@ fn xray_query_strategy(strategy: DomainStrategy) -> &'static str {
     }
 }
 
-fn socks_inbound(inbound: &Inbound) -> Result<Value> {
+fn socks_inbound(
+    inbound: &Inbound,
+    account: Option<&crate::settings::ProxyAccount>,
+) -> Result<Value> {
     if inbound.port == 0 {
         return Err(Error::config(format!("入站 {} 端口不能为 0", inbound.tag)));
+    }
+    let mut options = json!({"auth": "noauth", "udp": inbound.udp, "userLevel": 0});
+    if let Some(a) = account {
+        options["auth"] = json!("password");
+        options["accounts"] = json!([{"user":a.username, "pass":a.password}]);
     }
     Ok(json!({
         "tag": inbound.tag,
         "listen": inbound.listen_address(),
         "port": inbound.port,
         "protocol": "socks",
-        "settings": {"auth": "noauth", "udp": inbound.udp, "userLevel": 0},
+        "settings": options,
         "sniffing": sniffing(inbound)
     }))
 }
 
-fn http_inbound(inbound: &Inbound, port: u16) -> Result<Value> {
+fn http_inbound(
+    inbound: &Inbound,
+    port: u16,
+    account: Option<&crate::settings::ProxyAccount>,
+) -> Result<Value> {
     if port == 0 {
         return Err(Error::config(format!("入站 {} 端口不能为 0", inbound.tag)));
+    }
+    let mut options = json!({"timeout":300});
+    if let Some(a) = account {
+        options["accounts"] = json!([{"user":a.username, "pass":a.password}]);
     }
     Ok(json!({
         "tag": if port == inbound.port { inbound.tag.clone() } else { format!("{}-http", inbound.tag) },
         "listen": inbound.listen_address(),
         "port": port,
         "protocol": "http",
-        "settings": {"timeout": 300},
+        "settings": options,
         "sniffing": sniffing(inbound)
     }))
 }
@@ -626,17 +660,38 @@ fn tun_inbound(
 }
 
 /// Minimal configuration used only by private per-node probes.
-pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+pub(super) fn compile_probe(node: &Node, port: u16, front: Option<&Node>) -> Result<Value> {
+    let mut outbounds = vec![chained_outbound(node, front, &mut Vec::new())?];
+    if let Some(front) = front.filter(|f| node.needs_front(f)) {
+        outbounds.push(node_outbound(front, &mut Vec::new())?);
+    }
     Ok(json!({
         "log": {"loglevel": "none"},
         "inbounds": [{"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}],
-        "outbounds": [node_outbound(node, &mut Vec::new())?]
+        "outbounds": outbounds
     }))
 }
 
 /// Bind probe sockets before they can be captured by a running TUN.
 pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str) {
-    config["outbounds"][0]["streamSettings"]["sockopt"]["interface"] = json!(interface);
+    let first_hop = config["outbounds"]
+        .as_array_mut()
+        .unwrap()
+        .last_mut()
+        .unwrap();
+    first_hop["streamSettings"]["sockopt"]["interface"] = json!(interface);
+}
+
+fn chained_outbound(
+    node: &Node,
+    front: Option<&Node>,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let mut outbound = node_outbound(node, warnings)?;
+    if let Some(front) = front.filter(|f| node.needs_front(f)) {
+        outbound["streamSettings"]["sockopt"]["dialerProxy"] = json!(front.outbound_tag());
+    }
+    Ok(outbound)
 }
 
 fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
@@ -956,7 +1011,7 @@ mod tests {
         }
         model.add_nodes([wg.clone()]);
         let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
-        let probe = super::super::compile_probe(CoreKind::Xray, &wg, 12345).unwrap();
+        let probe = super::super::compile_probe(CoreKind::Xray, &wg, 12345, None).unwrap();
         let out = compiled.json["outbounds"]
             .as_array()
             .unwrap()
@@ -1135,7 +1190,7 @@ mod tests {
     fn xray_probe_binds_only_the_requested_node_to_the_uplink() {
         let (model, _, _) = sample();
         let mut config =
-            super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345).unwrap();
+            super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345, None).unwrap();
         bind_probe_interface(&mut config, "test-uplink");
         assert_eq!(config["outbounds"].as_array().unwrap().len(), 1);
         assert_eq!(
@@ -1166,8 +1221,9 @@ mod tests {
                 .iter()
                 .any(|o| o["tag"] == node.outbound_tag())
         );
-        assert!(super::super::compile_probe(CoreKind::Xray, &node, 12345).is_err());
-        let probe = super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345).unwrap();
+        assert!(super::super::compile_probe(CoreKind::Xray, &node, 12345, None).is_err());
+        let probe =
+            super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345, None).unwrap();
         assert_eq!(probe["outbounds"].as_array().unwrap().len(), 1);
         assert_eq!(probe["outbounds"][0]["tag"], model.nodes[0].outbound_tag());
         assert_eq!(probe["inbounds"][0]["listen"], "127.0.0.1");
@@ -1259,5 +1315,50 @@ mod tests {
                 .iter()
                 .all(|s| s["address"] != "fakeip")
         );
+    }
+    #[test]
+    fn compiles_separate_authenticated_lan_and_chains_only_other_nodes() {
+        let (mut model, mut settings, ctx) = sample();
+        let front = Node::new("fixture", Protocol::Socks, "proxy.invalid", 1080);
+        model.add_nodes([front.clone()]);
+        model.front_proxy = Some(front.id.clone());
+        let password = uuid::Uuid::new_v4().to_string();
+        settings.allow_lan = true;
+        settings.separate_lan_port = true;
+        settings.lan_auth = true;
+        settings.lan_account = crate::settings::ProxyAccount {
+            username: "fixture".into(),
+            password: password.clone(),
+        };
+        settings.sync_inbounds(&mut model);
+        let config = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let items = config.json["inbounds"].as_array().unwrap();
+        for i in &items[..2] {
+            assert_eq!(i["listen"], "127.0.0.1");
+            assert!(i["settings"]["accounts"].is_null());
+        }
+        for i in &items[2..4] {
+            assert_eq!(i["listen"], "0.0.0.0");
+            assert_eq!(i["settings"]["accounts"][0]["pass"], password);
+        }
+        assert_eq!(items[2]["settings"]["auth"], "password");
+        assert_eq!(items[3]["port"], settings.lan_port + 1);
+        assert_eq!(
+            config.json["outbounds"][0]["streamSettings"]["sockopt"]["dialerProxy"],
+            front.outbound_tag()
+        );
+        assert!(config.json["outbounds"][1]["streamSettings"]["sockopt"]["dialerProxy"].is_null());
+        let probe =
+            super::super::compile_probe(CoreKind::Xray, &model.nodes[0], 12345, Some(&front))
+                .unwrap();
+        assert_eq!(probe["outbounds"].as_array().unwrap().len(), 2);
+        settings.separate_lan_port = false;
+        settings.sync_inbounds(&mut model);
+        let shared = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        for i in &shared.json["inbounds"].as_array().unwrap()[..2] {
+            assert_eq!(i["settings"]["accounts"][0]["pass"], password);
+        }
+        model.remove_node(&front.id);
+        assert!(XrayAdapter.compile(&model, &settings, &ctx).is_err());
     }
 }

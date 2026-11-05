@@ -64,9 +64,11 @@ pub struct Subscription {
     pub id: String,
     pub name: String,
     pub url: String,
-    /// Send through a proxy? Reserved for future use; currently informational.
+    /// Empty inherits the global update User-Agent.
     #[serde(default)]
     pub user_agent: String,
+    #[serde(default)]
+    pub last_user_agent: Option<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default = "crate::model::default_true")]
@@ -99,7 +101,8 @@ impl Subscription {
             id: new_id("sub"),
             name: name.into(),
             url: url.into(),
-            user_agent: DEFAULT_USER_AGENT.into(),
+            user_agent: String::new(),
+            last_user_agent: None,
             headers: BTreeMap::new(),
             enabled: true,
             update_interval_secs: default_interval(),

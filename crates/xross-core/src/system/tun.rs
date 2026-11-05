@@ -144,16 +144,27 @@ pub(crate) fn diagnose_for_process(
         check_port(&name, endpoint, owner.as_ref(), conflict, settings.language)
     };
     let lang = settings.language;
-    for inbound in model.inbounds.iter().filter(|i| i.enabled) {
-        if inbound.kind == InboundKind::Tun || inbound.port == 0 {
-            continue;
+    for inbound in crate::model::inbound::effective_inbounds(model, settings) {
+        let ports = match inbound.listen_ports(settings.core) {
+            Ok(ports) => ports,
+            Err(err) => {
+                checks.push(DoctorCheck::error("HTTP", err.to_string()));
+                continue;
+            }
+        };
+        for port in ports {
+            let label = if port == inbound.port {
+                localize(lang, "端口", "Port")
+            } else {
+                "HTTP"
+            };
+            checks.push(port_check(
+                format!("{label} {}", inbound.tag),
+                inbound.listen_address(),
+                port,
+                localize(lang, "启动可能失败", "the core may fail to start"),
+            ));
         }
-        checks.push(port_check(
-            format!("{} {}", localize(lang, "端口", "Port"), inbound.tag),
-            inbound.listen_address(),
-            inbound.port,
-            localize(lang, "启动可能失败", "the core may fail to start"),
-        ));
     }
     if settings.core == crate::model::CoreKind::SingBox {
         checks.push(port_check(

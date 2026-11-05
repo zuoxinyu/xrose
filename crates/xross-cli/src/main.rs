@@ -175,11 +175,14 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
             }
         }
         "install" => {
+            let settings = xross_core::Settings::load(&paths.settings_file())
+                .map_err(|err| err.to_string())?;
+            let network = xross_core::updates::UpdateNetwork::offline_resources(&settings);
             runtime
                 .block_on(async {
-                    mesh::tailscale::install(&paths).await?;
+                    mesh::tailscale::install(&paths, &network).await?;
                     #[cfg(windows)]
-                    mesh::driver::install(&paths).await?;
+                    mesh::driver::install(&paths, &network).await?;
                     Ok::<(), xross_core::Error>(())
                 })
                 .map_err(|e| e.to_string())?;
@@ -404,7 +407,8 @@ fn compile(args: &[String]) -> Result<(), String> {
     let text = compiled.to_pretty_string().map_err(|e| e.to_string())?;
     match out {
         Some(path) => {
-            xross_core::util::atomic_write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+            xross_core::util::atomic_write_private(&path, text.as_bytes())
+                .map_err(|e| e.to_string())?;
             println!("已写入 {}", path.display());
         }
         None => println!("{text}"),
@@ -879,10 +883,12 @@ fn fetch_core(args: &[String]) -> Result<(), String> {
         .binaries()
         .resolve(core, settings.active_version(core).map(|s| s.as_str()))
         .map(|b| b.version);
+    let network = service.resource_network();
     let candidate = runtime
         .block_on(xross_core::updates::check_core_update(
             core,
             current.as_deref(),
+            &network,
         ))
         .map_err(|e| e.to_string())?;
     let Some(candidate) = candidate else {
@@ -897,7 +903,7 @@ fn fetch_core(args: &[String]) -> Result<(), String> {
     );
     let checksum = match &candidate.checksum_url {
         Some(url) => runtime
-            .block_on(xross_core::updates::download_checksum(url))
+            .block_on(xross_core::updates::download_checksum(url, &network))
             .map_err(|e| e.to_string())?,
         None => None,
     };
@@ -910,6 +916,7 @@ fn fetch_core(args: &[String]) -> Result<(), String> {
             &candidate.version,
             &candidate.asset.url,
             checksum,
+            &network,
         ))
         .map_err(|e| e.to_string())?;
     let mut settings = service.settings();

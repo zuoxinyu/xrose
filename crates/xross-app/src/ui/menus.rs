@@ -9,6 +9,7 @@ use xross_core::service::ToastLevel;
 #[derive(Clone)]
 pub(super) enum MenuTarget {
     NodeSelector,
+    FrontProxy,
     Node(String),
     Nodes,
     Rule(String, Option<String>),
@@ -22,6 +23,7 @@ pub(super) enum MenuTarget {
 #[derive(Clone)]
 pub(super) enum Command {
     SelectNode(String, String),
+    SetFrontProxy(Option<String>),
     EditNode(String),
     TestNode(String),
     DownloadNode(String),
@@ -120,6 +122,33 @@ impl AppView {
             item(&view, tr(lang, zh, en), enabled && available, command)
         };
         match target {
+            MenuTarget::FrontProxy => {
+                let model = &self.snapshot.model;
+                menu = menu.item(
+                    add("关闭", "Off", true, Command::SetFrontProxy(None))
+                        .checked(model.front_proxy.is_none()),
+                );
+                for node in model
+                    .nodes
+                    .iter()
+                    .filter(|n| n.usable_with(self.snapshot.settings.core))
+                {
+                    let name = if self.hide_ips && !node.server.is_empty() {
+                        node.name.replace(&node.server, "•••")
+                    } else {
+                        node.name.clone()
+                    };
+                    menu = menu.item(
+                        item(
+                            &view,
+                            name.into(),
+                            !busy("core"),
+                            Command::SetFrontProxy(Some(node.id.clone())),
+                        )
+                        .checked(model.front_proxy.as_ref() == Some(&node.id)),
+                    );
+                }
+            }
             MenuTarget::NodeSelector => {
                 let group = self
                     .selected_group
@@ -579,6 +608,11 @@ impl AppView {
             }
         }
         match command {
+            Command::SetFrontProxy(id) => {
+                if let Err(err) = self.service.set_front_proxy(id) {
+                    self.service.toast(ToastLevel::Error, err.to_string());
+                }
+            }
             Command::SelectNode(group_id, node_id) => {
                 self.service.select_node(&group_id, &node_id);
                 self.refresh_header_location();

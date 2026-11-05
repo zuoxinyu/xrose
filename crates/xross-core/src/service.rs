@@ -300,6 +300,7 @@ impl AppService {
 
         let mesh = crate::mesh::controller::MeshController::new(paths.clone(), store.clone())?;
         let mut model = model;
+        settings.sync_inbounds(&mut model);
         mesh.sync_outbounds(&mut model);
         let inner = Arc::new(Inner {
             mesh,
@@ -764,24 +765,7 @@ impl AppService {
     fn sync_model_settings(&self) {
         let settings = self.inner.settings.read().clone();
         let mut model = self.inner.model.write();
-        for inbound in model.inbounds.iter_mut() {
-            match inbound.kind {
-                InboundKind::Mixed => {
-                    inbound.port = settings.mixed_port;
-                    inbound.allow_lan = settings.allow_lan;
-                    inbound.listen = if settings.allow_lan {
-                        "0.0.0.0".into()
-                    } else {
-                        settings.listen_host.clone()
-                    };
-                }
-                InboundKind::Tun => {
-                    inbound.enabled = settings.tun_enabled;
-                    inbound.tun.strict_route = settings.tun_strict_route;
-                }
-                _ => {}
-            }
-        }
+        settings.sync_inbounds(&mut model);
     }
 
     fn save_settings(&self, settings: &Settings) -> Result<()> {
@@ -967,6 +951,13 @@ impl AppService {
         Ok(())
     }
 
+    pub fn resource_network(&self) -> updates::UpdateNetwork {
+        let settings = self.settings();
+        self.inner
+            .core
+            .update_network(&settings, settings.proxy_resource_updates)
+    }
+
     pub fn refresh_subscription(&self, id: &str) {
         let Some(subscription) = self.inner.subs.read().iter().find(|s| s.id == id).cloned() else {
             self.toast(ToastLevel::Error, "订阅不存在");
@@ -979,12 +970,26 @@ impl AppService {
         self.set_busy(&key, true);
         let service = self.clone();
         self.spawn(async move {
+            let settings = service.settings();
+            let network = service
+                .inner
+                .core
+                .update_network(&settings, settings.proxy_subscription_updates);
+            let user_agent = if !subscription.user_agent.is_empty() {
+                subscription.user_agent.clone()
+            } else if !settings.update_user_agent.is_empty() {
+                settings.update_user_agent
+            } else {
+                crate::subscription::DEFAULT_USER_AGENT.into()
+            };
+            let same_agent = subscription.last_user_agent.as_ref() == Some(&user_agent);
             let request = crate::subscription::FetchRequest {
+                network,
                 url: subscription.url.clone(),
-                user_agent: subscription.user_agent.clone(),
+                user_agent: user_agent.clone(),
                 headers: subscription.headers.clone(),
-                etag: subscription.etag.clone(),
-                last_modified: subscription.last_modified.clone(),
+                etag: subscription.etag.clone().filter(|_| same_agent),
+                last_modified: subscription.last_modified.clone().filter(|_| same_agent),
             };
             let result = crate::subscription::fetch_subscription(request).await;
             service.set_busy(&key, false);
@@ -1007,6 +1012,7 @@ impl AppService {
                     }
                     let added = service.merge_parsed(&subscription.id, &parsed);
                     let mut updated = subscription.clone();
+                    updated.last_user_agent = Some(user_agent);
                     updated.etag = response.etag;
                     updated.last_modified = response.last_modified;
                     updated.usage = response
@@ -1414,12 +1420,20 @@ impl AppService {
             .collect();
         // Use the applied configuration, not a pending settings edit. A TUN TCP
         // handshake can terminate locally before any remote connection exists.
-        let use_http = self.inner.core.native_tun_active();
+        let bypass_tun = self.inner.core.native_tun_active();
+        let use_http = bypass_tun || model.front_proxy.is_some();
         let settings = self.settings();
-        let core = if use_http {
+        let core = if bypass_tun {
             self.inner.core.state().core.unwrap_or(settings.core)
         } else {
             settings.core
+        };
+        let front = match model.front_node(core) {
+            Ok(front) => front.cloned(),
+            Err(err) => {
+                self.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
         };
         let binary = if use_http {
             match self.inner.core.resolve_binary(core, &settings) {
@@ -1443,11 +1457,12 @@ impl AppService {
             let results: Vec<_> = stream::iter(targets)
                 .map(|node| {
                     let binary = binary.clone();
+                    let front = front.as_ref();
                     let url = settings.urltest_url.clone();
                     async move {
                         let result = if let Some(binary) = binary {
                             match crate::runtime::probe::http_latency(
-                                &binary, core, &node, &url, use_http,
+                                &binary, core, &node, &url, front, bypass_tun,
                             )
                             .await
                             {
@@ -1514,7 +1529,15 @@ impl AppService {
         } else {
             settings.core
         };
-        let Some(node) = self.inner.model.read().node(node_id).cloned() else {
+        let model = self.model();
+        let front = match model.front_node(core) {
+            Ok(front) => front.cloned(),
+            Err(err) => {
+                self.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+        };
+        let Some(node) = model.node(node_id).cloned() else {
             return;
         };
         let binary = match self.inner.core.resolve_binary(core, &settings) {
@@ -1532,6 +1555,7 @@ impl AppService {
                 core,
                 &node,
                 &settings.urltest_url,
+                front.as_ref(),
                 bypass_tun,
             )
             .await;
@@ -1568,7 +1592,15 @@ impl AppService {
         } else {
             settings.core
         };
-        let Some(node) = self.inner.model.read().node(node_id).cloned() else {
+        let model = self.model();
+        let front = match model.front_node(core) {
+            Ok(front) => front.cloned(),
+            Err(err) => {
+                self.toast(ToastLevel::Error, err.to_string());
+                return;
+            }
+        };
+        let Some(node) = model.node(node_id).cloned() else {
             return;
         };
         if !node.enabled || !node.protocol.supported_by(core) {
@@ -1587,7 +1619,9 @@ impl AppService {
         self.inner.downloads.write().remove(&node.id);
         let service = self.clone();
         self.spawn(async move {
-            let result = crate::runtime::probe::download(&binary, core, &node, bypass_tun).await;
+            let result =
+                crate::runtime::probe::download(&binary, core, &node, front.as_ref(), bypass_tun)
+                    .await;
             let entry = match result {
                 Ok(entry) => {
                     service.toast(
@@ -1654,7 +1688,7 @@ impl AppService {
             let compiled = crate::adapters::adapter_for(settings.core)
                 .compile(model, settings, &ctx)
                 .map_err(|e| e.to_string())?;
-            return updates::ensure_xray_geo(&compiled.json, dir)
+            return updates::ensure_xray_geo(&compiled.json, dir, &self.resource_network())
                 .await
                 .map_err(|e| e.to_string());
         }
@@ -1671,7 +1705,7 @@ impl AppService {
             ToastLevel::Info,
             format!("正在预下载 {} 个规则集…", missing.len()),
         );
-        let results = updates::sync_rule_sets(&missing, &dir).await;
+        let results = updates::sync_rule_sets(&missing, &dir, &self.resource_network()).await;
         let failed: Vec<_> = results.iter().filter(|r| r.status == "failed").collect();
         for failure in failed {
             self.inner.core.logs().push(
@@ -1694,7 +1728,7 @@ impl AppService {
             Ok(())
         } else {
             Err(format!(
-                "规则集下载失败：{}。请检查网络，或在“路由 → 规则集”中使用可访问的镜像。",
+                "规则集下载失败：{}。请检查网络及资源更新代理设置，或在“路由 → 规则集”中更换镜像。",
                 still_missing.join(", ")
             ))
         }
@@ -1720,11 +1754,12 @@ impl AppService {
         );
         self.set_busy("install", true);
         let result: Result<_> = async {
-            let candidate = updates::check_core_update(settings.core, None)
+            let network = self.resource_network();
+            let candidate = updates::check_core_update(settings.core, None, &network)
                 .await?
                 .ok_or_else(|| Error::binary("未找到可下载的内核版本"))?;
             let checksum = match candidate.checksum_url {
-                Some(url) => updates::download_checksum(&url).await?,
+                Some(url) => updates::download_checksum(&url, &network).await?,
                 None => None,
             };
             self.inner
@@ -1735,6 +1770,7 @@ impl AppService {
                     &candidate.version,
                     &candidate.asset.url,
                     checksum,
+                    &network,
                 )
                 .await
         }
@@ -2104,18 +2140,46 @@ impl AppService {
     // Settings
     // ------------------------------------------------------------------
 
-    pub fn update_settings(&self, mut new: Settings) {
+    pub fn update_settings(&self, new: Settings) {
         let old = self.settings();
         if self.is_busy("autostart") && new.autostart != old.autostart {
             self.toast(ToastLevel::Info, "正在设置登录启动，请稍后重试");
             return;
         }
-        new.mixed_port = new.mixed_port.max(1);
-        new.api_port = new.api_port.max(1);
-        new.stats_port = new.stats_port.max(1);
-        if new.api_port == new.mixed_port || new.stats_port == new.mixed_port {
-            self.toast(ToastLevel::Warning, "端口不能重复，已保留旧端口");
-            new.mixed_port = old.mixed_port;
+        if new.lan_auth && !new.lan_account.valid() {
+            self.toast(ToastLevel::Warning, "请输入有效的局域网用户名和密码");
+            return;
+        }
+        if reqwest::header::HeaderValue::from_str(&new.update_user_agent).is_err() {
+            self.toast(ToastLevel::Warning, "User-Agent 含有无效字符，请重新输入");
+            return;
+        }
+        if new.listeners_changed(&old) {
+            let mut model = self.model();
+            new.sync_inbounds(&mut model);
+            let listeners = crate::model::inbound::effective_inbounds(&model, &new);
+            if let Err(err) = crate::model::inbound::validate_listeners(&listeners, new.core, &new)
+            {
+                self.toast(ToastLevel::Warning, err.to_string());
+                return;
+            }
+            let mesh = self.inner.mesh.snapshot();
+            if listeners
+                .iter()
+                .filter_map(|i| i.listen_ports(new.core).ok())
+                .flatten()
+                .any(|port| {
+                    mesh.profiles
+                        .iter()
+                        .any(|p| p.outbound_port == port && port != 0)
+                })
+            {
+                self.toast(
+                    ToastLevel::Warning,
+                    "代理端口与组网出口端口冲突，请修改端口",
+                );
+                return;
+            }
         }
         if let Err(err) = self.save_settings(&new) {
             self.toast(ToastLevel::Error, format!("保存设置失败：{err}"));
@@ -2131,6 +2195,7 @@ impl AppService {
         }
         if new.mixed_port != old.mixed_port
             || new.allow_lan != old.allow_lan
+            || new.separate_lan_port != old.separate_lan_port
             || new.listen_host != old.listen_host
             || new.tun_enabled != old.tun_enabled
             || new.tun_strict_route != old.tun_strict_route
@@ -2180,6 +2245,18 @@ impl AppService {
         {
             self.refresh_doctor();
         }
+    }
+
+    pub fn set_front_proxy(&self, id: Option<String>) -> Result<()> {
+        self.commit_model_change(|model| {
+            if model.front_proxy == id {
+                return Ok(false);
+            }
+            model.front_proxy = id;
+            model.front_node(self.settings().core)?;
+            Ok(true)
+        })?;
+        Ok(())
     }
 
     pub fn set_language(&self, language: crate::settings::Language) {
@@ -3017,8 +3094,10 @@ impl AppService {
                     settings.active_version(settings.core).map(|s| s.as_str()),
                 )
                 .map(|b| b.version);
-            let core_result = updates::check_core_update(settings.core, current.as_deref()).await;
-            let app_result = updates::check_app_update(APP_VERSION).await;
+            let network = service.resource_network();
+            let core_result =
+                updates::check_core_update(settings.core, current.as_deref(), &network).await;
+            let app_result = updates::check_app_update(APP_VERSION, &network).await;
             let mut status = UpdateStatus {
                 checked_at: Some(now_unix()),
                 ..Default::default()
@@ -3044,7 +3123,9 @@ impl AppService {
                 .map(|u| format!("{} {}", u.core.display_name(), u.version));
             let app_label = status.app.as_ref().map(|a| format!("App {}", a.version));
             if core_label.is_none() && app_label.is_none() {
-                service.toast(ToastLevel::Info, "已是最新版本");
+                if status.error.is_none() {
+                    service.toast(ToastLevel::Info, "已是最新版本");
+                }
             } else {
                 service.toast(
                     ToastLevel::Info,
@@ -3088,24 +3169,33 @@ impl AppService {
                         .map(|s| s.as_str()),
                 )
                 .map(|b| b.version);
-            let candidate = match updates::check_core_update(core, current.as_deref()).await {
-                Ok(Some(candidate)) => candidate,
-                Ok(None) => {
-                    service.set_busy("install", false);
-                    service.toast(
-                        ToastLevel::Info,
-                        format!("{} 已是最新版本", core.display_name()),
-                    );
-                    return;
-                }
-                Err(err) => {
-                    service.set_busy("install", false);
-                    service.toast(ToastLevel::Error, format!("检查更新失败：{err}"));
-                    return;
-                }
-            };
+            let network = service.resource_network();
+            let candidate =
+                match updates::check_core_update(core, current.as_deref(), &network).await {
+                    Ok(Some(candidate)) => candidate,
+                    Ok(None) => {
+                        service.set_busy("install", false);
+                        service.toast(
+                            ToastLevel::Info,
+                            format!("{} 已是最新版本", core.display_name()),
+                        );
+                        return;
+                    }
+                    Err(err) => {
+                        service.set_busy("install", false);
+                        service.toast(ToastLevel::Error, format!("检查更新失败：{err}"));
+                        return;
+                    }
+                };
             let checksum = match &candidate.checksum_url {
-                Some(url) => updates::download_checksum(url).await.ok().flatten(),
+                Some(url) => match updates::download_checksum(url, &network).await {
+                    Ok(checksum) => checksum,
+                    Err(err) => {
+                        service.set_busy("install", false);
+                        service.toast(ToastLevel::Error, format!("获取校验文件失败：{err}"));
+                        return;
+                    }
+                },
                 None => None,
             };
             service.toast(
@@ -3116,7 +3206,13 @@ impl AppService {
                 .inner
                 .core
                 .binaries()
-                .install_from_url(core, &candidate.version, &candidate.asset.url, checksum)
+                .install_from_url(
+                    core,
+                    &candidate.version,
+                    &candidate.asset.url,
+                    checksum,
+                    &network,
+                )
                 .await;
             service.set_busy("install", false);
             match result {
@@ -3146,8 +3242,12 @@ impl AppService {
         self.spawn(async move {
             let model = service.inner.model.read().clone();
             let dir = service.inner.paths.rule_sets_dir();
-            let results =
-                updates::sync_rule_sets(&crate::adapters::required_rule_sets(&model), &dir).await;
+            let results = updates::sync_rule_sets(
+                &crate::adapters::required_rule_sets(&model),
+                &dir,
+                &service.resource_network(),
+            )
+            .await;
             let updated = results.iter().filter(|r| r.status == "updated").count();
             let failed = results.iter().filter(|r| r.status == "failed").count();
             let unchanged = results
@@ -3417,13 +3517,18 @@ impl AppService {
     ) -> Result<String> {
         let settings = self.settings();
         if profile.outbound_port != 0
-            && [
-                settings.mixed_port,
-                settings.api_port,
-                settings.stats_port,
-                settings.pac_port,
-            ]
-            .contains(&profile.outbound_port)
+            && (crate::model::inbound::effective_inbounds(&self.model(), &settings)
+                .iter()
+                .filter_map(|i| i.listen_ports(settings.core).ok())
+                .flatten()
+                .any(|p| p == profile.outbound_port)
+                || [
+                    settings.mixed_port,
+                    settings.api_port,
+                    settings.stats_port,
+                    settings.pac_port,
+                ]
+                .contains(&profile.outbound_port))
         {
             return Err(Error::config(
                 "出口出站端口与代理或管理端口冲突，请使用其他端口",
@@ -3510,12 +3615,21 @@ impl AppService {
                         .is_err()
                         {
                             service.toast(ToastLevel::Info, "正在下载 Tailscale 组网组件…");
-                            service.inner.mesh.install().await?;
+                            service
+                                .inner
+                                .mesh
+                                .install(&service.resource_network())
+                                .await?;
                         }
                         let mut preflight = service.inner.core.mesh_plan();
                         preflight.active = true;
                         service.inner.core.apply_mesh_plan(preflight).await?;
-                        if let Err(error) = service.inner.mesh.connect(&value).await {
+                        if let Err(error) = service
+                            .inner
+                            .mesh
+                            .connect(&value, &service.resource_network())
+                            .await
+                        {
                             let _ = service.reconcile_mesh().await;
                             return Err(error);
                         }
@@ -3529,7 +3643,13 @@ impl AppService {
                             .probe(provider.unwrap(), value.clone())
                             .await?
                     }
-                    "install" => service.inner.mesh.install().await?,
+                    "install" => {
+                        service
+                            .inner
+                            .mesh
+                            .install(&service.resource_network())
+                            .await?
+                    }
                     _ => unreachable!(),
                 }
                 service.reconcile_mesh().await

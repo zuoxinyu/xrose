@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::model::CoreKind;
-use crate::util::atomic_write_json;
+use crate::util::atomic_write_private;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +94,34 @@ impl LogLevel {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct ProxyAccount {
+    pub username: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for ProxyAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProxyAccount(..)")
+    }
+}
+
+impl ProxyAccount {
+    pub fn valid(&self) -> bool {
+        !self.username.trim().is_empty()
+            && !self.password.is_empty()
+            && self.username.len() <= 255
+            && self.password.len() <= 255
+            && !self.username.contains(':')
+            && !self
+                .username
+                .chars()
+                .chain(self.password.chars())
+                .any(char::is_control)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
@@ -104,6 +132,14 @@ pub struct Settings {
     pub listen_host: String,
     pub mixed_port: u16,
     pub allow_lan: bool,
+    pub separate_lan_port: bool,
+    pub lan_port: u16,
+    pub lan_auth: bool,
+    #[serde(skip)]
+    pub lan_account: ProxyAccount,
+    pub proxy_subscription_updates: bool,
+    pub proxy_resource_updates: bool,
+    pub update_user_agent: String,
     pub api_port: u16,
     pub stats_port: u16,
     pub system_proxy: bool,
@@ -156,6 +192,13 @@ impl Default for Settings {
             listen_host: "127.0.0.1".into(),
             mixed_port: 7890,
             allow_lan: false,
+            separate_lan_port: false,
+            lan_port: 7892,
+            lan_auth: false,
+            lan_account: Default::default(),
+            proxy_subscription_updates: false,
+            proxy_resource_updates: false,
+            update_user_agent: String::new(),
             api_port: 9090,
             stats_port: 10085,
             system_proxy: false,
@@ -226,6 +269,15 @@ impl Settings {
         let bytes = std::fs::read(path)?;
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
         let mut settings: Self = serde_json::from_value(value.clone()).unwrap_or_default();
+        if let Some(encrypted) = value.get("lan_credentials") {
+            use crate::storage::crypto::SecretBox;
+            let encrypted = encrypted
+                .as_str()
+                .filter(|s| SecretBox::is_encrypted(s))
+                .ok_or_else(|| crate::Error::config("局域网认证数据无效，请重新设置账号密码"))?;
+            let secrets = SecretBox::load_or_create(&path.with_file_name("secrets.key"))?;
+            settings.lan_account = serde_json::from_str(&secrets.decrypt(encrypted)?)?;
+        }
         // Old startup actions implicitly registered the OS login entry. Preserve
         // that effective choice explicitly; new startup actions are independent.
         if value.get("startup_proxy").is_none()
@@ -240,7 +292,17 @@ impl Settings {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        atomic_write_json(path, self)
+        let mut value = serde_json::to_value(self)?;
+        if self.lan_account != ProxyAccount::default() {
+            use crate::storage::crypto::SecretBox;
+            let secrets = SecretBox::load_or_create(&path.with_file_name("secrets.key"))?;
+            let encrypted = secrets.encrypt(&serde_json::to_string(&self.lan_account)?);
+            if !SecretBox::is_encrypted(&encrypted) {
+                return Err(crate::Error::config("无法加密局域网账号，请重试"));
+            }
+            value["lan_credentials"] = encrypted.into();
+        }
+        atomic_write_private(path, &serde_json::to_vec_pretty(&value)?)
     }
 
     /// Whether changing these preferences affects the selected core's next run.
@@ -271,9 +333,24 @@ impl Settings {
                     s.listen_host.clone()
                 }
             };
-            if self.mixed_port != old.mixed_port || address(self) != address(old) {
+            let lan = |s: &Self| {
+                s.allow_lan
+                    .then_some((s.separate_lan_port.then_some(s.lan_port), s.lan_auth))
+            };
+            if self.mixed_port != old.mixed_port
+                || address(self) != address(old)
+                || lan(self) != lan(old)
+                || (self.allow_lan && self.lan_auth && self.lan_account != old.lan_account)
+            {
                 return true;
             }
+        }
+        if (self.lan_auth != old.lan_auth || (self.lan_auth && self.lan_account != old.lan_account))
+            && model.inbounds.iter().any(|i| {
+                i.enabled && i.allow_lan && matches!(i.kind, InboundKind::Http | InboundKind::Socks)
+            })
+        {
+            return true;
         }
         if model.inbounds.iter().any(|i| i.kind == InboundKind::Tun)
             && self.effective_tun() != old.effective_tun()
@@ -314,6 +391,43 @@ impl Settings {
                 automatic.clone().any(|g| {
                     matches!(g.kind, GroupKind::UrlTest | GroupKind::Fallback) && g.url.is_none()
                 }) && self.urltest_url != old.urltest_url
+            }
+        }
+    }
+
+    pub(crate) fn listeners_changed(&self, old: &Self) -> bool {
+        self.core != old.core
+            || self.listen_host != old.listen_host
+            || self.mixed_port != old.mixed_port
+            || self.allow_lan != old.allow_lan
+            || self.separate_lan_port != old.separate_lan_port
+            || self.lan_port != old.lan_port
+            || self.api_port != old.api_port
+            || self.stats_port != old.stats_port
+            || self.pac_enabled != old.pac_enabled
+            || self.pac_port != old.pac_port
+    }
+
+    pub(crate) fn sync_inbounds(&self, model: &mut crate::model::AppModel) {
+        use crate::model::InboundKind;
+        for inbound in model.inbounds.iter_mut() {
+            match inbound.kind {
+                InboundKind::Mixed => {
+                    inbound.port = self.mixed_port;
+                    inbound.allow_lan = self.allow_lan && !self.separate_lan_port;
+                    inbound.listen = if self.allow_lan && self.separate_lan_port {
+                        "127.0.0.1".into()
+                    } else if self.allow_lan {
+                        "0.0.0.0".into()
+                    } else {
+                        self.listen_host.clone()
+                    };
+                }
+                InboundKind::Tun => {
+                    inbound.enabled = self.tun_enabled;
+                    inbound.tun.strict_route = self.tun_strict_route;
+                }
+                _ => {}
             }
         }
     }
@@ -403,6 +517,9 @@ mod tests {
         new.log_max_bytes += 1024;
         new.log_keep += 1;
         new.subscription_update_hours += 1;
+        new.proxy_subscription_updates = true;
+        new.proxy_resource_updates = true;
+        new.update_user_agent = "Fixture/1".into();
         new.check_app_updates = !old.check_app_updates;
         new.last_update_check = Some(123);
         for core in CoreKind::all() {
@@ -514,6 +631,41 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn lan_account_is_encrypted_and_invalid_credentials_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let account = ProxyAccount {
+            username: "fixture-user".into(),
+            password: uuid::Uuid::new_v4().to_string(),
+        };
+        let settings = Settings {
+            allow_lan: true,
+            lan_auth: true,
+            lan_account: account.clone(),
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains(&account.username) && !saved.contains(&account.password));
+        assert_eq!(Settings::load(&path).unwrap(), settings);
+        assert!(account.valid());
+        assert!(
+            !ProxyAccount {
+                username: "bad:name".into(),
+                ..account.clone()
+            }
+            .valid()
+        );
+        assert!(
+            !ProxyAccount {
+                password: "x".repeat(256),
+                ..account
+            }
+            .valid()
+        );
+    }
 
     #[test]
     fn old_settings_keep_defaults_and_material_preference_roundtrips() {

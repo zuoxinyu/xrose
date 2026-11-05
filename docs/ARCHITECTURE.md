@@ -19,6 +19,8 @@
 | 能力 | Xray | sing-box | Xross 处理 |
 | --- | --- | --- | --- |
 | mixed 入站 | 无 | 有 | Xray 拆成 SOCKS + HTTP(port+1)，界面提示 |
+| 局域网认证与独立端口 | SOCKS 和 HTTP 分别配置账号 | mixed 入站配置账号 | 共用端口时本机也需认证；独立端口模式保留本机回环入口 |
+| 前置代理 | 目标节点 `streamSettings.sockopt.dialerProxy` | 目标出站或 endpoint 的 `detour` | 每个配置保存前置节点 ID；前置节点本身、组网本机出口和直连规则保留原路径 |
 | TUN | 原生（自动路由需 26.6.27+） | 原生 | Xray 生成 `gateway`、`autoSystemRoutingTable` 与 `autoOutboundsInterface`；共享提权启动与进程回收 |
 | AnyTLS | 不支持 | 1.12+ | 密码认证、必选 TLS 与空闲会话参数；Xray 跳过并警告 |
 | OpenVPN | 不支持 | 1.14+ endpoint | TLS 客户端、UDP/TCP、账号密码与 PEM 证书、控制通道密钥、分域 DNS；旧内核跳过并修复组引用 |
@@ -46,6 +48,8 @@ sing-box 测试内核启用 `auto_detect_interface`；Xray TUN 下的测试内�
 下载按实际接收字节计算平均速度，限制接收时间与数据量；空响应、HTTP 错误及连接中断返回失败。测试结束后停止并回收进程，删除临时配置。
 WireGuard 字段依据 [sing-box endpoint 文档](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)
 与 [Xray 出站文档](https://xtls.github.io/en/config/outbounds/wireguard.html)。`Credentials.wireguard` 随配置整体加密保存，`NodeDraft` 统一校验密钥长度与地址格式。
+配置中的前置节点失效时，编译会提示重新选择。独立 HTTP 延迟和下载测试复用同一前置节点；启用前置代理时，批量延迟测试改用 HTTP。Xray TUN 下单独为首跳解析地址并绑定上联网卡。字段定义见 [Xray Sockopt](https://xtls.github.io/config/transports/sockopt.html) 和 [sing-box 拨号字段](https://sing-box.sagernet.org/configuration/shared/dial/)。
+
 新增 `RoutingConfig.rule_groups` 使用 serde 默认空数组，旧配置无需数据库结构迁移；预设只替换未分组规则。
 AnyTLS 字段依据 [sing-box 官方文档](https://sing-box.sagernet.org/configuration/outbound/anytls/)。
 Xray TUN 字段依据 [官方 TUN 文档](https://xtls.github.io/en/config/inbounds/tun.html) 及 [26.6.27 配置定义](https://github.com/XTLS/Xray-core/blob/v26.6.27/infra/conf/tun.go)。
@@ -105,6 +109,10 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 2. `parse_subscription`：自动识别 Base64 / 链接 / Clash YAML / SIP008 / sing-box JSON。
 3. 节点全部替换该订阅的旧节点（保留其他订阅），按指纹去重。
 4. Clash `proxy-groups` 按名称合并到现有组；新节点自动加入默认 selector/urltest。
+
+订阅请求和资源下载分别读取当前代理开关。开启时使用正在运行的内核已应用的 HTTP/mixed 监听地址和认证信息；内核未就绪会提示启动或关闭该开关。关闭时客户端显式直连。版本查询、校验文件、内核包、规则集、Xray 地理数据和组网组件共用资源下载策略。自定义 User-Agent 随更新请求发送，订阅可单独覆盖；改变订阅的有效 User-Agent 后，首次请求重新获取内容。
+
+数据库 v4 将原先写入订阅的内置默认 User-Agent 迁移为继承全局设置，保留自定义值。旧配置的前置节点默认为空，新增开关默认为关闭。局域网账号使用现有密钥加密保存，运行配置使用独立临时文件原子替换，Unix 权限为 0600。
 
 ## 启动顺序
 

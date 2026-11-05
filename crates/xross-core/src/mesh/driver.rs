@@ -17,14 +17,16 @@ fn verified(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub async fn install(paths: &crate::paths::AppPaths) -> Result<PathBuf> {
+pub async fn install(
+    paths: &crate::paths::AppPaths,
+    network: &crate::updates::UpdateNetwork,
+) -> Result<PathBuf> {
     let target = archive_path(paths);
     if verified(&target).is_ok() {
         return Ok(target);
     }
-    let bytes = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
-        .build()?
+    let bytes = network
+        .client(std::time::Duration::from_secs(120))?
         .get("https://www.wintun.net/builds/wintun-0.14.1.zip")
         .send()
         .await?

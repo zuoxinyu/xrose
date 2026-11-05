@@ -7,6 +7,7 @@ use crate::util::SubscriptionUserInfo;
 
 #[derive(Debug, Clone, Default)]
 pub struct FetchRequest {
+    pub network: crate::updates::UpdateNetwork,
     pub url: String,
     pub user_agent: String,
     pub headers: BTreeMap<String, String>,
@@ -52,12 +53,11 @@ pub async fn fetch_subscription(request: FetchRequest) -> Result<FetchResponse> 
         return Err(Error::Subscription("订阅地址必须是 http(s)".into()));
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(if request.user_agent.trim().is_empty() {
-            DEFAULT_USER_AGENT.to_string()
-        } else {
-            request.user_agent.clone()
-        })
+    let mut client = request.network.builder(DEFAULT_USER_AGENT)?;
+    if !request.user_agent.trim().is_empty() {
+        client = client.user_agent(&request.user_agent);
+    }
+    let client = client
         .timeout(std::time::Duration::from_secs(40))
         .redirect(reqwest::redirect::Policy::limited(8))
         .build()?;
@@ -79,7 +79,7 @@ pub async fn fetch_subscription(request: FetchRequest) -> Result<FetchResponse> 
     let response = builder
         .send()
         .await
-        .map_err(|e| Error::Subscription(format!("请求订阅失败：{e}")))?;
+        .map_err(|e| Error::Subscription(format!("请求订阅失败：{}", e.without_url())))?;
 
     let status = response.status();
     if status == reqwest::StatusCode::NOT_MODIFIED {
@@ -127,7 +127,7 @@ pub async fn fetch_subscription(request: FetchRequest) -> Result<FetchResponse> 
     let body = response
         .text()
         .await
-        .map_err(|e| Error::Subscription(format!("读取订阅内容失败：{e}")))?;
+        .map_err(|e| Error::Subscription(format!("读取订阅内容失败：{}", e.without_url())))?;
 
     Ok(FetchResponse {
         status: FetchStatus::Ok,

@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::error::{io_context, Result};
+use crate::error::{Result, io_context};
 
 /// SHA-256 of an in-memory buffer, lowercase hex.
 pub fn sha256_bytes(bytes: &[u8]) -> String {
@@ -42,6 +42,20 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
         f.sync_all().ok();
     }
     fs::rename(&tmp, path).map_err(|e| io_context(path, e))?;
+    Ok(())
+}
+
+/// Atomically publish a file containing credentials with owner-only Unix permissions.
+pub fn atomic_write_private(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).map_err(|e| io_context(parent, e))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| io_context(parent, e))?;
+    file.write_all(contents).map_err(|e| io_context(path, e))?;
+    file.as_file().sync_all().map_err(|e| io_context(path, e))?;
+    file.persist(path).map_err(|e| io_context(path, e.error))?;
     Ok(())
 }
 

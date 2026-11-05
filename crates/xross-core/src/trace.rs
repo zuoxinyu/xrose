@@ -609,12 +609,14 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         );
     }
 
-    let ports = proxy_ports(compiled.as_ref(), &model);
+    let core = service.core();
+    let http = core.active_proxy("http");
+    let socks = core.active_proxy("socks");
     // A running core must evaluate its own applied rules, including direct and
     // reject actions. The editable model may contain unapplied changes.
     let use_proxy = running && target.protocol != TraceProtocol::Icmp;
     let used_direct = !use_proxy;
-    if use_proxy && ports.socks.is_none() && target.protocol.is_stream() {
+    if use_proxy && socks.is_none() && target.protocol.is_stream() {
         session.set(
             TraceStepKind::Outbound,
             TraceStatus::Warn,
@@ -640,17 +642,17 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     let remote = match target.protocol {
         TraceProtocol::Http | TraceProtocol::Https => {
-            if use_proxy && ports.http.is_none() {
+            if use_proxy && http.is_none() {
                 return Err(
                     "没有启用的 HTTP/mixed 入站，无法经 core 测试 HTTP；请启用入站后重试".into(),
                 );
             }
-            let http_proxy = if use_proxy { ports.http } else { None };
+            let http_proxy = if use_proxy { http.as_ref() } else { None };
             http_test(service, &target, http_proxy).await
         }
         TraceProtocol::Tcp => {
             if use_proxy {
-                match ports.socks {
+                match socks.as_ref() {
                     Some(socks) => {
                         tcp_probe(
                             service,
@@ -669,7 +671,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         }
         TraceProtocol::Udp => {
             if use_proxy {
-                match ports.socks {
+                match socks.as_ref() {
                     Some(socks) => {
                         udp_probe(
                             service,
@@ -935,56 +937,6 @@ fn pick_inbound(
     }
 }
 
-struct ProxyPorts {
-    socks: Option<u16>,
-    http: Option<u16>,
-}
-
-fn proxy_ports(compiled: Option<&crate::adapters::CompiledConfig>, model: &AppModel) -> ProxyPorts {
-    let mut socks = None;
-    let mut http = None;
-    if let Some(compiled) = compiled {
-        for inbound in &compiled.inbounds {
-            match inbound.kind.as_str() {
-                "mixed" => {
-                    socks = Some(inbound.port);
-                    http = Some(inbound.port);
-                }
-                "socks" => socks = Some(inbound.port),
-                "http" => http = Some(inbound.port),
-                _ => {}
-            }
-        }
-    }
-    if socks.is_none() {
-        socks = model
-            .inbounds
-            .iter()
-            .find(|i| {
-                i.enabled
-                    && matches!(
-                        i.kind,
-                        crate::model::InboundKind::Mixed | crate::model::InboundKind::Socks
-                    )
-            })
-            .map(|i| i.port);
-    }
-    if http.is_none() {
-        http = model
-            .inbounds
-            .iter()
-            .find(|i| {
-                i.enabled
-                    && matches!(
-                        i.kind,
-                        crate::model::InboundKind::Mixed | crate::model::InboundKind::Http
-                    )
-            })
-            .map(|i| i.port);
-    }
-    ProxyPorts { socks, http }
-}
-
 fn choose_dns_server<'a>(model: &'a AppModel, host: &str) -> Option<&'a DnsServer> {
     let lower = host.to_ascii_lowercase();
     for server in model.dns.servers.iter().filter(|s| !s.is_fakeip()) {
@@ -1069,7 +1021,7 @@ struct RemoteResult {
 async fn http_test(
     service: &AppService,
     target: &TraceTarget,
-    proxy_port: Option<u16>,
+    proxy: Option<&crate::updates::LocalProxy>,
 ) -> RemoteResult {
     let Some(url) = &target.url else {
         return RemoteResult {
@@ -1085,8 +1037,8 @@ async fn http_test(
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Xross-Trace/0.1");
-    if let Some(port) = proxy_port {
-        match reqwest::Proxy::all(format!("http://127.0.0.1:{port}")) {
+    if let Some(proxy) = proxy {
+        match proxy.http_proxy() {
             Ok(proxy) => builder = builder.proxy(proxy),
             Err(err) => {
                 return RemoteResult {
@@ -1095,7 +1047,7 @@ async fn http_test(
                     duration_ms: None,
                     warning: None,
                     clash: None,
-                }
+                };
             }
         }
     }
@@ -1108,10 +1060,10 @@ async fn http_test(
                 duration_ms: None,
                 warning: None,
                 clash: None,
-            }
+            };
         }
     };
-    let excluded = if proxy_port.is_some() && service.settings().core == CoreKind::SingBox {
+    let excluded = if proxy.is_some() && service.settings().core == CoreKind::SingBox {
         ClashClient::new(service.settings().api_port, "")
             .connections()
             .await
@@ -1122,7 +1074,7 @@ async fn http_test(
         std::collections::BTreeSet::new()
     };
     let observe = async {
-        if proxy_port.is_some() && service.settings().core == CoreKind::SingBox {
+        if proxy.is_some() && service.settings().core == CoreKind::SingBox {
             poll_clash(
                 service.settings().api_port,
                 &target.host,
@@ -1149,7 +1101,7 @@ async fn http_test(
             let text = format!(
                 "HTTP {} · {}{} · {} ms",
                 status.as_u16(),
-                if proxy_port.is_some() {
+                if proxy.is_some() {
                     "经 core 代理"
                 } else {
                     "直连"
@@ -1222,14 +1174,14 @@ async fn tcp_direct(target: &TraceTarget) -> RemoteResult {
 async fn tcp_probe(
     _service: &AppService,
     settings: &Settings,
-    socks_port: u16,
+    socks: &crate::updates::LocalProxy,
     target: &TraceTarget,
     use_clash: bool,
 ) -> RemoteResult {
     let started = Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(8),
-        socks5_connect(socks_port, &target.host, target.port),
+        socks5_connect(socks, &target.host, target.port),
     )
     .await;
     let mut stream = match result {
@@ -1241,7 +1193,7 @@ async fn tcp_probe(
                 duration_ms: Some(started.elapsed().as_millis() as u64),
                 warning: None,
                 clash: None,
-            }
+            };
         }
         Err(_) => {
             return RemoteResult {
@@ -1250,7 +1202,7 @@ async fn tcp_probe(
                 duration_ms: Some(8000),
                 warning: None,
                 clash: None,
-            }
+            };
         }
     };
     let elapsed = started.elapsed().as_millis() as u64;
@@ -1305,7 +1257,7 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
                 duration_ms: None,
                 warning: None,
                 clash: None,
-            }
+            };
         }
     };
     let sent = sock.send_to(&payload, (host.as_str(), port)).await;
@@ -1348,7 +1300,7 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
 async fn udp_probe(
     _service: &AppService,
     _settings: &Settings,
-    socks_port: u16,
+    socks: &crate::updates::LocalProxy,
     target: &TraceTarget,
     _use_clash: bool,
 ) -> RemoteResult {
@@ -1356,7 +1308,7 @@ async fn udp_probe(
     let payload = udp_payload(target.port);
     let result = tokio::time::timeout(
         Duration::from_secs(3),
-        socks5_udp_associate(socks_port, &target.host, target.port, &payload),
+        socks5_udp_associate(socks, &target.host, target.port, &payload),
     )
     .await;
     match result {
@@ -1507,12 +1459,13 @@ async fn icmp_test(target: &TraceTarget, running: bool, model: &AppModel) -> Rem
     }
 }
 
-async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStream, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", proxy_port))
+async fn socks5_login(proxy: &crate::updates::LocalProxy) -> Result<TcpStream, String> {
+    let mut stream = TcpStream::connect((proxy.host.as_str(), proxy.port))
         .await
         .map_err(|err| format!("连接 SOCKS 入站失败：{err}"))?;
+    let method = if proxy.account.is_some() { 2 } else { 0 };
     stream
-        .write_all(&[0x05, 0x01, 0x00])
+        .write_all(&[5, 1, method])
         .await
         .map_err(|e| e.to_string())?;
     let mut reply = [0u8; 2];
@@ -1520,9 +1473,35 @@ async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStr
         .read_exact(&mut reply)
         .await
         .map_err(|e| e.to_string())?;
-    if reply[0] != 0x05 || reply[1] != 0x00 {
-        return Err("SOCKS5 不接受的认证方式".into());
+    if reply != [5, method] {
+        return Err("SOCKS 入站不接受所选认证方式".into());
     }
+    if let Some(a) = &proxy.account {
+        if !a.valid() {
+            return Err("SOCKS 账号无效，请检查局域网认证设置".into());
+        }
+        let mut auth = vec![1, a.username.len() as u8];
+        auth.extend_from_slice(a.username.as_bytes());
+        auth.push(a.password.len() as u8);
+        auth.extend_from_slice(a.password.as_bytes());
+        stream.write_all(&auth).await.map_err(|e| e.to_string())?;
+        stream
+            .read_exact(&mut reply)
+            .await
+            .map_err(|e| e.to_string())?;
+        if reply != [1, 0] {
+            return Err("SOCKS 入站认证失败，请检查账号密码".into());
+        }
+    }
+    Ok(stream)
+}
+
+async fn socks5_connect(
+    proxy: &crate::updates::LocalProxy,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, String> {
+    let mut stream = socks5_login(proxy).await?;
     let mut request = vec![0x05, 0x01, 0x00];
     if let Ok(ip) = host.parse::<IpAddr>() {
         match ip {
@@ -1580,26 +1559,12 @@ async fn socks5_connect(proxy_port: u16, host: &str, port: u16) -> Result<TcpStr
 }
 
 async fn socks5_udp_associate(
-    proxy_port: u16,
+    proxy: &crate::updates::LocalProxy,
     host: &str,
     port: u16,
     payload: &[u8],
 ) -> Result<Option<usize>, String> {
-    let mut control = TcpStream::connect(("127.0.0.1", proxy_port))
-        .await
-        .map_err(|err| format!("连接 SOCKS 入站失败：{err}"))?;
-    control
-        .write_all(&[0x05, 0x01, 0x00])
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut reply = [0u8; 2];
-    control
-        .read_exact(&mut reply)
-        .await
-        .map_err(|e| e.to_string())?;
-    if reply != [0x05, 0x00] {
-        return Err("SOCKS5 认证失败".into());
-    }
+    let mut control = socks5_login(proxy).await?;
     // UDP ASSOCIATE with 0.0.0.0:0.
     control
         .write_all(&[0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0])

@@ -50,15 +50,73 @@ pub struct RuleSetUpdate {
     pub error: Option<String>,
 }
 
-fn client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent(format!("Xross/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
-        .build()?)
+/// Connection details from the running core's applied listener.
+#[derive(Debug, Clone)]
+pub(crate) struct LocalProxy {
+    pub host: String,
+    pub port: u16,
+    pub account: Option<crate::settings::ProxyAccount>,
 }
 
-async fn fetch_release(url: &str) -> Result<ReleaseInfo> {
-    let response = client()?
+impl LocalProxy {
+    pub fn http_proxy(&self) -> Result<reqwest::Proxy> {
+        let address = crate::util::host_port(&self.host, self.port);
+        let mut proxy = reqwest::Proxy::all(format!("http://{address}"))?;
+        if let Some(a) = &self.account {
+            proxy = proxy.basic_auth(&a.username, &a.password);
+        }
+        Ok(proxy)
+    }
+}
+
+/// A proxied request must fail if the running core has no HTTP listener.
+#[derive(Debug, Default, Clone)]
+pub struct UpdateNetwork {
+    pub(crate) via_core: bool,
+    pub(crate) proxy: Option<LocalProxy>,
+    pub(crate) user_agent: String,
+}
+
+impl UpdateNetwork {
+    /// CLI operations without a managed core must still honor the resource policy.
+    pub fn offline_resources(settings: &crate::Settings) -> Self {
+        Self {
+            via_core: settings.proxy_resource_updates,
+            user_agent: settings.update_user_agent.clone(),
+            proxy: None,
+        }
+    }
+
+    pub(crate) fn builder(&self, fallback_agent: &str) -> Result<reqwest::ClientBuilder> {
+        let agent = if self.user_agent.is_empty() {
+            fallback_agent
+        } else {
+            &self.user_agent
+        };
+        let builder = reqwest::Client::builder().no_proxy().user_agent(agent);
+        if self.via_core {
+            let proxy = self.proxy.as_ref().ok_or_else(|| {
+                Error::other(
+                    "更新需要代理，请先启动带 HTTP 或混合入站的内核，或关闭相应的更新代理开关",
+                )
+            })?;
+            Ok(builder.proxy(proxy.http_proxy()?))
+        } else {
+            Ok(builder)
+        }
+    }
+
+    pub(crate) fn client(&self, timeout: Duration) -> Result<reqwest::Client> {
+        Ok(self
+            .builder(concat!("Xross/", env!("CARGO_PKG_VERSION")))?
+            .timeout(timeout)
+            .build()?)
+    }
+}
+
+async fn fetch_release(url: &str, network: &UpdateNetwork) -> Result<ReleaseInfo> {
+    let response = network
+        .client(Duration::from_secs(30))?
         .get(url)
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -119,12 +177,13 @@ async fn fetch_release(url: &str) -> Result<ReleaseInfo> {
 pub async fn check_core_update(
     core: CoreKind,
     current_version: Option<&str>,
+    network: &UpdateNetwork,
 ) -> Result<Option<UpdateCandidate>> {
     let url = match core {
         CoreKind::Xray => XRAY_RELEASES,
         CoreKind::SingBox => SINGBOX_RELEASES,
     };
-    let release = fetch_release(url).await?;
+    let release = fetch_release(url, network).await?;
     if let Some(current) = current_version {
         if !is_newer(&release.version, current) {
             return Ok(None);
@@ -234,8 +293,12 @@ pub fn parse_checksum(text: &str) -> Option<String> {
     None
 }
 
-pub async fn download_checksum(url: &str) -> Result<Option<String>> {
-    let response = client()?.get(url).send().await?;
+pub async fn download_checksum(url: &str, network: &UpdateNetwork) -> Result<Option<String>> {
+    let response = network
+        .client(Duration::from_secs(30))?
+        .get(url)
+        .send()
+        .await?;
     if !response.status().is_success() {
         return Ok(None);
     }
@@ -265,8 +328,8 @@ pub struct AppUpdate {
     pub published_at: String,
 }
 
-pub async fn check_app_update(current: &str) -> Result<Option<AppUpdate>> {
-    let release = fetch_release(APP_RELEASES).await?;
+pub async fn check_app_update(current: &str, network: &UpdateNetwork) -> Result<Option<AppUpdate>> {
+    let release = fetch_release(APP_RELEASES, network).await?;
     if !is_newer(&release.version, current) {
         return Ok(None);
     }
@@ -299,7 +362,11 @@ pub async fn check_app_update(current: &str) -> Result<Option<AppUpdate>> {
 /// Downloads rule-set files, honoring cached checksums. Returns one result per
 /// rule-set; failures are reported rather than aborting the whole batch.
 /// Download only assets actually referenced by the generated Xray config.
-pub async fn ensure_xray_geo(config: &serde_json::Value, dir: &Path) -> Result<()> {
+pub async fn ensure_xray_geo(
+    config: &serde_json::Value,
+    dir: &Path,
+    network: &UpdateNetwork,
+) -> Result<()> {
     fn needs(value: &serde_json::Value, prefix: &str) -> bool {
         match value {
             serde_json::Value::String(s) => s.starts_with(prefix),
@@ -316,7 +383,8 @@ pub async fn ensure_xray_geo(config: &serde_json::Value, dir: &Path) -> Result<(
         let url = format!(
             "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/{file}"
         );
-        let bytes = client()?
+        let bytes = network
+            .client(Duration::from_secs(30))?
             .get(url)
             .send()
             .await?
@@ -331,10 +399,14 @@ pub async fn ensure_xray_geo(config: &serde_json::Value, dir: &Path) -> Result<(
     Ok(())
 }
 
-pub async fn sync_rule_sets(rule_sets: &[crate::model::RuleSet], dir: &Path) -> Vec<RuleSetUpdate> {
+pub async fn sync_rule_sets(
+    rule_sets: &[crate::model::RuleSet],
+    dir: &Path,
+    network: &UpdateNetwork,
+) -> Vec<RuleSetUpdate> {
     let mut results = Vec::new();
     let _ = std::fs::create_dir_all(dir);
-    let client = match client() {
+    let client = match network.client(Duration::from_secs(30)) {
         Ok(client) => client,
         Err(err) => {
             return rule_sets
@@ -475,6 +547,74 @@ mod tests {
         );
         release.assets.pop();
         assert!(pick_asset_for(CoreKind::SingBox, &release, "windows", "64").is_none());
+    }
+
+    #[tokio::test]
+    async fn subscription_and_resource_requests_use_the_configured_proxy_and_agent() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let network = UpdateNetwork {
+            via_core: true,
+            proxy: Some(LocalProxy {
+                host: "127.0.0.1".into(),
+                port: listener.local_addr().unwrap().port(),
+                account: Some(crate::settings::ProxyAccount {
+                    username: "fixture".into(),
+                    password: uuid::Uuid::new_v4().to_string(),
+                }),
+            }),
+            user_agent: "Fixture/2".into(),
+        };
+        let capture = tokio::spawn(async move {
+            for path in ["subscription", "asset"] {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut first = String::new();
+                reader.read_line(&mut first).await.unwrap();
+                assert!(first.starts_with(&format!("GET http://updates.invalid/{path} ")));
+                let (mut agent, mut authenticated) = (false, false);
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).await.unwrap();
+                    if header.trim().is_empty() {
+                        break;
+                    }
+                    let header = header.to_ascii_lowercase();
+                    agent |= header.trim() == "user-agent: fixture/2";
+                    authenticated |= header.starts_with("proxy-authorization: basic ");
+                }
+                assert!(agent && authenticated);
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await
+                    .unwrap();
+            }
+        });
+        let response = crate::subscription::fetch_subscription(crate::subscription::FetchRequest {
+            network: network.clone(),
+            url: "http://updates.invalid/subscription".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.body, "ok");
+        let dir = tempfile::tempdir().unwrap();
+        let mut set = crate::adapters::default_rule_set("geoip-cn").unwrap();
+        set.url = "http://updates.invalid/asset".into();
+        let result = sync_rule_sets(&[set], dir.path(), &network).await;
+        assert_eq!(result[0].status, "updated");
+        capture.await.unwrap();
+        assert!(
+            UpdateNetwork {
+                via_core: true,
+                ..Default::default()
+            }
+            .builder("Fixture")
+            .is_err()
+        );
     }
 
     #[test]
