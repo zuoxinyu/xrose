@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::spinner::Spinner;
@@ -705,6 +705,13 @@ impl AppView {
         let running = self.snapshot.process.phase.is_alive();
         let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
         let failed = self.snapshot.process.phase == xross_core::core::ProcessPhase::Failed;
+        let (action_icon, action_label) = if running {
+            (IconName::Square, self.tr("停止", "Stop"))
+        } else if failed {
+            (IconName::RotateCw, self.tr("重试", "Retry"))
+        } else {
+            (IconName::Play, self.tr("启动", "Start"))
+        };
         let node = self.snapshot.selected_node(self.selected_group.as_deref());
         let node_name = node
             .map(|n| {
@@ -788,7 +795,6 @@ impl AppView {
                     .items_center()
                     .flex_shrink_0()
                     .h(px(theme::STATUS_HEIGHT))
-                    .p(px(1.))
                     .rounded_full()
                     .overflow_hidden()
                     .bg(p.panel)
@@ -798,7 +804,7 @@ impl AppView {
                         Button::new("header-node-selector")
                             .compact()
                             .ghost()
-                            .h(px(theme::STATUS_INNER_HEIGHT))
+                            .h_full()
                             .w(px(theme::STATUS_NODE_WIDTH))
                             .rounded(gpui_kit::component::button::ButtonRounded::None)
                             .rounded_tl(px(theme::STATUS_END_RADIUS))
@@ -868,30 +874,28 @@ impl AppView {
                                 menus::MenuTarget::NodeSelector,
                             )),
                     )
+                    .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
                     .child(
                         Button::new("toggle-core")
-                            .compact()
-                            .h(px(theme::STATUS_INNER_HEIGHT))
-                            .w(px(theme::STATUS_ACTION_WIDTH))
+                            .h_full()
+                            .w(px(theme::CONTROL_HEIGHT))
+                            .p_0()
                             .flex_shrink_0()
                             .rounded(gpui_kit::component::button::ButtonRounded::None)
                             .rounded_tr(px(theme::STATUS_END_RADIUS))
                             .rounded_br(px(theme::STATUS_END_RADIUS))
-                            .border_l_1()
-                            .border_color(p.border)
-                            .ghost()
-                            .when(!running, |b| {
-                                b.custom(widgets::start_button(cx)).bg(p.primary)
-                            })
-                            .when(running, |b| b.custom(widgets::danger_tool_style(cx)))
-                            .disabled(core_busy)
-                            .label(if running {
-                                self.tr("停止", "Stop")
-                            } else if failed {
-                                self.tr("重试", "Retry")
+                            .custom(if running {
+                                danger_button_style(&p, cx)
                             } else {
-                                self.tr("启动", "Start")
+                                ButtonCustomVariant::new(cx)
+                                    .foreground(p.primary)
+                                    .hover(p.accent)
+                                    .active(p.accent)
                             })
+                            .icon(action_icon)
+                            .tooltip(action_label.clone())
+                            .accessibility_label(action_label)
+                            .disabled(core_busy)
                             .on_click(cx.listener(|this, _, _, _| this.service.toggle_core())),
                     ),
             )

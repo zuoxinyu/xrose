@@ -4,21 +4,21 @@ use gpui_base::Disableable;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xross_core::AppService;
 use xross_core::model::RoutePreset;
 use xross_core::settings::{Language, ThemeMode};
 use xross_core::util::format_speed;
-use xross_core::AppService;
 
-use super::dashboard::{self, Dashboard, TrayAction};
 use super::PopupAnchor;
+use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
-use crate::ui::theme::palette;
+use crate::ui::theme::{SEMANTIC_ALPHA, palette};
 
 #[derive(Default)]
 pub struct PopupManager {
@@ -896,6 +896,18 @@ impl Render for PopupView {
                         .h(px(32.))
                         .w_full()
                         .primary()
+                        .when(running, |b| {
+                            let tint = p.fg.opacity(SEMANTIC_ALPHA);
+                            let hover = p.danger_text.blend(tint);
+                            b.custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(p.danger_text)
+                                    .foreground(p.panel)
+                                    .hover(hover)
+                                    .active(hover.blend(tint)),
+                            )
+                            .when(!d.busy_core, |b| b.bg(p.danger_text))
+                        })
                         .disabled(d.busy_core)
                         .label(tr(
                             lang,
@@ -919,16 +931,6 @@ impl Render for PopupView {
                         })),
                 ),
             )
-            .when_some(d.toast.clone(), |d, toast| {
-                d.child(
-                    div()
-                        .flex_shrink_0()
-                        .text_size(px(11.))
-                        .text_color(p.muted_fg)
-                        .line_clamp(2)
-                        .child(toast),
-                )
-            })
             .child(
                 div()
                     .flex()
@@ -968,7 +970,7 @@ impl Render for PopupView {
 #[cfg(test)]
 mod tests {
     use super::popup_bounds;
-    use gpui_kit::{point, px, size, Bounds};
+    use gpui_kit::{Bounds, point, px, size};
     #[test]
     fn placement_stays_inside_work_area_at_every_edge() {
         let work = Bounds::new(point(px(-1600.), px(-200.)), size(px(1600.), px(860.)));

@@ -148,9 +148,10 @@ pub fn danger_icon_button(
     cx: &App,
 ) -> Button {
     let label = tip.into();
+    let p = palette(cx);
     Button::new(id)
         .compact()
-        .custom(danger_tool_style(cx))
+        .custom(danger_button_style(&p, cx).foreground(p.muted_fg))
         .icon(icon)
         .tooltip(label.clone())
         .accessibility_label(label)
@@ -158,10 +159,9 @@ pub fn danger_icon_button(
         .h(px(ICON_BUTTON_SIZE))
 }
 
-pub fn danger_tool_style(cx: &App) -> ButtonCustomVariant {
-    let p = super::theme::palette(cx);
+pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {
     ButtonCustomVariant::new(cx)
-        .foreground(p.muted_fg)
+        .foreground(p.danger_text)
         .hover(p.danger.opacity(SEMANTIC_ALPHA))
         .active(p.danger.opacity(SEMANTIC_ALPHA))
 }

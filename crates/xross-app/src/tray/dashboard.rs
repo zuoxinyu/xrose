@@ -1,10 +1,10 @@
 //! Content and service actions shared by every platform's GPUI tray flyout.
 
+use xross_core::AppService;
 use xross_core::model::RoutePreset;
 use xross_core::service::LatencyScope;
 use xross_core::settings::Language;
 use xross_core::util::{format_bytes, format_speed};
-use xross_core::AppService;
 
 use crate::i18n::tr;
 
@@ -48,7 +48,6 @@ pub struct Dashboard {
     pub core_name: String,
     pub busy_core: bool,
     pub busy_latency: bool,
-    pub toast: Option<String>,
 }
 
 /// Builds the dashboard from one snapshot. Called by the tray tick at 5 Hz;
@@ -196,7 +195,6 @@ pub fn build(service: &AppService) -> Dashboard {
         core_name: snapshot.settings.core.display_name().to_string(),
         busy_core: snapshot.busy.iter().any(|key| key == "core"),
         busy_latency: snapshot.busy.iter().any(|key| key == "latency"),
-        toast: snapshot.toasts.last().map(|toast| toast.message.clone()),
     }
 }
 
