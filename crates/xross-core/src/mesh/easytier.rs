@@ -2,9 +2,7 @@
 use super::{MeshPeer, MeshPhase, MeshProfile, MeshProvider, MeshRuntimeView};
 use crate::{Error, Result};
 use easytier::{
-    common::config::{
-        ConfigLoader, NetworkIdentity, PeerConfig, PortForwardConfig, TomlConfigLoader,
-    },
+    common::config::{ConfigLoader, NetworkIdentity, PeerConfig, TomlConfigLoader},
     common::global_ctx::GlobalCtxEvent,
     instance::instance::Instance,
     proto::acl::{Acl, AclV1, GroupIdentity, GroupInfo},
@@ -59,16 +57,6 @@ pub fn configuration(p: &MeshProfile) -> Result<TomlConfigLoader> {
         )
         .map_err(|_| Error::config("发布子网无效"))?;
     }
-    c.set_port_forwards(
-        p.port_forwards
-            .iter()
-            .map(|f| PortForwardConfig {
-                bind_addr: f.listen,
-                dst_addr: f.target,
-                proto: f.protocol.key().into(),
-            })
-            .collect(),
-    );
     // Some(empty) is intentional: upstream uses it to suppress automatic
     // installation of every remotely advertised subnet, including /0.
     c.set_routes(Some(
@@ -240,6 +228,7 @@ pub struct Backend {
     instance: Instance,
     profile: MeshProfile,
     gateway: Option<super::easytier_gateway::Gateway>,
+    forward_gateway: Option<(super::easytier_gateway::Gateway, super::forwards::Forwards)>,
     started: std::time::Instant,
     observation: std::sync::Arc<parking_lot::Mutex<StartupObservation>>,
     _events: tokio_util::task::AbortOnDropHandle<()>,
@@ -268,11 +257,12 @@ impl Backend {
             instance,
             profile,
             gateway: None,
+            forward_gateway: None,
             started: std::time::Instant::now(),
             observation,
             _events: events,
         };
-        if result.profile.outbound_port != 0 {
+        if result.profile.outbound_port != 0 || !result.profile.port_forwards.is_empty() {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
             let address = loop {
                 if let Some(ip) = result.instance.get_global_ctx().get_ipv4() {
@@ -285,16 +275,46 @@ impl Backend {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             };
-            result.gateway = Some(
-                super::easytier_gateway::Gateway::start(
-                    result.instance.get_peer_manager(),
-                    address.to_string(),
-                    &result.profile,
-                )
-                .await?,
-            );
+            if result.profile.outbound_port != 0 {
+                result.gateway = Some(
+                    super::easytier_gateway::Gateway::start(
+                        result.instance.get_peer_manager(),
+                        address.to_string(),
+                        result.profile.outbound_port,
+                        result.profile.outbound_secret.clone(),
+                        super::easytier_gateway::GatewayRoute::SelectedExit,
+                    )
+                    .await?,
+                );
+            }
+            let rules = result.profile.port_forwards.clone();
+            result.set_forwards(&rules).await?;
         }
         Ok(result)
+    }
+    pub(super) async fn set_forwards(&mut self, rules: &[super::PortForward]) -> Result<()> {
+        if self.forward_gateway.is_none() && !rules.is_empty() {
+            let address = self
+                .instance
+                .get_global_ctx()
+                .get_ipv4()
+                .ok_or_else(|| Error::other("请等待 EasyTier 获得虚拟地址后重试"))?;
+            let password = super::MeshSecret(uuid::Uuid::new_v4().simple().to_string());
+            let gateway = super::easytier_gateway::Gateway::start(
+                self.instance.get_peer_manager(),
+                address.to_string(),
+                0,
+                password.clone(),
+                super::easytier_gateway::GatewayRoute::Mesh,
+            )
+            .await?;
+            let forwards = super::forwards::Forwards::new(gateway.listen, password);
+            self.forward_gateway = Some((gateway, forwards));
+        }
+        if let Some((_, forwards)) = &mut self.forward_gateway {
+            forwards.apply(rules).await?;
+        }
+        Ok(())
     }
     pub async fn snapshot(&self) -> Result<MeshRuntimeView> {
         let ctx = self.instance.get_global_ctx();
@@ -315,6 +335,9 @@ impl Backend {
         };
         if let Some(ip) = ctx.get_ipv4() {
             if let Some(gateway) = &self.gateway {
+                gateway.check_address(ip.address().into())?;
+            }
+            if let Some((gateway, _)) = &self.forward_gateway {
                 gateway.check_address(ip.address().into())?;
             }
             state.addresses.push(ip.address().to_string());
@@ -578,7 +601,7 @@ mod tests {
             p.remote_subnets
         );
         assert_eq!(c.get_proxy_cidrs()[0].cidr.to_string(), "192.168.60.0/24");
-        assert_eq!(c.get_port_forwards()[0].dst_addr.port(), 80);
+        assert!(c.get_port_forwards().is_empty());
         p.exit_node.clear();
         p.advertise_exit_node = true;
         let c = configuration(&p).unwrap();

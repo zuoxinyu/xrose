@@ -66,11 +66,7 @@ impl AppView {
         let model = self.snapshot.model.clone();
         let exits = mesh_exits::choices(&self.snapshot.mesh, &model, self.hide_ips, lang);
         let has_nodes = !model.nodes.is_empty() || !exits.is_empty();
-        let active_group = self
-            .expanded_switch_group
-            .clone()
-            .filter(|id| model.group(id).is_some())
-            .or_else(|| model.default_group_id());
+        let active_group = model.default_group_id();
         let group = active_group
             .as_ref()
             .and_then(|id| model.group(id))
@@ -405,9 +401,6 @@ impl AppView {
                                 ),
                         ),
                 )
-                .when_some(group.as_ref().filter(|_| has_nodes), |d, group| {
-                    d.child(self.node_switch_controls(group, &p, cx))
-                })
                 .when(has_nodes, |d| {
                     d.child(
                         div()
@@ -415,12 +408,6 @@ impl AppView {
                             .items_center()
                             .gap_2()
                             .flex_wrap()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(super::theme::FORM_FIELD_WIDTH))
-                                    .child(Input::new(&self.node_search)),
-                            )
                             .child(
                                 ChoiceGroup::new(
                                     "node-view",
@@ -446,6 +433,12 @@ impl AppView {
                                         cx.notify();
                                     },
                                 )),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(super::theme::FORM_FIELD_WIDTH))
+                                    .child(Input::new(&self.node_search)),
                             )
                             .child(
                                 Button::new("test-all")

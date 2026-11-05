@@ -4,9 +4,11 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, Styled,
-    div, px,
+    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Styled, div, px,
 };
 
 use super::theme::Palette;
@@ -173,6 +175,7 @@ pub struct ChoiceGroup {
     labels: Vec<SharedString>,
     selected: Option<usize>,
     cards: bool,
+    scroll: Option<(ScrollHandle, Pixels)>,
     disabled: bool,
     handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
 }
@@ -187,12 +190,17 @@ impl ChoiceGroup {
             labels,
             selected: selected.into(),
             cards: false,
+            scroll: None,
             disabled: false,
             handler: None,
         }
     }
     pub fn cards(mut self) -> Self {
         self.cards = true;
+        self
+    }
+    pub fn scrollable(mut self, handle: &ScrollHandle, max_height: Pixels) -> Self {
+        self.scroll = Some((handle.clone(), max_height));
         self
     }
     pub fn disabled(mut self, disabled: bool) -> Self {
@@ -238,6 +246,12 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .border_color(p.border)
             .bg(p.bg)
             .opacity(if disabled { DISABLED_OPACITY } else { 1. })
+            .when_some(self.scroll.as_ref(), |group, (handle, height)| {
+                group
+                    .max_h(*height)
+                    .overflow_y_scroll()
+                    .track_scroll(handle)
+            })
             .on_key_down(move |event, window, cx| {
                 if disabled || count == 0 {
                     return;
@@ -251,6 +265,9 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                 };
                 if let Some(next) = next.filter(|n| *n < count) {
                     key_handles[next].focus(window, cx);
+                    if let Some((scroll, _)) = &self.scroll {
+                        scroll.scroll_to_item(next);
+                    }
                     if let Some(handler) = &key_handler {
                         handler(&next, window, cx);
                     }
@@ -269,6 +286,12 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     .tab_stop(index == selected.unwrap_or(0) && !disabled)
                     .track_focus(&handles[index])
                     .accessibility_label(label.clone())
+                    .when(cards, |option| {
+                        let tooltip = label.clone();
+                        option.max_w_full().tooltip(move |window, cx| {
+                            Tooltip::new(tooltip.clone()).build(window, cx)
+                        })
+                    })
                     .on_change(move |_, _, window, cx| {
                         if disabled {
                             return;
@@ -305,7 +328,7 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                             s.bg(if checked { p.accent } else { p.panel_alt })
                         }
                     })
-                    .child(label),
+                    .child(div().min_w_0().truncate().child(label)),
             );
         }
         group

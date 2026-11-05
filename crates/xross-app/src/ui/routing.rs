@@ -94,96 +94,86 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .flex_wrap()
                         .items_center()
-                        .gap_4()
+                        .gap_2()
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    toggle(
-                                        "bypass-lan",
-                                        self.tr("局域网直连", "Bypass LAN"),
-                                        routing.bypass_lan,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            let strategy =
-                                                this.snapshot.model.routing.domain_strategy;
-                                            let china =
-                                                this.snapshot.model.routing.bypass_china_ips;
-                                            this.service
-                                                .set_routing_flags(*checked, china, strategy);
-                                            this.sync(cx);
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    toggle(
-                                        "bypass-china",
-                                        self.tr("中国大陆 IP 直连", "Bypass China IPs"),
-                                        routing.bypass_china_ips,
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            let strategy =
-                                                this.snapshot.model.routing.domain_strategy;
-                                            let lan = this.snapshot.model.routing.bypass_lan;
-                                            this.service.set_routing_flags(lan, *checked, strategy);
-                                            this.sync(cx);
-                                        },
-                                    )),
-                                ),
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .child(self.tr("域名策略", "Domain strategy")),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(self.tr("域名策略", "Domain strategy")),
-                                )
-                                .child(
-                                    ChoiceGroup::new(
-                                        "domain-strategy",
-                                        vec![
-                                            self.tr("保持域名", "Keep domain"),
-                                            self.tr("优先 IPv4", "Prefer IPv4"),
-                                            self.tr("优先 IPv6", "Prefer IPv6"),
-                                            self.tr("未匹配时解析", "Resolve if unmatched"),
-                                        ],
+                            ChoiceGroup::new(
+                                "domain-strategy",
+                                vec![
+                                    self.tr("保持域名", "Keep domain"),
+                                    self.tr("优先 IPv4", "Prefer IPv4"),
+                                    self.tr("优先 IPv6", "Prefer IPv6"),
+                                    self.tr("未匹配时解析", "Resolve if unmatched"),
+                                ],
+                                [
+                                    DomainStrategy::AsIs,
+                                    DomainStrategy::PreferIpv4,
+                                    DomainStrategy::PreferIpv6,
+                                    DomainStrategy::IpIfNonMatch,
+                                ]
+                                .iter()
+                                .position(|v| *v == routing.domain_strategy)
+                                .unwrap_or(0),
+                            )
+                            .on_change(cx.listener(
+                                |this, index, _, cx| {
+                                    let route = &this.snapshot.model.routing;
+                                    this.service.set_routing_flags(
+                                        route.bypass_lan,
+                                        route.bypass_china_ips,
                                         [
                                             DomainStrategy::AsIs,
                                             DomainStrategy::PreferIpv4,
                                             DomainStrategy::PreferIpv6,
                                             DomainStrategy::IpIfNonMatch,
-                                        ]
-                                        .iter()
-                                        .position(|v| *v == routing.domain_strategy)
-                                        .unwrap_or(0),
-                                    )
-                                    .on_change(cx.listener(
-                                        |this, index, _, cx| {
-                                            let route = &this.snapshot.model.routing;
-                                            this.service.set_routing_flags(
-                                                route.bypass_lan,
-                                                route.bypass_china_ips,
-                                                [
-                                                    DomainStrategy::AsIs,
-                                                    DomainStrategy::PreferIpv4,
-                                                    DomainStrategy::PreferIpv6,
-                                                    DomainStrategy::IpIfNonMatch,
-                                                ][*index],
-                                            );
-                                            this.sync(cx);
-                                        },
-                                    )),
-                                ),
+                                        ][*index],
+                                    );
+                                    this.sync(cx);
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap_3()
+                        .child(
+                            toggle(
+                                "bypass-lan",
+                                self.tr("局域网直连", "Bypass LAN"),
+                                routing.bypass_lan,
+                            )
+                            .on_change(cx.listener(
+                                |this, checked, _, cx| {
+                                    let strategy = this.snapshot.model.routing.domain_strategy;
+                                    let china = this.snapshot.model.routing.bypass_china_ips;
+                                    this.service.set_routing_flags(*checked, china, strategy);
+                                    this.sync(cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            toggle(
+                                "bypass-china",
+                                self.tr("中国大陆 IP 直连", "Bypass China IPs"),
+                                routing.bypass_china_ips,
+                            )
+                            .on_change(cx.listener(
+                                |this, checked, _, cx| {
+                                    let strategy = this.snapshot.model.routing.domain_strategy;
+                                    let lan = this.snapshot.model.routing.bypass_lan;
+                                    this.service.set_routing_flags(lan, *checked, strategy);
+                                    this.sync(cx);
+                                },
+                            )),
                         ),
                 ),
         );

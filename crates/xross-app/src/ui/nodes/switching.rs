@@ -1,5 +1,7 @@
-//! A single switch policy control for the default outbound, with optional per-group settings.
+//! Live, per-group automatic switching settings.
 use super::*;
+use crate::ui::dialogs::settings_dialog;
+use gpui_kit::component::WindowExt;
 use xross_core::model::{FallbackScope, GroupKind, NodeSwitchPolicy, OutboundGroup, SwitchMode};
 use xross_core::service::ToastLevel;
 
@@ -19,14 +21,52 @@ impl AppView {
         }
     }
 
-    pub(super) fn node_switch_controls(
+    pub(in crate::ui) fn open_node_switch_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(initial) = self.snapshot.model.default_group_id() else {
+            return;
+        };
+        let selection = cx.new(|_| initial);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let body = match this.snapshot.model.group(selection.read(cx)) {
+                    Some(group) => this.node_switch_controls(group, selection.clone(), &p, cx),
+                    None => empty_hint(
+                        &p,
+                        this.tr(
+                            "出站组已移除，请重新打开设置。",
+                            "This group was removed. Reopen settings.",
+                        ),
+                    )
+                    .into_any_element(),
+                };
+                settings_dialog(
+                    dialog,
+                    this.tr("自动切换设置", "Auto-switch settings"),
+                    body,
+                    &p,
+                    window,
+                )
+            })
+        });
+    }
+
+    fn node_switch_controls(
         &self,
         group: &OutboundGroup,
+        selection: Entity<String>,
         p: &Palette,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let disabled = this_busy(&self.snapshot.busy, "core") || !group.enabled;
-        let expanded = self.expanded_switch_group.is_some();
         let policy = group.switch_policy;
         let interval = group.interval_secs.max(30);
         let mode = match (group.switch_mode(), group.kind) {
@@ -36,35 +76,6 @@ impl AppView {
             (mode, _) => mode,
         };
         let mode_id = group.id.clone();
-        let expand_id = group.id.clone();
-        let disclosure = if expanded {
-            self.tr("收起高级设置", "Collapse advanced settings")
-        } else {
-            self.tr("展开高级设置", "Expand advanced settings")
-        };
-        let expand_button = Button::new("switch-advanced")
-            .compact()
-            .ghost()
-            .icon(if expanded {
-                IconName::ChevronUp
-            } else {
-                IconName::ChevronRight
-            })
-            .size(px(crate::ui::theme::ICON_BUTTON_SIZE))
-            .flex_shrink_0()
-            .accessibility_label(format!(
-                "{} · {disclosure}",
-                self.tr("自动切换", "Auto switch")
-            ))
-            .tooltip(disclosure)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.expanded_switch_group = if expanded {
-                    None
-                } else {
-                    Some(expand_id.clone())
-                };
-                cx.notify();
-            }));
         let modes = ChoiceGroup::new(
             "node-switch-mode",
             vec![
@@ -88,22 +99,17 @@ impl AppView {
             );
         }));
         let row = |label: SharedString| {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .child(div().text_xs().text_color(p.muted_fg).child(label))
+            div().flex().flex_wrap().items_center().gap_2().child(
+                div()
+                    .w(px(crate::ui::theme::SETTING_LABEL_WIDTH))
+                    .flex_shrink_0()
+                    .text_xs()
+                    .text_color(p.muted_fg)
+                    .child(label),
+            )
         };
         let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
-        let controls = div().flex().flex_col().gap_2().child(
-            row(self.tr("自动切换", "Auto switch"))
-                .child(modes)
-                .child(expand_button),
-        );
-        if !expanded {
-            return controls;
-        }
+        let controls = div().flex().flex_col().gap_3();
         let groups = &self.snapshot.model.groups;
         let controls = controls.when(groups.len() > 1, |d| {
             let ids: Vec<_> = groups.iter().map(|g| g.id.clone()).collect();
@@ -117,18 +123,21 @@ impl AppView {
             )
             .on_change(cx.listener(move |this, index: &usize, _, cx| {
                 let id = &ids[*index];
-                if this.expanded_switch_group.is_some() && this.snapshot.model.group(id).is_some() {
-                    this.expanded_switch_group = Some(id.clone());
+                if this.snapshot.model.group(id).is_some() {
+                    selection.update(cx, |selected, _| *selected = id.clone());
                     cx.notify();
                 }
             }));
             d.child(row(self.tr("配置出站组", "Configure group")).child(choices))
         });
+        let controls = controls.child(row(self.tr("切换模式", "Switch mode")).child(modes));
         if mode == SwitchMode::GroupDefault {
-            return controls.child(note(self.tr(
-                "此组沿用导入的负载均衡设置。选择上方任一模式可更改。",
-                "This group uses imported load balancing. Choose a mode above to change it.",
-            )));
+            return controls
+                .child(note(self.tr(
+                    "此组沿用导入的负载均衡设置。选择上方任一模式可更改。",
+                    "This group uses imported load balancing. Choose a mode above to change it.",
+                )))
+                .into_any_element();
         }
         let policy = NodeSwitchPolicy { mode, ..policy };
         let scopes = [
@@ -227,7 +236,7 @@ impl AppView {
             })
             .when(group.managed() && this_busy(&self.snapshot.busy, "auto-probe"), |d| {
                 d.child(note(self.tr("正在检查节点…", "Checking nodes…")))
-            })
+            }).into_any_element()
     }
 
     fn save_node_switch(

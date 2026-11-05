@@ -9,6 +9,7 @@ Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
 - 测试 `cargo test -p xross-core`
 - 无界面验证优先用 `xross-cli`（`demo`、`seed-demo --home <dir>`、`check --core sing-box --home <dir>`，详见 `--help`）
 - 状态一律用 `XROSS_HOME=/tmp/xross-demo` 或 `--home` 隔离，不得触碰用户真实配置
+- 编译另有模拟数据的源码副本时，必须为副本单独设置 `CARGO_TARGET_DIR`，覆盖构建、测试与运行命令；不得复用主工作区的 `target` 或应用包。验证普通构建时，在新的空目录运行 `xross-cli mesh list --home <dir>`，结果应为 `[]`。
 - 只格式化自己改动的文件（`rustfmt <file>`）；`cargo build --workspace` 无警告，新增警告视为回归
 
 ## 结构

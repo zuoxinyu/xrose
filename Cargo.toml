@@ -12,6 +12,7 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 async-trait = "0.1"
+async-socks5 = "0.6"
 tokio-smoltcp = "0.7"
 smoltcp = { version = "0.14", default-features = false, features = ["proto-ipv4", "proto-ipv4-fragmentation", "fragmentation-buffer-size-8192", "reassembly-buffer-size-8192", "reassembly-buffer-count-16"] }
 tokio-util = { version = "0.7", features = ["rt"] }

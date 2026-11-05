@@ -43,6 +43,7 @@ tonic.workspace = true
 tonic-prost.workspace = true
 easytier.workspace = true
 async-trait.workspace = true
+async-socks5.workspace = true
 tokio-smoltcp.workspace = true
 smoltcp.workspace = true
 tokio-util.workspace = true

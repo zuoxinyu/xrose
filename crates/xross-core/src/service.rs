@@ -3554,6 +3554,40 @@ impl AppService {
         });
     }
 
+    /// Change only the selected listener; a connected worker confirms the update before it is saved.
+    pub fn edit_mesh_forward(
+        &self,
+        profile: &str,
+        old: Option<&crate::mesh::PortForward>,
+        rule: Option<crate::mesh::PortForward>,
+    ) -> Result<()> {
+        let (old, next) = self.inner.mesh.forward_edit(profile, old, rule)?;
+        if old == next {
+            return Ok(());
+        }
+        if !self.inner.busy.write().insert("mesh".into()) {
+            return Err(Error::other("正在处理组网操作，请稍后重试"));
+        }
+        self.set_busy("mesh-forward", true);
+        let service = self.clone();
+        let profile = profile.to_owned();
+        self.spawn(async move {
+            let _guard = service.inner.mesh.operation.lock().await;
+            let result = service
+                .inner
+                .mesh
+                .apply_forward_edit(&profile, &old, &next)
+                .await;
+            service.set_busy("mesh-forward", false);
+            service.set_busy("mesh", false);
+            match result {
+                Ok(()) => service.toast(ToastLevel::Success, "端口转发已更新"),
+                Err(e) => service.toast(ToastLevel::Error, e.to_string()),
+            }
+        });
+        Ok(())
+    }
+
     pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
         self.save_mesh_profile_inner(profile, None)
     }

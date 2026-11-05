@@ -528,6 +528,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-socks5"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da2537846e16b96d2972ee52a3b355663872a1a687ce6d57a3b6f6b6a181c89"
+dependencies = [
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11690,6 +11700,7 @@ name = "xross-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-socks5",
  "async-trait",
  "base64 0.23.1",
  "bytes",

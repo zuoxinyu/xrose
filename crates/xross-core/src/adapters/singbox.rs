@@ -45,6 +45,7 @@ pub fn compile_mesh(
     directory: &Path,
     api_port: u16,
     secret: &str,
+    forward_bridge: (u16, &str),
 ) -> crate::Result<Value> {
     profile.validate()?;
     let mut routes = vec!["100.64.0.0/10".to_string(), "fd7a:115c:a1e0::/48".into()];
@@ -79,14 +80,16 @@ pub fn compile_mesh(
             json!({"inbound":"mesh-exit","action":"route","outbound":"mesh-ts"}),
         );
     }
-    for (index, forward) in profile.port_forwards.iter().enumerate() {
-        let tag = format!("mesh-forward-{index}");
-        config["inbounds"].as_array_mut().unwrap().push(json!({"type":"direct","tag":tag,"listen":forward.listen.ip().to_string(),"listen_port":forward.listen.port(),"network":forward.protocol.key(),"override_address":forward.target.ip().to_string(),"override_port":forward.target.port()}));
-        config["route"]["rules"].as_array_mut().unwrap().insert(
-            0,
-            json!({"inbound":tag,"action":"route","outbound":"mesh-ts"}),
-        );
-    }
+    config["inbounds"].as_array_mut().unwrap().push(json!({
+        "type":"socks", "tag":"mesh-forwards", "listen":"127.0.0.1", "listen_port":forward_bridge.0,
+        "users":[{"username":"xross","password":forward_bridge.1}]
+    }));
+    config["route"]["rules"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "inbound":"mesh-forwards", "action":"route", "outbound":"mesh-ts"
+        }),
+    );
     Ok(config)
 }
 
@@ -1596,7 +1599,14 @@ mod tests {
             remote_subnets: vec!["192.168.50.0/24".into()],
             ..Default::default()
         };
-        let json = compile_mesh(&p, Path::new("mesh-test"), 19090, "fake-key").unwrap();
+        let json = compile_mesh(
+            &p,
+            Path::new("mesh-test"),
+            19090,
+            "fake-key",
+            (19091, "fixture-forward"),
+        )
+        .unwrap();
         assert_eq!(json["endpoints"][0]["system_interface"], false);
         assert_eq!(json["endpoints"][0]["advertise_exit_node"], false);
         assert_eq!(json["endpoints"][0]["advertise_routes"], json!([]));
@@ -1622,7 +1632,14 @@ mod tests {
             port_forwards: vec![PortForward::parse("udp://127.0.0.1:5533/100.64.1.2:53").unwrap()],
             ..Default::default()
         };
-        let config = compile_mesh(&p, Path::new("fixture"), 19090, "fixture-api").unwrap();
+        let config = compile_mesh(
+            &p,
+            Path::new("fixture"),
+            19090,
+            "fixture-api",
+            (19091, "fixture-forward"),
+        )
+        .unwrap();
         assert_eq!(config["endpoints"][0]["exit_node"], "100.64.1.1");
         assert_eq!(config["endpoints"][0]["exit_node_allow_lan_access"], false);
         assert_eq!(
@@ -1633,8 +1650,12 @@ mod tests {
             config["inbounds"][2]["users"][0]["password"],
             "fixture-secret"
         );
-        assert_eq!(config["inbounds"][3]["override_port"], 53);
-        assert_eq!(config["inbounds"][3]["network"], "udp");
+        assert_eq!(config["inbounds"][3]["listen"], "127.0.0.1");
+        assert_eq!(
+            config["inbounds"][3]["users"][0]["password"],
+            "fixture-forward"
+        );
+        assert_eq!(config["route"]["rules"][0]["outbound"], "mesh-ts");
         assert!(
             !config["inbounds"][1]["route_address"]
                 .as_array()
@@ -1644,7 +1665,14 @@ mod tests {
         p.exit_node.clear();
         p.outbound_port = 0;
         p.advertise_exit_node = true;
-        let config = compile_mesh(&p, Path::new("fixture"), 19090, "fixture-api").unwrap();
+        let config = compile_mesh(
+            &p,
+            Path::new("fixture"),
+            19090,
+            "fixture-api",
+            (19091, "fixture-forward"),
+        )
+        .unwrap();
         assert_eq!(config["endpoints"][0]["advertise_exit_node"], true);
         assert!(
             config["route"]["rules"]

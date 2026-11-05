@@ -45,6 +45,11 @@ pub enum MeshCommand {
     Logout {
         provider: MeshProvider,
     },
+    SetForwards {
+        profile_id: String,
+        id: String,
+        rules: Vec<super::PortForward>,
+    },
     Probe {
         provider: MeshProvider,
         ip: String,
@@ -70,7 +75,13 @@ pub struct Bootstrap {
 pub enum WorkerCommand {
     Stop,
     Logout,
-    Probe { ip: String },
+    Probe {
+        ip: String,
+    },
+    SetForwards {
+        id: String,
+        rules: Vec<super::PortForward>,
+    },
 }
 
 struct Worker {
@@ -413,6 +424,24 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             } else {
                 return Err(Error::other("请先连接后再注销"));
             }
+        }
+        MeshCommand::SetForwards {
+            profile_id,
+            id,
+            rules,
+        } => {
+            if rules.len() > 64 || uuid::Uuid::parse_str(id).is_err() {
+                return Err(Error::config("端口转发请求无效"));
+            }
+            let worker = session
+                .workers
+                .values()
+                .find(|w| w.state.lock().profile_id == *profile_id)
+                .ok_or_else(|| Error::other("组网连接已变更，请重试"))?;
+            worker.send(WorkerCommand::SetForwards {
+                id: id.clone(),
+                rules: rules.clone(),
+            })?;
         }
         MeshCommand::Probe { provider, ip } => {
             let w = session

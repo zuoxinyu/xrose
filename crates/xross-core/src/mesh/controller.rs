@@ -157,10 +157,127 @@ impl MeshController {
         }) {
             return Err(Error::other("请先断开组网，再删除配置"));
         }
+        let mut profiles = self.profiles.write();
         self.store.delete_mesh_profile(id)?;
-        self.profiles.write().retain(|p| p.id != id);
+        profiles.retain(|p| p.id != id);
         Ok(())
     }
+    pub(crate) fn forward_edit(
+        &self,
+        id: &str,
+        old: Option<&super::PortForward>,
+        new: Option<super::PortForward>,
+    ) -> Result<(Vec<super::PortForward>, Vec<super::PortForward>)> {
+        let mut profile = self.profile(id)?;
+        let original = profile.port_forwards.clone();
+        if let Some(old) = old {
+            let index = profile
+                .port_forwards
+                .iter()
+                .position(|r| r == old)
+                .ok_or_else(|| Error::other("这条转发已被更改，请重新打开"))?;
+            if let Some(rule) = new {
+                profile.port_forwards[index] = rule;
+            } else {
+                profile.port_forwards.remove(index);
+            }
+        } else if let Some(rule) = new {
+            profile.port_forwards.push(rule);
+        }
+        profile.validate()?;
+        Ok((original, profile.port_forwards))
+    }
+
+    /// The caller holds the mesh operation lock throughout live acknowledgement and persistence.
+    pub(crate) async fn apply_forward_edit(
+        &self,
+        id: &str,
+        old: &[super::PortForward],
+        next: &[super::PortForward],
+    ) -> Result<()> {
+        if self.profile(id)?.port_forwards != old {
+            return Err(Error::other("转发列表已变更，请重新选择"));
+        }
+        let live = self.networks.read().iter().any(|n| {
+            n.profile_id == id
+                && !matches!(
+                    n.phase,
+                    super::MeshPhase::Disconnected | super::MeshPhase::Failed
+                )
+        });
+        if live {
+            if let Err(e) = self.live_forwards(id, next).await {
+                // Also reconcile an unacknowledged request (e.g. a lost reply).
+                return self.restore_forwards(id, old, e).await;
+            }
+        }
+        let saved = (|| -> Result<()> {
+            let mut profiles = self.profiles.write();
+            let profile = profiles
+                .iter_mut()
+                .find(|p| p.id == id && p.port_forwards == old)
+                .ok_or_else(|| Error::other("组网配置已变更，请重新选择"))?;
+            let mut updated = profile.clone();
+            updated.port_forwards = next.to_vec();
+            self.store.save_mesh_profile(&updated)?;
+            *profile = updated;
+            Ok(())
+        })();
+        if live && let Err(e) = saved {
+            return self.restore_forwards(id, old, e).await;
+        }
+        saved
+    }
+    async fn restore_forwards(
+        &self,
+        id: &str,
+        rules: &[super::PortForward],
+        cause: Error,
+    ) -> Result<()> {
+        if self.live_forwards(id, rules).await.is_err() {
+            return Err(Error::other(format!(
+                "{cause}。未能确认当前监听状态，请重新连接组网"
+            )));
+        }
+        Err(cause)
+    }
+    async fn live_forwards(&self, profile_id: &str, rules: &[super::PortForward]) -> Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.send(MeshCommand::SetForwards {
+            profile_id: profile_id.into(),
+            id: id.clone(),
+            rules: rules.to_vec(),
+        })
+        .await?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            {
+                let networks = self.networks.read();
+                let state = networks
+                    .iter()
+                    .find(|n| n.profile_id == profile_id)
+                    .filter(|n| {
+                        !matches!(
+                            n.phase,
+                            super::MeshPhase::Failed | super::MeshPhase::Disconnected
+                        )
+                    })
+                    .ok_or_else(|| Error::other("组网已断开，请重新保存端口转发"))?;
+                if let Some(ack) = state.forward_update.as_ref().filter(|r| r.id == id) {
+                    return match &ack.error {
+                        Some(e) => Err(Error::other(e.clone())),
+                        None => Ok(()),
+                    };
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(Error::other("等待端口转发更新超时"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            self.send(MeshCommand::Status).await?;
+        }
+    }
+
     fn request(&self, command: MeshCommand) -> MeshRequest {
         MeshRequest {
             version: PROTOCOL_VERSION,
@@ -342,6 +459,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snapshot_lists_only_saved_profiles_and_stays_empty_after_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        paths.ensure().unwrap();
+        let open = || MeshController::new(paths.clone(), Store::open(&paths).unwrap()).unwrap();
+        let controller = open();
+        let initial = controller.snapshot();
+        assert!(initial.profiles.is_empty());
+        assert!(initial.networks.is_empty());
+
+        let id = controller
+            .save(MeshProfile {
+                provider: MeshProvider::Tailscale,
+                ..Default::default()
+            })
+            .unwrap();
+        drop(controller);
+        let controller = open();
+        let saved = controller.snapshot();
+        assert_eq!(saved.profiles.len(), 1);
+        assert_eq!(saved.profiles[0].id, id);
+        assert!(saved.networks.is_empty());
+        controller.delete(&id).unwrap();
+        drop(controller);
+        let reopened = open().snapshot();
+        assert!(reopened.profiles.is_empty());
+        assert!(reopened.networks.is_empty());
+    }
+
+    #[test]
     fn connection_waits_for_backend_and_propagates_startup_failure() {
         use super::super::MeshPhase;
         let mut state = MeshRuntimeView {
@@ -443,6 +590,64 @@ mod tests {
         assert_eq!(saved.group("proxy").unwrap().active_node(), Some(&gateway));
         assert_eq!(saved.node(&gateway).unwrap().port, 19081);
         assert!(model.select_node("proxy", &ordinary.id));
+    }
+
+    #[tokio::test]
+    async fn disconnected_forward_edits_preserve_profile_and_reject_stale_rules() {
+        use super::super::PortForward;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        paths.ensure().unwrap();
+        let store = Store::open(&paths).unwrap();
+        let controller = MeshController::new(paths, store.clone()).unwrap();
+        let id = controller
+            .save(MeshProfile {
+                provider: MeshProvider::Tailscale,
+                hostname: "fixture".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let original = controller.profile(&id).unwrap();
+        let tcp = PortForward::parse("tcp://127.0.0.1:15000/192.0.2.2:80").unwrap();
+        let udp = PortForward::parse("udp://127.0.0.1:15000/192.0.2.2:53").unwrap();
+        let (old, next) = controller
+            .forward_edit(&id, None, Some(tcp.clone()))
+            .unwrap();
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        let (_, both) = controller
+            .forward_edit(&id, None, Some(udp.clone()))
+            .unwrap();
+        controller
+            .apply_forward_edit(&id, &next, &both)
+            .await
+            .unwrap();
+        assert!(
+            controller
+                .apply_forward_edit(&id, &next, &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            controller
+                .forward_edit(&id, Some(&udp), Some(tcp.clone()))
+                .is_err()
+        );
+        assert_eq!(store.mesh_profiles().unwrap()[0].port_forwards, both);
+        let (old, next) = controller.forward_edit(&id, Some(&tcp), None).unwrap();
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        assert!(controller.forward_edit(&id, Some(&tcp), None).is_err());
+        let (old, next) = controller.forward_edit(&id, Some(&udp), None).unwrap();
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        assert_eq!(store.mesh_profiles().unwrap(), vec![original]);
     }
 
     #[tokio::test]

@@ -145,8 +145,13 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
         provider: MeshProvider::Tailscale,
         ..Default::default()
     };
-    let config =
-        crate::adapters::singbox::compile_mesh(&profile, &directory, 19090, "offline-test-secret")?;
+    let config = crate::adapters::singbox::compile_mesh(
+        &profile,
+        &directory,
+        19090,
+        "offline-test-secret",
+        (19091, "fixture-forward"),
+    )?;
     let path = directory.join("config.json");
     crate::util::atomic_write_json(&path, &config)?;
     let report = crate::adapters::validate(crate::model::CoreKind::SingBox, &binary, &path).await?;
@@ -175,6 +180,7 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             &directory,
             19090,
             "offline-test-secret",
+            (19091, "fixture-forward"),
         )?;
         crate::adapters::singbox::allow_mesh_discovery(&mut config, 19093);
         let path = directory.join(if publish {
@@ -299,6 +305,29 @@ struct EndpointStatus {
 }
 
 impl EndpointStatus {
+    fn apply_status(self, view: &mut MeshRuntimeView) {
+        self.update_auth(view);
+        let local_id = self.self_peer.as_ref().map(|peer| peer.id.as_str());
+        view.peers = self
+            .groups
+            .into_iter()
+            .flat_map(|g| g.peers)
+            .filter(|peer| Some(peer.id.as_str()) != local_id)
+            .take(1024)
+            .map(MeshPeer::from)
+            .collect();
+        let local = self.self_peer.unwrap_or_default();
+        view.local_hostname = if local.hostname.trim().is_empty() {
+            local.dns_name.trim_end_matches('.').to_string()
+        } else {
+            local.hostname
+        };
+        view.addresses = local.ips;
+        view.dns_suffix =
+            (!self.suffix.is_empty()).then(|| self.suffix.trim_end_matches('.').to_string());
+        view.dns_address = Some(super::DNS_ADDRESS.into());
+    }
+
     fn update_auth(&self, view: &mut MeshRuntimeView) {
         view.login_url = None;
         view.phase = match self.state.as_str() {
@@ -489,6 +518,7 @@ impl Client {
     }
 }
 pub struct Backend {
+    pub(super) forwards: super::forwards::Forwards,
     child: Child,
     client: Client,
     state: Arc<Mutex<MeshRuntimeView>>,
@@ -630,17 +660,27 @@ impl Backend {
         sync_port: u16,
     ) -> Result<Self> {
         let executable = unpack(archive, directory)?;
-        let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .map_err(|_| Error::other("无法分配组网 API 端口"))?
-            .local_addr()
-            .map_err(|_| Error::other("无法分配端口"))?
-            .port();
+        let reserve = || {
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .map_err(|_| Error::other("无法分配本地组网端口"))
+        };
+        let api_listener = reserve()?;
+        let bridge_listener = reserve()?;
+        let port = api_listener.local_addr()?.port();
+        let bridge = bridge_listener.local_addr()?;
+        let password = super::MeshSecret(uuid::Uuid::new_v4().simple().to_string());
         let secret = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let mut config = crate::adapters::singbox::compile_mesh(&p, directory, port, &secret)?;
+        let mut config = crate::adapters::singbox::compile_mesh(
+            &p,
+            directory,
+            port,
+            &secret,
+            (bridge.port(), &password.0),
+        )?;
         crate::adapters::singbox::allow_mesh_discovery(&mut config, sync_port);
         if !with_interface {
             config["inbounds"] = serde_json::json!([]);
@@ -667,6 +707,9 @@ impl Backend {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000);
         }
+        let mut forwards = super::forwards::Forwards::new(bridge, password);
+        forwards.apply(&p.port_forwards).await?;
+        drop((api_listener, bridge_listener));
         let mut child = cmd
             .spawn()
             .map_err(|_| Error::other("Tailscale 组网进程启动失败"))?;
@@ -742,20 +785,7 @@ impl Backend {
                     while let Ok(Some(update)) = stream.message().await {
                         if let Some(e) = update.endpoints.into_iter().find(|e| e.tag == "mesh-ts") {
                             let mut s = observed.lock();
-                            e.update_auth(&mut s);
-                            let self_id = e.self_peer.as_ref().map(|p| p.id.clone());
-                            s.addresses = e.self_peer.map(|p| p.ips).unwrap_or_default();
-                            s.dns_suffix = (!e.suffix.is_empty())
-                                .then(|| e.suffix.trim_end_matches('.').to_string());
-                            s.dns_address = Some(super::DNS_ADDRESS.into());
-                            s.peers = e
-                                .groups
-                                .into_iter()
-                                .flat_map(|g| g.peers)
-                                .filter(|p| Some(&p.id) != self_id.as_ref())
-                                .take(1024)
-                                .map(MeshPeer::from)
-                                .collect();
+                            e.apply_status(&mut s);
                             s.updated_at = crate::util::now_unix();
                             s.error = None;
                         }
@@ -775,6 +805,7 @@ impl Backend {
             }
         });
         Ok(Self {
+            forwards,
             child,
             client,
             state,
@@ -845,6 +876,46 @@ impl Drop for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_uses_self_for_the_local_hostname_and_keeps_remote_peers_separate() {
+        let local = Peer {
+            id: "local".into(),
+            hostname: "demo-laptop".into(),
+            dns_name: "laptop.mesh.example.".into(),
+            ..Default::default()
+        };
+        let remote = Peer {
+            id: "peer".into(),
+            hostname: "demo-tablet".into(),
+            ..Default::default()
+        };
+        let mut view = MeshRuntimeView::default();
+        for (hostname, expected) in [("demo-laptop", "demo-laptop"), ("", "laptop.mesh.example")] {
+            EndpointStatus {
+                self_peer: Some(Peer {
+                    hostname: hostname.into(),
+                    ..local.clone()
+                }),
+                groups: vec![Group {
+                    peers: vec![local.clone(), remote.clone()],
+                }],
+                ..Default::default()
+            }
+            .apply_status(&mut view);
+            assert_eq!(view.local_hostname, expected);
+            assert_eq!(view.peers.len(), 1);
+            assert_eq!(view.peers[0].id, remote.id);
+        }
+        EndpointStatus {
+            groups: vec![Group {
+                peers: vec![remote],
+            }],
+            ..Default::default()
+        }
+        .apply_status(&mut view);
+        assert!(view.local_hostname.is_empty());
+    }
 
     #[test]
     fn authentication_follows_backend_state_and_retires_old_links() {

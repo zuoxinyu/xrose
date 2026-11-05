@@ -7,6 +7,7 @@ pub mod easytier;
 mod easytier_gateway;
 mod easytier_options;
 pub use easytier_options::{EasyTierDeviceOptions, EasyTierOptions, P2pPolicy, TcpAcceleration};
+mod forwards;
 pub mod ipc;
 pub mod platform;
 pub mod sync;
@@ -16,7 +17,7 @@ pub mod worker;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -451,14 +452,25 @@ impl MeshPeer {
     }
 }
 
+/// Acknowledges a specific listener update after it has completed in the worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardUpdate {
+    pub id: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MeshRuntimeView {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forward_update: Option<ForwardUpdate>,
     #[serde(default)]
     pub probe: Option<MeshProbe>,
     pub profile_id: String,
     pub provider: MeshProvider,
     pub phase: MeshPhase,
     pub interface: String,
+    #[serde(default)]
+    pub local_hostname: String,
     pub addresses: Vec<String>,
     pub routes: Vec<String>,
     pub peers: Vec<MeshPeer>,

@@ -156,8 +156,10 @@ fn text_input(
 
 pub struct AppView {
     mesh_form: mesh::MeshForm,
+    forward_editor: Option<mesh::ForwardEditor>,
     mesh_sync_ui: mesh_sync::SyncUi,
     mesh_expanded: std::collections::HashSet<String>,
+    collapsed_mesh_devices: std::collections::HashSet<String>,
     mesh_overflow: std::collections::HashMap<String, bool>,
     pub(crate) service: AppService,
     pub(crate) snapshot: UiSnapshot,
@@ -227,7 +229,6 @@ pub struct AppView {
     pub(crate) show_host_form: bool,
     pub(crate) matcher_kind: MatcherKind,
     pub(crate) rule_action: RouteActionKind,
-    expanded_switch_group: Option<String>,
 }
 
 impl AppView {
@@ -310,8 +311,10 @@ impl AppView {
         let hide_ips = snapshot.settings.privacy_mode;
         let view = Self {
             mesh_form: mesh::MeshForm::new(window, cx),
+            forward_editor: None,
             mesh_sync_ui: mesh_sync::SyncUi::new(window, cx),
             mesh_expanded: std::collections::HashSet::new(),
+            collapsed_mesh_devices: std::collections::HashSet::new(),
             mesh_overflow: std::collections::HashMap::new(),
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
@@ -377,7 +380,6 @@ impl AppView {
             show_host_form: false,
             matcher_kind: MatcherKind::Suffix,
             rule_action: RouteActionKind::Proxy,
-            expanded_switch_group: None,
         };
         view.refresh_header_location();
         view.localize_inputs(window, cx);
@@ -513,13 +515,6 @@ impl AppView {
             self.last_refresh = now;
             if !self.snapshot.busy.iter().any(|b| b == "latency") {
                 self.latency_pending.clear();
-            }
-            if self
-                .expanded_switch_group
-                .as_deref()
-                .is_some_and(|id| self.snapshot.model.group(id).is_none())
-            {
-                self.expanded_switch_group = None;
             }
             self.refresh_header_location();
             cx.notify();

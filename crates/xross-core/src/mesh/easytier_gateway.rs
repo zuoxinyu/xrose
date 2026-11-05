@@ -1,6 +1,6 @@
 //! Authenticated loopback SOCKS gateway. Every payload uses the mesh stack;
 //! missing peers never fall back to host sockets or host default routes.
-use super::MeshProfile;
+use super::MeshSecret;
 use crate::{Error, Result};
 use easytier::{
     peers::{PeerPacketFilter, peer_manager::PeerManager},
@@ -149,7 +149,12 @@ impl Drop for PortGuard {
     }
 }
 
+pub(super) enum GatewayRoute {
+    SelectedExit,
+    Mesh,
+}
 pub struct Gateway {
+    pub(super) listen: SocketAddr,
     address: IpAddr,
     exit_peer: tokio::sync::watch::Sender<Option<u32>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -158,15 +163,18 @@ impl Gateway {
     pub async fn start(
         peer: Arc<PeerManager>,
         address: String,
-        profile: &MeshProfile,
+        port: u16,
+        password: MeshSecret,
+        route: GatewayRoute,
     ) -> Result<Self> {
         let cidr = address
             .parse::<ipnet::Ipv4Net>()
             .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?;
         let (exit_peer, selected) = tokio::sync::watch::channel(None);
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, profile.outbound_port))
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
-            .map_err(|_| Error::other("出口出站端口已被占用，请修改本地端口"))?;
+            .map_err(|_| Error::other("无法监听本地组网网关，请检查端口占用"))?;
+        let listen = listener.local_addr()?;
         let ports = Ports::default();
         let mut caps = smoltcp::phy::DeviceCapabilities::default();
         caps.medium = smoltcp::phy::Medium::Ip;
@@ -197,6 +205,15 @@ impl Gateway {
         let mut tasks = Vec::new();
         tasks.push(tokio::spawn(async move {
             while let Some(data) = receiver.recv().await {
+                if matches!(route, GatewayRoute::Mesh) {
+                    if let Ok(ip) = smoltcp::wire::Ipv4Packet::new_checked(data.as_slice()) {
+                        let dst = IpAddr::V4(ip.dst_addr());
+                        let _ = peer
+                            .send_msg_by_ip(ZCPacket::new_with_payload(&data), dst, false)
+                            .await;
+                    }
+                    continue;
+                }
                 // An overlapping subnet or default-route announcement must never
                 // redirect this gateway's packets to a different exit.
                 let Some(id) = *selected.borrow() else {
@@ -211,7 +228,7 @@ impl Gateway {
                 let _ = peer.send_msg_for_proxy(packet, id).await;
             }
         }));
-        let password = profile.outbound_secret.0.clone();
+        let password = password.0;
         tasks.push(tokio::spawn(async move {
             let mut clients = JoinSet::new();
             loop {
@@ -227,6 +244,7 @@ impl Gateway {
             }
         }));
         Ok(Self {
+            listen,
             address: cidr.addr().into(),
             exit_peer,
             tasks,
@@ -238,7 +256,9 @@ impl Gateway {
 
     pub fn check_address(&self, address: IpAddr) -> Result<()> {
         if self.address != address || self.tasks.iter().any(|task| task.is_finished()) {
-            return Err(Error::other("EasyTier 出口虚拟地址已变化，请重新连接组网"));
+            return Err(Error::other(
+                "EasyTier 虚拟地址已变化或网关已停止，请重新连接组网",
+            ));
         }
         Ok(())
     }
@@ -541,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn published_peer_receives_gateway_packets_over_an_in_memory_mesh() {
-        use crate::mesh::{MeshSecret, easytier::configuration};
+        use crate::mesh::{MeshProfile, easytier::configuration};
         use easytier::{
             common::{global_ctx::GlobalCtx, stun::MockStunInfoCollector},
             peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
@@ -596,9 +616,15 @@ mod tests {
             {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            let gateway = Gateway::start(local, client.ipv4.clone(), &client)
-                .await
-                .unwrap();
+            let gateway = Gateway::start(
+                local.clone(),
+                client.ipv4.clone(),
+                client.outbound_port,
+                client.outbound_secret.clone(),
+                GatewayRoute::SelectedExit,
+            )
+            .await
+            .unwrap();
             gateway.set_exit_peer(Some(remote.my_peer_id()));
             let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.outbound_port))
                 .await
@@ -613,6 +639,37 @@ mod tests {
             let packet = remote_packets.recv().await.unwrap();
             assert!(packet.peer_manager_header().unwrap().is_exit_node());
             assert_eq!(&packet.payload()[16..20], &[203, 0, 113, 5]);
+            let bridge = Gateway::start(
+                local,
+                client.ipv4.clone(),
+                0,
+                MeshSecret("test".into()),
+                GatewayRoute::Mesh,
+            )
+            .await
+            .unwrap();
+            let mut forwards =
+                crate::mesh::forwards::Forwards::new(bridge.listen, MeshSecret("test".into()));
+            let listen = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let rule = crate::mesh::PortForward {
+                protocol: crate::mesh::ForwardProtocol::Udp,
+                listen,
+                target: "192.0.2.2:5353".parse().unwrap(),
+            };
+            forwards.apply(&[rule]).await.unwrap();
+            let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            client.send_to(b"forward", listen).await.unwrap();
+            loop {
+                let packet = remote_packets.recv().await.unwrap();
+                if packet.payload().ends_with(b"forward") {
+                    assert_eq!(&packet.payload()[16..20], &[192, 0, 2, 2]);
+                    assert!(!packet.peer_manager_header().unwrap().is_exit_node());
+                    break;
+                }
+            }
         })
         .await
         .expect("exit discovery and SOCKS forwarding over the ring tunnel");
@@ -675,6 +732,77 @@ mod tests {
         })
         .await
         .expect("virtual gateway timed out");
+    }
+    #[tokio::test]
+    async fn live_forward_edits_keep_existing_streams_and_relay_udp_replies() {
+        use crate::mesh::{ForwardProtocol, PortForward, forwards::Forwards};
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (local, remote) = virtual_pair();
+            let proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let mut forwards =
+                Forwards::new(proxy.local_addr().unwrap(), MeshSecret("test".into()));
+            let bridge = tokio::spawn(async move {
+                let mut clients = JoinSet::new();
+                while let Ok((socket, _)) = proxy.accept().await {
+                    clients.spawn(serve(socket, local.clone(), Ports::default(), "test"));
+                }
+            });
+            let tcp_target: SocketAddr = "192.0.2.2:8080".parse().unwrap();
+            let udp_target: SocketAddr = "192.0.2.2:5353".parse().unwrap();
+            let mut remote_tcp = remote.tcp_bind(tcp_target).await.unwrap();
+            let remote_udp = remote.udp_bind(udp_target).await.unwrap();
+            let listen = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let tcp = PortForward {
+                protocol: ForwardProtocol::Tcp,
+                listen,
+                target: tcp_target,
+            };
+            let udp = PortForward {
+                protocol: ForwardProtocol::Udp,
+                listen,
+                target: udp_target,
+            };
+            forwards.apply(std::slice::from_ref(&tcp)).await.unwrap();
+            let mut client = TcpStream::connect(listen).await.unwrap();
+            let (mut upstream, _) = remote_tcp.accept().await.unwrap();
+            forwards.apply(&[tcp.clone(), udp.clone()]).await.unwrap();
+            let datagram = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            datagram.send_to(b"one", listen).await.unwrap();
+            let mut buf = [0; 16];
+            let (n, source) = remote_udp.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"one");
+            remote_udp.send_to(b"two", source).await.unwrap();
+            let (n, _) = datagram.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], b"two");
+            let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let bad = PortForward {
+                listen: occupied.local_addr().unwrap(),
+                ..tcp.clone()
+            };
+            assert!(forwards.apply(&[bad, udp]).await.is_err());
+            let changed = PortForward {
+                target: "192.0.2.2:8081".parse().unwrap(),
+                ..tcp.clone()
+            };
+            let mut second = remote.tcp_bind(changed.target).await.unwrap();
+            forwards.apply(&[changed]).await.unwrap();
+            client.write_all(b"held").await.unwrap();
+            upstream.read_exact(&mut buf[..4]).await.unwrap();
+            assert_eq!(&buf[..4], b"held");
+            let _new_client = TcpStream::connect(listen).await.unwrap();
+            let _ = second.accept().await.unwrap();
+            forwards.apply(&[]).await.unwrap();
+            assert!(TcpStream::connect(listen).await.is_err());
+            forwards.apply(&[tcp]).await.unwrap();
+            let _again = TcpStream::connect(listen).await.unwrap();
+            let _ = remote_tcp.accept().await.unwrap();
+            bridge.abort();
+        })
+        .await
+        .expect("local forwarding fixture timed out");
     }
     #[test]
     fn udp_rejects_fragments_and_truncated_requests() {

@@ -1,5 +1,6 @@
 //! Mesh peer capabilities, selective sharing, and review before importing.
 use super::*;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::Input;
 use std::collections::BTreeSet;
 use xross_core::mesh::{
@@ -8,7 +9,6 @@ use xross_core::mesh::{
 };
 
 pub(super) struct SyncUi {
-    share: Option<String>,
     send_keys: BTreeSet<String>,
     send_page: usize,
     cats: BTreeSet<Category>,
@@ -21,7 +21,6 @@ pub(super) struct SyncUi {
 impl SyncUi {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         Self {
-            share: None,
             send_keys: Default::default(),
             send_page: 0,
             cats: BTreeSet::new(),
@@ -32,9 +31,7 @@ impl SyncUi {
             page: 0,
         }
     }
-    pub fn open_share(&mut self, id: String) {
-        self.receive = None;
-        self.share = Some(id);
+    fn reset_share_selection(&mut self) {
         self.cats.clear();
         self.send_page = 0;
         self.send_keys.clear();
@@ -47,7 +44,6 @@ impl SyncUi {
         window: &mut Window,
         cx: &mut Context<AppView>,
     ) {
-        self.share = None;
         self.receive = Some((profile, peer, name));
         self.code
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -112,7 +108,273 @@ pub(super) fn badges(peer: &MeshPeer, provider: MeshProvider, lang: Language, p:
     row
 }
 impl AppView {
-    pub(super) fn sync_controls(
+    pub(super) fn open_mesh_share_dialog(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .snapshot
+            .mesh
+            .networks
+            .iter()
+            .any(|n| n.profile_id == id && n.phase == xross_core::mesh::MeshPhase::Connected)
+        {
+            return;
+        }
+        self.mesh_sync_ui.receive = None;
+        self.mesh_sync_ui.reset_share_selection();
+        if self.snapshot.mesh_sync.sharing_profile.as_ref() != Some(&id) {
+            self.service.prepare_mesh_share(id.clone());
+        }
+        self.sync(cx);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let busy = this.snapshot.busy.iter().any(|s| s == "mesh-share");
+                let connected = this.snapshot.mesh.networks.iter().any(|n| {
+                    n.profile_id == id && n.phase == xross_core::mesh::MeshPhase::Connected
+                });
+                let body = if connected {
+                    this.share_controls(&id, cx)
+                } else {
+                    div().text_sm().text_color(p.muted_fg).child(this.tr(
+                        "网络已断开。重新连接后可共享配置。",
+                        "Reconnect this network to share configuration.",
+                    ))
+                };
+                let service = this.service.clone();
+                let profile = id.clone();
+                super::dialogs::settings_dialog(
+                    dialog,
+                    this.tr("共享配置", "Share configuration"),
+                    body,
+                    &p,
+                    window,
+                )
+                .overlay_closable(false)
+                .on_cancel(move |_, _, _| !busy)
+                .on_close(move |_, _, _| service.close_mesh_share(&profile))
+            })
+        });
+    }
+
+    fn share_controls(&mut self, id: &str, cx: &mut Context<Self>) -> Div {
+        let lang = self.lang();
+        let busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|s| s == "mesh-sync" || s == "mesh-share");
+        let sharing = self.snapshot.mesh_sync.sharing_profile.as_deref() == Some(id);
+        let mut panel = div().flex().flex_col().gap_2();
+        let mut actions = div().flex().items_center().flex_wrap().gap_2();
+        if sharing {
+            let profile = id.to_string();
+            let stop = profile.clone();
+            let message = tr(
+                lang,
+                "已共享所选配置。将共享码交给接收设备，十分钟内有效。",
+                "Selected configuration is shared. Give the code to the receiving device within ten minutes.",
+            );
+            panel = panel.child(div().text_sm().child(message));
+            actions = actions
+                .child(
+                    Button::new("mesh-copy-code")
+                        .compact()
+                        .label(tr(lang, "复制共享码", "Copy sharing code"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(code) = this.service.mesh_share_code(&profile) {
+                                cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                this.service.toast(
+                                    xross_core::service::ToastLevel::Success,
+                                    this.tr("已复制共享码", "Sharing code copied"),
+                                );
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("mesh-revoke")
+                        .compact()
+                        .label(tr(lang, "停止共享", "Stop sharing"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.service.stop_mesh_share(&stop);
+                            this.sync(cx);
+                            window.close_dialog(cx);
+                        })),
+                );
+        } else {
+            let Some(catalog) = self
+                .snapshot
+                .mesh_sync
+                .catalog
+                .as_ref()
+                .filter(|v| v.profile == id)
+                .cloned()
+            else {
+                if busy {
+                    return panel.child(div().text_sm().child(tr(
+                        lang,
+                        "正在读取共享项目…",
+                        "Loading items to share…",
+                    )));
+                }
+                let profile = id.to_string();
+                return panel.child(
+                    Button::new("mesh-reload-share")
+                        .compact()
+                        .label(tr(lang, "重新读取共享项目", "Reload items to share"))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mesh_sync_ui.reset_share_selection();
+                            this.service.prepare_mesh_share(profile.clone());
+                            cx.notify();
+                        })),
+                );
+            };
+            let mut categories = div().flex().flex_wrap().gap_3();
+            for c in Category::ALL {
+                let available = catalog.rows.iter().filter(|r| r.category == c).count();
+                let list = catalog.clone();
+                categories = categories.child(
+                    toggle(
+                        SharedString::from(format!("share-{c:?}")),
+                        format!("{} ({available})", label(lang, c)),
+                        self.mesh_sync_ui.cats.contains(&c),
+                    )
+                    .disabled(available == 0)
+                    .on_change(cx.listener(move |this, on, _, cx| {
+                        let ui = &mut this.mesh_sync_ui;
+                        ui.send_page = 0;
+                        if *on {
+                            ui.cats.insert(c);
+                        } else {
+                            ui.cats.remove(&c);
+                        }
+                        for row in list.rows.iter().filter(|r| r.category == c) {
+                            if *on {
+                                ui.send_keys.insert(row.key.clone());
+                            } else {
+                                ui.send_keys.remove(&row.key);
+                            }
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            panel=panel.child(div().text_sm().child(tr(lang,"选择共享类别与项目。所选项目中的节点凭据、订阅地址及组网密钥将一并发送。",
+                "Select categories and items to share. Selected items include node credentials, subscription URLs and mesh network keys."))).child(categories);
+            const PAGE: usize = 12;
+            let visible: Vec<_> = catalog
+                .rows
+                .iter()
+                .filter(|r| self.mesh_sync_ui.cats.contains(&r.category))
+                .collect();
+            let pages = visible.len().div_ceil(PAGE).max(1);
+            for row in visible
+                .iter()
+                .skip(self.mesh_sync_ui.send_page * PAGE)
+                .take(PAGE)
+            {
+                let key = row.key.clone();
+                panel = panel.child(
+                    toggle(
+                        SharedString::from(format!("share-item-{key}")),
+                        format!("{} · {}", label(lang, row.category), row.name),
+                        self.mesh_sync_ui.send_keys.contains(&key),
+                    )
+                    .on_change(cx.listener(move |this, on, _, cx| {
+                        if *on {
+                            this.mesh_sync_ui.send_keys.insert(key.clone());
+                        } else {
+                            this.mesh_sync_ui.send_keys.remove(&key);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            if pages > 1 {
+                panel = panel.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            Button::new("send-prev")
+                                .compact()
+                                .label(tr(lang, "上一页", "Previous"))
+                                .disabled(self.mesh_sync_ui.send_page == 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.mesh_sync_ui.send_page =
+                                        this.mesh_sync_ui.send_page.saturating_sub(1);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(format!("{}/{}", self.mesh_sync_ui.send_page + 1, pages))
+                        .child(
+                            Button::new("send-next")
+                                .compact()
+                                .label(tr(lang, "下一页", "Next"))
+                                .disabled(self.mesh_sync_ui.send_page + 1 >= pages)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.mesh_sync_ui.send_page =
+                                        (this.mesh_sync_ui.send_page + 1).min(pages - 1);
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            let profile = id.to_string();
+            let close = profile.clone();
+            let count = self.mesh_sync_ui.send_keys.len();
+            actions = actions
+                .child(
+                    Button::new("mesh-share")
+                        .compact()
+                        .primary()
+                        .label(format!(
+                            "{} ({count})",
+                            tr(lang, "生成共享码", "Create sharing code")
+                        ))
+                        .disabled(busy || count == 0)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.service.offer_mesh_data(
+                                profile.clone(),
+                                catalog.id.clone(),
+                                this.mesh_sync_ui.send_keys.clone(),
+                            );
+                            this.sync(cx);
+                        })),
+                )
+                .child(
+                    Button::new("mesh-clear-share")
+                        .compact()
+                        .disabled(count == 0)
+                        .label(tr(lang, "清空所选", "Clear selection"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.mesh_sync_ui.send_keys.clear();
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("mesh-close-share")
+                        .compact()
+                        .disabled(busy)
+                        .label(tr(lang, "取消", "Cancel"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.service.close_mesh_share(&close);
+                            window.close_dialog(cx);
+                        })),
+                );
+        }
+        panel.child(actions)
+    }
+
+    pub(super) fn receive_controls(
         &mut self,
         id: &str,
         p: &Palette,
@@ -124,221 +386,13 @@ impl AppView {
             .busy
             .iter()
             .any(|s| s == "mesh-sync" || s == "mesh-share");
-        let sharing = self.snapshot.mesh_sync.sharing_profile.as_deref() == Some(id);
-        let mut panel = div().flex().flex_col().gap_2().pt_2();
-        if self.mesh_sync_ui.share.as_deref() == Some(id) || sharing {
-            let mut actions = div().flex().items_center().flex_wrap().gap_2();
-            if sharing {
-                let profile = id.to_string();
-                let stop = profile.clone();
-                let message = tr(
-                    lang,
-                    "已共享所选配置。将共享码交给接收设备，十分钟内有效。",
-                    "Selected configuration is shared. Give the code to the receiving device within ten minutes.",
-                );
-                panel = panel.child(div().text_sm().child(message));
-                actions = actions
-                    .child(
-                        Button::new("mesh-copy-code")
-                            .compact()
-                            .label(tr(lang, "复制共享码", "Copy sharing code"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(code) = this.service.mesh_share_code(&profile) {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(code));
-                                    this.service.toast(
-                                        xross_core::service::ToastLevel::Success,
-                                        this.tr("已复制共享码", "Sharing code copied"),
-                                    );
-                                }
-                            })),
-                    )
-                    .child(
-                        Button::new("mesh-revoke")
-                            .compact()
-                            .label(tr(lang, "停止共享", "Stop sharing"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.service.stop_mesh_share(&stop);
-                                this.mesh_sync_ui.share = None;
-                                cx.notify();
-                            })),
-                    );
-            } else {
-                let Some(catalog) = self
-                    .snapshot
-                    .mesh_sync
-                    .catalog
-                    .as_ref()
-                    .filter(|v| v.profile == id)
-                    .cloned()
-                else {
-                    if busy {
-                        return Some(panel.child(div().text_sm().child(tr(
-                            lang,
-                            "正在读取共享项目…",
-                            "Loading items to share…",
-                        ))));
-                    }
-                    let profile = id.to_string();
-                    return Some(
-                        panel.child(
-                            Button::new("mesh-reload-share")
-                                .compact()
-                                .label(tr(lang, "重新读取共享项目", "Reload items to share"))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.mesh_sync_ui.open_share(profile.clone());
-                                    this.service.prepare_mesh_share(profile.clone());
-                                    cx.notify();
-                                })),
-                        ),
-                    );
-                };
-                let mut categories = div().flex().flex_wrap().gap_3();
-                for c in Category::ALL {
-                    let available = catalog.rows.iter().filter(|r| r.category == c).count();
-                    let list = catalog.clone();
-                    categories = categories.child(
-                        toggle(
-                            SharedString::from(format!("share-{c:?}")),
-                            format!("{} ({available})", label(lang, c)),
-                            self.mesh_sync_ui.cats.contains(&c),
-                        )
-                        .disabled(available == 0)
-                        .on_change(cx.listener(move |this, on, _, cx| {
-                            let ui = &mut this.mesh_sync_ui;
-                            ui.send_page = 0;
-                            if *on {
-                                ui.cats.insert(c);
-                            } else {
-                                ui.cats.remove(&c);
-                            }
-                            for row in list.rows.iter().filter(|r| r.category == c) {
-                                if *on {
-                                    ui.send_keys.insert(row.key.clone());
-                                } else {
-                                    ui.send_keys.remove(&row.key);
-                                }
-                            }
-                            cx.notify();
-                        })),
-                    );
-                }
-                panel=panel.child(div().text_sm().child(tr(lang,"选择共享类别与项目。所选项目中的节点凭据、订阅地址及组网密钥将一并发送。",
-                    "Select categories and items to share. Selected items include node credentials, subscription URLs and mesh network keys."))).child(categories);
-                const PAGE: usize = 12;
-                let visible: Vec<_> = catalog
-                    .rows
-                    .iter()
-                    .filter(|r| self.mesh_sync_ui.cats.contains(&r.category))
-                    .collect();
-                let pages = visible.len().div_ceil(PAGE).max(1);
-                for row in visible
-                    .iter()
-                    .skip(self.mesh_sync_ui.send_page * PAGE)
-                    .take(PAGE)
-                {
-                    let key = row.key.clone();
-                    panel = panel.child(
-                        toggle(
-                            SharedString::from(format!("share-item-{key}")),
-                            format!("{} · {}", label(lang, row.category), row.name),
-                            self.mesh_sync_ui.send_keys.contains(&key),
-                        )
-                        .on_change(cx.listener(move |this, on, _, cx| {
-                            if *on {
-                                this.mesh_sync_ui.send_keys.insert(key.clone());
-                            } else {
-                                this.mesh_sync_ui.send_keys.remove(&key);
-                            }
-                            cx.notify();
-                        })),
-                    );
-                }
-                if pages > 1 {
-                    panel = panel.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Button::new("send-prev")
-                                    .compact()
-                                    .label(tr(lang, "上一页", "Previous"))
-                                    .disabled(self.mesh_sync_ui.send_page == 0)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.mesh_sync_ui.send_page =
-                                            this.mesh_sync_ui.send_page.saturating_sub(1);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(format!("{}/{}", self.mesh_sync_ui.send_page + 1, pages))
-                            .child(
-                                Button::new("send-next")
-                                    .compact()
-                                    .label(tr(lang, "下一页", "Next"))
-                                    .disabled(self.mesh_sync_ui.send_page + 1 >= pages)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.mesh_sync_ui.send_page =
-                                            (this.mesh_sync_ui.send_page + 1).min(pages - 1);
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                }
-                let profile = id.to_string();
-                let close = profile.clone();
-                let count = self.mesh_sync_ui.send_keys.len();
-                actions = actions
-                    .child(
-                        Button::new("mesh-share")
-                            .compact()
-                            .primary()
-                            .label(format!(
-                                "{} ({count})",
-                                tr(lang, "生成共享码", "Create sharing code")
-                            ))
-                            .disabled(busy || count == 0)
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.service.offer_mesh_data(
-                                    profile.clone(),
-                                    catalog.id.clone(),
-                                    this.mesh_sync_ui.send_keys.clone(),
-                                );
-                            })),
-                    )
-                    .child(
-                        Button::new("mesh-clear-share")
-                            .compact()
-                            .disabled(count == 0)
-                            .label(tr(lang, "清空所选", "Clear selection"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.mesh_sync_ui.send_keys.clear();
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("mesh-close-share")
-                            .compact()
-                            .disabled(busy)
-                            .label(tr(lang, "取消", "Cancel"))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.service.close_mesh_share(&close);
-                                this.mesh_sync_ui.share = None;
-                                cx.notify();
-                            })),
-                    );
-            }
-            panel = panel.child(actions);
-        } else if !self
-            .mesh_sync_ui
-            .receive
-            .as_ref()
-            .is_some_and(|v| v.0 == id)
-        {
-            return None;
-        }
-        if let Some((profile, peer, name)) = self.mesh_sync_ui.receive.clone().filter(|v| v.0 == id)
-        {
-            panel = panel
+        let (profile, peer, name) = self.mesh_sync_ui.receive.clone().filter(|v| v.0 == id)?;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .pt_2()
                 .child(div().text_sm().text_color(p.muted_fg).child(format!(
                     "{} · {}",
                     tr(
@@ -380,9 +434,8 @@ impl AppView {
                                     cx.notify();
                                 })),
                         ),
-                );
-        }
-        Some(panel)
+                ),
+        )
     }
     pub(super) fn sync_review(&mut self, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
         const PAGE: usize = 20;

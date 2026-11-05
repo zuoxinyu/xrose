@@ -1,5 +1,6 @@
 //! Mesh configuration and cached runtime state. All work goes through AppService.
 mod advanced;
+mod forwards;
 use super::{
     AppView,
     menus::{self, MenuTarget},
@@ -7,6 +8,7 @@ use super::{
     tr,
     widgets::*,
 };
+pub(super) use forwards::ForwardEditor;
 use gpui_base::{Disableable, SelectableText};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -686,6 +688,7 @@ impl AppView {
                 }),
         );
 
+        body = body.child(self.forward_card(&p, busy, cx));
         if let Some(review) = self.sync_review(&p, cx) {
             body = body.child(review);
         }
@@ -899,6 +902,20 @@ impl AppView {
                         .child(reason),
                 );
             }
+            let local_name = if state.local_hostname.trim().is_empty() {
+                &profile.hostname
+            } else {
+                &state.local_hostname
+            };
+            if !local_name.is_empty() {
+                network = network.child(self.mesh_text(
+                    format!("mesh-{}-local-name", profile.id),
+                    &self.tr("本机设备名", "Local device name"),
+                    vec![local_name.clone()],
+                    &p,
+                    cx,
+                ));
+            }
             if !active {
                 body = body.child(network);
                 continue;
@@ -942,39 +959,16 @@ impl AppView {
             if let Some(suffix) = state.dns_suffix {
                 details.push(("dns", "MagicDNS".into(), vec![format!("*.{suffix}")]));
             }
-            details.retain(|(_, _, values)| !values.is_empty());
-            if !details.is_empty() {
-                network = network.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .w_full()
-                        .min_w(px(0.))
-                        .children(details.into_iter().map(|(key, label, values)| {
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap_2()
-                                .w_full()
-                                .min_w(px(0.))
-                                .text_sm()
-                                .child(
-                                    div()
-                                        .py_1()
-                                        .flex_shrink_0()
-                                        .text_color(p.muted_fg)
-                                        .child("•"),
-                                )
-                                .child(self.mesh_text(
-                                    format!("mesh-{}-{key}", profile.id),
-                                    &label,
-                                    values,
-                                    &p,
-                                    cx,
-                                ))
-                        })),
-                );
+            for (key, label, values) in details {
+                if !values.is_empty() {
+                    network = network.child(self.mesh_text(
+                        format!("mesh-{}-{key}", profile.id),
+                        &label,
+                        values,
+                        &p,
+                        cx,
+                    ));
+                }
             }
             if let Some(probe) = state.probe {
                 network = network.child(
@@ -994,124 +988,166 @@ impl AppView {
                         )),
                 );
             }
-            let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));
-            let has_members = !state.peers.is_empty();
-            for peer in state.peers {
-                let has_address = !peer.addresses.is_empty();
-                let peer_id = format!("mesh-peer-{}-{}", profile.id, peer.id);
-                let expanded = self.mesh_expanded.contains(&peer_id);
-                let badges = super::mesh_sync::badges(&peer, provider, lang, &p);
-                let mut subnets = peer.subnets.clone();
-                if let Some(x) = &peer.xross {
-                    subnets.extend(x.subnets.clone());
-                }
-                subnets.sort();
-                subnets.dedup();
-                let menu = menus::builder(
-                    cx.entity().downgrade(),
-                    MenuTarget::MeshPeer(profile.id.clone(), peer.id),
-                );
-                let hover_bg = p.panel_alt.opacity(0.45);
-                members = members.child(
-                    div()
-                        .id(SharedString::from(peer_id.clone()))
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .p_3()
-                        .rounded_lg()
-                        .bg(p.bg)
-                        .border_1()
-                        .border_color(p.border)
-                        .hover(move |d| d.bg(hover_bg))
-                        .child(dot(if peer.online { p.success } else { p.muted_fg }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(p.fg)
-                                        .when(!expanded, |d| d.truncate())
-                                        .when(expanded, |d| d.whitespace_normal())
-                                        .child(SelectableText::new(
-                                            SharedString::from(format!("{peer_id}-name")),
-                                            peer.name,
-                                        )),
-                                )
-                                .child(badges)
-                                .when(!subnets.is_empty() && !self.hide_ips, |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .child(subnets.join(", ")),
-                                    )
-                                })
-                                .when(has_address, |d| {
-                                    d.child(div().text_xs().text_color(p.muted_fg).child(
-                                        self.mesh_text(peer_id.clone(), "", peer.addresses, &p, cx),
-                                    ))
-                                })
-                                .when(!has_address, |d| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .py_1()
-                                            .min_h(px(26.))
-                                            .child(tr(lang, "暂无 IP 地址", "No IP address")),
-                                    )
-                                }),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .when_some(peer.latency_ms, |d, ms| {
-                                    d.child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .child(format!("{ms:.1} ms")),
-                                    )
-                                })
-                                .child(pill(
-                                    if peer.online {
-                                        tr(lang, "在线", "Online")
-                                    } else {
-                                        tr(lang, "离线", "Offline")
-                                    },
-                                    if peer.online { p.ok_text } else { p.muted_fg },
-                                    if peer.online {
-                                        p.ok_text.opacity(0.1)
-                                    } else {
-                                        p.panel_alt
-                                    },
-                                )),
-                        )
-                        .child(
-                            more_button(
-                                SharedString::from(format!("{peer_id}-menu")),
-                                tr(lang, "设备操作", "Device actions"),
-                            )
-                            .dropdown_menu(menu.clone()),
-                        )
-                        .context_menu(menu),
-                );
-            }
             if state.phase == MeshPhase::Connected
-                && let Some(panel) = self.sync_controls(&profile.id, &p, cx)
+                && let Some(panel) = self.receive_controls(&profile.id, &p, cx)
             {
                 network = network.child(panel);
             }
-            if has_members {
+            let peer_count = state.peers.len();
+            if peer_count > 0 {
+                let profile_id = profile.id.clone();
+                let collapsed = self.collapsed_mesh_devices.contains(&profile_id);
+                let label = format!("{} ({peer_count})", self.tr("设备列表", "Devices"));
+                let tip = if collapsed {
+                    self.tr("展开设备列表", "Expand device list")
+                } else {
+                    self.tr("收起设备列表", "Collapse device list")
+                };
+                network = network.child(
+                    div().flex().child(
+                        Button::new(SharedString::from(format!("mesh-devices-{profile_id}")))
+                            .compact()
+                            .ghost()
+                            .accessibility_label(format!("{tip} ({peer_count})"))
+                            .tooltip(tip)
+                            .label(label)
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size_4(),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.collapsed_mesh_devices.remove(&profile_id) {
+                                    this.collapsed_mesh_devices.insert(profile_id.clone());
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                );
+                if collapsed {
+                    body = body.child(network);
+                    continue;
+                }
+                let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));
+                for peer in state.peers {
+                    let has_address = !peer.addresses.is_empty();
+                    let peer_id = format!("mesh-peer-{}-{}", profile.id, peer.id);
+                    let expanded = self.mesh_expanded.contains(&peer_id);
+                    let badges = super::mesh_sync::badges(&peer, provider, lang, &p);
+                    let mut subnets = peer.subnets.clone();
+                    if let Some(x) = &peer.xross {
+                        subnets.extend(x.subnets.clone());
+                    }
+                    subnets.sort();
+                    subnets.dedup();
+                    let menu = menus::builder(
+                        cx.entity().downgrade(),
+                        MenuTarget::MeshPeer(profile.id.clone(), peer.id),
+                    );
+                    let hover_bg = p.panel_alt.opacity(0.45);
+                    members = members.child(
+                        div()
+                            .id(SharedString::from(peer_id.clone()))
+                            .flex()
+                            .items_center()
+                            .gap_3()
+                            .p_3()
+                            .rounded_lg()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .hover(move |d| d.bg(hover_bg))
+                            .child(dot(if peer.online { p.success } else { p.muted_fg }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(p.fg)
+                                            .when(!expanded, |d| d.truncate())
+                                            .when(expanded, |d| d.whitespace_normal())
+                                            .child(SelectableText::new(
+                                                SharedString::from(format!("{peer_id}-name")),
+                                                peer.name,
+                                            )),
+                                    )
+                                    .child(badges)
+                                    .when(!subnets.is_empty() && !self.hide_ips, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .child(subnets.join(", ")),
+                                        )
+                                    })
+                                    .when(has_address, |d| {
+                                        d.child(div().text_xs().text_color(p.muted_fg).child(
+                                            self.mesh_text(
+                                                peer_id.clone(),
+                                                "",
+                                                peer.addresses,
+                                                &p,
+                                                cx,
+                                            ),
+                                        ))
+                                    })
+                                    .when(!has_address, |d| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .py_1()
+                                                .min_h(px(26.))
+                                                .child(tr(lang, "暂无 IP 地址", "No IP address")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .when_some(peer.latency_ms, |d, ms| {
+                                        d.child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .child(format!("{ms:.1} ms")),
+                                        )
+                                    })
+                                    .child(pill(
+                                        if peer.online {
+                                            tr(lang, "在线", "Online")
+                                        } else {
+                                            tr(lang, "离线", "Offline")
+                                        },
+                                        if peer.online { p.ok_text } else { p.muted_fg },
+                                        if peer.online {
+                                            p.ok_text.opacity(0.1)
+                                        } else {
+                                            p.panel_alt
+                                        },
+                                    )),
+                            )
+                            .child(
+                                more_button(
+                                    SharedString::from(format!("{peer_id}-menu")),
+                                    tr(lang, "设备操作", "Device actions"),
+                                )
+                                .dropdown_menu(menu.clone()),
+                            )
+                            .context_menu(menu),
+                    );
+                }
                 network = network.child(members);
             }
             body = body.child(network);

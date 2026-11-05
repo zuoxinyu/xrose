@@ -35,10 +35,10 @@ pub fn main() -> Result<()> {
         let mut input = std::io::stdin().lock();
         loop {
             let mut line = String::new();
-            if input.by_ref().take(4097).read_line(&mut line).unwrap_or(0) == 0 {
+            if input.by_ref().take(32769).read_line(&mut line).unwrap_or(0) == 0 {
                 break;
             }
-            if line.len() > 4096 {
+            if line.len() > 32768 {
                 break;
             }
             if let Ok(c) = serde_json::from_str(&line) {
@@ -76,11 +76,20 @@ pub fn main() -> Result<()> {
         let mut dns_suffix=None;
         let mut dns_warning=None;
         let mut probe=None;
+        let mut current_profile = boot.profile.clone();
         let mut proxy_addresses=boot.baseline.proxy_tun_addresses.clone();
         loop {tokio::select!{
             command=receiver.recv()=> match command {
                 Some(WorkerCommand::Stop)|None=>break,
                 Some(WorkerCommand::Logout)=>{backend.logout().await?;break;}
+                Some(WorkerCommand::SetForwards { id, rules }) => {
+                    let result = backend.update_forwards(&mut current_profile, rules).await;
+                    final_state.forward_update = Some(super::ForwardUpdate {
+                        id,
+                        error: result.err().map(|e| e.to_string()),
+                    });
+                    publish(&final_state);
+                }
                 Some(WorkerCommand::Probe{ip})=>{
                     let result=backend.probe(ip.clone()).await;
                     probe=Some(match result {Ok(latency_ms)=>super::MeshProbe{ip,success:true,latency_ms,detail:"设备可达".into()},Err(error)=>super::MeshProbe{ip,success:false,latency_ms:None,detail:error.to_string()}});
@@ -90,6 +99,7 @@ pub fn main() -> Result<()> {
             _=interval.tick()=>{
                 let mut state=backend.snapshot().await?;
                 state.probe=probe.clone();
+                state.forward_update=final_state.forward_update.clone();
                 let current=super::platform::worker_baseline(&mut proxy_addresses)?;
                 if let Some(change)=current.connectivity_change(&boot.baseline){return Err(Error::other(format!("检测到{change}，已停止组网以保护现有联网通道")));}
                 super::coexist::check_networks(&state.routes,&boot.baseline.protected)?;
@@ -167,6 +177,29 @@ impl Backend {
                 )
                 .await?,
             )),
+        }
+    }
+    async fn update_forwards(
+        &mut self,
+        current: &mut super::MeshProfile,
+        rules: Vec<super::PortForward>,
+    ) -> Result<()> {
+        let mut next = current.clone();
+        next.port_forwards = rules;
+        next.validate()?;
+        if let Err(error) = self.set_forwards(&next.port_forwards).await {
+            self.set_forwards(&current.port_forwards)
+                .await
+                .map_err(|_| Error::other("未能恢复原转发监听，请释放冲突端口后重试"))?;
+            return Err(error);
+        }
+        *current = next;
+        Ok(())
+    }
+    async fn set_forwards(&mut self, rules: &[super::PortForward]) -> Result<()> {
+        match self {
+            Self::EasyTier(e) => e.set_forwards(rules).await,
+            Self::Tailscale(t) => t.forwards.apply(rules).await,
         }
     }
     async fn snapshot(&mut self) -> Result<MeshRuntimeView> {

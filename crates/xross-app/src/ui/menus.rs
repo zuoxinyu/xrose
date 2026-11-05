@@ -4,7 +4,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
-use xross_core::mesh::{MeshPeer, MeshProvider};
+use xross_core::mesh::{MeshPeer, MeshProvider, PortForward};
 use xross_core::route::transfer::ExportScope;
 use xross_core::service::ToastLevel;
 
@@ -12,6 +12,7 @@ use xross_core::service::ToastLevel;
 pub(super) enum MenuTarget {
     Mesh(String),
     MeshPeer(String, String),
+    Forward(String, PortForward),
     RoutingFiles,
     NodeSelector,
     DefaultOutbound,
@@ -40,6 +41,7 @@ pub(super) enum Command {
     QrNode(String),
     DeleteNode(String),
     DeleteNodes(Vec<String>),
+    NodeSwitchSettings,
     BatchNodes,
     CleanNodes,
     MoveRule(String, Option<String>, isize),
@@ -58,6 +60,8 @@ pub(super) enum Command {
     ClearRecording,
     ClearLogs,
     EditMesh(String),
+    EditForward(String, PortForward),
+    DeleteForward(String, PortForward),
     LoginMesh(String),
     LogoutMesh(String),
     ShareMesh(String),
@@ -198,6 +202,22 @@ impl AppView {
                     !active && available,
                     Command::DeleteMesh(id),
                 ));
+            }
+            MenuTarget::Forward(id, rule) => {
+                menu = menu
+                    .item(item(
+                        &view,
+                        tr(lang, "编辑转发", "Edit forward"),
+                        !busy("mesh"),
+                        Command::EditForward(id.clone(), rule.clone()),
+                    ))
+                    .separator()
+                    .item(item(
+                        &view,
+                        tr(lang, "删除转发", "Delete forward"),
+                        !busy("mesh"),
+                        Command::DeleteForward(id, rule),
+                    ));
             }
             MenuTarget::MeshPeer(profile_id, peer_id) => {
                 let Some((_, peer)) = self.mesh_peer(&profile_id, &peer_id) else {
@@ -361,6 +381,12 @@ impl AppView {
             MenuTarget::Nodes => {
                 let failed = self.snapshot.latency.values().any(|e| e.delay_ms.is_none());
                 menu = menu
+                    .item(add(
+                        "自动切换设置…",
+                        "Auto-switch settings…",
+                        self.snapshot.model.default_group_id().is_some(),
+                        Command::NodeSwitchSettings,
+                    ))
                     .item(add(
                         if self.batch_mode {
                             "退出批量管理"
@@ -642,6 +668,15 @@ impl AppView {
                         .iter()
                         .any(|b| &b.core == core && &b.version == version)
             }
+            Command::EditForward(id, old) | Command::DeleteForward(id, old) => {
+                !busy("mesh")
+                    && self
+                        .snapshot
+                        .mesh
+                        .profiles
+                        .iter()
+                        .any(|p| &p.id == id && p.port_forwards.contains(old))
+            }
             Command::DeleteMesh(id) => self.snapshot.mesh.profiles.iter().any(|p| &p.id == id),
             Command::EditNode(id)
             | Command::TestNode(id)
@@ -687,6 +722,8 @@ impl AppView {
                 | Command::BatchNodes
                 | Command::ClearLogs
                 | Command::ClearRecording
+                | Command::EditForward(_, _)
+                | Command::DeleteForward(_, _)
                 | Command::ReceiveFromPeer(_, _)
                 | Command::ProbePeer(_, _)
         ) && busy("core")
@@ -715,6 +752,10 @@ impl AppView {
         }
         let confirmation = match &command {
             Command::LogoutMesh(_) => Some((self.tr("注销设备身份","Log out device"),self.tr("断开此 Tailscale 组网并注销本机身份，下次连接需要重新授权。","Disconnect this Tailscale network and sign out this device. The next connection requires authorization."))),
+            Command::DeleteForward(_, rule) => Some((
+                self.tr("删除端口转发", "Delete port forward"),
+                format!("{} {} · {}", rule.protocol.key().to_uppercase(), rule.listen.port(), self.tr("删除后将停止监听此端口。", "This port will stop accepting traffic.")).into()
+            )),
             Command::DeleteMesh(_) => Some((self.tr("删除组网配置", "Delete mesh profile"), self.tr("删除此组网配置，并移除关联出口节点与启动选项。", "Remove this mesh profile, its exit node, and startup selection."))),
             Command::DeleteVersion(core, version) => Some((self.tr("删除内核版本", "Delete core version"), format!("{} {} {}", self.tr("删除本地安装的", "Remove the installed"), core.display_name(), version).into())),
             Command::DeleteNodes(ids) => Some((self.tr("删除节点", "Delete nodes"), format!("{} {} {}", self.tr("将删除", "Delete"), ids.len(), self.tr("个节点，并从出站组中移除。", "nodes and remove them from outbound groups.")).into())),
@@ -761,13 +802,12 @@ impl AppView {
             }
         }
         match command {
+            Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
             Command::SetDefaultOutbound(id) => {
                 if let Err(err) = self.service.set_default_outbound_group(&id) {
                     self.service.toast(ToastLevel::Error, err.to_string());
-                } else {
-                    self.expanded_switch_group = None;
                 }
             }
             Command::SetFrontProxy(id) => {
@@ -779,9 +819,14 @@ impl AppView {
                 self.service.select_node(&group_id, &node_id);
                 self.refresh_header_location();
             }
+            Command::EditForward(id, old) => self.open_forward_editor(id, Some(old), window, cx),
+            Command::DeleteForward(id, old) => {
+                if let Err(e) = self.service.edit_mesh_forward(&id, Some(&old), None) {
+                    self.service.toast(ToastLevel::Error, e.to_string());
+                }
+            }
             Command::ShareMesh(id) => {
-                self.service.prepare_mesh_share(id.clone());
-                self.mesh_sync_ui.open_share(id);
+                self.open_mesh_share_dialog(id, window, cx);
             }
             Command::ReceiveFromPeer(profile_id, peer_id) => {
                 if let Some((_, peer)) = self.mesh_peer(&profile_id, &peer_id)

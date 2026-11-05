@@ -1,4 +1,4 @@
-//! Modal presentation for node creation, editing and sharing.
+//! Modal presentation for settings, node editing and sharing.
 
 use std::sync::Arc;
 
@@ -13,6 +13,34 @@ use xross_core::model::Node;
 use xross_core::service::ToastLevel;
 
 use super::{AppView, theme::palette, widgets::ChoiceGroup};
+
+/// Places settings in a scrollable surface so the close control stays reachable.
+pub(super) fn settings_dialog(
+    dialog: Dialog,
+    title: SharedString,
+    body: impl IntoElement,
+    p: &super::theme::Palette,
+    window: &Window,
+) -> Dialog {
+    dialog
+        .centered()
+        .w(px(super::theme::DIALOG_WIDE))
+        .bg(p.panel)
+        .text_color(p.fg)
+        .border_color(p.border)
+        .entrance(DialogEntrance::None)
+        .on_ok(|_, _, _| false)
+        .title(title)
+        .child(
+            div()
+                .id("settings-dialog-body")
+                .max_h(window.viewport_size().height * 0.68)
+                .overflow_y_scroll()
+                .mx_neg_1()
+                .px_1()
+                .child(body),
+        )
+}
 
 impl AppView {
     pub(crate) fn open_node_dialog(
@@ -47,7 +75,7 @@ impl AppView {
         let view = cx.entity().downgrade();
         let mut dialog = dialog
             .centered()
-            .w(px(720.))
+            .w(px(super::theme::DIALOG_WIDE))
             .bg(p.panel)
             .text_color(p.fg)
             .border_color(p.border)
