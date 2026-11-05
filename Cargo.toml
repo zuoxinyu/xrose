@@ -18,7 +18,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 socket2 = "0.6"
 anyhow = "1"
 thiserror = "2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "sync", "time", "net", "signal"] }

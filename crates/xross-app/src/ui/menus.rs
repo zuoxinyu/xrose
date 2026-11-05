@@ -9,6 +9,7 @@ use xross_core::service::ToastLevel;
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
+    Mesh(String),
     RoutingFiles,
     NodeSelector,
     FrontProxy,
@@ -52,6 +53,10 @@ pub(super) enum Command {
     CloseConnections,
     ClearRecording,
     ClearLogs,
+    EditMesh(String),
+    LoginMesh(String),
+    LogoutMesh(String),
+    ShareMesh(String),
     DeleteMesh(String),
     DeleteVersion(xross_core::model::CoreKind, String),
 }
@@ -126,6 +131,57 @@ impl AppView {
             item(&view, tr(lang, zh, en), enabled && available, command)
         };
         match target {
+            MenuTarget::Mesh(id) => {
+                use xross_core::mesh::{MeshPhase, MeshProvider};
+                let Some(p) = self.snapshot.mesh.profiles.iter().find(|p| p.id == id) else {
+                    return menu;
+                };
+                let state = self
+                    .snapshot
+                    .mesh
+                    .networks
+                    .iter()
+                    .find(|n| n.profile_id == id);
+                let active = state.is_some_and(|n| {
+                    !matches!(n.phase, MeshPhase::Disconnected | MeshPhase::Failed)
+                });
+                let available = !busy("mesh");
+                if state.and_then(|s| s.login_url.as_ref()).is_some() {
+                    menu = menu.item(item(
+                        &view,
+                        tr(lang, "在浏览器登录", "Sign in with browser"),
+                        true,
+                        Command::LoginMesh(id.clone()),
+                    ));
+                }
+                menu = menu
+                    .item(item(
+                        &view,
+                        tr(lang, "共享配置…", "Share configuration…"),
+                        state.is_some_and(|s| s.phase == MeshPhase::Connected),
+                        Command::ShareMesh(id.clone()),
+                    ))
+                    .item(item(
+                        &view,
+                        tr(lang, "编辑", "Edit"),
+                        !active && available,
+                        Command::EditMesh(id.clone()),
+                    ));
+                if active && p.provider == MeshProvider::Tailscale {
+                    menu = menu.item(item(
+                        &view,
+                        tr(lang, "注销设备身份", "Log out device"),
+                        available,
+                        Command::LogoutMesh(id.clone()),
+                    ));
+                }
+                menu = menu.separator().item(item(
+                    &view,
+                    tr(lang, "删除配置", "Delete profile"),
+                    !active && available,
+                    Command::DeleteMesh(id),
+                ));
+            }
             MenuTarget::FrontProxy => {
                 let model = &self.snapshot.model;
                 menu = menu.item(
@@ -601,6 +657,7 @@ impl AppView {
             return;
         }
         let confirmation = match &command {
+            Command::LogoutMesh(_) => Some((self.tr("注销设备身份","Log out device"),self.tr("断开此 Tailscale 组网并注销本机身份，下次连接需要重新授权。","Disconnect this Tailscale network and sign out this device. The next connection requires authorization."))),
             Command::DeleteMesh(_) => Some((self.tr("删除组网配置", "Delete mesh profile"), self.tr("删除此组网配置，并移除关联出口节点与启动选项。", "Remove this mesh profile, its exit node, and startup selection."))),
             Command::DeleteVersion(core, version) => Some((self.tr("删除内核版本", "Delete core version"), format!("{} {} {}", self.tr("删除本地安装的", "Remove the installed"), core.display_name(), version).into())),
             Command::DeleteNodes(ids) => Some((self.tr("删除节点", "Delete nodes"), format!("{} {} {}", self.tr("将删除", "Delete"), ids.len(), self.tr("个节点，并从出站组中移除。", "nodes and remove them from outbound groups.")).into())),
@@ -657,6 +714,55 @@ impl AppView {
             Command::SelectNode(group_id, node_id) => {
                 self.service.select_node(&group_id, &node_id);
                 self.refresh_header_location();
+            }
+            Command::ShareMesh(id) => {
+                self.service.prepare_mesh_share(id.clone());
+                self.mesh_sync_ui.open_share(id);
+            }
+            Command::LoginMesh(id) => {
+                if let Some(url) = self
+                    .snapshot
+                    .mesh
+                    .networks
+                    .iter()
+                    .find(|n| n.profile_id == id)
+                    .and_then(|n| n.login_url.as_deref())
+                {
+                    self.service.open_url(url);
+                }
+            }
+            Command::EditMesh(id) => {
+                if !self.snapshot.mesh.networks.iter().any(|n| {
+                    n.profile_id == id
+                        && !matches!(
+                            n.phase,
+                            xross_core::mesh::MeshPhase::Failed
+                                | xross_core::mesh::MeshPhase::Disconnected
+                        )
+                }) && let Some(p) = self
+                    .snapshot
+                    .mesh
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == id)
+                    .cloned()
+                {
+                    self.open_mesh_dialog(Some(p), window, cx);
+                }
+            }
+            Command::LogoutMesh(id) => {
+                if self.snapshot.mesh.networks.iter().any(|n| {
+                    n.profile_id == id
+                        && n.provider == xross_core::mesh::MeshProvider::Tailscale
+                        && !matches!(
+                            n.phase,
+                            xross_core::mesh::MeshPhase::Disconnected
+                                | xross_core::mesh::MeshPhase::Failed
+                        )
+                }) {
+                    self.service
+                        .mesh_logout(xross_core::mesh::MeshProvider::Tailscale);
+                }
             }
             Command::DeleteMesh(id) => {
                 if let Err(error) = self.service.delete_mesh_profile(&id) {

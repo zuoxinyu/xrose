@@ -1,6 +1,9 @@
 //! The single facade the UI talks to. All heavy work is dispatched to an
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
+mod mesh_discovery;
+mod mesh_exit;
+pub mod mesh_sync;
 mod routing_transfer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,6 +113,8 @@ pub struct RuntimeView {
 pub struct UiSnapshot {
     #[serde(default)]
     pub mesh: crate::mesh::MeshSnapshot,
+    #[serde(default)]
+    pub mesh_sync: mesh_sync::SyncView,
     pub app_version: String,
     pub settings: Settings,
     pub model: AppModel,
@@ -199,6 +204,7 @@ impl UiSnapshot {
 }
 
 struct Inner {
+    mesh_sync: mesh_sync::SyncState,
     mesh: crate::mesh::controller::MeshController,
     paths: AppPaths,
     settings: RwLock<Settings>,
@@ -308,6 +314,7 @@ impl AppService {
         settings.sync_inbounds(&mut model);
         mesh.sync_outbounds(&mut model);
         let inner = Arc::new(Inner {
+            mesh_sync: Default::default(),
             mesh,
             paths,
             settings: RwLock::new(settings),
@@ -374,6 +381,7 @@ impl AppService {
         if std::env::var_os("XROSS_DEBUG").is_some() {
             eprintln!("[debug] doctor done");
         }
+        service.start_mesh_discovery();
         service.start_monitor();
         service.start_subscription_scheduler();
         Ok(service)
@@ -413,7 +421,23 @@ impl AppService {
 
     pub fn snapshot(&self) -> UiSnapshot {
         let settings = self.inner.settings.read().clone();
-        let model = self.inner.model.read().clone();
+        let mut model = self.inner.model.read().clone();
+        let mut mesh = self.inner.mesh.snapshot();
+        self.annotate_peers(&mut mesh);
+        // Use the connected peer's name throughout the UI while leaving stored gateway IDs and names stable.
+        for (profile, peer, _) in mesh.exits().filter(|(_, peer, _)| peer.exit_selected) {
+            if let Some(node) = model.node_mut(&format!("mesh-exit-{}", profile.id))
+                && !peer.name.is_empty()
+                && !(settings.privacy_mode && peer.name.parse::<std::net::IpAddr>().is_ok())
+            {
+                node.name = format!(
+                    "{} · {} · {}",
+                    peer.name,
+                    profile.provider.label(),
+                    profile.name
+                );
+            }
+        }
         let process = self.inner.core.state();
         let (up_total, down_total, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
         let history = self.inner.traffic.lock().samples();
@@ -433,7 +457,8 @@ impl AppService {
             error: None,
         };
         UiSnapshot {
-            mesh: self.inner.mesh.snapshot(),
+            mesh_sync: self.sync_view(),
+            mesh,
             app_version: APP_VERSION.into(),
             settings,
             model,
@@ -1257,6 +1282,9 @@ impl AppService {
     }
 
     pub fn select_node(&self, group_id: &str, node_id: &str) {
+        if self.is_busy("mesh-exit") {
+            return;
+        }
         let group_tag;
         {
             let mut model = self.inner.model.write();
@@ -3527,20 +3555,12 @@ impl AppService {
         profile: crate::mesh::MeshProfile,
         connect_on_startup: Option<bool>,
     ) -> Result<String> {
-        let settings = self.settings();
+        if self.is_busy("mesh-exit") {
+            return Err(Error::other("正在切换组网出口，请稍后再编辑配置"));
+        }
         if profile.outbound_port != 0
-            && (crate::model::inbound::effective_inbounds(&self.model(), &settings)
-                .iter()
-                .filter_map(|i| i.listen_ports(settings.core).ok())
-                .flatten()
-                .any(|p| p == profile.outbound_port)
-                || [
-                    settings.mixed_port,
-                    settings.api_port,
-                    settings.stats_port,
-                    settings.pac_port,
-                ]
-                .contains(&profile.outbound_port))
+            && mesh_exit::proxy_ports(&self.model(), &self.settings())
+                .contains(&profile.outbound_port)
         {
             return Err(Error::config(
                 "出口出站端口与代理或管理端口冲突，请使用其他端口",
@@ -3565,6 +3585,9 @@ impl AppService {
     }
 
     pub fn delete_mesh_profile(&self, id: &str) -> Result<()> {
+        if self.is_busy("mesh-exit") {
+            return Err(Error::other("正在切换组网出口，请稍后再删除配置"));
+        }
         self.inner.mesh.delete(id)?;
         self.inner
             .model
@@ -3605,10 +3628,9 @@ impl AppService {
         value: String,
         provider: Option<crate::mesh::MeshProvider>,
     ) {
-        if self.is_busy("mesh") {
+        if !self.inner.busy.write().insert("mesh".into()) {
             return;
         }
-        self.set_busy("mesh", true);
         let service = self.clone();
         self.spawn(async move {
             let _operation = service.inner.mesh.operation.lock().await;

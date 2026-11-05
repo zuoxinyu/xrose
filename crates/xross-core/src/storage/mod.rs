@@ -1,6 +1,7 @@
 //! SQLite persistence with migrations, encrypted payloads and JSON backups.
 
 pub mod crypto;
+mod mesh_sync;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -238,6 +239,38 @@ impl Store {
         profile.validate()?;
         let payload = self.secrets.encrypt(&serde_json::to_string(profile)?);
         self.conn.lock().execute("INSERT INTO mesh_profiles (id,payload,updated_at) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at", params![profile.id, payload, now_unix()])?;
+        Ok(())
+    }
+
+    /// Publish the gateway and the selector choice together after the worker confirms the exit.
+    pub(crate) fn save_mesh_exit_selection(
+        &self,
+        profile: &crate::mesh::MeshProfile,
+        model: &AppModel,
+        active_id: &str,
+    ) -> Result<()> {
+        profile.validate()?;
+        let mesh = self.secrets.encrypt(&serde_json::to_string(profile)?);
+        let proxy = self.secrets.encrypt(&serde_json::to_string(model)?);
+        if !SecretBox::is_encrypted(&mesh) || !SecretBox::is_encrypted(&proxy) {
+            return Err(Error::other("出口配置加密失败，请重试"));
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let changed = tx.execute("UPDATE profiles SET model = ?1, updated_at = ?2 WHERE id = ?3 AND id = (SELECT value FROM app_state WHERE key = 'active_profile')", params![proxy, now_unix(), active_id])?;
+        if changed != 1
+            || tx.execute(
+                "UPDATE mesh_profiles SET payload = ?1, updated_at = ?2 WHERE id = ?3",
+                params![mesh, now_unix(), profile.id],
+            )? != 1
+        {
+            return Err(Error::other("当前配置已更改，请重新选择出口"));
+        }
+        tx.execute(
+            "DELETE FROM latency WHERE key = ?1",
+            [format!("mesh-exit-{}", profile.id)],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

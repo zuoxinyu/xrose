@@ -17,6 +17,28 @@ pub(crate) mod vpn;
 
 pub struct SingBoxAdapter;
 
+/// Use the adapter's resolved defaults, including any fallback for unsupported nodes.
+pub(crate) fn mesh_selector_defaults(
+    config: &CompiledConfig,
+) -> impl Iterator<Item = (&str, &str)> {
+    config.json["outbounds"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|outbound| {
+            let members = outbound["outbounds"].as_array()?;
+            if outbound["type"] != "selector"
+                || !members
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|tag| tag.starts_with("node-mesh-exit-"))
+            {
+                return None;
+            }
+            Some((outbound["tag"].as_str()?, outbound["default"].as_str()?))
+        })
+}
+
 /// Standalone mesh configuration; does not require a proxy profile or nodes.
 pub fn compile_mesh(
     profile: &crate::mesh::MeshProfile,
@@ -66,6 +88,21 @@ pub fn compile_mesh(
         );
     }
     Ok(config)
+}
+
+/// Incoming connections to the endpoint's own addresses are mapped to loopback by sing-box.
+pub(crate) fn allow_mesh_discovery(config: &mut Value, local_port: u16) {
+    if local_port >= 1024 {
+        config["route"]["rules"].as_array_mut().unwrap().insert(
+            0,
+            json!({
+                "inbound":"mesh-ts", "network":"tcp", "ip_cidr":["127.0.0.1/32","::1/128"],
+                "source_ip_cidr":["100.64.0.0/10","fd7a:115c:a1e0::/48"],
+                "port":crate::mesh::sync::PORT, "action":"route","outbound":"direct",
+                "override_address":"127.0.0.1","override_port":local_port
+            }),
+        );
+    }
 }
 
 impl CoreAdapter for SingBoxAdapter {

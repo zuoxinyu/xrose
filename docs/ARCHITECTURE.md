@@ -39,7 +39,7 @@
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
 | 组网访问 | 优先 freedom 规则 + 专用 DNS | 绑定组网接口直连 + TUN 排除 + 专用 DNS | `CompileContext.mesh` 注入，不改变 AppModel；MagicDNS 优先于 fake-IP |
-| 组网出口出站 | 本机认证 SOCKS 出站 | 本机认证 SOCKS 出站 | 由 MeshProfile 管理稳定节点 ID，支持出站组与规则；断开组网后不回退直连 |
+| 组网出口出站 | 本机认证 SOCKS 出站 | 本机认证 SOCKS 出站 | “节点”页列出已连接组网的出口候选。每个组网配置维护一个稳定的代理节点 ID，供出站组和分流规则引用 |
 | Windows 组网与 TUN 共存 | 从自动路由中排除组网网段 | 保留用户 `strict_route` 设置 | 严格路由可能影响组网 DNS，界面给出提示 |
 
 节点 HTTP 延迟与下载测试由 `runtime::probe` 启动短期测试内核，适配器生成仅含目标节点与本地 HTTP 入站的配置。
@@ -62,6 +62,8 @@ Xray 自动路由通过 CIDR 差集排除用户与组网网段，DNS 劫持规�
 静态库只在 Xross `--mesh-worker` 初始化；Tailscale 使用固定 sing-box 1.14.4
 子进程及鉴权 gRPC。UI 只调用 AppService、读取 `UiSnapshot.mesh`。
 SQLite 的 `mesh_profiles` 全量加密；新增字段使用 serde 默认值，不改变数据库结构。出口网关凭据随组网配置保存且不进入快照；生成的本机 SOCKS 节点随代理配置保存，编辑组网时保持节点 ID 与出站组引用。
+“节点”页从已连接的组网快照读取出口。Tailscale 使用已批准的出口标志，EasyTier 使用 Xross 发布的签名组声明、IPv4 默认网段公告或用户指定的出口地址。切换到其他设备时，服务重新连接相应组网，等待目标设备就绪，再在同一事务中保存组网出口和手动出站组的选择。组网重连或保存失败时尝试恢复原连接。
+
 EasyTier 使用公开的 Instance/PeerManager API，出口 TCP/UDP 经独立用户态网络栈发送，路由不可达时不调用本机直连。TCP/UDP 域名请求使用系统解析器，并选择 IPv4 目标；代理核心可按自身 DNS 策略预解析目标。Tailscale 配置编译仍集中在 sing-box adapter。
 
 `CoreManager` 独立保存最后已应用的模型、设置和编译结果。组网变化串行执行
@@ -69,6 +71,8 @@ EasyTier 使用公开的 Instance/PeerManager API，出口 TCP/UDP 经独立用�
 Tailscale 使用用户态 endpoint 和仅包含批准路由的专用 TUN，避免 `accept_routes`
 把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 DNS：Windows NRPT、macOS `/etc/resolver`、Linux systemd-resolved 按接口域名路由。
 出口和发布子网不加入宿主机默认路由；来自 Tailscale 的流量仅允许访问用户发布的网段，发布出口时允许互联网目的地。Unix 工作进程使用独立进程组，停止时回收子进程。
+组网发现使用版本化 TCP 协议。服务仅向已连接网络的成员地址发送握手，EasyTier 监听本机虚拟地址，Tailscale 在用户态端点将本机地址的专用端口转交已预留的回环监听器。组网页展示经发现的 Xross 信息与后端公布的能力。共享由用户选择数据并生成限时随机密钥；请求使用挑战应答，数据包另行加密认证。接收端在内存中预览独立项目，确认时复查当前配置、依赖和运行中的组网，使用一个 SQLite 事务更新加密记录。发现协议、共享码和预览不写入数据库。
+
 详见 [异地组网边界与构建说明](MESH.md)。
 
 连接诊断由 `AppService` 统一提供：后台监控采样维护有界的会话录制，

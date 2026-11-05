@@ -159,6 +159,7 @@ impl Drop for PortGuard {
 
 pub struct Gateway {
     address: IpAddr,
+    exit_peer: tokio::sync::watch::Sender<Option<u32>>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 impl Gateway {
@@ -170,6 +171,7 @@ impl Gateway {
         let cidr = address
             .parse::<ipnet::Ipv4Net>()
             .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?;
+        let (exit_peer, selected) = tokio::sync::watch::channel(None);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, profile.outbound_port))
             .await
             .map_err(|_| Error::other("出口出站端口已被占用，请修改本地端口"))?;
@@ -203,12 +205,18 @@ impl Gateway {
         let mut tasks = Vec::new();
         tasks.push(tokio::spawn(async move {
             while let Some(data) = receiver.recv().await {
-                if data.len() >= 20 && data[0] >> 4 == 4 {
-                    let dst = Ipv4Addr::new(data[16], data[17], data[18], data[19]);
-                    let _ = peer
-                        .send_msg_by_ip(ZCPacket::new_with_payload(&data), dst.into(), false)
-                        .await;
-                }
+                // An overlapping subnet or default-route announcement must never
+                // redirect this gateway's packets to a different exit.
+                let Some(id) = *selected.borrow() else {
+                    continue;
+                };
+                let mut packet = ZCPacket::new_with_payload(&data);
+                packet.fill_peer_manager_hdr(peer.my_peer_id(), id, PacketType::Data as u8);
+                packet
+                    .mut_peer_manager_header()
+                    .unwrap()
+                    .set_exit_node(true);
+                let _ = peer.send_msg_for_proxy(packet, id).await;
             }
         }));
         let password = profile.outbound_secret.0.clone();
@@ -228,9 +236,14 @@ impl Gateway {
         }));
         Ok(Self {
             address: cidr.addr().into(),
+            exit_peer,
             tasks,
         })
     }
+    pub fn set_exit_peer(&self, peer: Option<u32>) {
+        self.exit_peer.send_replace(peer);
+    }
+
     pub fn check_address(&self, address: IpAddr) -> Result<()> {
         if self.address != address || self.tasks.iter().any(|task| task.is_finished()) {
             return Err(Error::other("EasyTier 出口虚拟地址已变化，请重新连接组网"));
@@ -498,6 +511,85 @@ mod tests {
         client.read_exact(&mut bound).await.unwrap();
         assert_eq!(bound[1], 0);
         (client, task, bound)
+    }
+
+    #[tokio::test]
+    async fn published_peer_receives_gateway_packets_over_an_in_memory_mesh() {
+        use crate::mesh::{MeshSecret, easytier::configuration};
+        use easytier::{
+            common::{global_ctx::GlobalCtx, stun::MockStunInfoCollector},
+            peers::{create_packet_recv_chan, peer_manager::RouteAlgoType},
+            tunnel::ring::create_ring_tunnel_pair,
+        };
+
+        let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: MeshSecret("fixture".into()),
+            peers: vec!["tcp://192.0.2.254:11010".into()],
+            ipv4: "192.0.2.1/24".into(),
+            exit_node: "192.0.2.2".into(),
+            outbound_port: listener.local_addr().unwrap().port(),
+            outbound_secret: MeshSecret("test".into()),
+            ..Default::default()
+        };
+        drop(listener);
+        let exit = MeshProfile {
+            id: MeshProfile::default().id,
+            ipv4: "192.0.2.2/24".into(),
+            exit_node: String::new(),
+            advertise_exit_node: true,
+            outbound_port: 0,
+            ..client.clone()
+        };
+        let manager = |profile| {
+            let ctx = Arc::new(GlobalCtx::new(configuration(profile).unwrap()));
+            ctx.replace_stun_info_collector(Box::new(MockStunInfoCollector {
+                udp_nat_type: Default::default(),
+            }));
+            let (tx, rx) = create_packet_recv_chan();
+            (Arc::new(PeerManager::new(RouteAlgoType::Ospf, ctx, tx)), rx)
+        };
+        let (local, _local_packets) = manager(&client);
+        let (remote, mut remote_packets) = manager(&exit);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            local.run().await.unwrap();
+            remote.run().await.unwrap();
+            let (a, b) = create_ring_tunnel_pair();
+            let (client_conn, server_conn) = tokio::join!(
+                local.add_client_tunnel(a, false),
+                remote.add_tunnel_as_server(b, true)
+            );
+            client_conn.unwrap();
+            server_conn.unwrap();
+            let route = local.get_route();
+            while !route
+                .get_peer_groups(remote.my_peer_id())
+                .iter()
+                .any(|g| g == "xross-exit-node-v1")
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let gateway = Gateway::start(local, client.ipv4.clone(), &client)
+                .await
+                .unwrap();
+            gateway.set_exit_peer(Some(remote.my_peer_id()));
+            let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.outbound_port))
+                .await
+                .unwrap();
+            // SOCKS5 password negotiation followed by CONNECT to an off-subnet destination.
+            socket
+                .write_all(
+                    b"\x05\x01\x02\x01\x05xross\x04test\x05\x01\x00\x01\xcb\x00\x71\x05\x00\x50",
+                )
+                .await
+                .unwrap();
+            let packet = remote_packets.recv().await.unwrap();
+            assert!(packet.peer_manager_header().unwrap().is_exit_node());
+            assert_eq!(&packet.payload()[16..20], &[203, 0, 113, 5]);
+        })
+        .await
+        .expect("exit discovery and SOCKS forwarding over the ring tunnel");
     }
 
     #[tokio::test]

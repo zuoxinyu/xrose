@@ -170,12 +170,13 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             super::PortForward::parse("tcp://127.0.0.1:18080/100.64.1.2:80")?,
             super::PortForward::parse("udp://127.0.0.1:15353/100.64.1.2:53")?,
         ];
-        let config = crate::adapters::singbox::compile_mesh(
+        let mut config = crate::adapters::singbox::compile_mesh(
             &profile,
             &directory,
             19090,
             "offline-test-secret",
         )?;
+        crate::adapters::singbox::allow_mesh_discovery(&mut config, 19093);
         let path = directory.join(if publish {
             "publish.json"
         } else {
@@ -247,7 +248,7 @@ pub async fn check_api(paths: &crate::paths::AppPaths) -> Result<()> {
         hostname: "xross-api-check".into(),
         ..Default::default()
     };
-    let backend = Backend::start_inner(profile, &directory, &archive_path(paths), false).await?;
+    let backend = Backend::start_inner(profile, &directory, &archive_path(paths), false, 0).await?;
     let denied = Client {
         channel: backend.client.channel.clone(),
         secret: "invalid-test-credential".into(),
@@ -307,12 +308,41 @@ struct Peer {
     hostname: String,
     #[prost(string, tag = "2")]
     dns_name: String,
+    #[prost(string, tag = "3")]
+    os: String,
     #[prost(string, repeated, tag = "4")]
     ips: Vec<String>,
     #[prost(bool, tag = "5")]
     online: bool,
+    #[prost(bool, tag = "6")]
+    exit_selected: bool,
+    #[prost(bool, tag = "7")]
+    offers_exit: bool,
     #[prost(string, tag = "12")]
     id: String,
+    #[prost(bool, tag = "13")]
+    expired: bool,
+    #[prost(string, repeated, tag = "14")]
+    ssh_host_keys: Vec<String>,
+}
+impl From<Peer> for MeshPeer {
+    fn from(p: Peer) -> Self {
+        Self {
+            id: p.id,
+            name: if p.dns_name.is_empty() {
+                p.hostname
+            } else {
+                p.dns_name.trim_end_matches('.').into()
+            },
+            addresses: p.ips,
+            os: p.os,
+            tailscale_ssh: !p.expired && !p.ssh_host_keys.is_empty(),
+            online: p.online,
+            offers_exit: p.offers_exit && !p.expired,
+            exit_selected: p.exit_selected,
+            ..Default::default()
+        }
+    }
 }
 #[derive(Clone, PartialEq, Message)]
 struct EndpointRequest {
@@ -556,8 +586,13 @@ fn read_startup_failure(input: impl Read) -> Option<StartupFailure> {
 }
 
 impl Backend {
-    pub async fn start(p: MeshProfile, directory: &Path, archive: &Path) -> Result<Self> {
-        Self::start_inner(p, directory, archive, true).await
+    pub async fn start(
+        p: MeshProfile,
+        directory: &Path,
+        archive: &Path,
+        sync_port: u16,
+    ) -> Result<Self> {
+        Self::start_inner(p, directory, archive, true, sync_port).await
     }
 
     async fn start_inner(
@@ -565,6 +600,7 @@ impl Backend {
         directory: &Path,
         archive: &Path,
         with_interface: bool,
+        sync_port: u16,
     ) -> Result<Self> {
         let executable = unpack(archive, directory)?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))
@@ -578,6 +614,7 @@ impl Backend {
             uuid::Uuid::new_v4().simple()
         );
         let mut config = crate::adapters::singbox::compile_mesh(&p, directory, port, &secret)?;
+        crate::adapters::singbox::allow_mesh_discovery(&mut config, sync_port);
         if !with_interface {
             config["inbounds"] = serde_json::json!([]);
             config["route"]["rules"] = serde_json::json!([]);
@@ -674,55 +711,49 @@ impl Backend {
         let watcher = client.clone();
         let task = tokio::spawn(async move {
             loop {
-                match watcher.status().await {
-                    Ok(mut stream) => {
-                        while let Ok(Some(update)) = stream.message().await {
-                            if let Some(e) =
-                                update.endpoints.into_iter().find(|e| e.tag == "mesh-ts")
-                            {
-                                let mut s = observed.lock();
-                                s.phase = match e.state.as_str() {
-                                    "Running" => MeshPhase::Connected,
-                                    "NeedsLogin" | "NeedsMachineAuth" => MeshPhase::NeedsLogin,
-                                    _ => MeshPhase::Starting,
-                                };
-                                s.login_url = url::Url::parse(&e.auth_url)
-                                    .ok()
-                                    .filter(|u| {
-                                        u.scheme() == "https"
-                                            && u.username().is_empty()
-                                            && u.password().is_none()
-                                    })
-                                    .map(|u| u.to_string());
-                                s.addresses = e.self_peer.map(|p| p.ips).unwrap_or_default();
-                                s.dns_suffix = (!e.suffix.is_empty())
-                                    .then(|| e.suffix.trim_end_matches('.').to_string());
-                                s.dns_address = Some(super::DNS_ADDRESS.into());
-                                s.peers = e
-                                    .groups
-                                    .into_iter()
-                                    .flat_map(|g| g.peers)
-                                    .take(1024)
-                                    .map(|p| MeshPeer {
-                                        id: p.id,
-                                        name: if p.dns_name.is_empty() {
-                                            p.hostname
-                                        } else {
-                                            p.dns_name.trim_end_matches('.').into()
-                                        },
-                                        addresses: p.ips,
-                                        online: p.online,
-                                        ..Default::default()
-                                    })
-                                    .collect();
-                                s.updated_at = crate::util::now_unix();
-                                s.error = None;
-                            }
+                if let Ok(mut stream) = watcher.status().await {
+                    while let Ok(Some(update)) = stream.message().await {
+                        if let Some(e) = update.endpoints.into_iter().find(|e| e.tag == "mesh-ts") {
+                            let mut s = observed.lock();
+                            s.phase = match e.state.as_str() {
+                                "Running" => MeshPhase::Connected,
+                                "NeedsLogin" | "NeedsMachineAuth" => MeshPhase::NeedsLogin,
+                                _ => MeshPhase::Starting,
+                            };
+                            s.login_url = url::Url::parse(&e.auth_url)
+                                .ok()
+                                .filter(|u| {
+                                    u.scheme() == "https"
+                                        && u.username().is_empty()
+                                        && u.password().is_none()
+                                })
+                                .map(|u| u.to_string());
+                            let self_id = e.self_peer.as_ref().map(|p| p.id.clone());
+                            s.addresses = e.self_peer.map(|p| p.ips).unwrap_or_default();
+                            s.dns_suffix = (!e.suffix.is_empty())
+                                .then(|| e.suffix.trim_end_matches('.').to_string());
+                            s.dns_address = Some(super::DNS_ADDRESS.into());
+                            s.peers = e
+                                .groups
+                                .into_iter()
+                                .flat_map(|g| g.peers)
+                                .filter(|p| Some(&p.id) != self_id.as_ref())
+                                .take(1024)
+                                .map(MeshPeer::from)
+                                .collect();
+                            s.updated_at = crate::util::now_unix();
+                            s.error = None;
                         }
                     }
-                    Err(_) => {
-                        observed.lock().error = Some("Tailscale 状态连接中断，正在重试".into());
+                }
+                {
+                    let mut state = observed.lock();
+                    // Keep known addresses for the active TUN bypass plan.
+                    for peer in &mut state.peers {
+                        peer.offers_exit = false;
+                        peer.exit_selected = false;
                     }
+                    state.error = Some("Tailscale 状态连接中断，正在重试".into());
                 }
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
@@ -798,6 +829,24 @@ impl Drop for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoded_peer_distinguishes_offered_selected_and_expired_exits() {
+        // Pinned wire fields 5, 6, 7, 12 and 13. A connected device alone is not an exit.
+        let mut wire = vec![0x28, 1, 0x62, 1, b'p'];
+        assert!(!MeshPeer::from(Peer::decode(&*wire).unwrap()).offers_exit);
+        wire.extend([
+            0x1a, 5, b'l', b'i', b'n', b'u', b'x', 0x72, 1, b'k', 0x38, 1,
+        ]);
+        let peer = MeshPeer::from(Peer::decode(&*wire).unwrap());
+        assert!(peer.online && peer.offers_exit && !peer.exit_selected);
+        assert_eq!(peer.os, "linux");
+        assert!(peer.tailscale_ssh);
+        wire.extend([0x30, 1]);
+        assert!(MeshPeer::from(Peer::decode(&*wire).unwrap()).exit_selected);
+        wire.extend([0x68, 1]);
+        assert!(!MeshPeer::from(Peer::decode(&*wire).unwrap()).offers_exit);
+    }
 
     #[test]
     fn startup_diagnostics_expose_only_fixed_messages() {

@@ -7,13 +7,14 @@ pub mod easytier;
 mod easytier_gateway;
 pub mod ipc;
 pub mod platform;
+pub mod sync;
 pub mod tailscale;
 pub mod worker;
 
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -404,9 +405,42 @@ pub struct MeshPeer {
     pub name: String,
     pub addresses: Vec<String>,
     pub online: bool,
+    #[serde(default)]
+    pub offers_exit: bool,
+    #[serde(default)]
+    pub subnets: Vec<String>,
+    #[serde(default)]
+    pub client_version: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub tailscale_ssh: bool,
+    #[serde(default)]
+    pub xross: Option<sync::Hello>,
+    #[serde(default)]
+    pub exit_selected: bool,
     pub latency_ms: Option<f64>,
     pub connection: Option<String>,
 }
+impl MeshPeer {
+    /// A mesh address for a confirmed exit, suitable for the provider's dialer.
+    pub fn exit_address(&self, provider: MeshProvider) -> Option<std::net::IpAddr> {
+        if !self.offers_exit || self.id.is_empty() {
+            return None;
+        }
+        self.addresses
+            .iter()
+            .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+            .find(|ip| {
+                !ip.is_unspecified()
+                    && !ip.is_loopback()
+                    && !ip.is_multicast()
+                    && *ip != std::net::Ipv4Addr::BROADCAST
+                    && (ip.is_ipv4() || provider == MeshProvider::Tailscale)
+            })
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MeshRuntimeView {
     #[serde(default)]
@@ -442,9 +476,63 @@ pub struct MeshSnapshot {
     pub supported: bool,
 }
 
+impl MeshSnapshot {
+    pub fn exits(&self) -> impl Iterator<Item = (&MeshProfileView, &MeshPeer, std::net::IpAddr)> {
+        self.networks
+            .iter()
+            .filter(|n| n.phase == MeshPhase::Connected)
+            .flat_map(|n| {
+                let profile = self.profiles.iter().find(|p| {
+                    p.id == n.profile_id && p.provider == n.provider && !p.advertise_exit_node
+                });
+                n.peers
+                    .iter()
+                    .filter_map(move |peer| Some((profile?, peer, peer.exit_address(n.provider)?)))
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exit_list_requires_connected_profile_capability_and_usable_address() {
+        let profile = MeshProfile::default().summary();
+        let exit = MeshPeer {
+            id: "exit-a".into(),
+            addresses: vec!["192.0.2.2".into()],
+            offers_exit: true,
+            online: true,
+            ..Default::default()
+        };
+        let ordinary: MeshPeer = serde_json::from_str(
+            r#"{"id":"ordinary","name":"test","addresses":["192.0.2.3"],"online":true}"#,
+        )
+        .unwrap();
+        let ipv6 = MeshPeer {
+            addresses: vec!["2001:db8::2".into()],
+            ..exit.clone()
+        };
+        assert!(ipv6.exit_address(MeshProvider::Tailscale).is_some());
+        let mut mesh = MeshSnapshot {
+            profiles: vec![profile.clone()],
+            networks: vec![MeshRuntimeView {
+                phase: MeshPhase::Connected,
+                profile_id: profile.id.clone(),
+                peers: vec![ordinary, ipv6, exit],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let ids: Vec<_> = mesh.exits().map(|(_, peer, _)| peer.id.as_str()).collect();
+        assert_eq!(ids, ["exit-a"]);
+        mesh.profiles[0].advertise_exit_node = true;
+        assert_eq!(mesh.exits().count(), 0);
+        mesh.profiles[0].advertise_exit_node = false;
+        mesh.networks[0].phase = MeshPhase::Disconnected;
+        assert_eq!(mesh.exits().count(), 0);
+    }
+
     #[test]
     fn secrets_never_enter_debug_or_view() {
         let p = MeshProfile {

@@ -7,7 +7,12 @@ use easytier::{
     },
     common::global_ctx::GlobalCtxEvent,
     instance::instance::Instance,
+    proto::acl::{Acl, AclV1, GroupIdentity, GroupInfo},
 };
+
+// EasyTier 2.6 does not publish enable_exit_node in route capabilities.
+// Announce Xross exits via a network-scoped, signed group membership.
+const EXIT_GROUP: &str = "xross-exit-node-v1";
 
 pub fn configuration(p: &MeshProfile) -> Result<TomlConfigLoader> {
     p.validate()?;
@@ -86,6 +91,25 @@ pub fn configuration(p: &MeshProfile) -> Result<TomlConfigLoader> {
     flags.relay_network_whitelist = String::new();
     flags.bind_device = true;
     c.set_flags(flags);
+    let exit_group = GroupIdentity {
+        group_name: EXIT_GROUP.into(),
+        group_secret: crate::util::sha256_bytes(
+            format!("{EXIT_GROUP}:{}", p.network_secret.0).as_bytes(),
+        ),
+    };
+    c.set_acl(Some(Acl {
+        acl_v1: Some(AclV1 {
+            group: Some(GroupInfo {
+                declares: vec![exit_group],
+                members: if p.advertise_exit_node {
+                    vec![EXIT_GROUP.into()]
+                } else {
+                    Vec::new()
+                },
+            }),
+            ..Default::default()
+        }),
+    }));
     Ok(c)
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,26 +306,59 @@ impl Backend {
             }
             state.warning = Some(message.into());
         }
-        state.peers = self
-            .instance
-            .get_peer_manager()
-            .list_routes()
-            .await
+        let manager = self.instance.get_peer_manager();
+        let route = manager.get_route();
+        let routes = manager.list_routes().await;
+        if let Some(gateway) = &self.gateway {
+            let target = self.profile.exit_node.parse::<std::net::Ipv4Addr>().ok();
+            let selected = routes.iter().find(|r| {
+                r.cost > 0
+                    && r.peer_id != manager.my_peer_id()
+                    && r.ipv4_addr
+                        .and_then(|a| a.address)
+                        .map(std::net::Ipv4Addr::from)
+                        == target
+            });
+            gateway.set_exit_peer(selected.map(|r| r.peer_id));
+        }
+        state.peers = routes
             .iter()
-            .filter(|route| route.cost > 0)
+            .filter(|r| r.cost > 0 && r.peer_id != manager.my_peer_id())
             .take(1024)
-            .map(|r| MeshPeer {
-                id: r.peer_id.to_string(),
-                name: r.hostname.clone(),
-                addresses: r
+            .map(|r| {
+                let addresses: Vec<String> = r
                     .ipv4_addr
                     .as_ref()
                     .and_then(|a| a.address.as_ref())
-                    .map(|a| vec![a.to_string()])
-                    .unwrap_or_default(),
-                online: true,
-                latency_ms: None,
-                connection: Some(if r.cost <= 1 { "direct" } else { "relay" }.into()),
+                    .map(|a| a.to_string())
+                    .into_iter()
+                    .collect();
+                let exit_selected = addresses.contains(&self.profile.exit_node);
+                let offers_exit = exit_selected
+                    || r.proxy_cidrs.iter().any(|cidr| cidr == "0.0.0.0/0")
+                    || route
+                        .get_peer_groups(r.peer_id)
+                        .iter()
+                        .any(|g| g == EXIT_GROUP);
+                MeshPeer {
+                    id: r.peer_id.to_string(),
+                    name: r.hostname.clone(),
+                    addresses,
+                    subnets: r
+                        .proxy_cidrs
+                        .iter()
+                        .filter_map(|s| s.parse::<ipnet::IpNet>().ok())
+                        .filter(|n| n.prefix_len() != 0)
+                        .map(|n| n.trunc().to_string())
+                        .collect(),
+                    client_version: r.version.clone(),
+                    online: true,
+                    offers_exit,
+                    exit_selected,
+                    latency_ms: None,
+                    connection: Some(if r.cost <= 1 { "direct" } else { "relay" }.into()),
+                    ..Default::default()
+                }
             })
             .collect();
         state.routes.sort();
@@ -389,6 +446,9 @@ mod tests {
         assert!(c.get_flags().disable_upnp);
         assert!(c.get_secure_mode().is_none());
         assert!(c.get_flags().enable_encryption);
+        let group = c.get_acl().unwrap().acl_v1.unwrap().group.unwrap();
+        assert!(group.members.is_empty());
+        assert_eq!(group.declares[0].group_name, EXIT_GROUP);
     }
 
     #[test]
@@ -425,5 +485,9 @@ mod tests {
         let c = configuration(&p).unwrap();
         assert!(c.get_flags().enable_exit_node);
         assert!(!c.get_flags().proxy_forward_by_system);
+        assert_eq!(
+            c.get_acl().unwrap().acl_v1.unwrap().group.unwrap().members,
+            [EXIT_GROUP]
+        );
     }
 }

@@ -10,7 +10,8 @@ pub struct MeshController {
     paths: AppPaths,
     store: Arc<Store>,
     session: MeshSecret,
-    profiles: RwLock<Vec<MeshProfile>>,
+    pub(crate) profiles: RwLock<Vec<MeshProfile>>,
+    pub(crate) sync_port: std::sync::atomic::AtomicU16,
     networks: RwLock<Vec<MeshRuntimeView>>,
     installed: RwLock<bool>,
     pub operation: tokio::sync::Mutex<()>,
@@ -20,6 +21,7 @@ impl MeshController {
         let profiles = store.mesh_profiles()?;
         let installed = super::tailscale::archive_path(&paths).exists();
         Ok(Self {
+            sync_port: Default::default(),
             paths,
             store,
             session: MeshSecret(format!(
@@ -88,17 +90,7 @@ impl MeshController {
         let profile = profiles
             .iter()
             .find(|p| p.id == id && p.outbound_port != 0)?;
-        let mut node = crate::model::Node::new(
-            format!("{} · 出口", profile.name),
-            crate::model::Protocol::Socks,
-            "127.0.0.1",
-            profile.outbound_port,
-        );
-        node.id = format!("mesh-exit-{}", profile.id);
-        node.credentials.username = Some("xross".into());
-        node.credentials.password = Some(profile.outbound_secret.0.clone());
-        node.tags = vec!["mesh-exit".into()];
-        Some(node)
+        Some(outbound_node(profile))
     }
 
     /// Stable IDs keep group membership while profile ports/credentials change.
@@ -124,16 +116,36 @@ impl MeshController {
             model.remove_node(&id);
         }
         for id in ids {
-            if let Some(mut node) = self.outbound_node(&id) {
-                if let Some(old) = model.nodes.iter_mut().find(|n| n.id == node.id) {
-                    node.enabled = old.enabled;
-                    node.sort = old.sort;
-                    *old = node;
-                } else {
-                    model.add_nodes([node]);
-                }
+            if let Some(node) = self.outbound_node(&id) {
+                upsert_outbound(model, node);
             }
         }
+    }
+    pub(crate) fn commit_exit(
+        &self,
+        profile: MeshProfile,
+        model: &mut crate::model::AppModel,
+        group_id: &str,
+        active_profile_id: &str,
+    ) -> Result<()> {
+        let mut profiles = self.profiles.write();
+        let current = profiles
+            .iter_mut()
+            .find(|p| p.id == profile.id)
+            .ok_or_else(|| Error::config("组网配置不存在"))?;
+        let mut next = model.clone();
+        let node = outbound_node(&profile);
+        let node_id = node.id.clone();
+        upsert_outbound(&mut next, node);
+        if next.node(&node_id).is_none() || !next.can_select_mesh_exit(group_id, &node_id) {
+            return Err(Error::config("请选择包含此出口节点的已启用手动出站组"));
+        }
+        next.select_node(group_id, &node_id);
+        self.store
+            .save_mesh_exit_selection(&profile, &next, active_profile_id)?;
+        *model = next;
+        *current = profile;
+        Ok(())
     }
     pub fn delete(&self, id: &str) -> Result<()> {
         if self.networks.read().iter().any(|n| {
@@ -168,14 +180,24 @@ impl MeshController {
         *self.networks.write() = reply.networks;
         Ok(())
     }
-    pub async fn connect(&self, id: &str, _network: &crate::updates::UpdateNetwork) -> Result<()> {
-        let profile = self
-            .profiles
+    pub(crate) fn profile(&self, id: &str) -> Result<MeshProfile> {
+        self.profiles
             .read()
             .iter()
             .find(|p| p.id == id)
             .cloned()
-            .ok_or_else(|| Error::config("组网配置不存在"))?;
+            .ok_or_else(|| Error::config("组网配置不存在"))
+    }
+    pub async fn connect(&self, id: &str, network: &crate::updates::UpdateNetwork) -> Result<()> {
+        self.start_profile(self.profile(id)?, network, None).await
+    }
+    pub(crate) async fn start_profile(
+        &self,
+        profile: MeshProfile,
+        _network: &crate::updates::UpdateNetwork,
+        expected_exit: Option<&str>,
+    ) -> Result<()> {
+        let id = profile.id.clone();
         if profile.provider == MeshProvider::Tailscale {
             super::tailscale::verify_binary(&super::tailscale::archive_path(&self.paths))?;
         }
@@ -189,6 +211,7 @@ impl MeshController {
         self.send(MeshCommand::Start {
             profile,
             tailscale_binary: binary,
+            sync_port: self.sync_port.load(std::sync::atomic::Ordering::Acquire),
             driver_archive,
         })
         .await?;
@@ -197,7 +220,7 @@ impl MeshController {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             self.send(MeshCommand::Status).await?;
-            if startup_ready(&self.networks.read(), id)? {
+            if startup_ready(&self.networks.read(), &id, expected_exit)? {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -254,11 +277,49 @@ impl MeshController {
     }
 }
 
-fn startup_ready(states: &[MeshRuntimeView], id: &str) -> Result<bool> {
+fn outbound_node(profile: &MeshProfile) -> crate::model::Node {
+    let mut node = crate::model::Node::new(
+        format!("{} · 出口", profile.name),
+        crate::model::Protocol::Socks,
+        "127.0.0.1",
+        profile.outbound_port,
+    );
+    node.id = format!("mesh-exit-{}", profile.id);
+    node.credentials.username = Some("xross".into());
+    node.credentials.password = Some(profile.outbound_secret.0.clone());
+    node.tags = vec!["mesh-exit".into()];
+    node
+}
+
+/// Install or update the gateway without resetting its group membership.
+fn upsert_outbound(model: &mut crate::model::AppModel, mut node: crate::model::Node) {
+    if let Some(old) = model.node_mut(&node.id) {
+        node.enabled = old.enabled;
+        node.sort = old.sort;
+        *old = node;
+    } else {
+        model.add_nodes([node]);
+    }
+}
+
+fn startup_ready(
+    states: &[MeshRuntimeView],
+    id: &str,
+    expected_exit: Option<&str>,
+) -> Result<bool> {
     use super::MeshPhase;
     match states.iter().find(|state| state.profile_id == id) {
         Some(state) => match state.phase {
-            MeshPhase::Connected | MeshPhase::NeedsLogin => Ok(true),
+            MeshPhase::Connected => Ok(expected_exit.is_none_or(|id| {
+                state
+                    .peers
+                    .iter()
+                    .any(|p| p.id == id && p.online && p.exit_selected && p.offers_exit)
+            })),
+            MeshPhase::NeedsLogin if expected_exit.is_some() => {
+                Err(Error::other("请先完成组网设备授权再切换出口"))
+            }
+            MeshPhase::NeedsLogin => Ok(true),
             MeshPhase::Failed => Err(Error::other(
                 state.error.clone().unwrap_or_else(|| "组网启动失败".into()),
             )),
@@ -281,20 +342,95 @@ mod tests {
             phase: MeshPhase::Starting,
             ..Default::default()
         };
-        assert!(!startup_ready(&[state.clone()], "requested").unwrap());
+        assert!(!startup_ready(&[state.clone()], "requested", None).unwrap());
         state.phase = MeshPhase::NeedsLogin;
-        assert!(startup_ready(&[state.clone()], "requested").unwrap());
+        assert!(startup_ready(&[state.clone()], "requested", None).unwrap());
         state.phase = MeshPhase::Connected;
-        assert!(startup_ready(&[state.clone()], "requested").unwrap());
+        assert!(startup_ready(&[state.clone()], "requested", None).unwrap());
         state.phase = MeshPhase::Failed;
         state.error = Some("模拟组件提前退出".into());
         assert!(
-            startup_ready(&[state], "requested")
+            startup_ready(&[state], "requested", None)
                 .unwrap_err()
                 .to_string()
                 .contains("模拟组件提前退出")
         );
-        assert!(startup_ready(&[], "requested").is_err());
+        assert!(startup_ready(&[], "requested", None).is_err());
+    }
+
+    #[test]
+    fn switch_waits_for_the_chosen_peer_and_saves_both_profiles_together() {
+        use crate::mesh::{MeshPeer, MeshPhase};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        paths.ensure().unwrap();
+        let store = Store::open(&paths).unwrap();
+        let controller = MeshController::new(paths, store.clone()).unwrap();
+        let id = controller
+            .save(MeshProfile {
+                provider: MeshProvider::Tailscale,
+                ..Default::default()
+            })
+            .unwrap();
+        let old = controller.profile(&id).unwrap();
+        let mut state = MeshRuntimeView {
+            profile_id: id.clone(),
+            phase: MeshPhase::Connected,
+            peers: vec![MeshPeer {
+                id: "chosen".into(),
+                online: true,
+                offers_exit: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!startup_ready(std::slice::from_ref(&state), &id, Some("chosen")).unwrap());
+        state.peers[0].exit_selected = true;
+        assert!(!startup_ready(std::slice::from_ref(&state), &id, Some("different")).unwrap());
+        assert!(startup_ready(std::slice::from_ref(&state), &id, Some("chosen")).unwrap());
+        state.peers[0].online = false;
+        assert!(!startup_ready(&[state], &id, Some("chosen")).unwrap());
+
+        let mut model = crate::model::AppModel::default();
+        let ordinary = crate::model::Node::new(
+            "ordinary",
+            crate::model::Protocol::Socks,
+            "example.test",
+            1080,
+        );
+        model.add_nodes([ordinary.clone()]);
+        let active = store.save_active_profile(&model).unwrap();
+        let next = MeshProfile {
+            exit_node: "100.64.0.2".into(),
+            outbound_port: 19081,
+            ..old.clone()
+        };
+        for (group, profile) in [("auto", active.as_str()), ("proxy", "stale-profile")] {
+            assert!(
+                controller
+                    .commit_exit(next.clone(), &mut model, group, profile)
+                    .is_err()
+            );
+            assert_eq!(model.nodes.len(), 1);
+            assert_eq!(store.mesh_profiles().unwrap()[0], old);
+        }
+        let gateway = format!("mesh-exit-{id}");
+        controller
+            .commit_exit(next.clone(), &mut model, "proxy", &active)
+            .unwrap();
+        let next = MeshProfile {
+            exit_node: "100.64.0.3".into(),
+            ..next
+        };
+        controller
+            .commit_exit(next.clone(), &mut model, "proxy", &active)
+            .unwrap();
+        assert_eq!(model.nodes.len(), 2);
+        assert_eq!(store.mesh_profiles().unwrap()[0], next);
+        let saved = store.load_profile(&active).unwrap().unwrap().model;
+        assert_eq!(saved.group("proxy").unwrap().active_node(), Some(&gateway));
+        assert_eq!(saved.node(&gateway).unwrap().port, 19081);
+        assert!(model.select_node("proxy", &ordinary.id));
     }
 
     #[tokio::test]

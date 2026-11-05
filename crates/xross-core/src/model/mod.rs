@@ -341,6 +341,18 @@ impl AppModel {
         ids.len()
     }
 
+    /// New gateways join selector groups on insertion. Respect a saved gateway's
+    /// enabled state and any subsequent edits to its group membership.
+    pub fn can_select_mesh_exit(&self, group_id: &str, gateway: &str) -> bool {
+        self.group(group_id).is_some_and(|g| {
+            g.enabled
+                && g.kind == GroupKind::Selector
+                && self
+                    .node(gateway)
+                    .is_none_or(|n| n.enabled && g.members.contains(&n.id))
+        })
+    }
+
     /// Switches the selector's active node. Returns true if the model changed.
     pub fn select_node(&mut self, group_id: &str, node_id: &str) -> bool {
         let Some(group) = self.group_mut(group_id) else {

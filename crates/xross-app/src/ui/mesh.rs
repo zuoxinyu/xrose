@@ -12,6 +12,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -617,11 +618,12 @@ impl AppView {
                 }),
         );
 
+        if let Some(review) = self.sync_review(&p, cx) {
+            body = body.child(review);
+        }
         for profile in self.snapshot.mesh.profiles.clone() {
             let provider = profile.provider;
             let id = profile.id.clone();
-            let edit = profile.clone();
-            let delete = profile.id.clone();
             let state = self
                 .snapshot
                 .mesh
@@ -673,145 +675,103 @@ impl AppView {
                 );
             }
             let status_tip = (!status_tips.is_empty()).then(|| status_tips.join("\n"));
-            let login_url = state.login_url.clone();
-            let mut network =
-                card(&p).child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .items_center()
-                                .flex_wrap()
-                                .gap_2()
-                                .child(div().min_w(px(0.)).truncate().child(profile.name.clone()))
-                                .child(div().flex_shrink_0().child(pill(
-                                    provider.label(),
-                                    p.info,
-                                    p.info.opacity(0.1),
-                                )))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "mesh-status-{}",
-                                            profile.id
-                                        )))
-                                        .flex_shrink_0()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .px_2()
-                                        .py_0p5()
-                                        .rounded_full()
-                                        .text_xs()
-                                        .text_color(status_color)
-                                        .bg(status_color.opacity(0.1))
-                                        .child(label)
-                                        .when(has_notice, |d| {
-                                            d.child(Icon::new(IconName::Info).size(px(13.)))
-                                        })
-                                        .when_some(status_tip, |d, tip| {
-                                            d.tooltip(move |window, cx| {
-                                                let tip = tip.clone();
-                                                Tooltip::element(move |_, _| {
-                                                    div()
-                                                        .max_w(px(320.))
-                                                        .min_w(px(0.))
-                                                        .whitespace_normal()
-                                                        .child(tip.clone())
-                                                })
-                                                .build(window, cx)
-                                            })
-                                        }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .flex_wrap()
-                                .justify_end()
-                                .gap_2()
-                                .flex_shrink_0()
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "mesh-connect-{}",
-                                        id.clone()
-                                    )))
-                                    .primary()
-                                    .disabled(busy || !self.snapshot.mesh.supported)
-                                    .label(if active {
-                                        tr(lang, "断开", "Disconnect")
-                                    } else {
-                                        tr(lang, "连接", "Connect")
+            let mut network = card(&p).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(div().min_w(px(0.)).truncate().child(profile.name.clone()))
+                            .child(div().flex_shrink_0().child(pill(
+                                provider.label(),
+                                p.info,
+                                p.info.opacity(0.1),
+                            )))
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("mesh-status-{}", profile.id)))
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_full()
+                                    .text_xs()
+                                    .text_color(status_color)
+                                    .bg(status_color.opacity(0.1))
+                                    .child(label)
+                                    .when(has_notice, |d| {
+                                        d.child(Icon::new(IconName::Info).size(px(13.)))
                                     })
-                                    .on_click(cx.listener(move |this, _, _, _| {
+                                    .when_some(status_tip, |d, tip| {
+                                        d.tooltip(move |window, cx| {
+                                            let tip = tip.clone();
+                                            Tooltip::element(move |_, _| {
+                                                div()
+                                                    .max_w(px(320.))
+                                                    .min_w(px(0.))
+                                                    .whitespace_normal()
+                                                    .child(tip.clone())
+                                            })
+                                            .build(window, cx)
+                                        })
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_wrap()
+                            .justify_end()
+                            .gap_2()
+                            .flex_shrink_0()
+                            .child(
+                                more_button(
+                                    SharedString::from(format!("mesh-menu-{id}")),
+                                    tr(lang, "组网操作", "Network actions"),
+                                )
+                                .dropdown_menu(
+                                    super::menus::builder(
+                                        cx.entity().downgrade(),
+                                        super::menus::MenuTarget::Mesh(id.clone()),
+                                    ),
+                                ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "mesh-connect-{}",
+                                    id.clone()
+                                )))
+                                .primary()
+                                .disabled(busy || !self.snapshot.mesh.supported)
+                                .label(if active {
+                                    tr(lang, "断开", "Disconnect")
+                                } else {
+                                    tr(lang, "连接", "Connect")
+                                })
+                                .on_click(cx.listener(
+                                    move |this, _, _, _| {
                                         if active {
                                             this.service.mesh_disconnect(provider);
                                         } else {
                                             this.service.mesh_connect(&id);
                                         }
-                                    })),
-                                )
-                                .when_some(login_url, |d, url| {
-                                    d.child(
-                                        Button::new("mesh-login")
-                                            .primary()
-                                            .label(self.tr("在浏览器登录", "Sign in with browser"))
-                                            .on_click(cx.listener(move |this, _, _, _| {
-                                                this.service.open_url(&url)
-                                            })),
-                                    )
-                                })
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "mesh-edit-{}",
-                                        edit.id.clone()
-                                    )))
-                                    .label(tr(lang, "编辑", "Edit"))
-                                    .disabled(active || busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_mesh_dialog(Some(edit.clone()), window, cx);
-                                    })),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "mesh-delete-{}",
-                                        delete.clone()
-                                    )))
-                                    .compact()
-                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .ghost()
-                                    .icon(IconName::Trash)
-                                    .label(tr(lang, "删除配置", "Delete profile"))
-                                    .disabled(active || busy)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.run_command(
-                                            super::menus::Command::DeleteMesh(delete.clone()),
-                                            false,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                                )
-                                .when(active && provider == MeshProvider::Tailscale, |d| {
-                                    d.child(
-                                        Button::new("mesh-logout")
-                                            .label(tr(lang, "注销设备身份", "Log out device"))
-                                            .disabled(busy)
-                                            .on_click(cx.listener(move |this, _, _, _| {
-                                                this.service.mesh_logout(provider)
-                                            })),
-                                    )
-                                }),
-                        ),
-                );
+                                    },
+                                )),
+                            ),
+                    ),
+            );
             let mut details = vec![
                 (
                     "addresses",
@@ -886,6 +846,15 @@ impl AppView {
                 let peer_id = format!("mesh-peer-{}-{}", profile.id, peer.id);
                 let peer_group = SharedString::from(format!("{peer_id}-hover"));
                 let expanded = self.mesh_expanded.contains(&peer_id);
+                let badges = super::mesh_sync::badges(&peer, provider, lang, &p);
+                let mut subnets = peer.subnets.clone();
+                if let Some(x) = &peer.xross {
+                    subnets.extend(x.subnets.clone());
+                }
+                subnets.sort();
+                subnets.dedup();
+                let receive = peer.xross.is_some() && peer.online;
+                let source = (profile.id.clone(), peer.id.clone(), peer.name.clone());
                 let hover_bg = p.panel_alt.opacity(0.45);
                 members = members.child(
                     div()
@@ -919,6 +888,15 @@ impl AppView {
                                             peer.name,
                                         )),
                                 )
+                                .child(badges)
+                                .when(!subnets.is_empty() && !self.hide_ips, |d| {
+                                    d.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .child(subnets.join(", ")),
+                                    )
+                                })
                                 .when(!peer.addresses.is_empty(), |d| {
                                     d.child(div().text_xs().text_color(p.muted_fg).child(
                                         self.mesh_text(peer_id.clone(), "", peer.addresses, &p, cx),
@@ -963,6 +941,23 @@ impl AppView {
                                     },
                                 )),
                         )
+                        .when(receive, |d| {
+                            d.child(
+                                Button::new(SharedString::from(format!("{peer_id}-receive")))
+                                    .compact()
+                                    .label(tr(lang, "接收配置", "Receive config"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.mesh_sync_ui.open_receive(
+                                            source.0.clone(),
+                                            source.1.clone(),
+                                            source.2.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                        })
                         .child(div().w(px(26.)).h(px(26.)).flex_shrink_0().when_some(
                             target,
                             |d, ip| {
@@ -990,6 +985,11 @@ impl AppView {
                             },
                         )),
                 );
+            }
+            if state.phase == MeshPhase::Connected
+                && let Some(panel) = self.sync_controls(&profile.id, &p, cx)
+            {
+                network = network.child(panel);
             }
             if has_members {
                 network = network.child(members);

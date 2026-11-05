@@ -1,3 +1,5 @@
+mod mesh_exits;
+
 use std::collections::{BTreeMap, HashMap};
 
 use gpui_base::{Disableable, Selectable};
@@ -61,6 +63,8 @@ impl AppView {
         let p = palette(cx);
         let lang = self.lang();
         let model = self.snapshot.model.clone();
+        let exits = mesh_exits::choices(&self.snapshot.mesh, &model, self.hide_ips, lang);
+        let has_nodes = !model.nodes.is_empty() || !exits.is_empty();
         let groups = model.groups.clone();
         let active_group = self
             .selected_group
@@ -82,7 +86,7 @@ impl AppView {
         let mut body = div().flex().flex_col().gap_4().w_full();
 
         // First run / empty state wizard.
-        if model.nodes.is_empty() {
+        if !has_nodes {
             body = body.child(
                 card(&p)
                     .border_color(p.primary)
@@ -190,7 +194,6 @@ impl AppView {
         // Automatic groups pick the node themselves; rows only display it.
         let auto_mode = group_kind != GroupKind::Selector;
 
-        let has_nodes = !model.nodes.is_empty();
         let sort_active = has_nodes && self.sort_by_latency;
         let grouped = has_nodes && self.group_by_subscription;
 
@@ -246,7 +249,24 @@ impl AppView {
         let batch_selected = self.batch_selected.clone();
         let latency_busy = this_busy(&self.snapshot.busy, "latency");
         let tests_busy = latency_busy || this_busy(&self.snapshot.busy, "download");
-        let core_busy = is_core_busy;
+        let exit_busy = this_busy(&self.snapshot.busy, "mesh-exit");
+        let core_busy = is_core_busy || exit_busy;
+        let exit_count = exits.len();
+        let mut exit_rows = Vec::new();
+        for exit in exits
+            .iter()
+            .filter(|exit| exit.matches(&search_query, hide_ips))
+        {
+            let disabled = core_busy
+                || this_busy(&self.snapshot.busy, "mesh")
+                || auto_mode
+                || batch_mode
+                || active_group
+                    .as_ref()
+                    .is_none_or(|id| !model.can_select_mesh_exit(id, &exit.gateway));
+            exit_rows.push(exit.row(active_group.clone(), disabled, hide_ips, lang, &p, cx));
+        }
+        let shown = display_nodes.len() + exit_rows.len();
 
         // Subscription map for grouping.
         let sub_names: HashMap<String, String> = self
@@ -258,6 +278,13 @@ impl AppView {
 
         // Rows are rendered up front so flat and grouped views share them.
         let mut rows: HashMap<String, AnyElement> = HashMap::new();
+        let offline_exits: std::collections::HashSet<_> = self
+            .snapshot
+            .mesh
+            .exits()
+            .filter(|(_, peer, _)| peer.exit_selected && !peer.online)
+            .map(|(profile, _, _)| format!("mesh-exit-{}", profile.id))
+            .collect();
         for node in display_nodes.iter() {
             let row = render_node_row(
                 RowProps {
@@ -271,6 +298,7 @@ impl AppView {
                     downloading: this_busy(&self.snapshot.busy, &format!("download:{}", node.id)),
                     hide_ips,
                     auto_mode,
+                    offline_exit: offline_exits.contains(&node.id),
                     group_id: group_id_for_select.clone(),
                     core_busy,
                     latency_busy: tests_busy,
@@ -315,12 +343,12 @@ impl AppView {
                                 )
                                 .child(pill(
                                     if search_query.is_empty() {
-                                        format!("{} {}", display_nodes.len(), self.tr("个", ""))
+                                        format!("{} {}", shown, self.tr("个", ""))
                                     } else {
                                         format!(
                                             "{}/{} {}",
-                                            display_nodes.len(),
-                                            model.nodes.len(),
+                                            shown,
+                                            model.nodes.len() + exit_count,
                                             self.tr("个", "")
                                         )
                                     },
@@ -689,7 +717,21 @@ impl AppView {
                 .when(!self.hide_traffic_chart, |d| {
                     d.child(self.traffic_chart(&p))
                 })
-                .when(display_nodes.is_empty(), |d| {
+                .when(exit_busy, |d| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .child(Spinner::new())
+                            .child(self.tr(
+                                "正在重新连接组网并切换出口…",
+                                "Reconnecting the mesh and switching exit…",
+                            )),
+                    )
+                })
+                .when(shown == 0, |d| {
                     d.child(empty_hint(
                         &p,
                         if search_query.is_empty() {
@@ -822,7 +864,8 @@ impl AppView {
                                 )
                             })
                     }))
-                }),
+                })
+                .children(exit_rows),
         );
 
         let _ = running;
@@ -874,6 +917,7 @@ struct RowProps<'a> {
     downloading: bool,
     hide_ips: bool,
     auto_mode: bool,
+    offline_exit: bool,
     group_id: Option<String>,
     core_busy: bool,
     latency_busy: bool,
@@ -950,6 +994,7 @@ fn render_node_row(
         downloading,
         hide_ips,
         auto_mode,
+        offline_exit,
         group_id,
         core_busy: is_core_busy,
         latency_busy: is_latency_busy,
@@ -1057,7 +1102,7 @@ fn render_node_row(
                 this.sync(cx);
             }
         }))
-        .when(!node.enabled, |d| d.opacity(0.45))
+        .when(!node.enabled || offline_exit, |d| d.opacity(0.45))
         // Selection bar: inset vertically by the corner radius so it never
         // protrudes past the rounded corners of the row card.
         .when(selected, |d| {
@@ -1094,7 +1139,7 @@ fn render_node_row(
                         return;
                     }
                     // Automatic groups choose for themselves.
-                    if auto_mode || selected || is_core_busy {
+                    if auto_mode || selected || is_core_busy || offline_exit {
                         return;
                     }
                     if let Some(group) = &group_for_click {
@@ -1194,10 +1239,21 @@ fn render_node_row(
                                         .child(name),
                                 )
                                 .child(pill(
-                                    node.protocol.display_name().to_uppercase(),
+                                    if node.id.starts_with("mesh-exit-") {
+                                        super::tr(lang, "组网出口", "Mesh exit").to_string()
+                                    } else {
+                                        node.protocol.display_name().to_uppercase()
+                                    },
                                     p.primary,
                                     p.panel,
                                 ))
+                                .when(offline_exit, |d| {
+                                    d.child(pill(
+                                        super::tr(lang, "离线", "Offline"),
+                                        p.muted_fg,
+                                        p.panel_alt,
+                                    ))
+                                })
                                 .when(selected && auto_mode, |d| {
                                     d.child(pill(
                                         super::tr(lang, "当前选用", "In use"),

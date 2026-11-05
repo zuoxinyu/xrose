@@ -6,6 +6,7 @@ mod logs;
 mod manual_node;
 mod menus;
 mod mesh;
+mod mesh_sync;
 mod nodes;
 mod route_drag;
 mod route_transfer;
@@ -154,6 +155,7 @@ fn text_input(
 
 pub struct AppView {
     mesh_form: mesh::MeshForm,
+    mesh_sync_ui: mesh_sync::SyncUi,
     mesh_expanded: std::collections::HashSet<String>,
     mesh_overflow: std::collections::HashMap<String, bool>,
     pub(crate) service: AppService,
@@ -312,6 +314,7 @@ impl AppView {
         let hide_ips = snapshot.settings.privacy_mode;
         let view = Self {
             mesh_form: mesh::MeshForm::new(window, cx),
+            mesh_sync_ui: mesh_sync::SyncUi::new(window, cx),
             mesh_expanded: std::collections::HashSet::new(),
             mesh_overflow: std::collections::HashMap::new(),
             snapshot,

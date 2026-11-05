@@ -160,6 +160,7 @@ impl Backend {
                     b.tailscale_binary
                         .as_deref()
                         .ok_or_else(|| Error::binary("缺少组网组件"))?,
+                    b.sync_port,
                 )
                 .await?,
             )),

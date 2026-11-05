@@ -418,6 +418,14 @@ impl CoreManager {
             max_retries: settings.watchdog_max_retries,
         };
         self.supervisor.start(spec, watchdog).await?;
+        if core == CoreKind::SingBox
+            && let Err(err) = self
+                .restore_mesh_selectors(&outcome.compiled, settings)
+                .await
+        {
+            self.supervisor.stop().await?;
+            return Err(err);
+        }
         *self.applied.lock() = Some(AppliedConfig {
             model: model.clone(),
             settings: settings.clone(),
@@ -427,6 +435,28 @@ impl CoreManager {
         });
         outcome.started = true;
         Ok(outcome)
+    }
+
+    /// sing-box prefers the cached selection over its configured default. A choice made
+    /// while stopped (or before a new gateway existed) must reach the running selector.
+    async fn restore_mesh_selectors(
+        &self,
+        compiled: &CompiledConfig,
+        settings: &Settings,
+    ) -> Result<()> {
+        let client = crate::runtime::ClashClient::new(settings.api_port, "");
+        for (group, tag) in adapters::singbox::mesh_selector_defaults(compiled) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            while let Err(error) = client.select(group, tag).await {
+                if !self.state().phase.is_alive() || tokio::time::Instant::now() >= deadline {
+                    return Err(Error::other(format!(
+                        "无法应用出站组的节点选择，请检查内核状态：{error}"
+                    )));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            }
+        }
+        Ok(())
     }
 
     pub async fn stop(&self) -> Result<()> {
