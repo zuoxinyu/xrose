@@ -3,7 +3,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
+use gpui_kit::component::{Icon, Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::CoreKind;
@@ -11,7 +11,7 @@ use xross_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMod
 use xross_core::system::CheckLevel;
 
 use super::AppView;
-use super::theme::palette;
+use super::theme::{ICON_SIZE, Palette, palette};
 use super::widgets::*;
 
 impl AppView {
@@ -27,6 +27,63 @@ impl AppView {
             username: self.lan_user_input.read(cx).value().to_string(),
             password: self.lan_password_input.read(cx).value().to_string(),
         }
+    }
+
+    fn advanced_network_settings(&self, p: &Palette, cx: &mut Context<Self>) -> Div {
+        let settings = &self.snapshot.settings;
+        let lan_account = self.lan_account_input(cx);
+        let lan_port = valid_port(self.lan_port_input.read(cx).value().as_ref());
+        let front_label = match self.snapshot.model.front_node(settings.core) {
+            Ok(Some(node)) if self.hide_ips && !node.server.is_empty() => {
+                node.name.replace(&node.server, "•••").into()
+            }
+            Ok(Some(node)) => node.name.clone().into(),
+            Ok(None) => self.tr("关闭", "Off"),
+            Err(_) => self.tr("重新选择节点", "Choose another node"),
+        };
+        div().flex().flex_col().gap_3()
+            .when(settings.allow_lan, |card| card
+                .child(setting_row(p, self.tr("第二端口", "Second port"),
+                    self.tr("启用后主端口仅供本机使用，局域网设备使用第二端口", "Use the main port locally and the second port for LAN devices"),
+                    toggle("separate-lan-port", self.tr("使用独立局域网端口", "Use a separate LAN port"), settings.separate_lan_port)
+                        .disabled(!settings.separate_lan_port && lan_port.is_none())
+                        .on_change(cx.listener(move |this, enabled, _, cx| this.modify_settings(cx, |s| {
+                            s.separate_lan_port = *enabled;
+                            if *enabled { if let Some(port) = lan_port { s.lan_port = port; } }
+                        })))))
+                .child(setting_row(p, self.tr("局域网端口", "LAN port"), "",
+                    div().flex().items_center().gap_2()
+                        .child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_port_input)))
+                        .when(lan_port != Some(settings.lan_port), |d| d.child(Button::new("save-lan-port")
+                            .label(self.tr("应用", "Apply")).disabled(lan_port.is_none())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(port) = valid_port(this.lan_port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.lan_port = port); }
+                            }))))
+                        .when(lan_port.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text)
+                            .child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))))
+                .child(setting_row(p, self.tr("局域网认证", "LAN authentication"),
+                    self.tr("输入用户名和密码后启用。共用主端口时，本机客户端也需认证", "Enter credentials to enable. Local clients also authenticate when sharing the main port."),
+                    toggle("lan-auth", self.tr("要求账号认证", "Require authentication"), settings.lan_auth)
+                        .disabled(!settings.lan_auth && !lan_account.valid())
+                        .on_change(cx.listener(|this, enabled, _, cx| {
+                            let account = this.lan_account_input(cx);
+                            this.modify_settings(cx, |s| { s.lan_auth = *enabled; if *enabled { s.lan_account = account; } });
+                        }))))
+                .child(setting_row(p, self.tr("用户名", "Username"), "",
+                    div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_user_input))))
+                .child(setting_row(p, self.tr("密码", "Password"), "",
+                    div().flex().items_center().gap_2()
+                        .child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_password_input)))
+                        .when(settings.lan_auth && lan_account != settings.lan_account, |d| d.child(Button::new("save-lan-account")
+                            .label(self.tr("保存账号", "Save credentials")).disabled(!lan_account.valid())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let account = this.lan_account_input(cx);
+                                this.modify_settings(cx, |s| s.lan_account = account);
+                            })))))))
+            .child(setting_row(p, self.tr("前置代理", "Front proxy"),
+                self.tr("通过所选节点连接当前配置中的其他代理节点", "Connect to other proxy nodes in this profile through the selected node"),
+                Button::new("front-proxy").label(front_label).icon(IconName::ChevronDown)
+                    .dropdown_menu(super::menus::builder(cx.entity().downgrade(), super::menus::MenuTarget::FrontProxy))))
     }
 
     pub(crate) fn page_settings(
@@ -151,62 +208,29 @@ impl AppView {
         let port_raw = self.port_input.read(cx).value().to_string();
         let port_dirty = port_raw.trim() != settings.mixed_port.to_string();
         let port_valid = valid_port(&port_raw);
-        let lan_account = self.lan_account_input(cx);
-        let lan_port = valid_port(self.lan_port_input.read(cx).value().as_ref());
-        let front_label = match self.snapshot.model.front_node(settings.core) {
-            Ok(Some(node)) if self.hide_ips && !node.server.is_empty() => {
-                node.name.replace(&node.server, "•••").into()
-            }
-            Ok(Some(node)) => node.name.clone().into(),
-            Ok(None) => self.tr("关闭", "Off"),
-            Err(_) => self.tr("重新选择节点", "Choose another node"),
-        };
+        let advanced_toggle = Button::new("network-advanced")
+            .ghost()
+            .compact()
+            .label(self.tr("高级设置", "Advanced settings"))
+            .accessibility_label(if self.network_advanced_open {
+                self.tr("收起高级设置", "Collapse advanced settings")
+            } else {
+                self.tr("展开高级设置", "Expand advanced settings")
+            })
+            .child(
+                Icon::new(if self.network_advanced_open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .size(px(ICON_SIZE)),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.network_advanced_open = !this.network_advanced_open;
+                cx.notify();
+            }));
         let network_card = card(&p)
             .child(section_title(&p, self.tr("网络与代理", "Network & proxy"), self.tr("连接范围、流量接管与本地端口", "Access scope, traffic routing and local ports")))
-            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重启", "Allow devices on your LAN to use this proxy; restart required"),
-                toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
-            .when(settings.allow_lan, |card| card
-                .child(setting_row(&p, self.tr("第二端口", "Second port"),
-                    self.tr("启用后主端口仅供本机使用，局域网设备使用第二端口", "Use the main port locally and the second port for LAN devices"),
-                    toggle("separate-lan-port", self.tr("使用独立局域网端口", "Use a separate LAN port"), settings.separate_lan_port)
-                        .disabled(!settings.separate_lan_port && lan_port.is_none())
-                        .on_change(cx.listener(move |this, enabled, _, cx| this.modify_settings(cx, |s| {
-                            s.separate_lan_port = *enabled;
-                            if *enabled { if let Some(port) = lan_port { s.lan_port = port; } }
-                        })))))
-                .child(setting_row(&p, self.tr("局域网端口", "LAN port"), "",
-                    div().flex().items_center().gap_2()
-                        .child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_port_input)))
-                        .when(lan_port != Some(settings.lan_port), |d| d.child(Button::new("save-lan-port")
-                            .label(self.tr("应用", "Apply")).disabled(lan_port.is_none())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(port) = valid_port(this.lan_port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.lan_port = port); }
-                            }))))
-                        .when(lan_port.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text)
-                            .child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))))
-                .child(setting_row(&p, self.tr("局域网认证", "LAN authentication"),
-                    self.tr("输入用户名和密码后启用。共用主端口时，本机客户端也需认证", "Enter credentials to enable. Local clients also authenticate when sharing the main port."),
-                    toggle("lan-auth", self.tr("要求账号认证", "Require authentication"), settings.lan_auth)
-                        .disabled(!settings.lan_auth && !lan_account.valid())
-                        .on_change(cx.listener(|this, enabled, _, cx| {
-                            let account = this.lan_account_input(cx);
-                            this.modify_settings(cx, |s| { s.lan_auth = *enabled; if *enabled { s.lan_account = account; } });
-                        }))))
-                .child(setting_row(&p, self.tr("用户名", "Username"), "",
-                    div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_user_input))))
-                .child(setting_row(&p, self.tr("密码", "Password"), "",
-                    div().flex().items_center().gap_2()
-                        .child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.lan_password_input)))
-                        .when(settings.lan_auth && lan_account != settings.lan_account, |d| d.child(Button::new("save-lan-account")
-                            .label(self.tr("保存账号", "Save credentials")).disabled(!lan_account.valid())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let account = this.lan_account_input(cx);
-                                this.modify_settings(cx, |s| s.lan_account = account);
-                            })))))))
-            .child(setting_row(&p, self.tr("前置代理", "Front proxy"),
-                self.tr("通过所选节点连接当前配置中的其他代理节点", "Connect to other proxy nodes in this profile through the selected node"),
-                Button::new("front-proxy").label(front_label).icon(IconName::ChevronDown)
-                    .dropdown_menu(super::menus::builder(cx.entity().downgrade(), super::menus::MenuTarget::FrontProxy))))
             .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重启", "Route system traffic through the proxy; requires the privilege helper and restart"),
                 toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
             .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重启", "Restrict traffic from bypassing TUN; restart required"),
@@ -220,7 +244,11 @@ impl AppView {
                     .when(port_dirty, |d| d.child(Button::new("save-ports").primary().label(self.tr("应用", "Apply")).disabled(port_valid.is_none())
                         .on_click(cx.listener(|this, _, _, cx| { if let Some(port) = valid_port(this.port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.mixed_port = port); } }))))))
             .when(port_dirty && port_valid.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text).child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))
-            .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))));
+            .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))))
+            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重启", "Allow devices on your LAN to use this proxy; restart required"),
+                toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
+            .child(div().flex().child(advanced_toggle))
+            .when(self.network_advanced_open, |card| card.child(self.advanced_network_settings(&p, cx)));
 
         let startup_card = card(&p)
             .child(section_title(
