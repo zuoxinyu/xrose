@@ -65,6 +65,10 @@ winreg = "0.55"
 [patch.crates-io]
 block = { path = "vendor/block" }
 
+[profile.dev]
+# 精简开发环境下的 PDB 调试信息：仅保留行号，大幅减小 PDB 体积并大幅加速链接
+debug = 1
+
 [profile.release]
 strip = true
 lto = "thin"
