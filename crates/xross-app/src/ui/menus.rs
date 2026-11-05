@@ -4,12 +4,14 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
+use xross_core::mesh::{MeshPeer, MeshProvider};
 use xross_core::route::transfer::ExportScope;
 use xross_core::service::ToastLevel;
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
     Mesh(String),
+    MeshPeer(String, String),
     RoutingFiles,
     NodeSelector,
     DefaultOutbound,
@@ -59,6 +61,8 @@ pub(super) enum Command {
     LoginMesh(String),
     LogoutMesh(String),
     ShareMesh(String),
+    ReceiveFromPeer(String, String),
+    ProbePeer(String, String),
     DeleteMesh(String),
     DeleteVersion(xross_core::model::CoreKind, String),
 }
@@ -103,6 +107,17 @@ fn item(
 }
 
 impl AppView {
+    fn mesh_peer(&self, profile_id: &str, peer_id: &str) -> Option<(MeshProvider, &MeshPeer)> {
+        let network = self
+            .snapshot
+            .mesh
+            .networks
+            .iter()
+            .find(|n| n.profile_id == profile_id)?;
+        let peer = network.peers.iter().find(|p| p.id == peer_id)?;
+        Some((network.provider, peer))
+    }
+
     pub(super) fn dismiss_action_menu(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.action_menu.take() {
             let _ = menu.update(cx, |_, cx| cx.emit(DismissEvent));
@@ -182,6 +197,25 @@ impl AppView {
                     tr(lang, "删除配置", "Delete profile"),
                     !active && available,
                     Command::DeleteMesh(id),
+                ));
+            }
+            MenuTarget::MeshPeer(profile_id, peer_id) => {
+                let Some((_, peer)) = self.mesh_peer(&profile_id, &peer_id) else {
+                    return menu;
+                };
+                if peer.online && peer.xross.is_some() {
+                    menu = menu.item(item(
+                        &view,
+                        tr(lang, "接收配置", "Receive config"),
+                        true,
+                        Command::ReceiveFromPeer(profile_id.clone(), peer_id.clone()),
+                    ));
+                }
+                menu = menu.item(item(
+                    &view,
+                    tr(lang, "探测设备", "Probe device"),
+                    !peer.addresses.is_empty() && !busy("mesh"),
+                    Command::ProbePeer(profile_id, peer_id),
                 ));
             }
             MenuTarget::FrontProxy => {
@@ -653,6 +687,8 @@ impl AppView {
                 | Command::BatchNodes
                 | Command::ClearLogs
                 | Command::ClearRecording
+                | Command::ReceiveFromPeer(_, _)
+                | Command::ProbePeer(_, _)
         ) && busy("core")
         {
             return;
@@ -746,6 +782,24 @@ impl AppView {
             Command::ShareMesh(id) => {
                 self.service.prepare_mesh_share(id.clone());
                 self.mesh_sync_ui.open_share(id);
+            }
+            Command::ReceiveFromPeer(profile_id, peer_id) => {
+                if let Some((_, peer)) = self.mesh_peer(&profile_id, &peer_id)
+                    && peer.online
+                    && peer.xross.is_some()
+                {
+                    let name = peer.name.clone();
+                    self.mesh_sync_ui
+                        .open_receive(profile_id, peer_id, name, window, cx);
+                }
+            }
+            Command::ProbePeer(profile_id, peer_id) => {
+                if !busy("mesh")
+                    && let Some((provider, peer)) = self.mesh_peer(&profile_id, &peer_id)
+                    && let Some(ip) = peer.addresses.first()
+                {
+                    self.service.mesh_probe(provider, ip.clone());
+                }
             }
             Command::LoginMesh(id) => {
                 if let Some(url) = self
