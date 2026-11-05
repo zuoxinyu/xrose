@@ -10,8 +10,9 @@ pub use vpn::{OpenConnectOptions, OpenVpnOptions, VpnCertificates};
 pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
 pub use node::{
-    AnytlsOptions, Credentials, GroupKind, Network, Node, NodeDraft, NodeSource, OutboundGroup,
-    Protocol, RealityOptions, TlsOptions, Transport, TransportKind, WireguardOptions,
+    AnytlsOptions, Credentials, FallbackScope, GroupKind, Network, Node, NodeDraft, NodeSource,
+    NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode, TlsOptions, Transport,
+    TransportKind, WireguardOptions,
 };
 pub use route::{
     DomainStrategy, Matchers, Placement, RouteAction, RouteActionKind, RoutePreset, RouteRule,
@@ -243,6 +244,23 @@ impl AppModel {
             .or_else(|| self.default_group_id())
     }
 
+    /// Only probe groups used by a proxy route, including implicit default routes.
+    pub(crate) fn managed_route_groups(&self) -> Vec<OutboundGroup> {
+        let used: std::collections::HashSet<_> = self
+            .routing
+            .effective_rules()
+            .map(|r| &r.action)
+            .chain(std::iter::once(&self.routing.final_action))
+            .filter(|a| a.kind == RouteActionKind::Proxy)
+            .filter_map(|a| self.resolve_proxy_group(a))
+            .collect();
+        self.groups
+            .iter()
+            .filter(|g| g.enabled && g.managed() && used.contains(&g.id))
+            .cloned()
+            .collect()
+    }
+
     /// Adds nodes, de-duplicating by fingerprint. Returns the number inserted.
     pub fn add_nodes(&mut self, incoming: impl IntoIterator<Item = Node>) -> usize {
         let mut seen: std::collections::HashSet<String> =
@@ -256,9 +274,14 @@ impl AppModel {
             node.sort = self.nodes.len() as i64;
             self.nodes.push(node.clone());
             added += 1;
-            // New nodes join both default groups by default.
+            // Mesh gateways also join native selector and latency groups when first installed.
+            let mesh_gateway =
+                node.id.starts_with("mesh-exit-") && node.tags.iter().any(|t| t == "mesh-exit");
             for group in &mut self.groups {
-                if group.kind == GroupKind::Selector || group.kind == GroupKind::UrlTest {
+                let native_mesh_group = mesh_gateway
+                    && !group.managed()
+                    && matches!(group.kind, GroupKind::Selector | GroupKind::UrlTest);
+                if matches!(group.id.as_str(), "proxy" | "auto") || native_mesh_group {
                     if !group.members.contains(&node.id) {
                         group.members.push(node.id.clone());
                     }
@@ -346,7 +369,7 @@ impl AppModel {
     pub fn can_select_mesh_exit(&self, group_id: &str, gateway: &str) -> bool {
         self.group(group_id).is_some_and(|g| {
             g.enabled
-                && g.kind == GroupKind::Selector
+                && g.manually_selectable()
                 && self
                     .node(gateway)
                     .is_none_or(|n| n.enabled && g.members.contains(&n.id))
@@ -515,6 +538,36 @@ pub fn preset_rules(preset: RoutePreset) -> Vec<RouteRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_nodes_do_not_expand_custom_policy_groups() {
+        let mut model = AppModel::default();
+        let mut restricted = OutboundGroup::new("限定组", GroupKind::Selector);
+        restricted.switch_policy.mode = SwitchMode::Latency;
+        model.groups.push(restricted);
+        let node = Node::new("节点", Protocol::Http, "node.example", 80);
+        model.add_nodes([node.clone()]);
+        assert_eq!(model.groups[0].members, [node.id.clone()]);
+        assert_eq!(model.groups[1].members, [node.id]);
+        assert!(model.groups[2].members.is_empty());
+    }
+
+    #[test]
+    fn mesh_exit_selection_respects_managed_groups() {
+        let mut model = AppModel::default();
+        let manual = OutboundGroup::new("选择组", GroupKind::Selector);
+        let mut managed = OutboundGroup::new("策略组", GroupKind::Selector);
+        managed.switch_policy.mode = SwitchMode::Latency;
+        let mut gateway = Node::new("出口", Protocol::Socks, "127.0.0.1", 1080);
+        gateway.id = "mesh-exit-fixture".into();
+        gateway.tags.push("mesh-exit".into());
+        model.groups.extend([manual.clone(), managed.clone()]);
+        assert!(model.can_select_mesh_exit(&manual.id, &gateway.id));
+        assert!(!model.can_select_mesh_exit(&managed.id, &gateway.id));
+        model.add_nodes([gateway.clone()]);
+        assert!(model.can_select_mesh_exit(&manual.id, &gateway.id));
+        assert!(model.group(&managed.id).unwrap().members.is_empty());
+    }
 
     #[test]
     fn default_model_is_usable() {

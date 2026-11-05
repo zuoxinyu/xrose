@@ -237,14 +237,29 @@ pub async fn download(
     front: Option<&Node>,
     bypass_tun: bool,
 ) -> Result<DownloadResult> {
+    download_sample(binary, core, node, front, bypass_tun, false).await
+}
+
+/// Automatic rounds use a small response at the source, not a truncated 50 MiB request.
+pub(crate) async fn download_sample(
+    binary: &Path,
+    core: CoreKind,
+    node: &Node,
+    front: Option<&Node>,
+    bypass_tun: bool,
+    automatic: bool,
+) -> Result<DownloadResult> {
     let mut probe = Probe::start(binary, core, node, front, bypass_tun).await?;
-    let result = measure_download(
-        &probe.client,
-        DOWNLOAD_URL,
-        DOWNLOAD_DURATION,
-        DOWNLOAD_LIMIT,
-    )
-    .await;
+    let (url, duration, limit) = if automatic {
+        (
+            "https://speed.cloudflare.com/__down?bytes=1048576",
+            Duration::from_secs(3),
+            1024 * 1024,
+        )
+    } else {
+        (DOWNLOAD_URL, DOWNLOAD_DURATION, DOWNLOAD_LIMIT)
+    };
+    let result = measure_download(&probe.client, url, duration, limit).await;
     probe.stop().await;
     result
 }

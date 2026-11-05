@@ -216,7 +216,7 @@ impl CoreAdapter for XrayAdapter {
                 .filter(|n| n.usable_with(CoreKind::Xray))
                 .map(|n| n.outbound_tag())
                 .collect();
-            if group.kind == GroupKind::Selector {
+            if group.kind == GroupKind::Selector || group.managed() {
                 // Selector is compiled via routing target resolution; no
                 // balancer is necessary and Xray cannot switch it at runtime.
                 if group.active_node().is_none() {
@@ -288,7 +288,9 @@ impl CoreAdapter for XrayAdapter {
         let final_tag = action_tag(CoreKind::Xray, model, &model.routing.final_action)
             .unwrap_or_else(|| "direct".into());
         // Xray has no "final" field: append a catch-all rule.
-        rules.push(json!({"type": "field", "network": "tcp,udp", "outboundTag": final_tag}));
+        rules.push(
+            json!({"type": "field", "network": "tcp,udp", (target_field(&final_tag)): final_tag}),
+        );
 
         let mut routing = json!({
             "domainStrategy": xray_domain_strategy(model.routing.domain_strategy),
@@ -422,6 +424,8 @@ impl CoreAdapter for XrayAdapter {
             json: Value::Object(root),
             warnings,
             inbounds: compiled_inbounds,
+            managed_groups: model.managed_route_groups(),
+            core_version: ctx.core_version.clone(),
             rule_sets: model.routing.rule_sets.clone(),
             default_outbound,
         })
@@ -924,6 +928,15 @@ fn stream_settings(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
     Ok(Value::Object(stream))
 }
 
+/// Only native balancers resolve to group tags; managed and manual groups resolve to node tags.
+fn target_field(tag: &str) -> &'static str {
+    if tag.starts_with("group-") {
+        "balancerTag"
+    } else {
+        "outboundTag"
+    }
+}
+
 fn xray_rule(model: &AppModel, rule: &RouteRule, warnings: &mut Vec<String>) -> Option<Value> {
     let mut object = Map::new();
     object.insert("type".into(), json!("field"));
@@ -986,12 +999,38 @@ fn xray_rule(model: &AppModel, rule: &RouteRule, warnings: &mut Vec<String>) -> 
         return None;
     }
     let target = action_tag(CoreKind::Xray, model, &rule.action)?;
-    object.insert("outboundTag".into(), json!(target));
+    object.insert(target_field(&target).into(), json!(target));
     Some(Value::Object(object))
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn managed_route_pins_an_eligible_node_and_keeps_other_groups_idle() {
+        let (mut model, settings, ctx) = sample();
+        let unavailable = model.nodes[0].id.clone();
+        model.nodes[0].enabled = false;
+        let valid = Node::new("可用节点", Protocol::Socks, "candidate.example", 1080);
+        model.add_nodes([valid.clone()]);
+        for g in &mut model.groups {
+            g.kind = GroupKind::Fallback;
+            g.selected = Some(unavailable.clone());
+        }
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(compiled.managed_groups.len(), 1);
+        assert_eq!(compiled.managed_groups[0].id, "proxy");
+        assert_eq!(compiled.managed_groups[0].members, [valid.id.clone()]);
+        assert_eq!(
+            compiled.json["routing"]["rules"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["outboundTag"],
+            valid.outbound_tag()
+        );
+        assert!(compiled.json["routing"].get("balancers").is_none());
+    }
+
     #[test]
     fn wireguard_compiles_with_credentials_and_probe() {
         let (mut model, settings, ctx) = sample();
@@ -1296,10 +1335,14 @@ mod tests {
 
     #[test]
     fn uses_balancer_for_urltest() {
-        let (model, settings, ctx) = sample();
+        let (mut model, settings, ctx) = sample();
+        model.default_group = Some("auto".into());
         let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
         let balancers = compiled.json["routing"]["balancers"].as_array().unwrap();
         assert!(balancers.iter().any(|b| b["tag"] == "group-auto"));
+        let rules = compiled.json["routing"]["rules"].as_array().unwrap();
+        assert_eq!(rules.last().unwrap()["balancerTag"], "group-auto");
+        assert!(rules.iter().all(|r| r["outboundTag"] != "group-auto"));
         assert!(compiled.json["observatory"].is_object());
     }
 

@@ -170,7 +170,10 @@ pub fn build(service: &AppService) -> Dashboard {
         language,
         status_line,
         traffic_line,
-        group_id: group.as_ref().map(|group| group.id.clone()),
+        group_id: group
+            .as_ref()
+            .filter(|g| g.enabled && g.manually_selectable())
+            .map(|g| g.id.clone()),
         group_name: group
             .map(|group| group.name)
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
@@ -194,7 +197,10 @@ pub fn build(service: &AppService) -> Dashboard {
         ),
         core_name: snapshot.settings.core.display_name().to_string(),
         busy_core: snapshot.busy.iter().any(|key| key == "core"),
-        busy_latency: snapshot.busy.iter().any(|key| key == "latency"),
+        busy_latency: snapshot
+            .busy
+            .iter()
+            .any(|key| matches!(key.as_str(), "latency" | "download" | "auto-probe")),
     }
 }
 

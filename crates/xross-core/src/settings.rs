@@ -374,6 +374,7 @@ impl Settings {
         }
         let automatic = model.groups.iter().filter(|g| {
             g.enabled
+                && !g.managed()
                 && g.members
                     .iter()
                     .filter_map(|id| model.node(id))

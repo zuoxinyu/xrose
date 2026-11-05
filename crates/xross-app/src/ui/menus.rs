@@ -223,7 +223,7 @@ impl AppView {
                 let Some(group) = group else {
                     return menu.label(tr(lang, "请先添加节点", "Add a node first"));
                 };
-                let automatic = group.kind != xross_core::model::GroupKind::Selector;
+                let automatic = !group.manually_selectable();
                 if automatic {
                     menu = menu.label(tr(
                         lang,
@@ -267,7 +267,8 @@ impl AppView {
                 let Some(node) = self.snapshot.model.node(&id) else {
                     return menu;
                 };
-                let testing = busy("latency") || busy("download") || busy("core");
+                let testing =
+                    busy("latency") || busy("download") || busy("auto-probe") || busy("core");
                 menu = menu
                     .item(add(
                         "编辑",
@@ -576,9 +577,7 @@ impl AppView {
         let exists = match &command {
             Command::SelectNode(group_id, node_id) => {
                 self.snapshot.model.group(group_id).is_some_and(|g| {
-                    g.enabled
-                        && g.kind == xross_core::model::GroupKind::Selector
-                        && g.members.contains(node_id)
+                    g.enabled && g.manually_selectable() && g.members.contains(node_id)
                 }) && self.snapshot.model.node(node_id).is_some_and(|n| n.enabled)
             }
             Command::DeleteVersion(core, version) => {
@@ -638,7 +637,9 @@ impl AppView {
         {
             return;
         }
-        if matches!(&command, Command::DeleteNodes(_)) && (busy("latency") || busy("download")) {
+        if matches!(&command, Command::DeleteNodes(_))
+            && (busy("latency") || busy("download") || busy("auto-probe"))
+        {
             return;
         }
         if matches!(
@@ -652,7 +653,7 @@ impl AppView {
             return;
         }
         if matches!(&command, Command::TestNode(_) | Command::DownloadNode(_))
-            && (busy("latency") || busy("download"))
+            && (busy("latency") || busy("download") || busy("auto-probe"))
         {
             return;
         }

@@ -4,6 +4,7 @@
 mod mesh_discovery;
 mod mesh_exit;
 pub mod mesh_sync;
+mod node_switch;
 mod routing_transfer;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,6 +39,8 @@ use crate::trace::{self, TraceSession};
 use crate::updates::{self, AppUpdate, RuleSetUpdate, UpdateCandidate};
 use crate::util::now_unix;
 
+// Pasted links have historically shared this synthetic source, not a node subscription.
+const PASTED_SOURCE: &str = "import";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +101,8 @@ pub struct UpdateStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeView {
+    #[serde(default)]
+    pub managed_nodes: BTreeMap<String, String>,
     pub connections: Vec<ClashConnection>,
     pub proxies: BTreeMap<String, ClashProxy>,
     pub up_total: u64,
@@ -174,8 +179,19 @@ impl UiSnapshot {
                 .default_group_id()
                 .and_then(|id| self.model.group(&id))
         })?;
+        if self.process.phase.is_alive() {
+            if let Some(node) = self
+                .runtime
+                .managed_nodes
+                .get(&group.id)
+                .and_then(|id| self.model.node(id))
+            {
+                return Some(node);
+            }
+        }
         if self.process.phase.is_alive()
             && self.settings.core == CoreKind::SingBox
+            && !group.managed()
             && group.kind != crate::model::GroupKind::Selector
         {
             if let Some(tag) = self
@@ -383,6 +399,7 @@ impl AppService {
         }
         service.start_mesh_discovery();
         service.start_monitor();
+        service.start_node_switch_scheduler();
         service.start_subscription_scheduler();
         Ok(service)
     }
@@ -447,6 +464,11 @@ impl AppService {
         let validation = self.inner.validation.read().clone();
         let helper = self.inner.helper.read().clone();
         let runtime = RuntimeView {
+            managed_nodes: if process.phase.is_alive() {
+                self.inner.core.managed_selections()
+            } else {
+                Default::default()
+            },
             connections: self.inner.connections.read().clone(),
             proxies: self.inner.proxies.read().clone(),
             up_total,
@@ -541,15 +563,8 @@ impl AppService {
         }
         let service = self.clone();
         self.spawn(async move {
-            let label = location::lookup(&server, language).await;
-            service.inner.node_locations.write().insert(
-                key,
-                NodeLocation {
-                    label,
-                    pending: false,
-                    checked_at: now_unix(),
-                },
-            );
+            let location = location::lookup(&server, language).await;
+            service.inner.node_locations.write().insert(key, location);
         });
     }
 
@@ -563,7 +578,7 @@ impl AppService {
     fn request_all_node_locations_with<F, Fut>(&self, lookup: F)
     where
         F: Fn(String, crate::settings::Language) -> Fut + Send + Sync + 'static,
-        Fut: std::future::Future<Output = Option<String>> + Send,
+        Fut: std::future::Future<Output = NodeLocation> + Send,
     {
         if !self.inner.busy.write().insert("node-locations".into()) {
             return;
@@ -617,16 +632,9 @@ impl AppService {
                 })
                 .buffer_unordered(4);
             let mut found = 0;
-            while let Some((key, label)) = results.next().await {
-                found += usize::from(label.is_some());
-                service.inner.node_locations.write().insert(
-                    key,
-                    NodeLocation {
-                        label,
-                        pending: false,
-                        checked_at: now_unix(),
-                    },
-                );
+            while let Some((key, location)) = results.next().await {
+                found += usize::from(location.label.is_some());
+                service.inner.node_locations.write().insert(key, location);
             }
             service.set_busy("node-locations", false);
             service.toast(
@@ -1189,7 +1197,7 @@ impl AppService {
             );
             return 0;
         }
-        let added = self.merge_parsed("import", &parsed);
+        let added = self.merge_parsed(PASTED_SOURCE, &parsed);
         self.toast(
             ToastLevel::Success,
             format!("已导入 {} 个节点（{}）", added, parsed.format.label()),
@@ -1288,7 +1296,15 @@ impl AppService {
         let group_tag;
         {
             let mut model = self.inner.model.write();
-            if !model.select_node(group_id, node_id) {
+            if self.is_busy("core")
+                || !model
+                    .group(group_id)
+                    .is_some_and(|g| g.enabled && g.manually_selectable())
+                || !model
+                    .node(node_id)
+                    .is_some_and(|n| n.usable_with(self.inner.settings.read().core))
+                || !model.select_node(group_id, node_id)
+            {
                 return;
             }
             let Some(group) = model.group(group_id) else {
@@ -1438,8 +1454,19 @@ impl AppService {
     // Latency
     // ------------------------------------------------------------------
 
+    fn try_begin_probe(&self, key: &str) -> bool {
+        let mut busy = self.inner.busy.write();
+        if ["latency", "download", "auto-probe"]
+            .iter()
+            .any(|k| busy.contains(*k))
+        {
+            return false;
+        }
+        busy.insert(key.to_owned())
+    }
+
     pub fn test_latency(&self, scope: LatencyScope) {
-        if self.is_busy("latency") || self.is_busy("download") {
+        if self.is_busy("latency") || self.is_busy("download") || self.is_busy("auto-probe") {
             return;
         }
         let model = self.inner.model.read().clone();
@@ -1490,7 +1517,9 @@ impl AppService {
             self.toast(ToastLevel::Warning, "没有可测试的节点");
             return;
         }
-        self.set_busy("latency", true);
+        if !self.try_begin_probe("latency") {
+            return;
+        }
         let service = self.clone();
         self.spawn(async move {
             use futures_util::{StreamExt, stream};
@@ -1559,7 +1588,7 @@ impl AppService {
 
     /// HTTP latency through a private core configured with exactly one node.
     pub fn test_real_latency(&self, node_id: &str) {
-        if self.is_busy("latency") || self.is_busy("download") {
+        if self.is_busy("latency") || self.is_busy("download") || self.is_busy("auto-probe") {
             return;
         }
         let settings = self.settings();
@@ -1587,7 +1616,9 @@ impl AppService {
                 return;
             }
         };
-        self.set_busy("latency", true);
+        if !self.try_begin_probe("latency") {
+            return;
+        }
         let service = self.clone();
         self.spawn(async move {
             let result = crate::runtime::probe::http_latency(
@@ -1622,7 +1653,7 @@ impl AppService {
     }
 
     pub fn test_download(&self, node_id: &str) {
-        if self.is_busy("download") || self.is_busy("latency") {
+        if self.is_busy("download") || self.is_busy("latency") || self.is_busy("auto-probe") {
             return;
         }
         let settings = self.settings();
@@ -1654,7 +1685,9 @@ impl AppService {
                 return;
             }
         };
-        self.set_busy("download", true);
+        if !self.try_begin_probe("download") {
+            return;
+        }
         self.set_busy(&format!("download:{}", node.id), true);
         self.inner.downloads.write().remove(&node.id);
         let service = self.clone();
@@ -4997,6 +5030,45 @@ proxy-groups:
     }
 
     #[test]
+    fn switch_policy_roundtrips_without_starting_or_changing_the_manual_choice() {
+        use crate::model::{FallbackScope, NodeSwitchPolicy, SwitchMode};
+        let (service, _dir) = service();
+        let mut model = service.model();
+        let a = Node::new("A", Protocol::Socks, "a.example", 1080);
+        let b = Node::new("B", Protocol::Socks, "b.example", 1080);
+        model.add_nodes([a.clone(), b.clone()]);
+        *service.inner.model.write() = model;
+        let policy = NodeSwitchPolicy {
+            mode: SwitchMode::Throughput,
+            fallback: FallbackScope::SameSubscription,
+            consecutive_failures: 3,
+        };
+        service.set_node_switch_policy("proxy", policy, 60).unwrap();
+        service.select_node("proxy", &b.id);
+        let snapshot = service.snapshot();
+        let stored = service
+            .store()
+            .load_profile(snapshot.active_profile.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.group("proxy").unwrap().switch_policy, policy);
+        assert_eq!(stored.model.group("proxy").unwrap().interval_secs, 60);
+        assert_eq!(snapshot.selected_node(None).unwrap().id, a.id);
+        assert!(!snapshot.config_dirty && !service.is_running());
+        assert!(service.set_node_switch_policy("proxy", policy, 10).is_err());
+        assert!(service.set_default_outbound_group("missing").is_err());
+        service.set_default_outbound_group("auto").unwrap();
+        assert_eq!(service.model().default_group.as_deref(), Some("auto"));
+        let mut snapshot = snapshot;
+        snapshot.process.phase = crate::core::ProcessPhase::Running;
+        snapshot
+            .runtime
+            .managed_nodes
+            .insert("proxy".into(), b.id.clone());
+        assert_eq!(snapshot.selected_node(None).unwrap().id, b.id);
+    }
+
+    #[test]
     fn selected_node_follows_group_selection_and_live_automatic_choice() {
         use crate::model::{GroupKind, OutboundGroup};
 
@@ -5092,6 +5164,7 @@ proxy-groups:
             refreshed_key.clone(),
             NodeLocation {
                 label: Some("旧位置".into()),
+                country: None,
                 checked_at: now_unix(),
                 pending: false,
             },
@@ -5107,7 +5180,11 @@ proxy-groups:
                 async move {
                     calls.fetch_add(1, Ordering::SeqCst);
                     gate.acquire().await.unwrap().forget();
-                    (!server.contains("server-5")).then(|| "演示位置".into())
+                    NodeLocation {
+                        label: (!server.contains("server-5")).then(|| "演示位置".into()),
+                        checked_at: now_unix(),
+                        ..Default::default()
+                    }
                 }
             }
         });

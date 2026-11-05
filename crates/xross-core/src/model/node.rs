@@ -1071,12 +1071,52 @@ fn default_true() -> bool {
     true
 }
 
+/// GroupDefault keeps native selection except for ordered failover groups.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchMode {
+    #[default]
+    GroupDefault,
+    Failover,
+    Latency,
+    Throughput,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackScope {
+    #[default]
+    Group,
+    SameSubscription,
+    SameRegion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct NodeSwitchPolicy {
+    pub mode: SwitchMode,
+    pub fallback: FallbackScope,
+    pub consecutive_failures: u8,
+}
+
+impl Default for NodeSwitchPolicy {
+    fn default() -> Self {
+        Self {
+            mode: SwitchMode::GroupDefault,
+            fallback: FallbackScope::Group,
+            consecutive_failures: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OutboundGroup {
     pub id: String,
     pub name: String,
     #[serde(default)]
     pub kind: GroupKind,
+    #[serde(default)]
+    pub switch_policy: NodeSwitchPolicy,
     #[serde(default)]
     pub members: Vec<String>,
     #[serde(default)]
@@ -1097,6 +1137,7 @@ impl OutboundGroup {
             id: new_id("group"),
             name: name.into(),
             kind,
+            switch_policy: Default::default(),
             members: Vec::new(),
             selected: None,
             interval_secs: default_interval(),
@@ -1108,6 +1149,21 @@ impl OutboundGroup {
     pub fn tag(&self) -> String {
         format!("group-{}", self.id)
     }
+    pub fn switch_mode(&self) -> SwitchMode {
+        match (self.switch_policy.mode, self.kind) {
+            (SwitchMode::GroupDefault, GroupKind::Fallback) => SwitchMode::Failover,
+            (mode, _) => mode,
+        }
+    }
+
+    pub fn managed(&self) -> bool {
+        self.switch_mode() != SwitchMode::GroupDefault
+    }
+
+    pub fn manually_selectable(&self) -> bool {
+        self.kind == GroupKind::Selector && !self.managed()
+    }
+
     pub fn active_node(&self) -> Option<&String> {
         self.selected.as_ref().or_else(|| self.members.first())
     }

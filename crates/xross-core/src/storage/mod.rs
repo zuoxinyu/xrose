@@ -18,7 +18,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -176,6 +176,36 @@ impl Store {
                     }
                     tx.execute(
                         "UPDATE subscriptions SET payload = ?1 WHERE id = ?2",
+                        params![encrypted, id],
+                    )?;
+                }
+            }
+        }
+        if version < 5 {
+            // Patch only missing group policies, preserving unknown fields in encrypted profiles.
+            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            let default = serde_json::to_value(crate::model::NodeSwitchPolicy::default())?;
+            for (id, payload) in rows {
+                let mut model: serde_json::Value =
+                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                let mut changed = false;
+                for group in model["groups"].as_array_mut().into_iter().flatten() {
+                    if group.get("switch_policy").is_none() {
+                        group["switch_policy"] = default.clone();
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("配置加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE profiles SET model = ?1 WHERE id = ?2",
                         params![encrypted, id],
                     )?;
                 }
@@ -660,6 +690,46 @@ mod tests {
         let subs = reopened.subscriptions().unwrap();
         assert!(subs[0].user_agent.is_empty());
         assert_eq!(subs[1].user_agent, "Custom/1");
+    }
+
+    #[test]
+    fn v4_migration_adds_policy_only_and_preserves_custom_group_fields() {
+        let (store, dir) = store();
+        let id = store.active_profile_id().unwrap();
+        let mut profile = serde_json::to_value(AppModel::default()).unwrap();
+        let group = &mut profile["groups"][0];
+        group.as_object_mut().unwrap().remove("switch_policy");
+        group["extra"] = "fixture".into();
+        let mut expected = profile.clone();
+        expected["groups"][0]["switch_policy"] =
+            serde_json::to_value(crate::model::NodeSwitchPolicy::default()).unwrap();
+        let payload = store.secrets.encrypt(&profile.to_string());
+        store
+            .conn
+            .lock()
+            .execute(
+                "UPDATE profiles SET model=?1 WHERE id=?2",
+                params![payload, id],
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 4)
+            .unwrap();
+        drop(store);
+        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        let raw: String = reopened
+            .conn
+            .lock()
+            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(SecretBox::is_encrypted(&raw));
+        let result: serde_json::Value =
+            serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
+        assert_eq!(result, expected);
     }
 
     #[test]

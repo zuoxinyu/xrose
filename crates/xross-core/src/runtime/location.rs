@@ -10,6 +10,8 @@ use crate::settings::Language;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NodeLocation {
     pub label: Option<String>,
+    #[serde(default)]
+    pub country: Option<String>,
     pub pending: bool,
     pub checked_at: i64,
 }
@@ -39,7 +41,7 @@ struct LocationResponse {
 }
 
 impl LocationResponse {
-    fn label(self) -> Option<String> {
+    fn label(&self) -> Option<String> {
         if !self.success {
             return None;
         }
@@ -83,9 +85,9 @@ fn is_public(ip: IpAddr) -> bool {
     }
 }
 
-pub(crate) async fn lookup(server: &str, language: Language) -> Option<String> {
+pub(crate) async fn lookup(server: &str, language: Language) -> NodeLocation {
     // Bound DNS and HTTP together. Query only the server IP, never credentials.
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let response = tokio::time::timeout(Duration::from_secs(8), async {
         let server = server.trim().trim_start_matches('[').trim_end_matches(']');
         let ip = if let Ok(ip) = server.parse::<IpAddr>() {
             is_public(ip).then_some(ip)?
@@ -115,12 +117,20 @@ pub(crate) async fn lookup(server: &str, language: Language) -> Option<String> {
             .ok()?
             .json::<LocationResponse>()
             .await
-            .ok()?
-            .label()
+            .ok()
     })
     .await
     .ok()
     .flatten()
+    .filter(|r| r.success);
+    NodeLocation {
+        label: response.as_ref().and_then(LocationResponse::label),
+        country: response
+            .map(|r| r.country.trim().to_owned())
+            .filter(|s| !s.is_empty()),
+        checked_at: crate::util::now_unix(),
+        pending: false,
+    }
 }
 
 #[cfg(test)]

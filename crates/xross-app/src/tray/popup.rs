@@ -404,11 +404,11 @@ impl Render for PopupView {
                     } else {
                         gpui_kit::hsla(0., 0., 0., 0.)
                     })
-                    .hover(|s| s.bg(p.accent))
-                    .cursor_pointer()
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
-                    )
+                    .when(d.group_id.is_some() && !d.busy_core, |row| {
+                        row.hover(|s| s.bg(p.accent)).cursor_pointer().on_click(
+                            cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
+                        )
+                    })
                     .child(
                         div()
                             .w(px(16.))

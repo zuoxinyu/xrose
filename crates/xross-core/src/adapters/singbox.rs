@@ -328,14 +328,23 @@ impl CoreAdapter for SingBoxAdapter {
                 continue;
             }
             let interval = format!("{}s", group.interval_secs.max(30));
-            let mut value = match group.kind {
-                GroupKind::Selector => json!({
-                    "type": "selector",
-                    "tag": group.tag(),
-                    "outbounds": members,
-                    "interrupt_exist_connections": true
-                }),
-                GroupKind::UrlTest => json!({
+            let value = match (group.managed(), group.kind) {
+                (true, _) | (_, GroupKind::Fallback | GroupKind::Selector) => {
+                    let selected = group
+                        .active_node()
+                        .and_then(|id| model.node(id))
+                        .map(Node::outbound_tag)
+                        .unwrap_or_else(|| members[0].clone());
+                    // A pinned group must not restore a different choice from the Clash cache.
+                    let choices = if group.managed() {
+                        vec![selected.clone()]
+                    } else {
+                        members
+                    };
+                    json!({"type": "selector", "tag": group.tag(), "outbounds": choices,
+                           "default": selected, "interrupt_exist_connections": true})
+                }
+                (false, GroupKind::UrlTest) => json!({
                     "type": "urltest",
                     "tag": group.tag(),
                     "outbounds": members,
@@ -343,21 +352,7 @@ impl CoreAdapter for SingBoxAdapter {
                     "interval": interval,
                     "tolerance": group.tolerance_ms
                 }),
-                GroupKind::Fallback => {
-                    warnings.push(format!(
-                        "sing-box 没有 fallback 出站，“{}”已编译为 tolerance=0 的 urltest",
-                        group.name
-                    ));
-                    json!({
-                        "type": "urltest",
-                        "tag": group.tag(),
-                        "outbounds": members,
-                        "url": group.url.clone().unwrap_or_else(|| ctx.urltest_url.clone()),
-                        "interval": interval,
-                        "tolerance": 0
-                    })
-                }
-                GroupKind::LoadBalance => {
+                (false, GroupKind::LoadBalance) => {
                     warnings.push(format!(
                         "sing-box 没有 loadbalance 出站，“{}”已编译为 selector",
                         group.name
@@ -370,13 +365,6 @@ impl CoreAdapter for SingBoxAdapter {
                     })
                 }
             };
-            if group.kind == GroupKind::Selector {
-                if let Some(node_id) = group.active_node() {
-                    if let Some(node) = model.node(node_id) {
-                        value["default"] = json!(node.outbound_tag());
-                    }
-                }
-            }
             outbounds.push(value);
         }
 
@@ -558,6 +546,8 @@ impl CoreAdapter for SingBoxAdapter {
             json: Value::Object(root),
             warnings,
             inbounds: compiled_inbounds,
+            managed_groups: model.managed_route_groups(),
+            core_version: ctx.core_version.clone(),
             rule_sets: model.routing.rule_sets.clone(),
             default_outbound: final_tag,
         })
@@ -1299,6 +1289,32 @@ fn build_dns(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn managed_route_pins_an_eligible_node_and_keeps_other_groups_idle() {
+        let (mut model, settings, ctx) = sample();
+        let unavailable = model.nodes[0].id.clone();
+        model.nodes[0].enabled = false;
+        let valid = Node::new("可用节点", Protocol::Socks, "candidate.example", 1080);
+        model.add_nodes([valid.clone()]);
+        for g in &mut model.groups {
+            g.kind = GroupKind::Fallback;
+            g.selected = Some(unavailable.clone());
+        }
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(compiled.managed_groups.len(), 1);
+        assert_eq!(compiled.managed_groups[0].id, "proxy");
+        assert_eq!(compiled.managed_groups[0].members, [valid.id.clone()]);
+        let outbound = compiled.json["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "group-proxy")
+            .unwrap();
+        assert_eq!(outbound["type"], "selector");
+        assert_eq!(outbound["outbounds"], json!([valid.outbound_tag()]));
+        assert_eq!(outbound["default"], valid.outbound_tag());
+    }
+
     #[test]
     fn vpn_endpoints_groups_dns_and_version_degradation() {
         let (mut model, settings, mut ctx) = sample();

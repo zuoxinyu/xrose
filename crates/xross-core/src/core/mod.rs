@@ -496,37 +496,102 @@ impl CoreManager {
             .lock()
             .clone()
             .ok_or_else(|| Error::other("缺少已应用代理配置，请先重新应用配置"))?;
+        self.replace_applied(&old, old.model.clone(), &plan).await?;
+        *self.mesh.lock() = plan;
+        Ok(true)
+    }
+
+    pub(crate) fn managed_selections(&self) -> std::collections::BTreeMap<String, String> {
+        self.applied
+            .lock()
+            .iter()
+            .flat_map(|a| &a.compiled.managed_groups)
+            .filter_map(|g| Some((g.id.clone(), g.active_node()?.clone())))
+            .collect()
+    }
+
+    pub(crate) fn managed_probe_groups(&self) -> Vec<crate::model::OutboundGroup> {
+        self.applied
+            .lock()
+            .as_ref()
+            .map(|a| a.compiled.managed_groups.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn managed_probe_model(&self) -> Option<AppModel> {
+        self.applied.lock().as_ref().map(|a| a.model.clone())
+    }
+
+    /// Recheck the running session under the same lock as stop, start and mesh updates.
+    pub(crate) async fn switch_managed_node(
+        &self,
+        expected: &ProcessState,
+        group: &crate::model::OutboundGroup,
+        node_id: &str,
+    ) -> Result<bool> {
+        let _guard = self.operation.lock().await;
+        let state = self.state();
+        if state.phase != ProcessPhase::Running
+            || state.pid != expected.pid
+            || state.started_at != expected.started_at
+        {
+            return Ok(false);
+        }
+        let Some(old) = self.applied.lock().clone() else {
+            return Ok(false);
+        };
+        if !old.compiled.managed_groups.contains(group)
+            || !group.members.iter().any(|id| id == node_id)
+        {
+            return Ok(false);
+        }
+        let mut model = old.model.clone();
+        if !model.select_node(&group.id, node_id) {
+            return Ok(false);
+        }
+        let plan = self.mesh_plan();
+        self.replace_applied(&old, model, &plan).await?;
+        Ok(true)
+    }
+
+    async fn replace_applied(
+        &self,
+        old: &AppliedConfig,
+        model: AppModel,
+        plan: &crate::mesh::coexist::CoexistencePlan,
+    ) -> Result<()> {
         let mut ctx = adapters::CompileContext::new(
             &old.settings,
             self.paths.data_dir.clone(),
             self.paths.runtime_dir.clone(),
         );
         ctx.mesh = plan.clone();
-        let compiled = adapters::adapter_for(old.core).compile(&old.model, &old.settings, &ctx)?;
-        let candidate = self.paths.runtime_dir.join("mesh-candidate.json");
+        ctx.core_version = old.compiled.core_version.clone();
+        let compiled = adapters::adapter_for(old.core).compile(&model, &old.settings, &ctx)?;
+        let candidate = self.paths.runtime_dir.join("runtime-candidate.json");
         atomic_write_private(&candidate, compiled.to_pretty_string()?.as_bytes())?;
         let binary = self.resolve_binary(old.core, &old.settings)?;
         let validation = adapters::validate(old.core, &binary, &candidate).await;
         let _ = std::fs::remove_file(&candidate);
         let report = validation?;
         if !report.ok {
-            return Err(Error::config("组网共存配置校验失败，原代理继续运行"));
+            return Err(Error::config("运行配置校验失败，原代理继续运行"));
         }
         self.supervisor.stop().await?;
         let next = AppliedConfig {
+            model,
             compiled: compiled.clone(),
             ..old.clone()
         };
         replace_with_rollback(self.spawn_applied(&next), async {
             self.supervisor.stop().await?;
-            self.spawn_applied(&old).await
+            self.spawn_applied(old).await
         })
         .await?;
-        *self.mesh.lock() = plan;
         *self.applied.lock() = Some(next);
         *self.last_compiled.lock() = Some(compiled);
         *self.last_validation.lock() = Some(report);
-        Ok(true)
+        Ok(())
     }
 
     async fn spawn_applied(&self, applied: &AppliedConfig) -> Result<()> {
@@ -631,13 +696,13 @@ impl CoreManager {
 
 fn startup_ready(phase: ProcessPhase, ready: bool, expired: bool) -> Result<bool> {
     if !matches!(phase, ProcessPhase::Starting | ProcessPhase::Running) {
-        return Err(Error::other("组网共存配置启动失败，请检查内核日志"));
+        return Err(Error::other("新配置启动失败，请检查内核日志"));
     }
     if phase == ProcessPhase::Running && ready {
         return Ok(true);
     }
     if expired {
-        return Err(Error::other("组网共存配置启动超时，请检查内核日志"));
+        return Err(Error::other("新配置启动超时，请检查内核日志"));
     }
     Ok(false)
 }
@@ -648,7 +713,7 @@ async fn replace_with_rollback(
 ) -> Result<()> {
     if let Err(error) = replace.await {
         restore.await.map_err(|_| {
-            Error::other("组网共存配置启动失败，原代理恢复失败；请停止组网并检查代理日志")
+            Error::other("新配置启动失败，原代理恢复失败；请检查内核日志并重新启动")
         })?;
         return Err(Error::other(format!("{error}；已恢复原代理配置")));
     }

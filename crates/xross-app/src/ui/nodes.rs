@@ -11,7 +11,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::model::{CoreKind, GroupKind, Node};
+use xross_core::model::{
+    CoreKind, FallbackScope, GroupKind, Node, NodeSwitchPolicy, OutboundGroup, SwitchMode,
+};
 use xross_core::service::LatencyScope;
 use xross_core::settings::Language;
 use xross_core::storage::LatencyEntry;
@@ -79,7 +81,6 @@ impl AppView {
             .snapshot
             .selected_node(active_group.as_deref())
             .map(|n| n.id.clone());
-        let running = self.snapshot.process.phase.is_alive();
         let is_xray = self.snapshot.settings.core == CoreKind::Xray;
         let is_core_busy = this_busy(&self.snapshot.busy, "core");
 
@@ -187,12 +188,7 @@ impl AppView {
 
         // Filter and sort nodes.
         let group_id_for_select = active_group.clone();
-        let group_kind = group
-            .as_ref()
-            .map(|g| g.kind)
-            .unwrap_or(GroupKind::Selector);
-        // Automatic groups pick the node themselves; rows only display it.
-        let auto_mode = group_kind != GroupKind::Selector;
+        let auto_mode = group.as_ref().is_some_and(|g| !g.manually_selectable());
 
         let sort_active = has_nodes && self.sort_by_latency;
         let grouped = has_nodes && self.group_by_subscription;
@@ -248,7 +244,9 @@ impl AppView {
         let batch_mode = self.batch_mode;
         let batch_selected = self.batch_selected.clone();
         let latency_busy = this_busy(&self.snapshot.busy, "latency");
-        let tests_busy = latency_busy || this_busy(&self.snapshot.busy, "download");
+        let tests_busy = latency_busy
+            || this_busy(&self.snapshot.busy, "download")
+            || this_busy(&self.snapshot.busy, "auto-probe");
         let exit_busy = this_busy(&self.snapshot.busy, "mesh-exit");
         let core_busy = is_core_busy || exit_busy;
         let exit_count = exits.len();
@@ -420,9 +418,7 @@ impl AppView {
                                         .map(|g| {
                                             if g.id == "proxy" || g.id == "auto" {
                                                 match g.kind {
-                                                    GroupKind::Selector => {
-                                                        self.tr("手动", "Manual")
-                                                    }
+                                                    GroupKind::Selector => self.tr("代理", "Proxy"),
                                                     GroupKind::UrlTest => self.tr("自动", "Auto"),
                                                     GroupKind::Fallback => {
                                                         self.tr("故障转移", "Fallback")
@@ -452,6 +448,9 @@ impl AppView {
                                 )),
                             ),
                     )
+                })
+                .when_some(group.as_ref().filter(|_| has_nodes), |d, group| {
+                    d.child(self.node_switch_controls(group, &p, cx))
                 })
                 .when(has_nodes, |d| {
                     d.child(
@@ -868,8 +867,113 @@ impl AppView {
                 .children(exit_rows),
         );
 
-        let _ = running;
         body
+    }
+
+    fn node_switch_controls(
+        &self,
+        group: &OutboundGroup,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let busy = this_busy(&self.snapshot.busy, "core");
+        let disabled = busy || !group.enabled;
+        let policy = group.switch_policy;
+        let interval = group.interval_secs.max(30);
+        let id = group.id.clone();
+        let mode_id = id.clone();
+        let default_id = id.clone();
+        let scope_id = id.clone();
+        let failure_id = id.clone();
+        let is_default = self.snapshot.model.default_group.as_ref() == Some(&id);
+        let mut modes = vec![
+            (
+                SwitchMode::GroupDefault,
+                self.tr("出站组默认", "Group default"),
+            ),
+            (SwitchMode::Failover, self.tr("仅故障切换", "Failover only")),
+            (SwitchMode::Latency, self.tr("延迟优先", "Lowest latency")),
+            (
+                SwitchMode::Throughput,
+                self.tr("吞吐量优先", "Highest throughput"),
+            ),
+        ];
+        if group.kind == GroupKind::Fallback {
+            modes.remove(0);
+        }
+        let mode = group.switch_mode();
+        let row = |label: SharedString| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .items_center()
+                .child(div().text_xs().text_color(p.muted_fg).child(label))
+        };
+        let scopes = [
+            FallbackScope::Group,
+            FallbackScope::SameSubscription,
+            FallbackScope::SameRegion,
+        ];
+        let mut failures = vec![1u8, 2, 3];
+        let count = policy.consecutive_failures.max(1);
+        if !failures.contains(&count) {
+            failures.push(count);
+        }
+        let mut intervals = vec![30u64, 60, 300];
+        if !intervals.contains(&interval) {
+            intervals.push(interval);
+            intervals.sort_unstable();
+        }
+        div().flex().flex_col().gap_2()
+            .child(row(self.tr("切换条件", "Switch when"))
+                .child(ChoiceGroup::new("node-switch-mode", modes.iter().map(|(_, label)| label.clone()).collect(), modes.iter().position(|(m,_)| *m == mode).unwrap_or(0))
+                .disabled(disabled).on_change(cx.listener(move |this, i: &usize, _, cx| {
+                    this.save_node_switch(&mode_id, NodeSwitchPolicy { mode: modes[*i].0, ..policy }, interval, cx);
+                })))
+                .when(!is_default, |row| row.child(Button::new("default-outbound-group").compact()
+                    .label(self.tr("设为默认出站组", "Use as default group")).disabled(disabled)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Err(e) = this.service.set_default_outbound_group(&default_id) {
+                            this.service.toast(xross_core::service::ToastLevel::Error, e.to_string());
+                        }
+                        this.sync(cx);
+                    }))))
+                .when(is_default, |row| row.child(div().text_xs().text_color(p.muted_fg).child(self.tr("默认出站组", "Default group")))))
+            .when(group.managed(), |d| d
+                .child(row(self.tr("故障回退范围", "Fallback scope"))
+                    .child(ChoiceGroup::new("node-fallback-scope", vec![self.tr("组内全部", "Entire group"), self.tr("同订阅", "Same subscription"), self.tr("同地区", "Same region")], scopes.iter().position(|s| *s == policy.fallback).unwrap_or(0))
+                        .disabled(disabled).on_change(cx.listener(move |this, i: &usize, _, cx| {
+                            this.save_node_switch(&scope_id, NodeSwitchPolicy {fallback: scopes[*i], ..policy}, interval, cx);
+                        }))))
+                .child(row(self.tr("连续失败次数", "Consecutive failures"))
+                    .child(ChoiceGroup::new("node-failure-count", failures.iter().map(|v| v.to_string().into()).collect(), failures.iter().position(|v| *v == count).unwrap_or(0))
+                        .disabled(disabled).on_change(cx.listener(move |this, i: &usize, _, cx| {
+                            this.save_node_switch(&failure_id, NodeSwitchPolicy { consecutive_failures: failures[*i], ..policy }, interval, cx);
+                        })))
+                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr("检查间隔", "Check interval")))
+                    .child(ChoiceGroup::new("node-check-interval", intervals.iter().map(|v| format!("{v} s").into()).collect(), intervals.iter().position(|v| *v == interval).unwrap_or(0))
+                        .disabled(disabled).on_change(cx.listener(move |this, i: &usize, _, cx| {
+                            this.save_node_switch(&id, policy, intervals[*i], cx);
+                        }))))
+                .child(div().text_xs().text_color(p.muted_fg).child(self.tr("仅检查路由使用的出站组。切换时会重启内核，现有连接将中断。", "Only groups used by routing are checked. Switching restarts the core and interrupts active connections.")))
+                .when(mode == SwitchMode::Throughput, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("每轮每个节点最多下载 1 MiB；下载速度至少提高 10% 时切换。", "Each round downloads up to 1 MiB per node. Switching requires a speed gain of at least 10%."))))
+                .when(policy.fallback == FallbackScope::SameRegion, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("按服务器 IP 查询国家或地区。归属地未知时不回退。", "Country or region is looked up by server IP. Unknown locations are excluded."))))
+                .when(this_busy(&self.snapshot.busy, "auto-probe"), |d| d.child(div().text_xs().text_color(p.primary).child(self.tr("正在检查节点…", "Checking nodes…")))))
+    }
+
+    fn save_node_switch(
+        &mut self,
+        group: &str,
+        policy: NodeSwitchPolicy,
+        interval: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(e) = self.service.set_node_switch_policy(group, policy, interval) {
+            self.service
+                .toast(xross_core::service::ToastLevel::Error, e.to_string());
+        }
+        self.sync(cx);
     }
 }
 

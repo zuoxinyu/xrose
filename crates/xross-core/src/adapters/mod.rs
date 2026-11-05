@@ -135,6 +135,9 @@ pub struct CompiledConfig {
     pub inbounds: Vec<CompiledInbound>,
     pub rule_sets: Vec<RuleSet>,
     pub default_outbound: String,
+    /// Managed groups after removing nodes that this core could not compile.
+    pub(crate) managed_groups: Vec<crate::model::OutboundGroup>,
+    pub(crate) core_version: Option<semver::Version>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -362,12 +365,10 @@ pub fn action_tag(core: CoreKind, model: &AppModel, action: &RouteAction) -> Opt
         RouteActionKind::Block => Some("block".into()),
         RouteActionKind::Proxy => {
             if core == CoreKind::Xray {
-                // Xray has no selector outbound: a selector compiles to a
-                // balancer pinned to the selected node. Switching nodes goes
-                // through config regeneration + core restart.
+                // Manual and client-managed groups route directly to the selected node.
                 if let Some(group_id) = model.resolve_proxy_group(action) {
                     if let Some(group) = model.group(&group_id) {
-                        if group.kind == crate::model::GroupKind::Selector {
+                        if group.kind == crate::model::GroupKind::Selector || group.managed() {
                             if let Some(node_id) = group.active_node() {
                                 if let Some(node) = model.node(node_id) {
                                     return Some(node.outbound_tag());

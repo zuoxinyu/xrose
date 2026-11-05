@@ -29,7 +29,8 @@
 | 自定义规则分组 | 按组展开 | 按组展开 | 启用组按顺序先于未分组/预设规则；本地预览共用 `effective_rules()`；PAC 从启用规则收集直连条件 |
 | selector 热切换 | 无 | Clash API | Xray 选择节点 = 改配置 + 重启 |
 | urltest | balancer + observatory | 原生 urltest | 分别生成 |
-| fallback / loadbalance | leastPing / random | 无 | sing-box 映射为 urltest/selector + 警告 |
+| 故障转移 / 自定义节点切换策略 | 路由固定到选中节点 | 单成员选择组，避免旧缓存覆盖选择 | 客户端按策略探测、校验并重启；故障组不再降级为最低延迟 |
+| loadbalance（默认策略） | random | 无 | sing-box 映射为 selector + 警告 |
 | block | blackhole 出站 | `action: reject` | 不生成 legacy block 出站 |
 | geoip/geosite | 原生字段 | 1.8 起移除 | 自动生成 `.srs` rule-set 引用 |
 | GFWList 来源 | `geosite:gfw`（需对应资产） | `geosite-gfw` rule-set | 使用 MetaCubeX `gfw.srs`；编译、预下载、手动更新共用来源解析 |
@@ -49,6 +50,12 @@ sing-box 测试内核启用 `auto_detect_interface`；Xray TUN 下的测试内�
 WireGuard 字段依据 [sing-box endpoint 文档](https://sing-box.sagernet.org/configuration/endpoint/wireguard/)
 与 [Xray 出站文档](https://xtls.github.io/en/config/outbounds/wireguard.html)。`Credentials.wireguard` 随配置整体加密保存，`NodeDraft` 统一校验密钥长度与地址格式。
 配置中的前置节点失效时，编译会提示重新选择。独立 HTTP 延迟和下载测试复用同一前置节点；启用前置代理时，批量延迟测试改用 HTTP。Xray TUN 下单独为首跳解析地址并绑定上联网卡。字段定义见 [Xray Sockopt](https://xtls.github.io/config/transports/sockopt.html) 和 [sing-box 拨号字段](https://sing-box.sagernet.org/configuration/shared/dial/)。
+
+节点切换策略保存在每个出站组的 `switch_policy`。数据库 v5 为旧组补充默认策略，保留其他字段和原有手动选择。故障转移组默认由客户端按成员顺序处理；其他类型只有显式选择策略时才由客户端接管。适配器先按实际内核能力剔除不可编译的节点，再把代理路由实际引用的策略组和成员交给服务。默认组选择与节点页正在查看的组相互独立。
+
+`service/node_switch.rs` 仅在有运行中内核、无待应用编辑时探测已应用配置。每组独立记录检查间隔和当前节点连续失败次数；成功即清零，停止或更换内核进程后放弃旧探测。决策只比较本轮结果，不使用列表中历史测速或总流量。延迟使用组的 HTTP 测试地址和容差；吞吐量串行取最多 1 MiB 的下载样本，至少提升 10% 才切换。故障时按当前节点的订阅 ID 或服务器归属地的国家／地区字段过滤，不比较城市或翻译后的完整标签。范围内全不可用时保留原节点。
+
+切换在内核操作锁中复核进程与组成员，基于上次已应用模型校验新配置，启动失败时回滚。运行时选择通过快照提供给节点页、标题栏与托盘，不改写用户保存的起始节点。
 
 新增 `RoutingConfig.rule_groups` 使用 serde 默认空数组，旧配置无需数据库结构迁移；预设只替换未分组规则。
 AnyTLS 字段依据 [sing-box 官方文档](https://sing-box.sagernet.org/configuration/outbound/anytls/)。
