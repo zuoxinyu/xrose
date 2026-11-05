@@ -382,19 +382,19 @@ fn extract_archive(archive: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs `--version` and extracts a version string. Errors are soft: an unknown
+/// Runs `version` and extracts a version string. Errors are soft: an unknown
 /// version string is still usable.
 pub async fn probe_version(binary: &Path) -> Option<String> {
-    let output = tokio::process::Command::new(binary)
-        .arg("version")
-        .output()
-        .await
-        .ok()?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let (code, text) = super::process::run_capture(
+        binary,
+        &["version".into()],
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .ok()?;
+    if code != 0 {
+        return None;
+    }
     let re = regex::Regex::new(r"(?i)\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)").ok()?;
     re.captures(&text).map(|c| c[1].to_string())
 }

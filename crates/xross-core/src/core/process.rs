@@ -601,6 +601,7 @@ pub async fn run_capture(
 ) -> Result<(i32, String)> {
     let mut command = tokio::process::Command::new(program);
     command
+        .kill_on_drop(true)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -626,7 +627,10 @@ pub async fn run_capture(
             Ok((output.status.code().unwrap_or(-1), text))
         }
         Ok(Err(e)) => Err(Error::process(format!("运行 core 失败：{e}"))),
-        Err(_) => Err(Error::process("core 检查超时（20 秒）")),
+        Err(_) => Err(Error::process(format!(
+            "内核检查超时（{} 秒）",
+            timeout.as_secs()
+        ))),
     }
 }
 

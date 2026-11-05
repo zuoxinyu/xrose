@@ -30,6 +30,7 @@ pub const SOCKET_NAME: &str = "io.xross.helper.v1";
 /// Flags recognized by [`helper_main`]. `xross-app` and `xross-cli` both run
 /// these before touching the database or the GUI.
 pub const HELPER_ARG: &str = "--helper";
+const UPDATE_ARG: &str = "--update-helper";
 pub const INSTALL_ARG: &str = "--install-helper";
 pub const UNINSTALL_ARG: &str = "--uninstall-helper";
 pub const START_ARG: &str = "--start-helper";
@@ -133,6 +134,7 @@ pub struct HelperStatus {
     pub supported: bool,
     pub installed: bool,
     pub running: bool,
+    pub needs_update: bool,
     pub elevated: bool,
     pub detail: String,
     pub executable: Option<String>,
@@ -328,7 +330,7 @@ pub fn handle_request(request: HelperRequest) -> HelperResponse {
                 Err(_) => HelperResponse::error("无法读取代理 TUN 状态"),
             }
         }
-        HelperRequest::Ping => HelperResponse::ok("pong"),
+        HelperRequest::Ping => HelperResponse::ok(helper_signature()),
         HelperRequest::Status => HelperResponse::ok(format!(
             "Xross 提权助手 {}（{}，管理员权限）",
             env!("CARGO_PKG_VERSION"),
@@ -450,6 +452,7 @@ pub fn initial_status() -> HelperStatus {
         supported,
         installed: supported && platform::is_installed(),
         running: false,
+        needs_update: false,
         elevated: is_elevated(),
         detail: "正在检测提权助手…".to_string(),
         executable: std::env::current_exe()
@@ -479,18 +482,37 @@ pub fn invalidate_status() {
     *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+// Legacy clients only inspect the response status, so the ping can also
+// identify the running executable without a second IPC round trip.
+fn helper_signature() -> String {
+    format!(
+        "pong:{}:{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::mesh::PROTOCOL_VERSION
+    )
+}
+
+fn probe_helper(timeout: Duration) -> Option<bool> {
+    ping_is_current(&call_with_timeout(&HelperRequest::Ping, timeout).ok()?)
+}
+
+fn ping_is_current(reply: &HelperResponse) -> Option<bool> {
+    reply.is_ok().then(|| reply.message() == helper_signature())
+}
+
 fn compute_status() -> HelperStatus {
     let supported = supported();
-    let running = matches!(
-        call_with_timeout(&HelperRequest::Ping, Duration::from_millis(1500)),
-        Ok(response) if response.is_ok()
-    );
+    let current = probe_helper(Duration::from_millis(1500));
+    let running = current.is_some();
+    let needs_update = current == Some(false);
     // A running helper necessarily means it was installed (or started by a
     // privileged user); skipping the task/service query keeps the 400 ms UI
     // poll from spawning `schtasks`/`systemctl` continuously.
     let installed = supported && (running || platform::is_installed());
     let detail = if !supported {
         "该操作系统没有可用的提权助手实现".to_string()
+    } else if needs_update {
+        "当前助手与应用版本不一致，请在设置中更新提权助手".to_string()
     } else if running {
         "助手正在运行：可代启 TUN 核心、修改系统 DNS 与透明代理规则".to_string()
     } else if installed {
@@ -502,6 +524,7 @@ fn compute_status() -> HelperStatus {
         supported,
         installed,
         running,
+        needs_update,
         elevated: is_elevated(),
         detail,
         executable: std::env::current_exe()
@@ -539,7 +562,7 @@ pub fn install() -> Result<String> {
             "提权助手已安装，但尚未响应；下次登录会自动启动".into()
         });
     }
-    let message = platform::install()?;
+    let message = register_and_start(platform::register, platform::start)?;
     invalidate_status();
     Ok(message)
 }
@@ -553,18 +576,54 @@ pub fn update() -> Result<String> {
         return Err(Error::other("请先安装提权助手"));
     }
     if is_elevated() {
-        platform::install()?;
+        update_and_start()?;
     } else {
-        platform::run_elevated(&elevated_args(INSTALL_ARG))?;
+        platform::run_elevated(&elevated_args(UPDATE_ARG))?;
     }
     invalidate_status();
-    if wait_until_running(Duration::from_secs(8)) {
-        Ok("提权助手已更新并启动".into())
-    } else {
-        Err(Error::other(
-            "提权助手已更新，但未能启动，请检查系统服务状态后重试",
-        ))
+    if probe_helper(Duration::from_secs(2)) != Some(true) {
+        return Err(Error::other(
+            "提权助手更新后未响应或版本不匹配，请检查系统服务后重试",
+        ));
     }
+    Ok("提权助手已更新并启动".into())
+}
+
+// Keep registration, startup and the readiness check inside one elevation prompt.
+fn update_and_start() -> Result<()> {
+    finish_update(platform::register, platform::start, || {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            if probe_helper(Duration::from_millis(600)) == Some(true) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        false
+    })
+}
+
+fn register_and_start(
+    register: impl FnOnce() -> Result<String>,
+    start: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let message = register()?;
+    start().map_err(|e| Error::other(format!("提权助手已注册，但启动失败：{e}")))?;
+    Ok(message)
+}
+
+fn finish_update(
+    register: impl FnOnce() -> Result<String>,
+    start: impl FnOnce() -> Result<String>,
+    ready: impl FnOnce() -> bool,
+) -> Result<()> {
+    register_and_start(register, start)?;
+    if !ready() {
+        return Err(Error::other(
+            "提权助手已更新，但新版本未响应，请检查系统服务状态后重试",
+        ));
+    }
+    Ok(())
 }
 
 /// Removes the service/task. A running helper is stopped first.
@@ -689,7 +748,7 @@ pub fn helper_main(args: &[String]) -> Result<bool> {
     };
     if !matches!(
         flag,
-        HELPER_ARG | INSTALL_ARG | UNINSTALL_ARG | START_ARG | STATUS_ARG
+        HELPER_ARG | INSTALL_ARG | UPDATE_ARG | UNINSTALL_ARG | START_ARG | STATUS_ARG
     ) {
         return Ok(false);
     }
@@ -698,8 +757,9 @@ pub fn helper_main(args: &[String]) -> Result<bool> {
     }
     match flag {
         HELPER_ARG => run_helper()?,
+        UPDATE_ARG => update_and_start()?,
         INSTALL_ARG => {
-            let message = platform::install()?;
+            let message = register_and_start(platform::register, platform::start)?;
             invalidate_status();
             println!("{message}");
         }
@@ -727,6 +787,7 @@ fn status_json(status: &HelperStatus) -> serde_json::Value {
         "supported": status.supported,
         "installed": status.installed,
         "running": status.running,
+        "needs_update": status.needs_update,
         "elevated": status.elevated,
         "label": status.label(),
         "detail": status.detail,
@@ -933,7 +994,7 @@ mod platform {
         command_ok("schtasks", &["/Query", "/TN", TASK_NAME])
     }
 
-    pub fn install() -> Result<String> {
+    pub fn register() -> Result<String> {
         let source =
             std::env::current_exe().map_err(|e| Error::other(format!("定位当前程序失败：{e}")))?;
         let directory = crate::paths::AppPaths::discover().data_dir.join("helper");
@@ -974,7 +1035,6 @@ mod platform {
                 created.trim()
             )));
         }
-        start()?;
         Ok(format!(
             "已安装提权助手（计划任务 {TASK_NAME}，登录时以最高权限启动）"
         ))
@@ -1268,7 +1328,7 @@ mod platform {
         Path::new(PLIST).exists()
     }
 
-    pub fn install() -> Result<String> {
+    pub fn register() -> Result<String> {
         let exe =
             std::env::current_exe().map_err(|e| Error::other(format!("定位当前程序失败：{e}")))?;
         let uid = super::install_uid();
@@ -1315,12 +1375,20 @@ mod platform {
         if !bootstrapped {
             run("launchctl", &["load", "-w", PLIST])?;
         }
-        run("launchctl", &["kickstart", "-k", &target])?;
         Ok(format!("已安装提权助手（LaunchDaemon {LAUNCHD_LABEL}）"))
     }
 
     pub fn start() -> Result<String> {
-        let _ = install()?;
+        let target = format!("system/{LAUNCHD_LABEL}");
+        run("launchctl", &["enable", &target])?;
+        if !Command::new("launchctl")
+            .args(["print", &target])
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            run("launchctl", &["bootstrap", "system", PLIST])?;
+        }
+        run("launchctl", &["kickstart", "-k", &target])?;
         Ok("已请求 launchd 启动提权助手".into())
     }
 
@@ -1522,7 +1590,7 @@ mod platform {
         Path::new(UNIT_PATH).exists()
     }
 
-    pub fn install() -> Result<String> {
+    pub fn register() -> Result<String> {
         let exe =
             std::env::current_exe().map_err(|e| Error::other(format!("定位当前程序失败：{e}")))?;
         let uid = super::install_uid();
@@ -1538,9 +1606,7 @@ mod platform {
             .map_err(|e| Error::other(format!("写入 {UNIT_PATH} 失败：{e}")))?;
         run("systemctl", &["daemon-reload"])?;
         run("systemctl", &["enable", SYSTEMD_UNIT])?;
-        // Enabling an active unit does not replace its running executable.
-        let _ = super::request_shutdown();
-        run("systemctl", &["restart", SYSTEMD_UNIT])?;
+
         Ok(format!("已安装提权助手（systemd 服务 {SYSTEMD_UNIT}）"))
     }
 
@@ -1795,7 +1861,7 @@ mod platform {
     pub fn is_installed() -> bool {
         false
     }
-    pub fn install() -> Result<String> {
+    pub fn register() -> Result<String> {
         Err(Error::other("当前平台不支持提权助手"))
     }
     pub fn uninstall() -> Result<String> {
@@ -1915,11 +1981,49 @@ mod tests {
     }
 
     #[test]
+    fn only_a_current_helper_acknowledges_an_update() {
+        assert_eq!(
+            ping_is_current(&handle_request(HelperRequest::Ping)),
+            Some(true)
+        );
+        for old in ["pong", "pong:0.0.0:0"] {
+            assert_eq!(ping_is_current(&HelperResponse::ok(old)), Some(false));
+        }
+        assert_eq!(ping_is_current(&HelperResponse::error("unavailable")), None);
+    }
+
+    #[test]
+    fn helper_update_starts_the_replacement_and_waits_for_it() {
+        use std::cell::Cell;
+        let starts = Cell::new(0);
+        let install = || Ok(String::new());
+        let start = || {
+            starts.set(starts.get() + 1);
+            Ok(String::new())
+        };
+        finish_update(install, start, || starts.get() == 1).unwrap();
+        assert_eq!(starts.get(), 1);
+        assert!(finish_update(install, start, || false).is_err());
+        assert_eq!(starts.get(), 2);
+        assert!(finish_update(|| Err(Error::other("安装失败")), start, || false).is_err());
+        assert_eq!(starts.get(), 2);
+        assert!(
+            finish_update(
+                install,
+                || Err(Error::other("启动失败")),
+                || panic!("must not probe")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn helper_status_labels_cover_every_state() {
         let base = HelperStatus {
             supported: true,
             installed: false,
             running: false,
+            needs_update: false,
             elevated: false,
             detail: String::new(),
             executable: None,

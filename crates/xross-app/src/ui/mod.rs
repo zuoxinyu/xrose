@@ -602,6 +602,8 @@ impl AppView {
             .child(div().flex().flex_col().gap_1().p_2().flex_1().children(
                 Page::all().into_iter().map(|page| {
                     let active = self.page == page;
+                    let has_update =
+                        page == Page::Settings && self.snapshot.settings_update_available();
                     div().child(
                         Button::new(SharedString::from(format!("nav-{page:?}")))
                             .ghost()
@@ -609,7 +611,11 @@ impl AppView {
                             .w_full()
                             .h(px(40.))
                             .justify_start()
-                            .accessibility_label(tr(lang, page.zh(), page.en()))
+                            .accessibility_label(if has_update {
+                                tr(lang, "设置，有更新", "Settings, update available")
+                            } else {
+                                tr(lang, page.zh(), page.en())
+                            })
                             .child(
                                 div()
                                     .w_full()
@@ -617,7 +623,14 @@ impl AppView {
                                     .items_center()
                                     .gap_3()
                                     .child(Icon::new(page.icon()).size(px(18.)))
-                                    .child(tr(lang, page.zh(), page.en())),
+                                    .child(tr(lang, page.zh(), page.en()))
+                                    .when(has_update, |d| {
+                                        d.child(div().flex_1()).child(pill(
+                                            tr(lang, "更新", "Update"),
+                                            p.info,
+                                            p.info.opacity(0.1),
+                                        ))
+                                    }),
                             )
                             .text_color(if active { p.primary } else { p.muted_fg })
                             .when(active, |b| b.bg(p.accent))

@@ -96,6 +96,7 @@ impl AppView {
         let settings = self.snapshot.settings.clone();
         let binaries = self.snapshot.binaries.clone();
         let updates = self.snapshot.updates.clone();
+        let core_check = updates.cores.get(settings.core.as_str());
         let platform = self.snapshot.platform.clone();
         let doctor = self.snapshot.doctor.clone();
         let helper_busy = self.snapshot.busy.iter().any(|b| b == "helper");
@@ -416,7 +417,7 @@ impl AppView {
 
         // Core & updates ------------------------------------------------
         let is_installing = self.snapshot.busy.iter().any(|b| b == "install");
-        let is_checking_updates = self.snapshot.busy.iter().any(|b| b == "updates");
+        let is_checking_updates = self.snapshot.busy.iter().any(|b| b.starts_with("updates-"));
 
         let mut core_card = card(&p)
             .child(section_title(
@@ -520,6 +521,23 @@ impl AppView {
                                     .text_color(p.fg)
                                     .child(core_title),
                             )
+                            .when_some(
+                                updates
+                                    .cores
+                                    .get(core.as_str())
+                                    .and_then(|c| c.candidate.as_ref()),
+                                |d, candidate| {
+                                    d.child(pill(
+                                        format!(
+                                            "{} {}",
+                                            self.tr("可更新至", "Update to"),
+                                            candidate.version
+                                        ),
+                                        p.info,
+                                        p.info.opacity(0.1),
+                                    ))
+                                },
+                            )
                             .when(is_engine, |d| {
                                 d.child(pill(
                                     self.tr("当前选用", "Selected"),
@@ -530,9 +548,20 @@ impl AppView {
                             .child(div().text_xs().text_color(p.muted_fg).child(format!(
                                 "{}: {}",
                                 self.tr("当前版本", "Active"),
-                                active_version.clone().unwrap_or_else(|| {
-                                    self.tr("未安装", "Not installed").to_string()
-                                })
+                                if settings.binary_override(core).is_some() {
+                                    self.tr("自定义路径", "Custom path").to_string()
+                                } else {
+                                    active_version
+                                        .clone()
+                                        .or_else(|| {
+                                            core_binaries
+                                                .first()
+                                                .map(|record| record.version.clone())
+                                        })
+                                        .unwrap_or_else(|| {
+                                            self.tr("未安装", "Not installed").to_string()
+                                        })
+                                }
                             ))),
                     )
                     .child(
@@ -548,7 +577,7 @@ impl AppView {
                     ),
             );
 
-            if core_binaries.is_empty() {
+            if core_binaries.is_empty() && settings.binary_override(core).is_none() {
                 section = section.child(empty_hint(
                     &p,
                     self.tr(
@@ -720,6 +749,9 @@ impl AppView {
                                 ),
                         ),
                 )
+                .child(setting_row(&p, self.tr("自动检查更新", "Automatic update checks"), self.tr("启动时检查应用和当前内核", "Check the app and selected core at startup"),
+                    toggle("check-startup-updates", self.tr("启动时检查", "Check at startup"), settings.check_app_updates)
+                        .on_change(cx.listener(|this, enabled, _, cx| this.modify_settings(cx, |s| s.check_app_updates = *enabled)))))
                 .child(setting_row(&p, self.tr("节点订阅", "Subscriptions"), "",
                     toggle("proxy-sub-updates", self.tr("使用代理更新订阅", "Update subscriptions through the proxy"), settings.proxy_subscription_updates)
                         .on_change(cx.listener(|this, enabled, _, cx| this.modify_settings(cx, |s| s.proxy_subscription_updates = *enabled)))))
@@ -752,7 +784,7 @@ impl AppView {
                                         .text_color(p.fg)
                                         .child(self.tr("Core 更新状态", "Core update status")),
                                 )
-                                .child(match &updates.core {
+                                .child(match core_check.and_then(|c| c.candidate.as_ref()) {
                                     Some(candidate) => {
                                         let label = format!(
                                             "{} {}",
@@ -779,7 +811,13 @@ impl AppView {
                                     None => div()
                                         .text_xs()
                                         .text_color(p.muted_fg)
-                                        .child(self.tr("没有可用更新", "No update found")),
+                                        .child(if core_check.is_some_and(|c| c.error.is_some()) {
+                                            self.tr("检查失败", "Check failed")
+                                        } else if core_check.is_none() {
+                                            if settings.binary_override(settings.core).is_none() && !binaries.iter().any(|b| b.core == settings.core) {
+                                                self.tr("未安装", "Not installed")
+                                            } else { self.tr("尚未检查", "Not checked") }
+                                        } else { self.tr("已是最新版本", "Up to date") }),
                                 }),
                         )
                         .child(
@@ -816,9 +854,14 @@ impl AppView {
                                     None => div()
                                         .text_xs()
                                         .text_color(p.muted_fg)
-                                        .child(self.tr("没有可用更新", "No update found")),
+                                        .child(if updates.error.is_some() { self.tr("检查失败", "Check failed") }
+                                        else if updates.checked_at.is_none() { self.tr("尚未检查", "Not checked") }
+                                        else { self.tr("已是最新版本", "Up to date") }),
                                 }),
                         )
+                        .when_some(core_check.and_then(|c| c.error.clone()), |d, error| {
+                            d.child(div().text_xs().text_color(p.warn_text).child(error))
+                        })
                         .when(updates.error.is_some(), |d| {
                             d.child(
                                 div()
@@ -866,14 +909,18 @@ impl AppView {
         );
 
         // Privilege helper & diagnostics --------------------------------
-        let helper_label = if platform.helper_available {
+        let helper_label = if platform.helper_needs_update {
+            self.tr("需要更新", "Update required")
+        } else if platform.helper_available {
             self.tr("运行中", "Running")
         } else if platform.helper_installed {
             self.tr("已安装，未运行", "Installed, not running")
         } else {
             self.tr("未安装", "Not installed")
         };
-        let helper_color = if platform.helper_available {
+        let helper_color = if platform.helper_needs_update {
+            p.warn_text
+        } else if platform.helper_available {
             p.success
         } else if platform.helper_installed {
             p.warning

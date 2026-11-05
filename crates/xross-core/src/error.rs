@@ -25,6 +25,13 @@ pub enum Error {
     #[error("core binary error: {0}")]
     Binary(String),
 
+    #[error("{name} 无法应用组网配置：{source}。请在设置中查看内核更新状态；更新后请重新应用代理配置", name = core.display_name())]
+    MeshCore {
+        core: crate::model::CoreKind,
+        #[source]
+        source: Box<Error>,
+    },
+
     #[error("core process error: {0}")]
     Process(String),
 

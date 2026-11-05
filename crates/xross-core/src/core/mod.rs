@@ -496,7 +496,12 @@ impl CoreManager {
             .lock()
             .clone()
             .ok_or_else(|| Error::other("缺少已应用代理配置，请先重新应用配置"))?;
-        self.replace_applied(&old, old.model.clone(), &plan).await?;
+        self.replace_applied(&old, old.model.clone(), &plan)
+            .await
+            .map_err(|source| Error::MeshCore {
+                core: old.core,
+                source: Box::new(source),
+            })?;
         *self.mesh.lock() = plan;
         Ok(true)
     }
@@ -575,7 +580,11 @@ impl CoreManager {
         let _ = std::fs::remove_file(&candidate);
         let report = validation?;
         if !report.ok {
-            return Err(Error::config("运行配置校验失败，原代理继续运行"));
+            // Validator output may contain configuration values. Keep the raw
+            // report in memory and use a safe diagnosis in notifications/logs.
+            let reason = validation_failure(&report);
+            *self.last_validation.lock() = Some(report);
+            return Err(Error::other(reason));
         }
         self.supervisor.stop().await?;
         let next = AppliedConfig {
@@ -718,6 +727,21 @@ async fn replace_with_rollback(
         return Err(Error::other(format!("{error}；已恢复原代理配置")));
     }
     Ok(())
+}
+
+fn validation_failure(report: &ValidationReport) -> String {
+    let text = report.raw_output.to_ascii_lowercase();
+    let reason = if text.contains("unknown field") || text.contains("unrecognized field") {
+        "内核不识别配置字段"
+    } else if text.contains("unknown outbound type") || text.contains("unknown rule") {
+        "内核不支持配置中的出站或规则类型"
+    } else {
+        "内核配置校验失败"
+    };
+    match report.issues.iter().find_map(|issue| issue.line) {
+        Some(line) => format!("{reason}（第 {line} 行），原代理继续运行"),
+        None => format!("{reason}，原代理继续运行"),
+    }
 }
 
 fn uses_native_tun(model: &AppModel, core: CoreKind) -> bool {

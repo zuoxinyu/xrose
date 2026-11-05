@@ -642,7 +642,18 @@ impl AppView {
                     | MeshPhase::Connected
                     | MeshPhase::Stopping
             );
-            let label = match state.phase {
+            let connection_error = self
+                .snapshot
+                .mesh_connection_errors
+                .get(&id)
+                .cloned()
+                .or_else(|| state.error.clone());
+            let display_phase = if !active && connection_error.is_some() {
+                MeshPhase::Failed
+            } else {
+                state.phase
+            };
+            let label = match display_phase {
                 MeshPhase::Disconnected => tr(lang, "未连接", "Disconnected"),
                 MeshPhase::Starting => tr(lang, "正在连接", "Connecting"),
                 MeshPhase::NeedsLogin => tr(lang, "等待登录或批准", "Sign-in or approval required"),
@@ -650,7 +661,7 @@ impl AppView {
                 MeshPhase::Stopping => tr(lang, "正在断开", "Disconnecting"),
                 MeshPhase::Failed => tr(lang, "连接失败", "Failed"),
             };
-            let status_color = match state.phase {
+            let status_color = match display_phase {
                 MeshPhase::Connected => p.ok_text,
                 MeshPhase::Failed => p.danger_text,
                 MeshPhase::Starting | MeshPhase::NeedsLogin | MeshPhase::Stopping => p.warn_text,
@@ -775,6 +786,15 @@ impl AppView {
                             ),
                     ),
             );
+            if let Some(reason) = connection_error {
+                network = network.child(
+                    div()
+                        .text_sm()
+                        .text_color(p.danger_text)
+                        .whitespace_normal()
+                        .child(reason),
+                );
+            }
             let mut details = vec![
                 (
                     "addresses",

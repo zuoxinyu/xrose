@@ -175,7 +175,7 @@ impl MeshController {
             .await
             .map_err(|_| Error::other("组网助手任务异常"))??;
         if reply.version != PROTOCOL_VERSION {
-            return Err(Error::other("组网助手版本不兼容，请更新并重启助手"));
+            return Err(Error::other("组网助手版本不兼容，请在设置中更新提权助手"));
         }
         *self.networks.write() = reply.networks;
         Ok(())
@@ -188,6 +188,15 @@ impl MeshController {
             .cloned()
             .ok_or_else(|| Error::config("组网配置不存在"))
     }
+    /// Test legacy helpers before changing any proxy or network state.
+    pub(crate) async fn verify_protocol(&self) -> Result<()> {
+        self.send(MeshCommand::Status).await.map_err(|error| {
+            Error::other(format!(
+                "无法确认提权助手支持当前组网协议，请在设置中更新助手后重试：{error}"
+            ))
+        })
+    }
+
     pub async fn connect(&self, id: &str, network: &crate::updates::UpdateNetwork) -> Result<()> {
         self.start_profile(self.profile(id)?, network, None).await
     }

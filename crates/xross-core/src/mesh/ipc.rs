@@ -137,7 +137,7 @@ static SESSIONS: OnceLock<Mutex<BTreeMap<String, Session>>> = OnceLock::new();
 
 pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
     if request.version != PROTOCOL_VERSION {
-        return Err(Error::other("组网助手协议不兼容，请更新并重启提权助手"));
+        return Err(Error::other("组网助手协议不兼容，请在设置中更新提权助手"));
     }
     if request.session.0.len() != 64 || !request.session.0.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err(Error::other("组网会话凭证无效"));

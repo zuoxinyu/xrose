@@ -6,6 +6,7 @@ mod mesh_exit;
 pub mod mesh_sync;
 mod node_switch;
 mod routing_transfer;
+mod update_check;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -84,6 +85,8 @@ pub struct PlatformInfo {
     pub elevated: bool,
     pub helper_available: bool,
     pub helper_installed: bool,
+    #[serde(default)]
+    pub helper_needs_update: bool,
     pub helper_supported: bool,
     pub helper_detail: String,
     pub helper_path: Option<String>,
@@ -93,10 +96,18 @@ pub struct PlatformInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateStatus {
-    pub core: Option<UpdateCandidate>,
+    #[serde(default)]
+    pub cores: BTreeMap<String, CoreUpdateStatus>,
     pub app: Option<AppUpdate>,
     pub checked_at: Option<i64>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CoreUpdateStatus {
+    pub candidate: Option<UpdateCandidate>,
+    pub error: Option<String>,
+    pub checked_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -118,6 +129,8 @@ pub struct RuntimeView {
 pub struct UiSnapshot {
     #[serde(default)]
     pub mesh: crate::mesh::MeshSnapshot,
+    #[serde(default)]
+    pub mesh_connection_errors: BTreeMap<String, String>,
     #[serde(default)]
     pub mesh_sync: mesh_sync::SyncView,
     pub app_version: String,
@@ -160,6 +173,16 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    pub fn settings_update_available(&self) -> bool {
+        self.platform.helper_needs_update
+            || self.updates.app.is_some()
+            || self
+                .updates
+                .cores
+                .values()
+                .any(|check| check.candidate.is_some())
+    }
+
     pub fn dns_preset(&self) -> Option<DnsPreset> {
         dns::detect_preset(&self.model.dns)
     }
@@ -222,6 +245,7 @@ impl UiSnapshot {
 struct Inner {
     mesh_sync: mesh_sync::SyncState,
     mesh: crate::mesh::controller::MeshController,
+    mesh_connection_errors: RwLock<BTreeMap<String, String>>,
     paths: AppPaths,
     settings: RwLock<Settings>,
     model: RwLock<AppModel>,
@@ -331,6 +355,7 @@ impl AppService {
         mesh.sync_outbounds(&mut model);
         let inner = Arc::new(Inner {
             mesh_sync: Default::default(),
+            mesh_connection_errors: Default::default(),
             mesh,
             paths,
             settings: RwLock::new(settings),
@@ -478,8 +503,11 @@ impl AppService {
             history,
             error: None,
         };
+        let updates = self.inner.updates.lock().clone();
+        let system_proxy_active = settings.system_proxy;
         UiSnapshot {
             mesh_sync: self.sync_view(),
+            mesh_connection_errors: self.inner.mesh_connection_errors.read().clone(),
             mesh,
             app_version: APP_VERSION.into(),
             settings,
@@ -512,6 +540,7 @@ impl AppService {
                 elevated: helper.elevated,
                 helper_available: helper.running,
                 helper_installed: helper.installed,
+                helper_needs_update: helper.needs_update,
                 helper_supported: helper.supported,
                 helper_detail: helper.detail.clone(),
                 helper_path: helper.executable.clone(),
@@ -519,8 +548,8 @@ impl AppService {
                 data_dir: self.inner.paths.data_dir.display().to_string(),
             },
             doctor,
-            updates: self.inner.updates.lock().clone(),
-            system_proxy_active: self.inner.settings.read().system_proxy,
+            updates,
+            system_proxy_active,
             pac_url,
             active_proxy_addresses: self.inner.core.active_proxy_addresses(),
             active_tun_interface: self.inner.core.active_tun_interface(),
@@ -820,7 +849,16 @@ impl AppService {
         }
         let restart_required = settings.requires_core_restart(&old, &self.inner.model.read());
         settings.save(&self.inner.paths.settings_file())?;
-        *self.inner.settings.write() = settings.clone();
+        {
+            let mut current = self.inner.settings.write();
+            let mut updates = self.inner.updates.lock();
+            for core in CoreKind::all() {
+                if !Self::same_binary(core, &current, settings) {
+                    updates.cores.remove(core.as_str());
+                }
+            }
+            *current = settings.clone();
+        }
         if settings.watchdog != old.watchdog
             || settings.watchdog_max_retries != old.watchdog_max_retries
         {
@@ -1873,6 +1911,15 @@ impl AppService {
         }
         let service = self.clone();
         self.spawn(async move {
+            if settings.check_app_updates {
+                if settings.startup_proxy && settings.proxy_resource_updates {
+                    while service.is_busy("core") {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+                service.check_core_release(settings.core, false);
+                service.check_app_release(false);
+            }
             for (provider, id) in [
                 (
                     crate::mesh::MeshProvider::Tailscale,
@@ -3150,103 +3197,26 @@ impl AppService {
         let _ = self.save_settings(&settings);
     }
 
-    pub fn check_updates(&self) {
-        if self.is_busy("updates") {
-            return;
-        }
-        self.set_busy("updates", true);
-        let service = self.clone();
-        self.spawn(async move {
-            let settings = service.inner.settings.read().clone();
-            let current = service
-                .inner
-                .core
-                .binaries()
-                .resolve(
-                    settings.core,
-                    settings.active_version(settings.core).map(|s| s.as_str()),
-                )
-                .map(|b| b.version);
-            let network = service.resource_network();
-            let core_result =
-                updates::check_core_update(settings.core, current.as_deref(), &network).await;
-            let app_result = updates::check_app_update(APP_VERSION, &network).await;
-            let mut status = UpdateStatus {
-                checked_at: Some(now_unix()),
-                ..Default::default()
-            };
-            match core_result {
-                Ok(candidate) => status.core = candidate,
-                Err(err) => status.error = Some(err.to_string()),
-            }
-            match app_result {
-                Ok(update) => status.app = update,
-                Err(err) => {
-                    status.error = Some(match status.error.take() {
-                        Some(existing) => format!("{existing}；{err}"),
-                        None => err.to_string(),
-                    });
-                }
-            }
-            *service.inner.updates.lock() = status.clone();
-            service.set_busy("updates", false);
-            let core_label = status
-                .core
-                .as_ref()
-                .map(|u| format!("{} {}", u.core.display_name(), u.version));
-            let app_label = status.app.as_ref().map(|a| format!("App {}", a.version));
-            if core_label.is_none() && app_label.is_none() {
-                if status.error.is_none() {
-                    service.toast(ToastLevel::Info, "已是最新版本");
-                }
-            } else {
-                service.toast(
-                    ToastLevel::Info,
-                    format!(
-                        "发现更新：{}",
-                        [core_label, app_label]
-                            .into_iter()
-                            .flatten()
-                            .collect::<Vec<_>>()
-                            .join("，")
-                    ),
-                );
-            }
-            if let Some(error) = &status.error {
-                if status.core.is_none() {
-                    service.toast(ToastLevel::Warning, format!("检查更新失败：{error}"));
-                }
-            }
-        });
-    }
-
     pub fn install_core_update(&self, core: CoreKind) {
-        if self.is_busy("install") {
+        if !self.inner.busy.write().insert("install".into()) {
             return;
         }
-        self.set_busy("install", true);
         let service = self.clone();
         self.spawn(async move {
             let _install = service.inner.install_lock.lock().await;
+            let settings = service.settings();
+            // Explicit installation can replace an unidentifiable custom binary.
             let current = service
-                .inner
-                .core
-                .binaries()
-                .resolve(
-                    core,
-                    service
-                        .inner
-                        .settings
-                        .read()
-                        .active_version(core)
-                        .map(|s| s.as_str()),
-                )
-                .map(|b| b.version);
+                .installed_core_version(core, &settings)
+                .await
+                .ok()
+                .flatten();
             let network = service.resource_network();
             let candidate =
                 match updates::check_core_update(core, current.as_deref(), &network).await {
                     Ok(Some(candidate)) => candidate,
                     Ok(None) => {
+                        service.record_core_check(core, &settings, Ok(None));
                         service.set_busy("install", false);
                         service.toast(
                             ToastLevel::Info,
@@ -3287,7 +3257,6 @@ impl AppService {
                     &network,
                 )
                 .await;
-            service.set_busy("install", false);
             match result {
                 Ok(record) => {
                     let mut settings = service.inner.settings.read().clone();
@@ -3295,7 +3264,12 @@ impl AppService {
                         .active_versions
                         .insert(core.as_str().into(), record.version.clone());
                     settings.binary_paths.remove(core.as_str());
-                    let _ = service.save_settings(&settings);
+                    if let Err(err) = service.save_settings(&settings) {
+                        service.set_busy("install", false);
+                        service.toast(ToastLevel::Error, format!("内核已下载，但启用失败：{err}"));
+                        return;
+                    }
+                    service.record_core_check(core, &settings, Ok(None));
                     service.toast(
                         ToastLevel::Success,
                         format!("{} {} 安装完成", core.display_name(), record.version),
@@ -3303,6 +3277,7 @@ impl AppService {
                 }
                 Err(err) => service.toast(ToastLevel::Error, format!("安装失败：{err}")),
             }
+            service.set_busy("install", false);
         });
     }
 
@@ -3622,6 +3597,7 @@ impl AppService {
             return Err(Error::other("正在切换组网出口，请稍后再删除配置"));
         }
         self.inner.mesh.delete(id)?;
+        self.inner.mesh_connection_errors.write().remove(id);
         self.inner
             .model
             .write()
@@ -3670,10 +3646,14 @@ impl AppService {
             let result: Result<()> = async {
                 match action {
                     "connect" => {
+                        service.inner.mesh_connection_errors.write().remove(&value);
                         if !service.inner.mesh.snapshot().supported {
                             return Err(Error::other("当前平台不支持组网连接"));
                         }
                         service.ensure_helper().await.map_err(Error::other)?;
+                        if service.inner.helper.read().needs_update {
+                            service.inner.mesh.verify_protocol().await?;
+                        }
                         if service.inner.mesh.snapshot().profiles.iter().any(|p| {
                             p.id == value && p.provider == crate::mesh::MeshProvider::Tailscale
                         }) && crate::mesh::tailscale::verify_binary(
@@ -3690,7 +3670,7 @@ impl AppService {
                         }
                         let mut preflight = service.inner.core.mesh_plan();
                         preflight.active = true;
-                        service.inner.core.apply_mesh_plan(preflight).await?;
+                        service.apply_mesh_plan(preflight).await?;
                         if let Err(error) = service
                             .inner
                             .mesh
@@ -3722,7 +3702,6 @@ impl AppService {
                 service.reconcile_mesh().await
             }
             .await;
-            service.set_busy("mesh", false);
             match result {
                 Ok(()) if action == "connect" => {
                     let state = service
@@ -3742,7 +3721,15 @@ impl AppService {
                                     "Tailscale 正在等待登录或管理员批准"
                                 },
                             ),
-                        _ => service.toast(ToastLevel::Success, "组网已连接"),
+                        Some(state) if state.phase == crate::mesh::MeshPhase::Connected => {
+                            service.toast(ToastLevel::Success, "组网已连接")
+                        }
+                        other => service.mesh_connection_failed(
+                            &value,
+                            other
+                                .and_then(|state| state.error)
+                                .unwrap_or_else(|| "未能确认组网连接，请重试".into()),
+                        ),
                     }
                 }
                 Ok(()) => service.toast(
@@ -3754,9 +3741,37 @@ impl AppService {
                         _ => "正在探测组网设备",
                     },
                 ),
+                Err(error) if action == "connect" => {
+                    service.mesh_connection_failed(&value, error.to_string())
+                }
                 Err(error) => service.toast(ToastLevel::Error, error.to_string()),
             }
+            service.set_busy("mesh", false);
         });
+    }
+
+    fn mesh_connection_failed(&self, profile_id: &str, reason: String) {
+        self.inner
+            .mesh_connection_errors
+            .write()
+            .insert(profile_id.to_owned(), reason.clone());
+        self.toast(ToastLevel::Error, reason);
+    }
+
+    async fn apply_mesh_plan(&self, plan: crate::mesh::coexist::CoexistencePlan) -> Result<bool> {
+        let result = self.inner.core.apply_mesh_plan(plan).await;
+        if let Err(Error::MeshCore { core, .. }) = &result {
+            if let Some(report) = self
+                .inner
+                .core
+                .last_validation()
+                .filter(|r| !r.ok && r.core == *core)
+            {
+                *self.inner.validation.write() = Some(report);
+            }
+            self.check_core_release(*core, false);
+        }
+        result
     }
 
     async fn reconcile_mesh(&self) -> Result<()> {
@@ -3779,20 +3794,30 @@ impl AppService {
                     })
                     .or_else(|| states.last());
                 if let Some(state) = offender {
+                    self.inner
+                        .mesh_connection_errors
+                        .write()
+                        .insert(state.profile_id.clone(), error.to_string());
                     self.inner.mesh.disconnect(state.provider).await?;
                 }
                 return Err(error);
             }
         };
-        if let Err(error) = self.inner.core.apply_mesh_plan(plan.clone()).await {
+        if let Err(error) = self.apply_mesh_plan(plan.clone()).await {
             // Keep the proxy's verified configuration, and remove the new mesh
             // connection rather than leaving traffic captured by the proxy TUN.
             for state in states.iter().filter(|s| {
                 matches!(
                     s.phase,
-                    crate::mesh::MeshPhase::Starting | crate::mesh::MeshPhase::Connected
+                    crate::mesh::MeshPhase::Starting
+                        | crate::mesh::MeshPhase::NeedsLogin
+                        | crate::mesh::MeshPhase::Connected
                 )
             }) {
+                self.inner
+                    .mesh_connection_errors
+                    .write()
+                    .insert(state.profile_id.clone(), error.to_string());
                 let _ = self.inner.mesh.disconnect(state.provider).await;
             }
             return Err(error);
@@ -4753,6 +4778,119 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         let service = AppService::with_paths(paths).unwrap();
         (service, dir)
+    }
+
+    #[test]
+    fn update_badge_keeps_confirmed_candidates_but_discards_stale_checks() {
+        let (service, _dir) = service();
+        let core = CoreKind::SingBox;
+        let settings = service.settings();
+        let candidate = || UpdateCandidate {
+            core,
+            version: "1.2.3".into(),
+            asset: updates::ReleaseAsset {
+                name: "fixture".into(),
+                url: String::new(),
+                size: 0,
+            },
+            checksum_url: None,
+            notes: String::new(),
+        };
+        assert!(!service.snapshot().settings_update_available());
+        service.record_core_check(core, &settings, Err(Error::other("离线")));
+        assert!(!service.snapshot().settings_update_available());
+        service.record_core_check(core, &settings, Ok(Some(candidate())));
+        service.record_core_check(core, &settings, Err(Error::other("离线")));
+        assert!(service.snapshot().settings_update_available());
+        let mut next = settings.clone();
+        next.active_versions
+            .insert(core.as_str().into(), "1.2.3".into());
+        service.save_settings(&next).unwrap();
+        assert!(!service.record_core_check(core, &settings, Ok(Some(candidate()))));
+        assert!(!service.snapshot().settings_update_available());
+        service.inner.helper.write().needs_update = true;
+        assert!(service.snapshot().settings_update_available());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_mesh_configuration_preserves_proxy_and_checks_the_running_core() {
+        use std::os::unix::fs::PermissionsExt;
+        let (service, dir) = service();
+        // No network or privileged service: accept the initial config, reject
+        // the mesh candidate, and deliberately fail the local version probe.
+        let fixture = dir.path().join("fixture-core");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+case "$*" in
+  version) exit 1 ;;
+  *runtime-candidate.json*) echo 'unknown field in fixture' >&2; exit 1 ;;
+  *-test*) exit 0 ;;
+  *) exec sleep 30 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut settings = service.settings();
+        settings.core = CoreKind::SingBox;
+        settings.binary_paths.insert(
+            CoreKind::Xray.as_str().into(),
+            fixture.display().to_string(),
+        );
+        service.save_settings(&settings).unwrap();
+        service.inner.rt.block_on(async {
+            let core = &service.inner.core;
+            let mut model = AppModel::default();
+            model.add_nodes([Node::new(
+                "fixture",
+                Protocol::Socks,
+                "proxy.example.test",
+                1080,
+            )]);
+            let started = core.start(&model, &settings, CoreKind::Xray).await.unwrap();
+            assert!(started.started);
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(pid) = core.state().pid {
+                        break pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let error = service
+                .apply_mesh_plan(crate::mesh::coexist::CoexistencePlan {
+                    active: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                Error::MeshCore {
+                    core: CoreKind::Xray,
+                    ..
+                }
+            ));
+            assert!(error.to_string().contains("内核不识别配置字段"));
+            assert_eq!(core.state().pid, Some(pid));
+            assert!(!core.mesh_plan().active);
+            core.stop().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while service.is_busy("updates-xray") {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let snapshot = service.snapshot();
+            assert!(snapshot.updates.cores["xray"].error.is_some());
+            assert!(!snapshot.updates.cores.contains_key("sing-box"));
+            assert!(!snapshot.validation.unwrap().ok);
+        });
     }
 
     #[test]
