@@ -48,7 +48,7 @@ impl AppView {
             .icon(if expanded {
                 IconName::ChevronUp
             } else {
-                IconName::ChevronDown
+                IconName::ChevronRight
             })
             .size(px(crate::ui::theme::ICON_BUTTON_SIZE))
             .flex_shrink_0()
@@ -97,17 +97,8 @@ impl AppView {
         };
         let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
         let controls = div().flex().flex_col().gap_2().child(
-            div()
-                .flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .child(
-                    row(self.tr("自动切换", "Auto switch"))
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(modes),
-                )
+            row(self.tr("自动切换", "Auto switch"))
+                .child(modes)
                 .child(expand_button),
         );
         if !expanded {
