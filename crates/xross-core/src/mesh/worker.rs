@@ -72,6 +72,7 @@ pub fn main() -> Result<()> {
     let result=runtime.block_on(async {
         let mut backend=Backend::start(&boot).await?;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(2));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut dns_suffix=None;
         let mut dns_warning=None;
         let mut probe=None;
@@ -97,7 +98,7 @@ pub fn main() -> Result<()> {
                     .map(|route|route.cidr.clone()).collect::<Vec<_>>();
                 super::coexist::check_networks(&state.routes,&other_routes)?;
                 if !state.interface.is_empty(){
-                    let installed=super::platform::interface_routes(&state.interface)?;
+                    let installed=current.installed_routes(&state.interface)?;
                     for route in installed {
                         let Ok(net)=route.parse::<ipnet::IpNet>() else{continue;};
                         if net.prefix_len()==0{return Err(Error::other("组网尝试接管默认路由，已停止"));}
@@ -130,14 +131,8 @@ pub fn main() -> Result<()> {
         drop(backend);Ok::<(),Error>(())
     });
     let cleanup = super::platform::cleanup_dns(&boot.directory);
-    final_state.login_url = None;
-    match result.and(cleanup) {
-        Ok(()) => final_state.phase = MeshPhase::Disconnected,
-        Err(err) => {
-            final_state.phase = MeshPhase::Failed;
-            final_state.error = Some(err.to_string());
-        }
-    }
+    let error = result.and(cleanup).err();
+    final_state.finish(error.map(|e| e.to_string()));
     publish(&final_state);
     Ok(())
 }

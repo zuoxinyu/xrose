@@ -256,9 +256,7 @@ impl MeshController {
         }
         if let Err(error) = poll.await {
             for state in self.networks.write().iter_mut() {
-                state.phase = super::MeshPhase::Failed;
-                state.error = Some("与组网助手失去联系，请重启助手后重新连接".into());
-                state.login_url = None;
+                state.finish(Some("与组网助手失去联系，请重启助手后重新连接".into()));
             }
             return Err(error);
         }
@@ -325,10 +323,10 @@ fn startup_ready(
                     .iter()
                     .any(|p| p.id == id && p.online && p.exit_selected && p.offers_exit)
             })),
-            MeshPhase::NeedsLogin if expected_exit.is_some() => {
+            MeshPhase::NeedsLogin | MeshPhase::NeedsApproval if expected_exit.is_some() => {
                 Err(Error::other("请先完成组网设备授权再切换出口"))
             }
-            MeshPhase::NeedsLogin => Ok(true),
+            MeshPhase::NeedsLogin | MeshPhase::NeedsApproval => Ok(true),
             MeshPhase::Failed => Err(Error::other(
                 state.error.clone().unwrap_or_else(|| "组网启动失败".into()),
             )),
@@ -456,6 +454,11 @@ mod tests {
         *controller.networks.write() = vec![MeshRuntimeView {
             phase: super::super::MeshPhase::NeedsLogin,
             login_url: Some("https://example.test/private-login".into()),
+            routes: vec!["192.0.2.0/24".into()],
+            peers: vec![super::super::MeshPeer {
+                online: true,
+                ..Default::default()
+            }],
             ..Default::default()
         }];
         assert!(
@@ -467,6 +470,7 @@ mod tests {
         let state = &controller.snapshot().networks[0];
         assert_eq!(state.phase, super::super::MeshPhase::Failed);
         assert!(state.login_url.is_none());
+        assert!(state.routes.is_empty() && state.peers.is_empty());
         assert!(state.error.as_ref().unwrap().contains("失去联系"));
         let polled = std::cell::Cell::new(false);
         controller

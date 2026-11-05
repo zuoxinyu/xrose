@@ -80,7 +80,10 @@ pub fn plan(networks: &[MeshRuntimeView], protected: &[String]) -> Result<Coexis
     result.active = networks.iter().any(|n| {
         matches!(
             n.phase,
-            MeshPhase::Starting | MeshPhase::NeedsLogin | MeshPhase::Connected
+            MeshPhase::Starting
+                | MeshPhase::NeedsLogin
+                | MeshPhase::NeedsApproval
+                | MeshPhase::Connected
         )
     });
     let mut used = protected.to_vec();

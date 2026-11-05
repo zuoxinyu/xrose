@@ -297,6 +297,33 @@ struct EndpointStatus {
     #[prost(message, repeated, tag = "8")]
     groups: Vec<Group>,
 }
+
+impl EndpointStatus {
+    fn update_auth(&self, view: &mut MeshRuntimeView) {
+        view.login_url = None;
+        view.phase = match self.state.as_str() {
+            "Running" => MeshPhase::Connected,
+            "NeedsMachineAuth" => MeshPhase::NeedsApproval,
+            "NeedsLogin" | "NoState" => {
+                view.login_url = url::Url::parse(&self.auth_url)
+                    .ok()
+                    .filter(|u| {
+                        u.scheme() == "https"
+                            && u.has_host()
+                            && u.username().is_empty()
+                            && u.password().is_none()
+                    })
+                    .map(|u| u.to_string());
+                if self.state == "NeedsLogin" || view.login_url.is_some() {
+                    MeshPhase::NeedsLogin
+                } else {
+                    MeshPhase::Starting
+                }
+            }
+            _ => MeshPhase::Starting,
+        };
+    }
+}
 #[derive(Clone, PartialEq, Message)]
 struct Group {
     #[prost(message, repeated, tag = "5")]
@@ -715,19 +742,7 @@ impl Backend {
                     while let Ok(Some(update)) = stream.message().await {
                         if let Some(e) = update.endpoints.into_iter().find(|e| e.tag == "mesh-ts") {
                             let mut s = observed.lock();
-                            s.phase = match e.state.as_str() {
-                                "Running" => MeshPhase::Connected,
-                                "NeedsLogin" | "NeedsMachineAuth" => MeshPhase::NeedsLogin,
-                                _ => MeshPhase::Starting,
-                            };
-                            s.login_url = url::Url::parse(&e.auth_url)
-                                .ok()
-                                .filter(|u| {
-                                    u.scheme() == "https"
-                                        && u.username().is_empty()
-                                        && u.password().is_none()
-                                })
-                                .map(|u| u.to_string());
+                            e.update_auth(&mut s);
                             let self_id = e.self_peer.as_ref().map(|p| p.id.clone());
                             s.addresses = e.self_peer.map(|p| p.ips).unwrap_or_default();
                             s.dns_suffix = (!e.suffix.is_empty())
@@ -748,6 +763,7 @@ impl Backend {
                 }
                 {
                     let mut state = observed.lock();
+                    state.login_url = None;
                     // Keep known addresses for the active TUN bypass plan.
                     for peer in &mut state.peers {
                         peer.offers_exit = false;
@@ -829,6 +845,37 @@ impl Drop for Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authentication_follows_backend_state_and_retires_old_links() {
+        let mut view = MeshRuntimeView::default();
+        let mut endpoint = EndpointStatus {
+            state: "NeedsLogin".into(),
+            ..Default::default()
+        };
+        endpoint.update_auth(&mut view);
+        assert_eq!(view.phase, MeshPhase::NeedsLogin);
+        assert!(view.login_url.is_none());
+        endpoint.auth_url = "https://example.test/sign-in".into();
+        for state in ["NoState", "NeedsLogin"] {
+            endpoint.state = state.into();
+            endpoint.update_auth(&mut view);
+            assert_eq!(view.phase, MeshPhase::NeedsLogin);
+            assert_eq!(view.login_url.as_ref(), Some(&endpoint.auth_url));
+        }
+        endpoint.state = "NeedsMachineAuth".into();
+        endpoint.update_auth(&mut view);
+        assert_eq!(view.phase, MeshPhase::NeedsApproval);
+        assert!(view.login_url.is_none());
+        endpoint.state = "Running".into();
+        endpoint.update_auth(&mut view);
+        assert_eq!(view.phase, MeshPhase::Connected);
+        assert!(view.login_url.is_none());
+        endpoint.state = "NeedsLogin".into();
+        endpoint.auth_url = "http://example.test/sign-in".into();
+        endpoint.update_auth(&mut view);
+        assert!(view.login_url.is_none());
+    }
 
     #[test]
     fn decoded_peer_distinguishes_offered_selected_and_expired_exits() {

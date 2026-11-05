@@ -3726,9 +3726,12 @@ impl AppService {
                                 if state.login_url.is_some() {
                                     "请点击“在浏览器登录”完成 Tailscale 设备授权"
                                 } else {
-                                    "Tailscale 正在等待登录或管理员批准"
+                                    "正在获取 Tailscale 登录链接"
                                 },
                             ),
+                        Some(state) if state.phase == crate::mesh::MeshPhase::NeedsApproval => {
+                            service.toast(ToastLevel::Info, "请联系目标网络的管理员批准此设备")
+                        }
                         Some(state) if state.phase == crate::mesh::MeshPhase::Connected => {
                             service.toast(ToastLevel::Success, "组网已连接")
                         }
@@ -3819,6 +3822,7 @@ impl AppService {
                     s.phase,
                     crate::mesh::MeshPhase::Starting
                         | crate::mesh::MeshPhase::NeedsLogin
+                        | crate::mesh::MeshPhase::NeedsApproval
                         | crate::mesh::MeshPhase::Connected
                 )
             }) {

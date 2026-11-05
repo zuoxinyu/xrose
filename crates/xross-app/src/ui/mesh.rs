@@ -703,6 +703,7 @@ impl AppView {
                 state.phase,
                 MeshPhase::Starting
                     | MeshPhase::NeedsLogin
+                    | MeshPhase::NeedsApproval
                     | MeshPhase::Connected
                     | MeshPhase::Stopping
             );
@@ -720,7 +721,11 @@ impl AppView {
             let label = match display_phase {
                 MeshPhase::Disconnected => tr(lang, "未连接", "Disconnected"),
                 MeshPhase::Starting => tr(lang, "正在连接", "Connecting"),
-                MeshPhase::NeedsLogin => tr(lang, "等待登录或批准", "Sign-in or approval required"),
+                MeshPhase::NeedsApproval => tr(lang, "等待管理员批准", "Awaiting device approval"),
+                MeshPhase::NeedsLogin if state.login_url.is_some() => {
+                    tr(lang, "等待登录", "Sign-in required")
+                }
+                MeshPhase::NeedsLogin => tr(lang, "正在获取登录链接", "Waiting for sign-in link"),
                 MeshPhase::Connected => tr(lang, "已连接", "Connected"),
                 MeshPhase::Stopping => tr(lang, "正在断开", "Disconnecting"),
                 MeshPhase::Failed => tr(lang, "连接失败", "Failed"),
@@ -728,7 +733,10 @@ impl AppView {
             let status_color = match display_phase {
                 MeshPhase::Connected => p.ok_text,
                 MeshPhase::Failed => p.danger_text,
-                MeshPhase::Starting | MeshPhase::NeedsLogin | MeshPhase::Stopping => p.warn_text,
+                MeshPhase::Starting
+                | MeshPhase::NeedsLogin
+                | MeshPhase::NeedsApproval
+                | MeshPhase::Stopping => p.warn_text,
                 MeshPhase::Disconnected => p.muted_fg,
             };
             let has_notice = active
@@ -753,6 +761,24 @@ impl AppView {
                 );
             }
             let status_tip = (!status_tips.is_empty()).then(|| status_tips.join("\n"));
+            let needs_auth = display_phase == MeshPhase::NeedsLogin;
+            let needs_approval = display_phase == MeshPhase::NeedsApproval;
+            let official_control = profile.control_url.is_empty()
+                || profile.control_url.trim_end_matches('/')
+                    == "https://controlplane.tailscale.com";
+            let auth_action = if needs_approval && official_control {
+                Some((
+                    tr(lang, "打开设备列表", "Open Machines"),
+                    "https://login.tailscale.com/admin/machines".to_owned(),
+                ))
+            } else if needs_auth {
+                state
+                    .login_url
+                    .clone()
+                    .map(|url| (tr(lang, "在浏览器登录", "Sign in with browser"), url))
+            } else {
+                None
+            };
             let mut network = card(&p).child(
                 div()
                     .flex()
@@ -814,6 +840,15 @@ impl AppView {
                             .justify_end()
                             .gap_2()
                             .flex_shrink_0()
+                            .when_some(auth_action, |d, (label, url)| {
+                                d.child(
+                                    Button::new(SharedString::from(format!("mesh-auth-{id}")))
+                                        .label(label)
+                                        .on_click(cx.listener(move |this, _, _, _| {
+                                            this.service.open_url(&url)
+                                        })),
+                                )
+                            })
                             .child(
                                 more_button(
                                     SharedString::from(format!("mesh-menu-{id}")),
@@ -858,6 +893,34 @@ impl AppView {
                         .whitespace_normal()
                         .child(reason),
                 );
+            }
+            if !active {
+                body = body.child(network);
+                continue;
+            }
+            let auth_hint = if needs_approval && official_control {
+                Some(tr(
+                    lang,
+                    "请管理员在 Machines 页面找到标有 Needs approval 的设备，选择 Approve。",
+                    "Ask an administrator to open Machines and select Approve for the device marked Needs approval.",
+                ))
+            } else if needs_approval {
+                Some(tr(
+                    lang,
+                    "请联系此控制服务器的管理员批准设备。",
+                    "Ask the administrator of this control server to approve the device.",
+                ))
+            } else if needs_auth && state.login_url.is_none() {
+                Some(tr(
+                    lang,
+                    "如果迟迟没有登录链接，请检查控制服务器地址和网络连接，然后断开并重新连接。",
+                    "If the sign-in link does not appear, check the control server address and connectivity, then disconnect and reconnect.",
+                ))
+            } else {
+                None
+            };
+            if let Some(hint) = auth_hint {
+                network = network.child(div().text_sm().text_color(p.muted_fg).child(hint));
             }
             let mut details = vec![
                 (

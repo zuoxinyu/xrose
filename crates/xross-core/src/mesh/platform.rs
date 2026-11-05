@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 #[cfg(unix)]
 pub use unix::{baseline_with_proxy_tun, interface_routes};
+#[cfg(windows)]
+#[path = "platform_windows.rs"]
+mod windows;
+#[cfg(windows)]
+pub use windows::{baseline_with_proxy_tun, interface_routes};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkBaseline {
@@ -23,6 +28,19 @@ pub struct NetworkBaseline {
 }
 
 impl NetworkBaseline {
+    pub(super) fn installed_routes(&self, interface: &str) -> Result<Vec<String>> {
+        #[cfg(windows)]
+        if interface.to_ascii_lowercase().starts_with("xross-mesh-") {
+            return Ok(self
+                .mesh_routes
+                .iter()
+                .filter(|route| route.interface.eq_ignore_ascii_case(interface))
+                .map(|route| route.cidr.clone())
+                .collect());
+        }
+        interface_routes(interface)
+    }
+
     #[cfg(any(windows, test))]
     fn exclude_proxy_interfaces(&mut self) {
         let indices = std::mem::take(&mut self.proxy_indices);
@@ -182,39 +200,6 @@ pub fn worker_baseline(known: &mut Vec<String>) -> Result<NetworkBaseline> {
     }
 }
 
-#[cfg(windows)]
-pub fn baseline_with_proxy_tun(addresses: &[String]) -> Result<NetworkBaseline> {
-    let addresses = addresses
-        .iter()
-        .map(|s| s.parse::<std::net::IpAddr>().map(|ip| ip.to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|_| Error::config("代理 TUN 地址无效"))?;
-    let prefix = format!(
-        "$ErrorActionPreference='Stop'; $proxyAddresses=@({}); $tunIndices=@(Get-NetAdapter -IncludeHidden | Where-Object {{$_.InterfaceDescription -like 'sing-tun Tunnel*'}} | Select-Object -ExpandProperty InterfaceIndex); $ips=@(Get-NetIPAddress); $proxyIndices=@($ips | Where-Object {{$_.IPAddress -in $proxyAddresses -and $_.InterfaceIndex -in $tunIndices}} | Select-Object -ExpandProperty InterfaceIndex -Unique); ",
-        addresses
-            .iter()
-            .map(|s| quote(s))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let raw = powershell(
-        &(prefix
-            + "$ErrorActionPreference='Stop'; $r=@(Get-NetRoute -ErrorAction Stop); [pscustomobject]@{ proxy_indices=@($proxyIndices); mesh_routes=@($r | Where-Object {$_.InterfaceAlias -like 'xross-mesh-*'} | ForEach-Object { [pscustomobject]@{cidr=$_.DestinationPrefix; interface=$_.InterfaceAlias} }); protected=@($ips | Where-Object { $_.InterfaceAlias -notlike 'xross-mesh-*' -and $_.InterfaceAlias -notlike '*Loopback*' } | ForEach-Object { \"$($_.IPAddress)/$($_.PrefixLength)\" }); dns=@(Get-DnsClientServerAddress | Where-Object {$_.InterfaceAlias -notlike 'xross-mesh-*'} | ForEach-Object { \"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')\" } | Sort-Object); defaults=@($r | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')} | ForEach-Object { \"$($_.DestinationPrefix)|$($_.NextHop)|$($_.InterfaceIndex)\" } | Sort-Object) } | ConvertTo-Json -Compress"),
-    )?;
-    let mut baseline: NetworkBaseline =
-        serde_json::from_str(&raw).map_err(|_| Error::other("无法读取本机路由基线"))?;
-    baseline.exclude_proxy_interfaces();
-    baseline.proxy_tun_addresses = addresses;
-    Ok(baseline)
-}
-#[cfg(windows)]
-pub fn interface_routes(interface: &str) -> Result<Vec<String>> {
-    let raw = powershell(&format!(
-        "$ErrorActionPreference='Stop'; ConvertTo-Json -Compress -InputObject @(Get-NetRoute -InterfaceAlias {} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty DestinationPrefix -Unique)",
-        quote(interface)
-    ))?;
-    serde_json::from_str(&raw).map_err(|_| Error::other("无法读取组网接口路由"))
-}
 pub fn secure_directory(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|_| Error::other("无法创建组网私有目录"))?;
     #[cfg(windows)]

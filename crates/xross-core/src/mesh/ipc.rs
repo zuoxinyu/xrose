@@ -123,10 +123,12 @@ impl Worker {
         let _ = child.wait();
         let _ = super::platform::cleanup_dns(&self.directory);
         let mut state = self.state.lock();
-        if state.phase != MeshPhase::Failed {
-            state.phase = MeshPhase::Disconnected;
-        }
-        state.login_url = None;
+        let error = if state.phase == MeshPhase::Failed {
+            state.error.take()
+        } else {
+            None
+        };
+        state.finish(error);
     }
 }
 struct Session {

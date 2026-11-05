@@ -237,6 +237,7 @@ fn mesh_phase_info(
         xross_core::mesh::MeshPhase::Connected => (p.success, tr(lang, "已连接", "Connected")),
         xross_core::mesh::MeshPhase::Starting => (p.info, tr(lang, "连接中", "Connecting")),
         xross_core::mesh::MeshPhase::NeedsLogin => (p.warning, tr(lang, "待登录", "Login req.")),
+        xross_core::mesh::MeshPhase::NeedsApproval => (p.warning, tr(lang, "待批准", "Approval req.")),
         xross_core::mesh::MeshPhase::Stopping => (p.warning, tr(lang, "断开中", "Stopping")),
         xross_core::mesh::MeshPhase::Failed => (p.danger, tr(lang, "异常", "Failed")),
         xross_core::mesh::MeshPhase::Disconnected => {

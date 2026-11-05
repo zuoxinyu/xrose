@@ -20,7 +20,9 @@ use tokio::{
 };
 use tokio_smoltcp::{self as stack, smoltcp};
 
-type Ports = Arc<Mutex<HashSet<u16>>>;
+use smoltcp::wire::IpProtocol;
+
+type Ports = Arc<Mutex<HashSet<(IpProtocol, u16)>>>;
 
 struct ChannelDevice {
     incoming: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
@@ -88,19 +90,20 @@ impl PeerPacketFilter for PacketSink {
         let offset = usize::from(data[0] & 15) * 4;
         // Fragmented UDP is reassembled by smoltcp; also retain the kernel copy
         // since later fragments do not contain a transport port.
-        if data[9] == 17 && (data[6] & 0x3f != 0 || data[7] != 0) {
-            if !self.ports.lock().is_empty() {
+        let protocol = IpProtocol::from(data[9]);
+        if protocol == IpProtocol::Udp && (data[6] & 0x3f != 0 || data[7] != 0) {
+            if self.ports.lock().iter().any(|(p, _)| *p == IpProtocol::Udp) {
                 let _ = self.sender.try_send(Ok(data.to_vec()));
             }
             return Some(packet);
         }
-        if matches!(data[9], 6 | 17)
+        if matches!(protocol, IpProtocol::Tcp | IpProtocol::Udp)
             && offset >= 20
             && data.len() >= offset + 4
-            && self
-                .ports
-                .lock()
-                .contains(&u16::from_be_bytes([data[offset + 2], data[offset + 3]]))
+            && self.ports.lock().contains(&(
+                protocol,
+                u16::from_be_bytes([data[offset + 2], data[offset + 3]]),
+            ))
         {
             let _ = self.sender.try_send(Ok(data.to_vec()));
             None
@@ -113,39 +116,28 @@ impl PeerPacketFilter for PacketSink {
 struct PortGuard {
     _holder: socket2::Socket,
     port: u16,
-    _udp: std::net::UdpSocket,
+    protocol: IpProtocol,
     ports: Ports,
 }
 impl PortGuard {
-    fn new(ports: &Ports) -> std::io::Result<Self> {
-        for _ in 0..16 {
-            // Reserve across local interfaces without opening a TCP listener.
-            // This prevents intercepting another application's virtual-IP flow.
-            let holder = socket2::Socket::new(
-                socket2::Domain::IPV4,
-                socket2::Type::STREAM,
-                Some(socket2::Protocol::TCP),
-            )?;
-            holder.bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0).into())?;
-            let port = holder.local_addr()?.as_socket().ok_or_else(invalid)?.port();
-            match std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)) {
-                Ok(udp) => {
-                    ports.lock().insert(port);
-                    return Ok(Self {
-                        _holder: holder,
-                        port,
-                        _udp: udp,
-                        ports: ports.clone(),
-                    });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            "无法分配出口连接端口",
-        ))
+    fn new(ports: &Ports, protocol: IpProtocol) -> std::io::Result<Self> {
+        // Windows can reserve different port ranges for TCP and UDP. Reserve
+        // and intercept only the protocol used by this particular flow.
+        let kind = match protocol {
+            IpProtocol::Tcp => socket2::Type::STREAM,
+            IpProtocol::Udp => socket2::Type::DGRAM,
+            _ => return Err(invalid()),
+        };
+        let holder = socket2::Socket::new(socket2::Domain::IPV4, kind, None)?;
+        holder.bind(&SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0).into())?;
+        let port = holder.local_addr()?.as_socket().ok_or_else(invalid)?.port();
+        ports.lock().insert((protocol, port));
+        Ok(Self {
+            _holder: holder,
+            protocol,
+            port,
+            ports: ports.clone(),
+        })
     }
     fn port(&self) -> u16 {
         self.port
@@ -153,7 +145,7 @@ impl PortGuard {
 }
 impl Drop for PortGuard {
     fn drop(&mut self) {
-        self.ports.lock().remove(&self.port());
+        self.ports.lock().remove(&(self.protocol, self.port));
     }
 }
 
@@ -337,7 +329,7 @@ async fn serve(
     .await
     .map_err(|_| invalid())??;
     if command == 1 {
-        let port = PortGuard::new(&ports)?;
+        let port = PortGuard::new(&ports, IpProtocol::Tcp)?;
         let connected = tokio::time::timeout(
             Duration::from_secs(15),
             net.tcp_connect_with_options(
@@ -361,7 +353,7 @@ async fn serve(
         socket
             .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, port[0], port[1]])
             .await?;
-        let port_guard = PortGuard::new(&ports)?;
+        let port_guard = PortGuard::new(&ports, IpProtocol::Udp)?;
         let upstream = net
             .udp_bind(SocketAddr::new(
                 Ipv4Addr::UNSPECIFIED.into(),
@@ -440,6 +432,40 @@ async fn udp_destination(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn gateway_only_intercepts_the_reserved_transport() {
+        let ports = Ports::default();
+        let reservation = PortGuard::new(&ports, IpProtocol::Tcp).unwrap();
+        let (sender, mut received) = tokio::sync::mpsc::channel(2);
+        let sink = PacketSink {
+            ports,
+            address: Ipv4Addr::new(192, 0, 2, 1),
+            sender,
+        };
+        let packet = |protocol: IpProtocol| {
+            let mut data = [0; 40];
+            data[0] = 0x45;
+            data[9] = protocol.into();
+            data[16..20].copy_from_slice(&sink.address.octets());
+            data[22..24].copy_from_slice(&reservation.port().to_be_bytes());
+            let mut packet = ZCPacket::new_with_payload(&data);
+            packet.fill_peer_manager_hdr(1, 2, PacketType::Data as u8);
+            packet
+        };
+        assert!(
+            sink.try_process_packet_from_peer(packet(IpProtocol::Udp))
+                .await
+                .is_some()
+        );
+        assert!(received.try_recv().is_err());
+        assert!(
+            sink.try_process_packet_from_peer(packet(IpProtocol::Tcp))
+                .await
+                .is_none()
+        );
+        assert!(received.try_recv().unwrap().is_ok());
+    }
 
     fn virtual_pair() -> (Arc<stack::Net>, Arc<stack::Net>) {
         let (a_tx, a_rx) = tokio::sync::mpsc::channel(64);

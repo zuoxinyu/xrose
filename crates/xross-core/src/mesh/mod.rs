@@ -404,6 +404,7 @@ pub enum MeshPhase {
     Disconnected,
     Starting,
     NeedsLogin,
+    NeedsApproval,
     Connected,
     Stopping,
     Failed,
@@ -468,6 +469,24 @@ pub struct MeshRuntimeView {
     pub error: Option<String>,
     pub warning: Option<String>,
     pub updated_at: i64,
+}
+
+impl MeshRuntimeView {
+    /// Discard live network data once the worker has exited or become unreachable.
+    pub(super) fn finish(&mut self, error: Option<String>) {
+        *self = Self {
+            profile_id: std::mem::take(&mut self.profile_id),
+            provider: self.provider,
+            phase: if error.is_some() {
+                MeshPhase::Failed
+            } else {
+                MeshPhase::Disconnected
+            },
+            error,
+            updated_at: crate::util::now_unix(),
+            ..Default::default()
+        };
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
