@@ -323,6 +323,9 @@ impl AppView {
             .id("mesh-editor-scroll")
             .max_h(px(520.))
             .overflow_y_scroll()
+            // Extend the scroll viewport into the dialog padding to fit the outer focus ring.
+            .mx_neg_1()
+            .px_1()
             .flex()
             .flex_col()
             .gap_3()
