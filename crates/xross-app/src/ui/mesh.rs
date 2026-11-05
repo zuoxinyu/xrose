@@ -1,4 +1,5 @@
 //! Mesh configuration and cached runtime state. All work goes through AppService.
+mod advanced;
 use super::{
     AppView,
     theme::{Palette, palette},
@@ -16,11 +17,16 @@ use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xross_core::mesh::{MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret};
+use xross_core::mesh::{
+    EasyTierOptions, MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret,
+};
 use xross_core::service::ToastLevel;
 
 pub(crate) struct MeshForm {
     editing: bool,
+    advanced_open: bool,
+    easytier: EasyTierOptions,
+    mtu: Entity<InputState>,
     error: Option<String>,
     id: String,
     provider: MeshProvider,
@@ -44,6 +50,9 @@ impl MeshForm {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         Self {
             editing: false,
+            advanced_open: false,
+            easytier: Default::default(),
+            mtu: super::text_input(window, cx, "400–1380"),
             error: None,
             id: MeshProfile::default().id,
             provider: MeshProvider::EasyTier,
@@ -65,11 +74,17 @@ impl MeshForm {
     }
 
     fn load(&mut self, profile: MeshProfileView, window: &mut Window, cx: &mut Context<AppView>) {
+        self.advanced_open = false;
+        self.easytier = profile.easytier;
         self.id = profile.id;
         self.provider = profile.provider;
         self.advertise_exit = profile.advertise_exit_node;
         self.error = None;
         for (input, value) in [
+            (
+                &self.mtu,
+                self.easytier.mtu.map(|n| n.to_string()).unwrap_or_default(),
+            ),
             (&self.name, profile.name),
             (&self.hostname, profile.hostname),
             (&self.network, profile.network_name),
@@ -111,7 +126,22 @@ impl MeshForm {
                 .map(str::to_string)
                 .collect()
         };
+        let easytier = if self.provider == MeshProvider::EasyTier {
+            let mut options = self.easytier.clone();
+            let mtu = value(&self.mtu);
+            options.mtu = if mtu.is_empty() {
+                None
+            } else {
+                Some(mtu.parse().map_err(|_| {
+                    xross_core::Error::config("EasyTier MTU 必须为 400–1380，或留空使用默认值")
+                })?)
+            };
+            options
+        } else {
+            EasyTierOptions::default()
+        };
         Ok(MeshProfile {
+            easytier,
             id: self.id.clone(),
             name: value(&self.name),
             provider: self.provider,
@@ -306,9 +336,9 @@ impl AppView {
             .mesh_startup_profile(self.mesh_form.provider)
             == Some(self.mesh_form.id.as_str());
         let view = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             if let Some(view) = view.upgrade() {
-                view.update(cx, |this, cx| this.mesh_dialog(dialog, cx))
+                view.update(cx, |this, cx| this.mesh_dialog(dialog, window, cx))
             } else {
                 dialog
             }
@@ -316,12 +346,16 @@ impl AppView {
         cx.notify();
     }
 
-    fn mesh_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+    fn mesh_dialog(&mut self, dialog: Dialog, window: &Window, cx: &mut Context<Self>) -> Dialog {
         let p = palette(cx);
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
         let mut form = div()
-            .id("mesh-editor-scroll")
-            .max_h(px(520.))
+            .id(if self.mesh_form.advanced_open {
+                "mesh-advanced-scroll"
+            } else {
+                "mesh-editor-scroll"
+            })
+            .max_h(px(520.).min(window.viewport_size().height * 0.62))
             .overflow_y_scroll()
             // Extend the scroll viewport into the dialog padding to fit the outer focus ring.
             .mx_neg_1()
@@ -329,128 +363,156 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_3()
-            .min_w(px(0.))
+            .min_w(px(0.));
+        let toolbar = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
             .child(
-                div().flex().flex_shrink_0().child(
-                    ChoiceGroup::new(
-                        "mesh-provider",
-                        vec!["EasyTier".into(), "Tailscale".into()],
-                        usize::from(self.mesh_form.provider == MeshProvider::Tailscale),
-                    )
-                    .disabled(self.mesh_form.editing || busy)
-                    .on_change(cx.listener(|this, index: &usize, _, cx| {
-                        if this.mesh_form.editing
-                            || this.snapshot.busy.iter().any(|key| key == "mesh")
-                        {
-                            return;
-                        }
-                        this.mesh_form.provider = if *index == 0 {
-                            MeshProvider::EasyTier
-                        } else {
-                            MeshProvider::Tailscale
-                        };
-                        cx.notify();
-                    })),
-                ),
-            );
-        let mut fields = vec![
-            (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
-            (
-                self.tr("设备名称", "Device hostname"),
-                &self.mesh_form.hostname,
-            ),
-        ];
-        if self.mesh_form.provider == MeshProvider::EasyTier {
-            fields.extend([
-                (self.tr("网络名称", "Network name"), &self.mesh_form.network),
-                (
-                    if self.mesh_form.editing {
-                        self.tr("网络密钥（留空保留）", "Network secret (blank to keep)")
+                ChoiceGroup::new(
+                    "mesh-provider",
+                    vec!["EasyTier".into(), "Tailscale".into()],
+                    usize::from(self.mesh_form.provider == MeshProvider::Tailscale),
+                )
+                .disabled(self.mesh_form.editing || busy)
+                .on_change(cx.listener(|this, index: &usize, _, cx| {
+                    if this.mesh_form.editing || this.snapshot.busy.iter().any(|key| key == "mesh")
+                    {
+                        return;
+                    }
+                    this.mesh_form.advanced_open = false;
+                    this.mesh_form.provider = if *index == 0 {
+                        MeshProvider::EasyTier
                     } else {
-                        self.tr("网络密钥", "Network secret")
-                    },
-                    &self.mesh_form.secret,
-                ),
+                        MeshProvider::Tailscale
+                    };
+                    cx.notify();
+                })),
+            )
+            .when(self.mesh_form.provider == MeshProvider::EasyTier, |bar| {
+                bar.child(
+                    Button::new("mesh-advanced")
+                        .compact()
+                        .ghost()
+                        .disabled(busy)
+                        .icon(if self.mesh_form.advanced_open {
+                            IconName::ChevronLeft
+                        } else {
+                            IconName::Settings
+                        })
+                        .label(if self.mesh_form.advanced_open {
+                            self.tr("基本设置", "Basic settings")
+                        } else {
+                            self.tr("高级设置", "Advanced settings")
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.mesh_form.advanced_open = !this.mesh_form.advanced_open;
+                            cx.notify();
+                        })),
+                )
+            });
+        if self.mesh_form.advanced_open && self.mesh_form.provider == MeshProvider::EasyTier {
+            form = form.child(self.easytier_advanced_settings(&p, cx));
+        } else {
+            let mut fields = vec![
+                (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
                 (
-                    self.tr("入口节点（逗号分隔）", "Entry peers (comma separated)"),
-                    &self.mesh_form.peers,
+                    self.tr("设备名称", "Device hostname"),
+                    &self.mesh_form.hostname,
+                ),
+            ];
+            if self.mesh_form.provider == MeshProvider::EasyTier {
+                fields.extend([
+                    (self.tr("网络名称", "Network name"), &self.mesh_form.network),
+                    (
+                        if self.mesh_form.editing {
+                            self.tr("网络密钥（留空保留）", "Network secret (blank to keep)")
+                        } else {
+                            self.tr("网络密钥", "Network secret")
+                        },
+                        &self.mesh_form.secret,
+                    ),
+                    (
+                        self.tr("入口节点（逗号分隔）", "Entry peers (comma separated)"),
+                        &self.mesh_form.peers,
+                    ),
+                    (
+                        self.tr(
+                            "虚拟 IPv4（留空自动分配）",
+                            "Virtual IPv4 (blank for automatic)",
+                        ),
+                        &self.mesh_form.address,
+                    ),
+                ]);
+            } else {
+                fields.push((
+                    self.tr(
+                        "控制服务器（留空使用 Tailscale）",
+                        "Control server (blank for Tailscale)",
+                    ),
+                    &self.mesh_form.control,
+                ));
+            }
+            fields.push((
+                self.tr(
+                    "允许访问的远端网段（逗号分隔）",
+                    "Allowed remote subnets (comma separated)",
+                ),
+                &self.mesh_form.subnets,
+            ));
+            fields.extend([
+                (
+                    self.tr(
+                        "本机发布子网（逗号分隔）",
+                        "Advertised subnets (comma separated)",
+                    ),
+                    &self.mesh_form.advertised,
                 ),
                 (
                     self.tr(
-                        "虚拟 IPv4（留空自动分配）",
-                        "Virtual IPv4 (blank for automatic)",
+                        "出口节点（设备名或虚拟 IP）",
+                        "Exit node (device name or virtual IP)",
                     ),
-                    &self.mesh_form.address,
+                    &self.mesh_form.exit_node,
+                ),
+                (
+                    self.tr(
+                        "出口出站端口（留空禁用）",
+                        "Exit outbound port (blank to disable)",
+                    ),
+                    &self.mesh_form.outbound_port,
+                ),
+                (
+                    self.tr("端口转发（逗号分隔）", "Port forwards (comma separated)"),
+                    &self.mesh_form.forwards,
                 ),
             ]);
-        } else {
-            fields.push((
-                self.tr(
-                    "控制服务器（留空使用 Tailscale）",
-                    "Control server (blank for Tailscale)",
-                ),
-                &self.mesh_form.control,
-            ));
-        }
-        fields.push((
-            self.tr(
-                "允许访问的远端网段（逗号分隔）",
-                "Allowed remote subnets (comma separated)",
-            ),
-            &self.mesh_form.subnets,
-        ));
-        fields.extend([
-            (
-                self.tr(
-                    "本机发布子网（逗号分隔）",
-                    "Advertised subnets (comma separated)",
-                ),
-                &self.mesh_form.advertised,
-            ),
-            (
-                self.tr(
-                    "出口节点（设备名或虚拟 IP）",
-                    "Exit node (device name or virtual IP)",
-                ),
-                &self.mesh_form.exit_node,
-            ),
-            (
-                self.tr(
-                    "出口出站端口（留空禁用）",
-                    "Exit outbound port (blank to disable)",
-                ),
-                &self.mesh_form.outbound_port,
-            ),
-            (
-                self.tr("端口转发（逗号分隔）", "Port forwards (comma separated)"),
-                &self.mesh_form.forwards,
-            ),
-        ]);
-        for (label, input) in fields {
-            form = form.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .flex_shrink_0()
-                    .min_w(px(0.))
-                    .child(div().text_sm().child(label))
-                    .child(Input::new(input)),
-            );
-        }
-        form = form.child(toggle("mesh-connect-on-startup", self.tr("随应用启动连接", "Connect when app starts"), self.mesh_form.connect_on_startup).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.connect_on_startup = *checked; cx.notify(); })))
+            for (label, input) in fields {
+                form = form.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .min_w(px(0.))
+                        .child(div().text_sm().child(label))
+                        .child(Input::new(input)),
+                );
+            }
+            form = form.child(toggle("mesh-connect-on-startup", self.tr("随应用启动连接", "Connect when app starts"), self.mesh_form.connect_on_startup).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.connect_on_startup = *checked; cx.notify(); })))
             .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("每种组网类型可选择一个启动连接配置。", "Select one startup profile for each network type.")))
             .child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
             .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("填写出口出站端口后，节点列表将生成可用于出站组和分流规则的出口节点。转发格式：tcp://监听IP:端口/目标IP:端口（支持 udp）。", "An outbound port creates a node for groups and routing rules. Forward format: tcp://listen-IP:port/target-IP:port (udp supported).")));
-        if self.mesh_form.provider == MeshProvider::Tailscale {
-            form = form.child(
+            if self.mesh_form.provider == MeshProvider::Tailscale {
+                form = form.child(
                     div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr(
                         "保存后连接，并在浏览器中完成授权。发布子网与出口需在控制端批准；断开连接保留登录状态。",
                         "Connect and authorize in your browser. Advertised subnets and exit nodes require control-plane approval. Disconnecting preserves sign-in.",
                     )),
                 );
+            }
         }
-
         let view = cx.entity().downgrade();
         dialog
             .centered()
@@ -475,15 +537,17 @@ impl AppView {
                     cx.notify();
                 });
             })
-            .child(form.when_some(self.mesh_form.error.clone(), |d, error| {
+            .child(toolbar)
+            .child(form)
+            .when_some(self.mesh_form.error.clone(), |d, error| {
                 d.child(
                     div()
                         .flex_shrink_0()
                         .text_sm()
-                        .text_color(p.danger)
+                        .text_color(p.danger_text)
                         .child(error),
                 )
-            }))
+            })
             .footer(
                 div()
                     .flex()

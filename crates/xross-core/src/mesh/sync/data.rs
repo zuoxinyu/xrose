@@ -85,6 +85,10 @@ fn portable_mesh(p: &MeshProfile) -> MeshProfile {
         name: p.name.clone(),
         provider: p.provider,
         network_name: p.network_name.clone(),
+        easytier: super::super::EasyTierOptions {
+            device: Default::default(),
+            ..p.easytier.clone()
+        },
         network_secret: p.network_secret.clone(),
         peers: p.peers.clone(),
         remote_subnets: p.remote_subnets.clone(),
@@ -497,6 +501,7 @@ impl Bundle {
                         if old.provider != p.provider {
                             return Err(Error::config("同一组网标识对应不同类型，无法合并"));
                         }
+                        value.easytier.device = old.easytier.device.clone();
                         value.hostname = old.hostname.clone();
                         value.ipv4 = old.ipv4.clone();
                         value.exit_node = old.exit_node.clone();
@@ -601,6 +606,41 @@ fn upsert<T>(list: &mut Vec<T>, value: T, matches: impl Fn(&T) -> bool) {
 mod tests {
     use super::*;
     use crate::model::{GroupKind, Matchers, OutboundGroup, Protocol, RouteAction};
+    #[test]
+    fn syncing_easytier_preferences_does_not_publish_or_override_local_forwarding() {
+        let mut source = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: crate::mesh::MeshSecret("fixture".into()),
+            peers: vec!["tcp://192.0.2.1:11010".into()],
+            ..Default::default()
+        };
+        let mut local = source.clone();
+        local.easytier.device.tcp_hole_punching = false;
+        source.easytier.latency_first = true;
+        source.easytier.device.system_forwarding = true;
+        let mut model = AppModel::default();
+        let bundle = Bundle::capture(&model, &[], &[source], &Category::ALL.into());
+        let Item::Network(shared) = &bundle.items[0] else {
+            panic!("expected a network")
+        };
+        assert!(shared.easytier.latency_first && !shared.easytier.device.system_forwarding);
+        let mut local = vec![local];
+        bundle
+            .merge(
+                &[bundle.items[0].key()].into(),
+                &mut model,
+                &mut vec![],
+                &mut local,
+                &BTreeSet::new(),
+            )
+            .unwrap();
+        assert!(local[0].easytier.latency_first);
+        assert!(
+            !local[0].easytier.device.tcp_hole_punching
+                && !local[0].easytier.device.system_forwarding
+        );
+    }
+
     #[test]
     fn merges_different_device_ids_and_preserves_local_references_on_repeat() {
         let mut local = AppModel::default();

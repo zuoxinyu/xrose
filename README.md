@@ -61,6 +61,8 @@ SwitchyOmega 请使用自动切换情景模式导出的 **Conditions 规则列�
 
 在“组网”页连接 EasyTier 或 Tailscale，让多台设备处于同一虚拟网络。两种后端可同时在线，且独立于代理 Core。
 
+EasyTier 的新增和编辑窗口提供[高级设置](docs/MESH.md#easytier-高级设置)，可按网络调整 P2P 策略、KCP / QUIC、MTU、打洞与转发。
+
 成员列表显示已知的出口、子网、Tailscale SSH 和客户端信息。两台 Xross 连接同一组网后，可以选择要共享的节点、订阅、组网配置及自定义规则，并在接收端逐项预览、选择和合并。[发现与同步](docs/MESH.md#设备发现与配置同步)
 
 - **两种后端**：EasyTier 内置于应用；Tailscale 支持官方服务和自建控制服务器，使用浏览器授权登录。

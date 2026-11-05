@@ -5,6 +5,8 @@ pub mod controller;
 pub mod driver;
 pub mod easytier;
 mod easytier_gateway;
+mod easytier_options;
+pub use easytier_options::{EasyTierDeviceOptions, EasyTierOptions, P2pPolicy, TcpAcceleration};
 pub mod ipc;
 pub mod platform;
 pub mod sync;
@@ -14,7 +16,7 @@ pub mod worker;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -68,6 +70,8 @@ pub struct MeshProfile {
     pub provider: MeshProvider,
     pub hostname: String,
     pub auto_connect: bool,
+    #[serde(default)]
+    pub easytier: EasyTierOptions,
     pub network_name: String,
     pub network_secret: MeshSecret,
     pub peers: Vec<String>,
@@ -92,6 +96,7 @@ impl Default for MeshProfile {
             provider: MeshProvider::EasyTier,
             hostname: "xross".into(),
             auto_connect: false,
+            easytier: Default::default(),
             network_name: String::new(),
             network_secret: MeshSecret::default(),
             peers: Vec::new(),
@@ -160,6 +165,7 @@ impl MeshProfile {
             ));
         }
         if self.provider == MeshProvider::EasyTier {
+            self.easytier.validate()?;
             if self.network_name.trim().is_empty() || self.network_secret.0.is_empty() {
                 return Err(Error::config("请填写 EasyTier 网络名称和密钥"));
             }
@@ -290,6 +296,7 @@ impl MeshProfile {
             provider: self.provider,
             hostname: self.hostname.clone(),
             auto_connect: self.auto_connect,
+            easytier: self.easytier.clone(),
             network_name: self.network_name.clone(),
             has_secret: !self.network_secret.0.is_empty(),
             peers: self.peers.clone(),
@@ -375,6 +382,8 @@ pub struct MeshProfileView {
     pub provider: MeshProvider,
     pub hostname: String,
     pub auto_connect: bool,
+    #[serde(default)]
+    pub easytier: EasyTierOptions,
     pub network_name: String,
     pub has_secret: bool,
     pub peers: Vec<String>,

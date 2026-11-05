@@ -84,12 +84,34 @@ pub fn configuration(p: &MeshProfile) -> Result<TomlConfigLoader> {
     flags.dev_name = p.interface_name();
     flags.accept_dns = false;
     flags.enable_exit_node = p.advertise_exit_node;
-    flags.proxy_forward_by_system = false;
-    flags.disable_upnp = true;
-    flags.enable_udp_broadcast_relay = false;
-    flags.enable_ipv6 = false;
+    let options = &p.easytier;
+    let local = &options.device;
+    flags.enable_encryption = !options.disable_encryption;
+    flags.latency_first = options.latency_first;
+    flags.disable_p2p = options.p2p == super::P2pPolicy::Disabled;
+    flags.lazy_p2p = options.p2p == super::P2pPolicy::OnDemand;
+    flags.need_p2p = options.request_p2p;
+    flags.p2p_only = options.p2p_only;
+    flags.enable_kcp_proxy = options.tcp_acceleration == super::TcpAcceleration::Kcp;
+    flags.enable_quic_proxy = options.tcp_acceleration == super::TcpAcceleration::Quic;
+    if let Some(mtu) = options.mtu {
+        flags.mtu = u32::from(mtu);
+    }
+    flags.use_smoltcp = local.userspace_stack;
+    flags.disable_kcp_input = !local.accept_kcp;
+    flags.disable_quic_input = !local.accept_quic;
+    flags.disable_tcp_hole_punching = !local.tcp_hole_punching;
+    flags.disable_udp_hole_punching = !local.udp_hole_punching;
+    flags.disable_sym_hole_punching = !local.symmetric_nat_punching;
+    flags.multi_thread = local.multi_thread;
+    flags.private_mode = local.private_mode;
+    flags.relay_all_peer_rpc = local.relay_peer_rpc;
+    flags.proxy_forward_by_system = local.system_forwarding;
+    flags.disable_upnp = !local.port_mapping;
+    flags.enable_udp_broadcast_relay = local.udp_broadcast_relay;
+    flags.enable_ipv6 = options.ipv6_transport;
     flags.relay_network_whitelist = String::new();
-    flags.bind_device = true;
+    flags.bind_device = local.bind_physical;
     c.set_flags(flags);
     let exit_group = GroupIdentity {
         group_name: EXIT_GROUP.into(),
@@ -172,6 +194,7 @@ impl ConnectionFailure {
 struct StartupObservation {
     interface: String,
     tun_failed: bool,
+    broadcast_relay_failed: bool,
     peer_connected: bool,
     connection_failure: Option<ConnectionFailure>,
 }
@@ -183,6 +206,9 @@ impl StartupObservation {
                 self.tun_failed = false;
             }
             GlobalCtxEvent::TunDeviceError(_) => self.tun_failed = true,
+            GlobalCtxEvent::UdpBroadcastRelayStartResult { error, .. } => {
+                self.broadcast_relay_failed = error.is_some()
+            }
             GlobalCtxEvent::PeerConnAdded(_) => {
                 self.peer_connected = true;
                 self.connection_failure = None;
@@ -305,6 +331,8 @@ impl Backend {
                 return Err(Error::other(message));
             }
             state.warning = Some(message.into());
+        } else if observation.broadcast_relay_failed {
+            state.warning = Some("UDP 广播中继未启动，请检查物理网卡和提权助手权限".into());
         }
         let manager = self.instance.get_peer_manager();
         let route = manager.get_route();
@@ -449,6 +477,77 @@ mod tests {
         let group = c.get_acl().unwrap().acl_v1.unwrap().group.unwrap();
         assert!(group.members.is_empty());
         assert_eq!(group.declares[0].group_name, EXIT_GROUP);
+    }
+
+    #[test]
+    fn advanced_options_reach_the_embedded_instance_without_changing_route_policy() {
+        use super::super::{EasyTierDeviceOptions, EasyTierOptions, P2pPolicy, TcpAcceleration};
+        let mut p = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: super::super::MeshSecret("fixture".into()),
+            peers: vec!["udp://192.0.2.1:11010".into()],
+            easytier: EasyTierOptions {
+                p2p: P2pPolicy::OnDemand,
+                p2p_only: true,
+                request_p2p: true,
+                latency_first: true,
+                ipv6_transport: true,
+                tcp_acceleration: TcpAcceleration::Kcp,
+                disable_encryption: true,
+                mtu: Some(1240),
+                device: EasyTierDeviceOptions {
+                    bind_physical: false,
+                    multi_thread: false,
+                    userspace_stack: true,
+                    accept_kcp: false,
+                    accept_quic: false,
+                    tcp_hole_punching: false,
+                    udp_hole_punching: false,
+                    symmetric_nat_punching: false,
+                    port_mapping: true,
+                    relay_peer_rpc: true,
+                    private_mode: true,
+                    system_forwarding: true,
+                    udp_broadcast_relay: cfg!(windows),
+                },
+            },
+            ..Default::default()
+        };
+        let config = configuration(&p).unwrap();
+        let flags = config.get_flags();
+        assert!(flags.lazy_p2p && !flags.disable_p2p && flags.p2p_only && flags.need_p2p);
+        assert!(flags.latency_first && flags.enable_ipv6 && !flags.enable_encryption);
+        assert_eq!(flags.mtu, 1240);
+        assert!(flags.enable_kcp_proxy && !flags.enable_quic_proxy);
+        assert!(flags.disable_kcp_input && flags.disable_quic_input);
+        assert!(flags.use_smoltcp && !flags.bind_device && !flags.multi_thread);
+        assert!(
+            flags.disable_tcp_hole_punching
+                && flags.disable_udp_hole_punching
+                && flags.disable_sym_hole_punching
+        );
+        assert!(
+            !flags.disable_upnp
+                && flags.private_mode
+                && flags.relay_all_peer_rpc
+                && flags.proxy_forward_by_system
+        );
+        assert_eq!(flags.enable_udp_broadcast_relay, cfg!(windows));
+        assert!(!flags.no_tun && !flags.accept_dns && flags.relay_network_whitelist.is_empty());
+        assert!(config.get_routes().unwrap().is_empty());
+        p.easytier.p2p = P2pPolicy::Disabled;
+        p.easytier.tcp_acceleration = TcpAcceleration::Quic;
+        let flags = configuration(&p).unwrap().get_flags();
+        assert!(
+            flags.disable_p2p
+                && !flags.lazy_p2p
+                && flags.enable_quic_proxy
+                && !flags.enable_kcp_proxy
+        );
+        for (mtu, ok) in [(399, false), (400, true), (1380, true), (1381, false)] {
+            p.easytier.mtu = Some(mtu);
+            assert_eq!(configuration(&p).is_ok(), ok);
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -213,6 +213,32 @@ impl Store {
                     }
                     tx.execute(
                         "UPDATE profiles SET model = ?1 WHERE id = ?2",
+                        params![encrypted, id],
+                    )?;
+                }
+            }
+        }
+        if version < 7 {
+            // Preserve unrecognized fields and keep the original update timestamp.
+            let mut stmt = tx.prepare("SELECT id, payload FROM mesh_profiles")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, payload) in rows {
+                let mut profile: serde_json::Value =
+                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                if profile["provider"] == "easy_tier" && profile.get("easytier").is_none() {
+                    profile["easytier"] =
+                        serde_json::to_value(crate::mesh::EasyTierOptions::default())?;
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&profile)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("组网配置加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE mesh_profiles SET payload=?1 WHERE id=?2",
                         params![encrypted, id],
                     )?;
                 }
@@ -788,6 +814,53 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v7_migrates_encrypted_easytier_profiles_without_changing_existing_behavior() {
+        use crate::mesh::{MeshProfile, MeshSecret};
+        let (store, dir) = store();
+        let profile = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: MeshSecret("fixture".into()),
+            peers: vec!["udp://192.0.2.1:11010".into()],
+            ..Default::default()
+        };
+        let mut legacy = serde_json::to_value(&profile).unwrap();
+        legacy.as_object_mut().unwrap().remove("easytier");
+        legacy["extra"] = serde_json::json!("preserve");
+        let ciphertext = store.secrets.encrypt(&legacy.to_string());
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO mesh_profiles VALUES (?1,?2,17)",
+                params![profile.id, ciphertext],
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 6)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        let (payload, stamp): (String, i64) = store
+            .conn
+            .lock()
+            .query_row(
+                "SELECT payload, updated_at FROM mesh_profiles WHERE id=?1",
+                [&profile.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stamp, 17);
+        assert!(SecretBox::is_encrypted(&payload));
+        let migrated: serde_json::Value =
+            serde_json::from_str(&store.secrets.decrypt(&payload).unwrap()).unwrap();
+        assert_eq!(migrated["extra"], "preserve");
+        assert!(migrated["easytier"].is_object());
+        assert_eq!(store.mesh_profiles().unwrap(), vec![profile]);
     }
 
     #[test]

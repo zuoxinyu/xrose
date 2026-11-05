@@ -49,8 +49,16 @@ pub fn main() -> Result<()> {
         }
         let _ = sender.blocking_send(WorkerCommand::Stop);
     });
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+    let mut builder = if boot.profile.provider == MeshProvider::EasyTier
+        && !boot.profile.easytier.device.multi_thread
+    {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        builder.worker_threads(2);
+        builder
+    };
+    let runtime = builder
         .enable_all()
         .build()
         .map_err(|_| Error::other("组网运行时初始化失败"))?;
