@@ -25,6 +25,7 @@ fn main() {
         Some("compile") => compile(&args[1..]),
         Some("check") => check(&args[1..]),
         Some("parse") => parse(&args[1..]),
+        Some("route") => route_files(&args[1..]),
         Some("import") => import(&args[1..]),
         Some("export") => export(&args[1..]),
         Some("add-node") => add_node(&args[1..]),
@@ -59,6 +60,9 @@ fn usage() {
 用法 / Usage:
   xross-cli compile [--core xray|sing-box] [-o config.json] [--home DIR]
   xross-cli check   [--core xray|sing-box] [--home DIR]
+  xross-cli route preview|import <file|-> [--home DIR]   预览或追加路由规则与规则集
+  xross-cli route convert <file|-> [-o FILE] [--home DIR]   转换为 Xross 路由文件
+  xross-cli route export [--sets-only] [-o FILE] [--home DIR]
   xross-cli parse <file|->          解析订阅并打印摘要
   xross-cli import <file|->         导入节点到当前配置
   xross-cli export [--all]          导出分享链接
@@ -479,6 +483,88 @@ fn parse(args: &[String]) -> Result<(), String> {
             node.transport.kind_name(),
             if node.tls.enabled { "TLS" } else { "plain" }
         );
+    }
+    Ok(())
+}
+
+fn route_files(args: &[String]) -> Result<(), String> {
+    use xross_core::route::transfer::{self, ExportScope};
+    let mut out = None;
+    let mut home = None;
+    let mut positional = Vec::new();
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        match arg {
+            "-o" | "--out" | "--home" => {
+                let path = args
+                    .next()
+                    .filter(|p| !p.starts_with('-'))
+                    .ok_or_else(|| format!("{arg} 缺少路径"))?;
+                let dest = if arg == "--home" { &mut home } else { &mut out };
+                if dest.replace(PathBuf::from(path)).is_some() {
+                    return Err(format!("请只指定一次 {arg}"));
+                }
+            }
+            other => positional.push(other),
+        }
+    }
+    let emit = |text: &str| -> Result<(), String> {
+        if let Some(path) = &out {
+            xross_core::util::atomic_write_private(path, text.as_bytes())
+                .map_err(|_| "无法导出，请选择可写文件位置".to_string())?;
+        } else {
+            println!("{text}");
+        }
+        Ok(())
+    };
+    let usage = "用法：route preview|import|convert <文件|-> 或 route export [--sets-only]；convert / export 可用 -o 指定输出文件";
+    match positional.as_slice() {
+        [cmd @ ("preview" | "import" | "convert"), file] => {
+            if *cmd != "convert" && out.is_some() {
+                return Err(usage.into());
+            }
+            let text = if *file == "-" {
+                transfer::read_text(std::io::stdin().lock())
+            } else {
+                transfer::read_file(std::path::Path::new(file))
+            }
+            .map_err(|e| e.to_string())?;
+            let service = service(home)?;
+            if *cmd == "convert" {
+                let (bundle, summary) =
+                    transfer::convert(&text, &service.model()).map_err(|e| e.to_string())?;
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&summary).map_err(|e| e.to_string())?
+                );
+                return emit(&bundle);
+            }
+            let (id, summary) = service
+                .preview_route_import(&text)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+            );
+            if *cmd == "import" {
+                service
+                    .commit_route_import(&id)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        ["export"] | ["export", "--sets-only"] => {
+            let scope = if positional.len() == 1 {
+                ExportScope::All
+            } else {
+                ExportScope::RuleSets
+            };
+            emit(
+                &service(home)?
+                    .export_route_text(&scope)
+                    .map_err(|e| e.to_string())?,
+            )?;
+        }
+        _ => return Err(usage.into()),
     }
     Ok(())
 }

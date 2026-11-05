@@ -331,6 +331,12 @@ impl AppView {
                                 .justify_end()
                                 .gap_2()
                                 .child(
+                                    Button::new("route-files").compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .label(self.tr("导入 / 导出", "Import / Export"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "route-file"))
+                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RoutingFiles)),
+                                )
+                                .child(
                                     Button::new("validate-route")
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
@@ -362,6 +368,9 @@ impl AppView {
                                 ),
                         ),
                 )
+                .when_some(self.snapshot.route_import.clone(), |d, (id, report)| {
+                    d.child(self.route_import_review(id, &report, cx))
+                })
                 .when(self.show_rule_form, |d| {
                     d.child(
                         div()
@@ -386,6 +395,7 @@ impl AppView {
                                         MatcherKind::Domain,
                                         MatcherKind::Suffix,
                                         MatcherKind::Geo,
+                                        MatcherKind::RuleSet,
                                         MatcherKind::Ip,
                                         MatcherKind::Process,
                                         MatcherKind::Port,
@@ -506,6 +516,15 @@ impl AppView {
                                                         matchers.domain_suffixes = values
                                                     }
                                                     MatcherKind::Geo => matchers.geosites = values,
+                                                    MatcherKind::RuleSet => {
+                                                        let known = this.snapshot.rule_sets();
+                                                        if values.iter().any(|v| !known.iter().any(|s| &s.tag == v)) {
+                                                            this.service.toast(xross_core::service::ToastLevel::Warning,
+                                                                this.tr("请填写已列出的规则集标签", "Enter a listed rule set tag").to_string());
+                                                            return;
+                                                        }
+                                                        matchers.rule_sets = values;
+                                                    }
                                                     MatcherKind::Ip => matchers.ip_cidrs = values,
                                                     MatcherKind::Process => {
                                                         matchers.process_names = values

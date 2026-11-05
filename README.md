@@ -11,6 +11,7 @@ Xross 是跨平台的 Xray / sing-box 桌面客户端，同时内置异地组网
 ## 功能
 
 - **代理**：管理节点与订阅，配置出站组、路由规则和 DNS；支持系统代理、PAC 与 TUN。
+- **路由**：导入、导出规则、分组与规则集定义，可将 SwitchyOmega Conditions 和 AutoProxy 列表转换为本地路由规则。
 - **Core**：下载和切换 Xray 或 sing-box 版本，应用配置前自动校验。
 - **订阅**：支持 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON。
 - **诊断**：连接列表、日志、延迟与下载测速、连接链路测试。
@@ -23,6 +24,21 @@ Xross 是跨平台的 Xray / sing-box 桌面客户端，同时内置异地组网
 「高级设置」中的「前置代理」可从当前配置中选择节点，局域网关闭时也可使用。选择后，内核先连接前置节点，再通过它连接目标代理节点。局域网监听和前置代理设置在下次启动内核或点击「应用配置」后生效。
 
 在「设置 → 更新与备份」可分别开启「使用代理更新订阅」和「使用代理更新资源」，也可填写 User-Agent。两项代理开关默认关闭。开启后，请先启动带 HTTP 或混合入站的内核。资源包括版本检查、内核安装包、校验文件、规则集、地理数据及组网组件。User-Agent 留空时使用默认值，已有订阅的自定义值优先。
+
+## 导入和导出路由
+
+打开「路由 → 路由规则 → 导入 / 导出」选择文件。导入前可查看规则、分组、规则集数量及转换提示，确认后追加到当前配置。运行中的内核需点击「应用配置」才会使用新规则。单条规则和整个分组可从各自的「⋯」菜单导出。Xross JSON 保留规则顺序、启用状态、动作和引用的规则集；只导出规则集时，文件包含来源与更新设置，不包含已下载的数据。要使用导入的规则集，在「添加规则」中选择「规则集」并填写标签。
+
+SwitchyOmega 请使用自动切换情景模式导出的 **Conditions 规则列表**，或 AutoProxy 列表（明文、Base64 均可）。导入后生成一个独立分组，排在已有自定义分组之后、未分组和预设规则之前。不带结果的列表将匹配项转为代理、例外转为直连，未命中时继续匹配原配置。带 `@with result` 的列表保留指定动作；末尾的 `* +情景模式` 会接管该分组之后的 TCP / UDP 流量，可在分组中禁用这条规则。
+
+| 源条件 | 转换结果 |
+|---|---|
+| `example.org`、`*.example.org` | 完整域名、域名后缀（包含根域名） |
+| 主机通配符、主机正则、`Ip: 192.0.2.0/24` | 主机匹配或目标 IP 网段 |
+| AutoProxy 的 `\|\|example.org`、`@@\|\|safe.example.org` | 域名后缀；例外优先 |
+| URL 路径、URL 正则、浏览器专有条件 | 跳过；预览列出数量和源文件行号 |
+
+`direct` 对应直连；命名情景模式优先匹配同名出站组，找不到时使用默认代理，并在预览中提示。SwitchyOmega 整份设置备份（`.bak`）、PAC 脚本和二进制 `.srs` 不是路由交换文件。条件顺序和语法见 [SwitchyOmega 格式说明](https://github.com/FelisCatus/SwitchyOmega/wiki/SwitchyOmega-conditions-format)。
 
 ## 异地组网
 
@@ -63,6 +79,10 @@ cargo run -p xross-app
 ```bash
 xross-cli parse ./subscription.txt           # 解析订阅并列出节点
 xross-cli import ./sub.yaml                  # 导入订阅文件
+xross-cli route preview ./rules.sorl         # 预览 SwitchyOmega 转换结果
+xross-cli route convert ./rules.sorl -o ./rules.json  # 仅转换，不导入当前配置
+xross-cli route import ./rules.sorl          # 追加到当前配置
+xross-cli route export -o ./routing.json     # 导出规则、分组和规则集
 xross-cli compile --core sing-box -o c.json  # 编译配置
 xross-cli check --core sing-box              # 用真实 Core 校验
 xross-cli doctor                             # TUN / 端口 / 权限检查

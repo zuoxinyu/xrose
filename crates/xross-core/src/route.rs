@@ -4,6 +4,8 @@
 //! sets); those matchers are reported as "needs core" instead of silently
 //! returning a wrong answer.
 
+pub mod transfer;
+
 use std::net::IpAddr;
 
 use crate::model::{
@@ -95,7 +97,7 @@ pub fn action_label(model: &AppModel, action: &RouteAction) -> String {
 }
 
 pub fn matches_rule(matchers: &Matchers, info: &ConnectionInfo) -> MatchState {
-    let mut needs_core = false;
+    let mut needs_core = !matchers.rule_sets.is_empty();
     let domain = info
         .domain
         .as_deref()
@@ -142,8 +144,7 @@ pub fn matches_rule(matchers: &Matchers, info: &ConnectionInfo) -> MatchState {
             return MatchState::NotMatched;
         }
     }
-    if !matchers.geosites.is_empty() || matchers.rule_sets.iter().any(|t| t.starts_with("geosite-"))
-    {
+    if !matchers.geosites.is_empty() {
         // geosites only affect the result if this rule also matches on other
         // fields; mark that we cannot be definitive.
         needs_core = true;
@@ -157,7 +158,7 @@ pub fn matches_rule(matchers: &Matchers, info: &ConnectionInfo) -> MatchState {
             return MatchState::NotMatched;
         }
     }
-    if !matchers.geoips.is_empty() || matchers.rule_sets.iter().any(|t| t.starts_with("geoip-")) {
+    if !matchers.geoips.is_empty() {
         needs_core = true;
     }
     if !matchers.source_ip_cidrs.is_empty() {

@@ -4,10 +4,12 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
+use xross_core::route::transfer::ExportScope;
 use xross_core::service::ToastLevel;
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
+    RoutingFiles,
     NodeSelector,
     FrontProxy,
     Node(String),
@@ -22,6 +24,8 @@ pub(super) enum MenuTarget {
 
 #[derive(Clone)]
 pub(super) enum Command {
+    ImportRoute,
+    ExportRoute(ExportScope),
     SelectNode(String, String),
     SetFrontProxy(Option<String>),
     EditNode(String),
@@ -268,6 +272,29 @@ impl AppView {
                         Command::CleanNodes,
                     ));
             }
+            MenuTarget::RoutingFiles => {
+                let ready = !busy("route-file");
+                menu = menu
+                    .item(add(
+                        "导入规则文件…",
+                        "Import rule file…",
+                        ready,
+                        Command::ImportRoute,
+                    ))
+                    .separator()
+                    .item(add(
+                        "导出全部规则与规则集…",
+                        "Export rules and rule sets…",
+                        ready,
+                        Command::ExportRoute(ExportScope::All),
+                    ))
+                    .item(add(
+                        "仅导出规则集…",
+                        "Export rule sets only…",
+                        ready,
+                        Command::ExportRoute(ExportScope::RuleSets),
+                    ));
+            }
             MenuTarget::Rule(id, group) => {
                 let rules = match &group {
                     Some(gid) => match self
@@ -324,6 +351,12 @@ impl AppView {
                         tr(lang, "移动到分组", "Move to group"),
                         submenu,
                     ))
+                    .item(add(
+                        "导出规则…",
+                        "Export rule…",
+                        !busy("route-file"),
+                        Command::ExportRoute(ExportScope::Rule(id.clone())),
+                    ))
                     .separator()
                     .item(add(
                         "删除规则",
@@ -370,6 +403,12 @@ impl AppView {
                         "Move down",
                         index + 1 < groups.len(),
                         Command::MoveGroup(id.clone(), 1),
+                    ))
+                    .item(add(
+                        "导出分组…",
+                        "Export group…",
+                        !busy("route-file"),
+                        Command::ExportRoute(ExportScope::Group(id.clone())),
                     ))
                     .separator()
                     .item(add(
@@ -608,6 +647,8 @@ impl AppView {
             }
         }
         match command {
+            Command::ImportRoute => self.pick_route_import(cx),
+            Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
             Command::SetFrontProxy(id) => {
                 if let Err(err) = self.service.set_front_proxy(id) {
                     self.service.toast(ToastLevel::Error, err.to_string());

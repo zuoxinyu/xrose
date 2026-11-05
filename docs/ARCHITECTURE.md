@@ -227,3 +227,11 @@ OpenVPN / OpenConnect 的适配以 sing-box 1.14.4 的类型定义和官方客�
 VPN 参数和 PEM 内容保存在节点凭据中；导入器不会执行 `.ovpn` 指令或读取其引用的本地文件。
 配置编译与节点探测均生成用户态 endpoint，通用 TLS / v2ray transport 不叠加到 VPN。
 启动时将实际内核版本传入编译上下文，sing-box 1.14 以下跳过 VPN；纯 VPN 配置无法编译时给出升级提示。
+
+## 路由规则交换
+
+`route/transfer.rs` 定义版本独立于数据库的 `xross-routing` v1 JSON：`rules`、`rule_groups`、`rule_sets`、用于跨配置解析出站组的 `outbound_names`。不交换节点、订阅、运行数据或默认路由设置。导入为规则及分组生成新 ID；再次导入会追加副本。同标签且定义相同的规则集复用，不同定义拒绝整批导入。规则集标签校验同时覆盖显式引用和隐式 Geo 引用；来源限无认证信息及查询参数的 HTTP(S) URL。
+
+`route/transfer/omega.rs` 按 [SwitchyOmega 的列表解析顺序](https://github.com/FelisCatus/SwitchyOmega/blob/master/omega-pac/src/rule_list.coffee) 转换为同一意图模型。Conditions 保持原顺序，带结果的排除条件使用末尾默认动作；AutoProxy 将例外放在普通条件之前。文件内的默认规则保存在导入分组中，不修改全局默认出站。不能等价转换的浏览器条件计入预览。编译复用现有适配器，sing-box 用网络类型数组表达同时匹配 TCP 和 UDP。
+
+文件选择后，`AppService` 在后台读取和解析，将摘要放入快照，完整预览仅保存在内存。确认时检查预览 ID、当前配置、出站组与规则集引用，持久化成功后才发布模型；取消或解析失败不写入配置。GUI 与 CLI 复用同一预览和提交流程。

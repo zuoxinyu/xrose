@@ -940,7 +940,10 @@ fn singbox_rule(
         object.insert("source_port_range".into(), json!(source_ranges));
     }
     if let Some(network) = network_str(m) {
-        object.insert("network".into(), json!(network));
+        object.insert(
+            "network".into(),
+            json!(network.split(',').collect::<Vec<_>>()),
+        );
     }
     if !m.process_names.is_empty() {
         object.insert("process_name".into(), json!(m.process_names));

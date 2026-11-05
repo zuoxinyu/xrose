@@ -1,6 +1,8 @@
 //! The single facade the UI talks to. All heavy work is dispatched to an
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
+mod routing_transfer;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -140,6 +142,8 @@ pub struct UiSnapshot {
     pub config_dirty: bool,
     pub recovery_note: Option<String>,
     pub rule_set_updates: Vec<RuleSetUpdate>,
+    #[serde(default)]
+    pub route_import: Option<(String, crate::route::transfer::ImportSummary)>,
     pub trace: Option<TraceSession>,
     #[serde(default)]
     pub recording: DiagnosticRecording,
@@ -155,7 +159,7 @@ impl UiSnapshot {
     }
 
     pub fn rule_sets(&self) -> Vec<crate::model::RuleSet> {
-        crate::adapters::required_rule_sets(&self.model)
+        crate::route::transfer::listed_rule_sets(&self.model)
     }
 
     /// Resolve the same group as the node list, including live automatic choices.
@@ -225,6 +229,7 @@ struct Inner {
     recovery_note: RwLock<Option<String>>,
     helper: RwLock<HelperStatus>,
     rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
+    route_import: Mutex<Option<routing_transfer::PendingImport>>,
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
     recording: Mutex<DiagnosticRecording>,
@@ -333,6 +338,7 @@ impl AppService {
             recovery_note: RwLock::new(None),
             helper: RwLock::new(privilege::initial_status()),
             rule_set_updates: RwLock::new(Vec::new()),
+            route_import: Mutex::new(None),
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
             recording: Mutex::new(DiagnosticRecording::default()),
@@ -474,6 +480,12 @@ impl AppService {
             config_dirty: self.inner.config_dirty.load(Ordering::SeqCst),
             recovery_note: self.inner.recovery_note.read().clone(),
             rule_set_updates: self.inner.rule_set_updates.read().clone(),
+            route_import: self
+                .inner
+                .route_import
+                .lock()
+                .as_ref()
+                .map(|p| (p.id.clone(), p.plan.summary.clone())),
             trace: self.inner.trace.read().clone(),
             recording: self.inner.recording.lock().clone(),
         }
@@ -3243,7 +3255,7 @@ impl AppService {
             let model = service.inner.model.read().clone();
             let dir = service.inner.paths.rule_sets_dir();
             let results = updates::sync_rule_sets(
-                &crate::adapters::required_rule_sets(&model),
+                &crate::route::transfer::listed_rule_sets(&model),
                 &dir,
                 &service.resource_network(),
             )

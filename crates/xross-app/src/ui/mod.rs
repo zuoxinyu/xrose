@@ -8,6 +8,7 @@ mod menus;
 mod mesh;
 mod nodes;
 mod route_drag;
+mod route_transfer;
 mod routing;
 mod settings;
 mod subscriptions;
@@ -118,6 +119,7 @@ pub enum MatcherKind {
     Domain,
     Suffix,
     Geo,
+    RuleSet,
     Ip,
     Process,
     Port,
@@ -129,6 +131,7 @@ impl MatcherKind {
             MatcherKind::Domain => ("完整域名", "Exact domain"),
             MatcherKind::Suffix => ("域名后缀", "Domain suffix"),
             MatcherKind::Geo => ("GeoSite", "GeoSite"),
+            MatcherKind::RuleSet => ("规则集", "Rule set"),
             MatcherKind::Ip => ("IP / CIDR", "IP / CIDR"),
             MatcherKind::Process => ("进程名", "Process"),
             MatcherKind::Port => ("端口", "Port"),
