@@ -2734,6 +2734,10 @@ impl AppService {
         self.run_helper_action("安装提权助手", privilege::install);
     }
 
+    pub fn update_helper(&self) {
+        self.run_helper_action("更新提权助手", privilege::update);
+    }
+
     pub fn uninstall_helper(&self) {
         self.run_helper_action("卸载提权助手", privilege::uninstall);
     }
@@ -2749,21 +2753,20 @@ impl AppService {
     /// Runs install/uninstall/start in a blocking task: they may show an OS
     /// elevation prompt and must never block the render thread.
     fn run_helper_action(&self, label: &'static str, action: fn() -> Result<String>) {
-        if self.is_busy("helper") {
+        if !self.inner.busy.write().insert("helper".into()) {
             return;
         }
-        self.set_busy("helper", true);
         let service = self.clone();
         self.spawn(async move {
+            let _guard = service.inner.helper_lock.lock().await;
             let result = tokio::task::spawn_blocking(move || {
-                privilege::invalidate_status();
                 let outcome = action();
+                privilege::invalidate_status();
                 // Refresh before returning so the settings card updates
                 // immediately instead of waiting for the next monitor tick.
                 (outcome, privilege::status())
             })
             .await;
-            service.set_busy("helper", false);
             match result {
                 Ok((Ok(message), status)) => {
                     *service.inner.helper.write() = status;
@@ -2777,6 +2780,8 @@ impl AppService {
                     service.toast(ToastLevel::Error, format!("{label}任务异常：{err}"));
                 }
             }
+            service.set_busy("helper", false);
+            service.refresh_doctor();
         });
     }
 
@@ -2900,7 +2905,12 @@ impl AppService {
         let service = self.clone();
         self.spawn(async move {
             let checks = tokio::task::spawn_blocking(move || {
-                system::tun::diagnose_for_process(&model, &settings, pid)
+                system::tun::diagnose_for_process(
+                    &model,
+                    &settings,
+                    pid,
+                    state.helper_session.as_deref(),
+                )
             })
             .await;
             if service.inner.doctor_generation.load(Ordering::SeqCst) == generation {
@@ -3615,6 +3625,7 @@ impl AppService {
         self.spawn(async move {
             let mut tick: u64 = 0;
             let mut last_phase = crate::core::ProcessPhase::Stopped;
+            let mut last_pid = None;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 let Some(inner) = weak.upgrade() else { break };
@@ -3647,10 +3658,11 @@ impl AppService {
                         service.toast(ToastLevel::Error, format!("core 已退出：{}", exit.reason));
                     }
                 }
-                if state.phase != last_phase {
+                if state.phase != last_phase || state.pid != last_pid {
                     service.refresh_doctor();
                 }
                 last_phase = state.phase;
+                last_pid = state.pid;
                 if !state.phase.is_alive() {
                     service.update_connections(Vec::new());
                     tick += 1;

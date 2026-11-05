@@ -58,6 +58,8 @@ pub struct ProcessState {
     pub phase: ProcessPhase,
     pub core: Option<CoreKind>,
     pub pid: Option<u32>,
+    #[serde(skip)]
+    pub(crate) helper_session: Option<String>,
     pub started_at: Option<i64>,
     pub binary: Option<String>,
     pub restarts: u32,
@@ -72,6 +74,7 @@ impl Default for ProcessState {
             phase: ProcessPhase::Stopped,
             core: None,
             pid: None,
+            helper_session: None,
             started_at: None,
             binary: None,
             restarts: 0,
@@ -291,6 +294,10 @@ async fn run_loop(mut ctx: RunContext) {
             let mut state = ctx.state.write();
             state.phase = ProcessPhase::Running;
             state.pid = pid;
+            state.helper_session = match &child {
+                Child::Elevated(client) => Some(client.session().to_owned()),
+                Child::Local(_) => None,
+            };
             state.started_at = Some(now_unix());
             state.restarts = attempt;
         }

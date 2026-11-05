@@ -824,8 +824,8 @@ impl AppView {
                     if !platform.elevated {
                         items.push(
                             self.tr(
-                                "安装、启动与卸载会弹出系统管理员授权（UAC / osascript / pkexec）",
-                                "Install, start and uninstall go through the OS elevation prompt (UAC / osascript / pkexec)",
+                                "管理提权助手时，系统可能要求管理员授权",
+                                "Managing the helper may require administrator approval",
                             )
                             .to_string(),
                         );
@@ -837,6 +837,12 @@ impl AppView {
                         )
                         .to_string(),
                     );
+                    if platform.helper_supported && platform.helper_installed {
+                        items.push(self.tr(
+                            "更新会重启提权助手，并中断由它管理的连接",
+                            "Updating restarts the helper and interrupts connections it manages",
+                        ).to_string());
+                    }
                     if cfg!(windows) {
                         items.push(
                             self.tr(
@@ -927,7 +933,19 @@ impl AppView {
                                     this.service.refresh_helper_status();
                                     this.sync(cx);
                                 })),
-                        ),
+                        )
+                        .when(platform.helper_supported && platform.helper_installed, |d| {
+                            d.child(
+                                Button::new("update-helper")
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                    .label(self.tr("更新助手", "Update helper"))
+                                    .loading(helper_busy)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.service.update_helper();
+                                        this.sync(cx);
+                                    })),
+                            )
+                        }),
                 )
                 .when(!platform.helper_supported, |d| {
                     d.child(

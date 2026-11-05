@@ -544,6 +544,29 @@ pub fn install() -> Result<String> {
     Ok(message)
 }
 
+/// Re-registers the installed service with this executable and verifies the replacement.
+pub fn update() -> Result<String> {
+    if !supported() {
+        return Err(Error::other("当前平台不支持提权助手"));
+    }
+    if !platform::is_installed() {
+        return Err(Error::other("请先安装提权助手"));
+    }
+    if is_elevated() {
+        platform::install()?;
+    } else {
+        platform::run_elevated(&elevated_args(INSTALL_ARG))?;
+    }
+    invalidate_status();
+    if wait_until_running(Duration::from_secs(8)) {
+        Ok("提权助手已更新并启动".into())
+    } else {
+        Err(Error::other(
+            "提权助手已更新，但未能启动，请检查系统服务状态后重试",
+        ))
+    }
+}
+
 /// Removes the service/task. A running helper is stopped first.
 pub fn uninstall() -> Result<String> {
     if !supported() {
@@ -951,7 +974,7 @@ mod platform {
                 created.trim()
             )));
         }
-        let _ = start();
+        start()?;
         Ok(format!(
             "已安装提权助手（计划任务 {TASK_NAME}，登录时以最高权限启动）"
         ))
@@ -1290,13 +1313,9 @@ mod platform {
             .map(|status| status.success())
             .unwrap_or(false);
         if !bootstrapped {
-            let _ = Command::new("launchctl")
-                .args(["load", "-w", PLIST])
-                .status();
+            run("launchctl", &["load", "-w", PLIST])?;
         }
-        let _ = Command::new("launchctl")
-            .args(["kickstart", "-k", &target])
-            .status();
+        run("launchctl", &["kickstart", "-k", &target])?;
         Ok(format!("已安装提权助手（LaunchDaemon {LAUNCHD_LABEL}）"))
     }
 
@@ -1518,7 +1537,10 @@ mod platform {
         std::fs::write(UNIT_PATH, unit)
             .map_err(|e| Error::other(format!("写入 {UNIT_PATH} 失败：{e}")))?;
         run("systemctl", &["daemon-reload"])?;
-        run("systemctl", &["enable", "--now", SYSTEMD_UNIT])?;
+        run("systemctl", &["enable", SYSTEMD_UNIT])?;
+        // Enabling an active unit does not replace its running executable.
+        let _ = super::request_shutdown();
+        run("systemctl", &["restart", SYSTEMD_UNIT])?;
         Ok(format!("已安装提权助手（systemd 服务 {SYSTEMD_UNIT}）"))
     }
 

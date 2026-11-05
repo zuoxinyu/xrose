@@ -24,6 +24,7 @@ pub struct Request {
 pub enum Command {
     Start { binary: PathBuf, config: PathBuf },
     Poll,
+    Listeners,
     Stop,
 }
 
@@ -31,6 +32,8 @@ pub enum Command {
 pub struct Reply {
     version: u32,
     pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    listeners: Option<Vec<std::net::SocketAddr>>,
     exit_code: Option<u32>,
     lines: Vec<(bool, String)>,
 }
@@ -296,6 +299,7 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
             monitor_owner(request.session.clone(), owner);
             Ok(Reply {
                 version: VERSION,
+                listeners: None,
                 pid,
                 exit_code: None,
                 lines: vec![],
@@ -316,15 +320,35 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
             let lines = process.lines.lock().drain(..).collect();
             Ok(Reply {
                 version: VERSION,
+                listeners: None,
                 pid: process.child.id(),
                 exit_code,
                 lines,
+            })
+        }
+        Command::Listeners => {
+            let process = map
+                .get_mut(&request.session)
+                .ok_or_else(|| Error::process("TUN 助手会话已结束"))?;
+            if process.child.try_wait()?.is_some() {
+                return Err(Error::process("TUN 内核已退出"));
+            }
+            let pid = process.child.id();
+            let listeners = super::port_owner::listeners(pid)
+                .map_err(|_| Error::process("无法读取 TUN 内核监听端口"))?;
+            Ok(Reply {
+                version: VERSION,
+                pid,
+                listeners: Some(listeners),
+                exit_code: None,
+                lines: vec![],
             })
         }
         Command::Stop => {
             map.remove(&request.session);
             Ok(Reply {
                 version: VERSION,
+                listeners: None,
                 pid: 0,
                 exit_code: Some(1),
                 lines: vec![],
@@ -402,6 +426,19 @@ fn call(request: Request) -> Result<Reply> {
     Ok(reply)
 }
 
+/// Query only the child of this authenticated session. Older helpers reject
+/// the new command without affecting the running child or consuming its logs.
+pub(crate) fn session_listeners(session: &str, pid: u32) -> Option<Vec<std::net::SocketAddr>> {
+    let reply = call(Request {
+        version: VERSION,
+        owner_pid: std::process::id(),
+        session: session.to_owned(),
+        command: Command::Listeners,
+    })
+    .ok()?;
+    (reply.pid == pid).then_some(reply.listeners).flatten()
+}
+
 pub struct Client {
     request: Request,
     pid: u32,
@@ -446,6 +483,9 @@ impl Client {
         tokio::task::spawn_blocking(move || call(request))
             .await
             .map_err(|_| Error::process("TUN 助手通信任务异常"))?
+    }
+    pub(crate) fn session(&self) -> &str {
+        &self.request.session
     }
     pub fn id(&self) -> u32 {
         self.pid

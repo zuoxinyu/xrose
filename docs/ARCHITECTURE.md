@@ -169,7 +169,8 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 - helper 由系统服务/计划任务以管理员身份运行；GUI 通过本地 socket 调用。
   Unix 端校验 `SO_PEERCRED`/`LOCAL_PEERCRED` 的 euid（安装用户或 root），
   Windows 依赖命名管道的默认 DACL（创建者用户 + Administrators）。
-- 安装/卸载/启动通过 UAC（`ShellExecuteEx runas` 等待子进程）、
+- 设置页按当前内核的实际 TCP 监听地址和端口判断占用。对助手代启的内核，通过已认证的 TUN 会话查询该子进程的监听端口；旧助手不支持查询且本地无法确认时，提示更新助手，不将其判为其他进程。
+- 更新助手会用当前可执行文件重新注册并启动服务；助手响应后报告完成。安装/更新/卸载/启动通过 UAC（`ShellExecuteEx runas` 等待子进程）、
   `osascript ... with administrator privileges`、`pkexec` 完成，不提供 setuid 包装。
 - `--helper` 在 `xross-app`/`xross-cli` 的 `main` 最前面处理，早于数据库和 GUI；
   helper 进程不会打开用户配置库。

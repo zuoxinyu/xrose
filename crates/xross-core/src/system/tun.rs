@@ -1,11 +1,13 @@
 //! Pre-flight diagnostics for TUN mode, shown before the user hits start.
 
-use std::net::TcpListener;
+use std::net::{IpAddr, SocketAddr, TcpListener};
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::{AppModel, InboundKind};
-use crate::settings::Settings;
+use crate::settings::{Language, Settings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,13 +55,14 @@ pub fn is_port_free(port: u16) -> bool {
 /// Runs local, side-effect-free checks. Results never block starting; the
 /// caller decides what to do with warnings.
 pub fn diagnose(model: &AppModel, settings: &Settings) -> Vec<DoctorCheck> {
-    diagnose_for_process(model, settings, None)
+    diagnose_for_process(model, settings, None, None)
 }
 
 pub(crate) fn diagnose_for_process(
     model: &AppModel,
     settings: &Settings,
     core_pid: Option<u32>,
+    helper_session: Option<&str>,
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let caps = settings.core.capabilities();
@@ -114,31 +117,66 @@ pub(crate) fn diagnose_for_process(
         }
     }
 
+    // Take one socket-table snapshot for all occupied ports. Use the helper's
+    // view for its own child; the GUI may not be allowed to inspect that PID.
+    let owner = core_pid.map(|pid| PortOwner {
+        pid,
+        helper_session,
+        listeners: Default::default(),
+    });
+    let port_check = |name: String, host: &str, port, conflict: &str| {
+        let endpoint = match host.parse::<IpAddr>() {
+            Ok(ip) => SocketAddr::new(ip, port),
+            Err(_) => {
+                return DoctorCheck::warn(
+                    &name,
+                    format!(
+                        "{host}:{port} {}",
+                        localize(
+                            settings.language,
+                            "监听地址无效，请检查配置",
+                            "has an invalid listen address; check the configuration"
+                        )
+                    ),
+                );
+            }
+        };
+        check_port(&name, endpoint, owner.as_ref(), conflict, settings.language)
+    };
+    let lang = settings.language;
     for inbound in model.inbounds.iter().filter(|i| i.enabled) {
         if inbound.kind == InboundKind::Tun || inbound.port == 0 {
             continue;
         }
-        checks.push(check_port(
-            &format!("端口 {}", inbound.tag),
+        checks.push(port_check(
+            format!("{} {}", localize(lang, "端口", "Port"), inbound.tag),
+            inbound.listen_address(),
             inbound.port,
-            core_pid,
-            "启动可能失败",
+            localize(lang, "启动可能失败", "the core may fail to start"),
         ));
     }
     if settings.core == crate::model::CoreKind::SingBox {
-        checks.push(check_port(
-            "Clash API 端口",
+        checks.push(port_check(
+            localize(lang, "Clash API 端口", "Clash API port").into(),
+            "127.0.0.1",
             settings.api_port,
-            core_pid,
-            "流量/连接面板将不可用",
+            localize(
+                lang,
+                "流量/连接面板将不可用",
+                "traffic and connection data will be unavailable",
+            ),
         ));
     }
     if settings.core == crate::model::CoreKind::Xray {
-        checks.push(check_port(
-            "Xray Stats 端口",
+        checks.push(port_check(
+            localize(lang, "Xray Stats 端口", "Xray Stats port").into(),
+            "127.0.0.1",
             settings.stats_port,
-            core_pid,
-            "流量统计将不可用",
+            localize(
+                lang,
+                "流量统计将不可用",
+                "traffic statistics will be unavailable",
+            ),
         ));
     }
 
@@ -167,14 +205,120 @@ pub(crate) fn diagnose_for_process(
     checks
 }
 
-fn check_port(name: &str, port: u16, core_pid: Option<u32>, conflict: &str) -> DoctorCheck {
-    if is_port_free(port) {
-        DoctorCheck::ok(name, format!("{port} 可用"))
-    } else if let Some(pid) = core_pid.filter(|pid| super::port_owner::owns_listener(*pid, port)) {
-        DoctorCheck::ok(name, format!("{port} 由当前 core 使用（PID {pid}）"))
-    } else {
-        DoctorCheck::warn(name, format!("{port} 已被其他进程占用，{conflict}"))
+fn localize<'a>(language: Language, zh: &'a str, en: &'a str) -> &'a str {
+    if language == Language::En { en } else { zh }
+}
+
+#[derive(Default)]
+struct ListenerSnapshot {
+    endpoints: Vec<SocketAddr>,
+    complete: bool,
+}
+
+struct PortOwner<'a> {
+    pid: u32,
+    helper_session: Option<&'a str>,
+    listeners: std::cell::OnceCell<ListenerSnapshot>,
+}
+
+impl PortOwner<'_> {
+    fn listeners(&self) -> &ListenerSnapshot {
+        self.listeners.get_or_init(|| {
+            if let Some(session) = self.helper_session {
+                if let Some(endpoints) = super::tun_process::session_listeners(session, self.pid) {
+                    return ListenerSnapshot {
+                        endpoints,
+                        complete: true,
+                    };
+                }
+                // With an older helper the GUI may still see the sockets. Only
+                // positive matches are meaningful across the privilege boundary.
+                return ListenerSnapshot {
+                    endpoints: super::port_owner::listeners(self.pid).unwrap_or_default(),
+                    complete: false,
+                };
+            }
+            super::port_owner::listeners(self.pid)
+                .map(|endpoints| ListenerSnapshot {
+                    endpoints,
+                    complete: true,
+                })
+                .unwrap_or_default()
+        })
     }
+}
+
+fn check_port(
+    name: &str,
+    endpoint: SocketAddr,
+    owner: Option<&PortOwner<'_>>,
+    conflict: &str,
+    lang: Language,
+) -> DoctorCheck {
+    let port = endpoint.port();
+    let tr = |zh, en| localize(lang, zh, en);
+    let bind_error = match TcpListener::bind(endpoint) {
+        Ok(_) => return DoctorCheck::ok(name, format!("{port} {}", tr("可用", "is available"))),
+        Err(e) => e,
+    };
+    // Windows may report access denied for an exclusively bound socket.
+    // Positive ownership evidence still applies in that case.
+    if let Some(owner) = owner {
+        let pid = owner.pid;
+        let snapshot = owner.listeners();
+        let ip = endpoint.ip().to_canonical();
+        let same_port = || snapshot.endpoints.iter().filter(|l| l.port() == port);
+        if same_port().any(|l| {
+            let bound = l.ip().to_canonical();
+            bound == ip || (bound.is_unspecified() && bound.is_ipv4() == ip.is_ipv4())
+        }) {
+            return DoctorCheck::ok(
+                name,
+                format!(
+                    "{port} {} (PID {pid})",
+                    tr("由当前内核使用", "is in use by the current core")
+                ),
+            );
+        }
+        // Port numbers alone cannot distinguish a partial address overlap or
+        // whether an IPv6 wildcard also covers IPv4.
+        if (bind_error.kind() == std::io::ErrorKind::AddrInUse && !snapshot.complete)
+            || same_port().any(|l| {
+                ip.is_unspecified() || (ip.is_ipv4() && l.is_ipv6() && l.ip().is_unspecified())
+            })
+        {
+            let detail = if owner.helper_session.is_some() && !snapshot.complete {
+                tr(
+                    "已占用，无法确认归属；请更新提权助手后重新检查",
+                    "is in use; update the helper and re-check ownership",
+                )
+            } else {
+                tr(
+                    "已占用，无法确认归属",
+                    "is in use; ownership could not be verified",
+                )
+            };
+            return DoctorCheck::warn(name, format!("{port} {detail}"));
+        }
+    }
+    if bind_error.kind() != std::io::ErrorKind::AddrInUse {
+        return DoctorCheck::warn(
+            name,
+            format!(
+                "{port} {}: {bind_error}",
+                tr(
+                    "无法监听，请检查地址和权限",
+                    "cannot be bound; check the address and permissions"
+                )
+            ),
+        );
+    }
+    let detail = if lang == Language::En {
+        format!("{port} is in use by another process; {conflict}")
+    } else {
+        format!("{port} 已被其他进程占用，{conflict}")
+    };
+    DoctorCheck::warn(name, detail)
 }
 
 #[cfg(test)]
@@ -198,11 +342,11 @@ mod tests {
             ..Default::default()
         };
         let model = AppModel::default();
-        let own = diagnose_for_process(&model, &settings, Some(std::process::id()));
+        let own = diagnose_for_process(&model, &settings, Some(std::process::id()), None);
         let check = own.iter().find(|c| c.name == "Clash API 端口").unwrap();
         assert_eq!(check.level, CheckLevel::Ok);
-        assert!(check.detail.contains("当前 core"));
-        let other = diagnose_for_process(&model, &settings, Some(u32::MAX));
+        assert!(check.detail.contains("当前内核"));
+        let other = diagnose_for_process(&model, &settings, None, None);
         assert_eq!(
             other
                 .iter()
@@ -211,5 +355,37 @@ mod tests {
                 .level,
             CheckLevel::Warn
         );
+    }
+    #[test]
+    fn helper_checks_both_ports_and_distinguishes_missing_evidence() {
+        let mixed = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let api = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mixed = mixed.local_addr().unwrap();
+        let api = api.local_addr().unwrap();
+        let owner = |listeners: Option<Vec<SocketAddr>>| PortOwner {
+            pid: 42,
+            helper_session: Some("test-session"),
+            listeners: ListenerSnapshot {
+                complete: listeners.is_some(),
+                endpoints: listeners.unwrap_or_default(),
+            }
+            .into(),
+        };
+        let checked = |addr, owner: &PortOwner| {
+            check_port("端口", addr, Some(owner), "启动可能失败", Language::Zh)
+        };
+        let managed = owner(Some(vec![mixed, api]));
+        for addr in [mixed, api] {
+            let check = checked(addr, &managed);
+            assert_eq!(check.level, CheckLevel::Ok);
+            assert!(check.detail.contains("当前内核"));
+        }
+        let another_address = SocketAddr::new("127.0.0.2".parse().unwrap(), api.port());
+        let foreign = checked(api, &owner(Some(vec![mixed, another_address])));
+        assert_eq!(foreign.level, CheckLevel::Warn);
+        assert!(foreign.detail.contains("其他进程"));
+        let unknown = checked(api, &owner(None));
+        assert_eq!(unknown.level, CheckLevel::Warn);
+        assert!(unknown.detail.contains("更新提权助手"));
     }
 }

@@ -73,6 +73,7 @@ fn usage() {
   xross-cli helper status           提权助手状态（JSON）
   xross-cli helper install          安装并启动提权助手（会请求管理员权限）
   xross-cli helper start|restart    启动/重启已安装的提权助手
+  xross-cli helper update           使用当前版本更新并启动提权助手
   xross-cli helper uninstall        卸载提权助手
   xross-cli helper run              前台运行助手（需要 root/管理员）
   xross-cli doctor                  输出 TUN/端口/权限检查
@@ -665,6 +666,10 @@ fn helper_command(args: &[String]) -> Result<(), String> {
             println!("{}", privilege::install().map_err(|e| e.to_string())?);
             Ok(())
         }
+        Some("update") => {
+            println!("{}", privilege::update().map_err(|e| e.to_string())?);
+            Ok(())
+        }
         Some("uninstall") => {
             println!("{}", privilege::uninstall().map_err(|e| e.to_string())?);
             Ok(())
@@ -690,7 +695,9 @@ fn helper_command(args: &[String]) -> Result<(), String> {
                 .map_err(|e| e.to_string())
         }
         _ => {
-            eprintln!("用法：xross-cli helper status|install|start|restart|stop|uninstall|run");
+            eprintln!(
+                "用法：xross-cli helper status|install|update|start|restart|stop|uninstall|run"
+            );
             std::process::exit(2);
         }
     }

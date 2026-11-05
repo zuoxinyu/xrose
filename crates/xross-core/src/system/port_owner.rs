@@ -1,15 +1,22 @@
 //! Identifies TCP listeners belonging to the core managed by this instance.
 
+use std::io;
+use std::net::{IpAddr, SocketAddr};
+
+/// Returns listening endpoints, never established connections or configured ports.
 #[cfg(windows)]
-pub fn owns_listener(pid: u32, port: u16) -> bool {
+pub fn listeners(pid: u32) -> io::Result<Vec<SocketAddr>> {
     use std::mem::size_of;
-    use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows_sys::Win32::Foundation::{
+        ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, ERROR_NOT_SUPPORTED,
+    };
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID,
         TCP_TABLE_OWNER_PID_LISTENER,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
+    let mut listeners = Vec::new();
     for family in [AF_INET, AF_INET6] {
         let mut bytes = 0;
         // The first call obtains the size; the table can grow between calls.
@@ -23,7 +30,7 @@ pub fn owns_listener(pid: u32, port: u16) -> bool {
                 0,
             );
         }
-        for _ in 0..3 {
+        for attempt in 0..3 {
             let mut table = vec![0u32; (bytes as usize).div_ceil(size_of::<u32>())];
             let result = unsafe {
                 GetExtendedTcpTable(
@@ -35,10 +42,16 @@ pub fn owns_listener(pid: u32, port: u16) -> bool {
                     0,
                 )
             };
-            if result == ERROR_INSUFFICIENT_BUFFER {
+            if result == ERROR_INSUFFICIENT_BUFFER && attempt < 2 {
                 continue;
             }
-            if result != 0 || table.is_empty() {
+            if result == ERROR_NO_DATA || (family == AF_INET6 && result == ERROR_NOT_SUPPORTED) {
+                break;
+            }
+            if result != 0 {
+                return Err(io::Error::from_raw_os_error(result as i32));
+            }
+            if table.is_empty() {
                 break;
             }
             let row_size = if family == AF_INET {
@@ -49,100 +62,181 @@ pub fn owns_listener(pid: u32, port: u16) -> bool {
             let count = (table[0] as usize).min((table.len() * 4 - 4) / row_size);
             for index in 0..count {
                 let row = unsafe { table.as_ptr().cast::<u8>().add(4 + index * row_size) };
-                let matches = if family == AF_INET {
+                let (owner, ip, port) = if family == AF_INET {
                     let row = unsafe { row.cast::<MIB_TCPROW_OWNER_PID>().read_unaligned() };
-                    row.dwOwningPid == pid
-                        && u16::from_be(row.dwLocalPort as u16) == port
-                        && (row.dwLocalAddr == 0 || row.dwLocalAddr.to_ne_bytes() == [127, 0, 0, 1])
+                    (
+                        row.dwOwningPid,
+                        IpAddr::from(row.dwLocalAddr.to_ne_bytes()),
+                        row.dwLocalPort,
+                    )
                 } else {
                     let row = unsafe { row.cast::<MIB_TCP6ROW_OWNER_PID>().read_unaligned() };
-                    row.dwOwningPid == pid
-                        && u16::from_be(row.dwLocalPort as u16) == port
-                        && (row.ucLocalAddr == [0; 16]
-                            || row.ucLocalAddr == std::net::Ipv6Addr::LOCALHOST.octets())
+                    (
+                        row.dwOwningPid,
+                        IpAddr::from(row.ucLocalAddr),
+                        row.dwLocalPort,
+                    )
                 };
-                if matches {
-                    return true;
+                if owner == pid {
+                    listeners.push(SocketAddr::new(ip, u16::from_be(port as u16)));
                 }
             }
             break;
         }
     }
-    false
+    Ok(listeners)
+}
+
+// Used by the Windows core startup readiness check.
+#[cfg(windows)]
+pub fn owns_listener(pid: u32, port: u16) -> bool {
+    listeners(pid).is_ok_and(|listeners| {
+        listeners.iter().any(|addr| {
+            addr.port() == port && (addr.ip().is_unspecified() || addr.ip().is_loopback())
+        })
+    })
 }
 
 #[cfg(target_os = "linux")]
-pub fn owns_listener(pid: u32, port: u16) -> bool {
+pub fn listeners(pid: u32) -> io::Result<Vec<SocketAddr>> {
     use std::collections::HashSet;
-    let Ok(entries) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
-        return false;
-    };
-    let sockets: HashSet<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let link = std::fs::read_link(entry.path()).ok()?;
-            let link = link.to_str()?;
-            link.strip_prefix("socket:[")?
-                .strip_suffix(']')
-                .map(str::to_string)
-        })
-        .collect();
+    use std::fs;
+    let mut sockets = HashSet::new();
+    for entry in fs::read_dir(format!("/proc/{pid}/fd"))? {
+        let link = match fs::read_link(entry?.path()) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            result => result?,
+        };
+        if let Some(inode) = link
+            .to_str()
+            .and_then(|s| s.strip_prefix("socket:[")?.strip_suffix(']'))
+        {
+            sockets.insert(inode.to_owned());
+        }
+    }
+    let mut listeners = Vec::new();
     for file in ["tcp", "tcp6"] {
-        let Ok(table) = std::fs::read_to_string(format!("/proc/{pid}/net/{file}")) else {
-            continue;
+        let table = match fs::read_to_string(format!("/proc/{pid}/net/{file}")) {
+            Err(e) if file == "tcp6" && e.kind() == io::ErrorKind::NotFound => continue,
+            result => result?,
         };
         for row in table.lines().skip(1) {
             let columns: Vec<_> = row.split_whitespace().collect();
-            if columns.len() > 9
-                && columns[3] == "0A"
-                && columns[1]
-                    .rsplit_once(':')
-                    .and_then(|(_, p)| u16::from_str_radix(p, 16).ok())
-                    == Some(port)
-                && sockets.contains(columns[9])
-            {
-                return true;
+            if columns.len() > 9 && columns[3] == "0A" && sockets.contains(columns[9]) {
+                if let Some(addr) = proc_address(columns[1]) {
+                    listeners.push(addr);
+                }
             }
         }
     }
-    false
+    Ok(listeners)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn proc_address(field: &str) -> Option<SocketAddr> {
+    let (ip, port) = field.split_once(':')?;
+    let port = u16::from_str_radix(port, 16).ok()?;
+    // procfs prints each native-endian 32-bit word in hexadecimal.
+    let word = |s: &str| u32::from_str_radix(s, 16).ok().map(u32::to_ne_bytes);
+    let ip = match ip.len() {
+        8 => IpAddr::from(word(ip)?),
+        32 => {
+            let mut octets = [0; 16];
+            for (index, dst) in octets.chunks_exact_mut(4).enumerate() {
+                dst.copy_from_slice(&word(ip.get(index * 8..index * 8 + 8)?)?);
+            }
+            IpAddr::from(octets)
+        }
+        _ => return None,
+    };
+    Some(SocketAddr::new(ip, port))
 }
 
 #[cfg(target_os = "macos")]
-pub fn owns_listener(pid: u32, port: u16) -> bool {
-    std::process::Command::new("/usr/sbin/lsof")
+pub fn listeners(pid: u32) -> io::Result<Vec<SocketAddr>> {
+    let output = std::process::Command::new("/usr/sbin/lsof")
         .args([
             "-nP",
             "-a",
             "-p",
             &pid.to_string(),
-            &format!("-iTCP:{port}"),
+            "-iTCP",
             "-sTCP:LISTEN",
-            "-Fp",
+            "-Ftn",
         ])
-        .output()
-        .ok()
-        .is_some_and(|output| {
-            output.status.success()
-                && String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line == format!("p{pid}"))
-        })
+        .output()?;
+    if !output.status.success() {
+        // lsof exits with 1 and no diagnostic when no visible files match.
+        // The GUI treats its view of a privileged child as incomplete.
+        if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(io::Error::other("无法读取内核监听端口"));
+    }
+    Ok(lsof_addresses(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn lsof_addresses(fields: &str) -> Vec<SocketAddr> {
+    let mut wildcard = None;
+    let mut addresses = Vec::new();
+    for line in fields.lines() {
+        if let Some(kind) = line.strip_prefix('t') {
+            wildcard = match kind {
+                "IPv4" => Some(IpAddr::from([0; 4])),
+                "IPv6" => Some(IpAddr::from([0; 16])),
+                _ => None,
+            };
+        } else if let Some(name) = line.strip_prefix('n') {
+            if let Some(addr) = name.parse().ok().or_else(|| {
+                Some(SocketAddr::new(
+                    wildcard?,
+                    name.strip_prefix("*:")?.parse().ok()?,
+                ))
+            }) {
+                addresses.push(addr);
+            }
+        }
+    }
+    addresses
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub fn owns_listener(_pid: u32, _port: u16) -> bool {
-    false
+pub fn listeners(_pid: u32) -> io::Result<Vec<SocketAddr>> {
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
-    fn recognizes_only_the_process_owning_a_listener() {
+    fn reads_the_process_listeners() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        assert!(super::owns_listener(std::process::id(), port));
-        assert!(!super::owns_listener(u32::MAX, port));
+        assert!(
+            listeners(std::process::id())
+                .unwrap()
+                .contains(&listener.local_addr().unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_lsof_wildcards_and_loopback() {
+        let fields = "p42\nf3\ntIPv6\nn*:8080\nf4\ntIPv4\nn127.0.0.1:9090\n";
+        assert_eq!(
+            lsof_addresses(fields),
+            ["[::]:8080", "127.0.0.1:9090"].map(|s| s.parse::<SocketAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    #[cfg(target_endian = "little")]
+    fn parses_procfs_loopback() {
+        assert_eq!(proc_address("0100007F:0050"), "127.0.0.1:80".parse().ok());
+        assert_eq!(
+            proc_address("00000000000000000000000001000000:1F90"),
+            "[::1]:8080".parse().ok()
+        );
     }
 }

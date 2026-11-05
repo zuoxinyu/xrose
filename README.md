@@ -44,7 +44,9 @@ cargo run -p xross-app
 2. 在“设置 → Core 管理”下载 Xray 或 sing-box。
 3. 点击右上角“启动”。修改路由或 DNS 后，点击“应用配置”重启 Core 生效。
 
-使用 TUN 或组网时，按提示安装提权助手。使用独立数据目录：`XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`。
+使用 TUN 或组网时，按提示安装提权助手。升级 Xross 后，可在「设置 → 提权助手与环境检查」点击「更新助手」，载入当前版本。更新会中断由助手管理的连接。
+
+使用独立数据目录：`XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`。
 
 ## CLI
 
