@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use gpui_base::SelectableText;
+use gpui_base::{Disableable, SelectableText};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::*;
 use xross_core::core::LogEntry;
+use xross_core::core::logs::{LogFilter, LogSourceFilter};
 use xross_core::settings::LogLevel;
 
 use super::AppView;
@@ -19,7 +20,7 @@ use super::widgets::*;
 pub(super) struct LogListState {
     list: ListState,
     rows: Rc<Vec<LogRow>>,
-    level: LogLevel,
+    filter: LogFilter,
     query: String,
 }
 
@@ -41,13 +42,13 @@ impl LogListState {
         Self {
             list: ListState::new(0, ListAlignment::Top, px(128.)),
             rows: Rc::new(Vec::new()),
-            level: LogLevel::Info,
+            filter: LogFilter::default(),
             query: String::new(),
         }
     }
 
-    fn update(&mut self, logs: Vec<LogEntry>, level: LogLevel, query: String) {
-        let filter_changed = self.level != level || self.query != query;
+    fn update(&mut self, logs: Vec<LogEntry>, filter: &LogFilter, query: String) {
+        let filter_changed = &self.filter != filter || self.query != query;
         if !filter_changed
             && self.rows.len() == logs.len()
             && self
@@ -83,6 +84,7 @@ impl LogListState {
             .collect();
 
         if filter_changed {
+            self.filter.clone_from(filter);
             self.list.reset(rows.len());
         } else {
             // Keep measurements and the reading position of unchanged rows.
@@ -112,7 +114,6 @@ impl LogListState {
             }
         }
         self.rows = Rc::new(rows);
-        self.level = level;
         self.query = query;
     }
 }
@@ -121,9 +122,10 @@ impl AppView {
     pub(crate) fn page_logs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let query = self.log_search.read(cx).value().to_string();
-        let logs = self.service.logs_filtered(self.log_level, &query, 400);
-        self.log_list.update(logs, self.log_level, query);
+        let logs = self.service.logs_matching(&self.log_filter, &query, 400);
+        self.log_list.update(logs, &self.log_filter, query);
         let rows = self.log_list.rows.clone();
+        let visible_rows = rows.clone();
         let mono = cx.theme().mono_font_family.clone();
 
         let mut body = div().flex().flex_col().gap_4().size_full().min_h(px(0.));
@@ -142,8 +144,8 @@ impl AppView {
                             &p,
                             self.tr("实时日志", "Live logs"),
                             self.tr(
-                                "查看运行记录，按级别或关键字筛选",
-                                "View runtime logs and filter by level or keyword",
+                                "按来源、级别和关键词筛选运行记录",
+                                "Filter runtime logs by source, level, and keyword",
                             ),
                         ))
                         .child(
@@ -157,18 +159,12 @@ impl AppView {
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .icon(IconName::Copy)
                                         .label(self.tr("复制日志", "Copy logs"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            let query =
-                                                this.log_search.read(cx).value().to_string();
-                                            let logs = this.service.logs_filtered(
-                                                this.log_level,
-                                                &query,
-                                                400,
-                                            );
-                                            let text = logs
+                                        .disabled(visible_rows.is_empty())
+                                        .on_click(move |_, _, cx| {
+                                            let text = visible_rows
                                                 .iter()
-                                                .rev()
-                                                .map(|entry| {
+                                                .map(|row| {
+                                                    let entry = &row.entry;
                                                     format!(
                                                         "{} {} {} {}",
                                                         entry.timestamp,
@@ -180,13 +176,14 @@ impl AppView {
                                                 .collect::<Vec<_>>()
                                                 .join("\n");
                                             cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                        })),
+                                        }),
                                 )
                                 .child(
                                     Button::new("export-logs")
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("导出", "Export"))
+                                        .tooltip(self.tr("导出全部日志", "Export all logs"))
                                         .on_click(cx.listener(|this, _, _, _| {
                                             let _ = this.service.export_logs();
                                         })),
@@ -212,43 +209,11 @@ impl AppView {
                         .child(
                             div()
                                 .flex_1()
-                                .min_w(px(220.))
+                                .min_w(px(160.))
                                 .child(Input::new(&self.log_search)),
                         )
-                        .child(
-                            ChoiceGroup::new(
-                                "log-filter",
-                                vec![
-                                    "Trace".into(),
-                                    "Debug".into(),
-                                    "Info".into(),
-                                    "Warn".into(),
-                                    "Error".into(),
-                                ],
-                                [
-                                    LogLevel::Trace,
-                                    LogLevel::Debug,
-                                    LogLevel::Info,
-                                    LogLevel::Warn,
-                                    LogLevel::Error,
-                                ]
-                                .iter()
-                                .position(|l| *l == self.log_level)
-                                .unwrap_or(2),
-                            )
-                            .on_change(cx.listener(
-                                |this, index, _, cx| {
-                                    this.log_level = [
-                                        LogLevel::Trace,
-                                        LogLevel::Debug,
-                                        LogLevel::Info,
-                                        LogLevel::Warn,
-                                        LogLevel::Error,
-                                    ][*index];
-                                    cx.notify();
-                                },
-                            )),
-                        ),
+                        .child(self.log_source_filter(p, cx))
+                        .child(self.log_level_filter(p, cx)),
                 )
                 .child(
                     div()
@@ -311,7 +276,11 @@ impl AppView {
         if rows.is_empty() {
             list = list.child(empty_hint(
                 &p,
-                self.tr("没有匹配的日志", "No matching logs"),
+                if self.log_filter.levels.is_empty() {
+                    self.tr("请选择至少一个日志级别", "Select at least one log level")
+                } else {
+                    self.tr("没有匹配的日志", "No matching logs")
+                },
             ));
         } else {
             // A bounded viewport is required: an outer scrolling Div would lay
@@ -327,6 +296,89 @@ impl AppView {
 
         body = body.child(list);
         body
+    }
+
+    fn log_source_filter(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let options = [
+            (LogSourceFilter::All, self.tr("全部", "All")),
+            (LogSourceFilter::App, "App".into()),
+            (LogSourceFilter::Core, "Core".into()),
+        ];
+        let selected = options
+            .iter()
+            .position(|(source, _)| *source == self.log_filter.source);
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(p.muted_fg)
+                    .child(self.tr("来源", "Source")),
+            )
+            .child(
+                ChoiceGroup::new(
+                    "log-source",
+                    options.iter().map(|(_, label)| label.clone()).collect(),
+                    selected,
+                )
+                .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                    this.log_filter.source = options[*index].0;
+                    cx.notify();
+                })),
+            )
+    }
+
+    fn log_level_filter(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let levels = [
+            (LogLevel::Trace, "Trace"),
+            (LogLevel::Debug, "Debug"),
+            (LogLevel::Info, "Info"),
+            (LogLevel::Warn, "Warn"),
+            (LogLevel::Error, "Error"),
+        ];
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_xs()
+                    .mr_1()
+                    .text_color(p.muted_fg)
+                    .child(self.tr("级别（多选）", "Levels (multi-select)")),
+            )
+            .children(levels.into_iter().map(|(level, label)| {
+                let selected = self.log_filter.levels.contains(&level);
+                let view = cx.entity().downgrade();
+                gpui_base::Toggle::new((ElementId::from("log-level"), label))
+                    .pressed(selected)
+                    .accessibility_label(label)
+                    .h(px(super::theme::ICON_BUTTON_SIZE))
+                    .px_2()
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if selected { p.primary } else { p.border })
+                    .bg(if selected { p.accent } else { p.panel })
+                    .text_color(if selected { p.primary } else { p.muted_fg })
+                    .text_sm()
+                    .cursor_pointer()
+                    .hover(move |style| style.border_color(p.primary))
+                    .focus_visible(move |style| style.border_2().border_color(p.primary))
+                    .child(label)
+                    .on_change(move |pressed, _, _, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            if pressed {
+                                this.log_filter.levels.insert(level);
+                            } else {
+                                this.log_filter.levels.remove(&level);
+                            }
+                            cx.notify();
+                        });
+                    })
+            }))
     }
 }
 
@@ -373,7 +425,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
         )
         .child(
             div()
-                .w(px(48.))
+                .w(px(64.))
                 .flex_shrink_0()
                 .text_color(color)
                 .child(SelectableText::new(
@@ -406,7 +458,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::LogListState;
+    use super::{LogFilter, LogListState, LogSourceFilter};
     use gpui_kit::{ListOffset, px};
     use std::rc::Rc;
     use xross_core::core::LogEntry;
@@ -428,14 +480,14 @@ mod tests {
     #[test]
     fn unchanged_poll_reuses_rows_and_scroll_position() {
         let mut state = LogListState::new();
-        state.update(entries(0..400), LogLevel::Info, String::new());
+        state.update(entries(0..400), &LogFilter::default(), String::new());
         let rows = state.rows.clone();
         let top = ListOffset {
             item_ix: 120,
             offset_in_item: px(7.),
         };
         state.list.scroll_to(top);
-        state.update(entries(0..400), LogLevel::Info, String::new());
+        state.update(entries(0..400), &LogFilter::default(), String::new());
         assert!(Rc::ptr_eq(&rows, &state.rows));
         assert_eq!(state.list.logical_scroll_top(), top);
     }
@@ -443,13 +495,13 @@ mod tests {
     #[test]
     fn rolling_window_keeps_the_log_being_read() {
         let mut state = LogListState::new();
-        state.update(entries(0..400), LogLevel::Info, String::new());
+        state.update(entries(0..400), &LogFilter::default(), String::new());
         let key = state.rows[120].key.clone();
         state.list.scroll_to(ListOffset {
             item_ix: 120,
             offset_in_item: px(7.),
         });
-        state.update(entries(10..410), LogLevel::Info, String::new());
+        state.update(entries(10..410), &LogFilter::default(), String::new());
         let top = state.list.logical_scroll_top();
         assert_eq!(state.list.item_count(), 400);
         assert_eq!(state.rows[top.item_ix].key, key);
@@ -459,21 +511,32 @@ mod tests {
     #[test]
     fn newest_logs_follow_at_top_and_filter_changes_reset_scroll() {
         let mut state = LogListState::new();
-        state.update(entries(0..10), LogLevel::Info, String::new());
-        state.update(entries(0..12), LogLevel::Info, String::new());
+        state.update(entries(0..10), &LogFilter::default(), String::new());
+        state.update(entries(0..12), &LogFilter::default(), String::new());
         assert_eq!(state.rows[0].entry.unix_ms, 11);
         assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
         state.list.scroll_to(ListOffset {
             item_ix: 5,
             offset_in_item: px(3.),
         });
-        state.update(entries(0..12), LogLevel::Info, "test".into());
+        state.update(entries(0..12), &LogFilter::default(), "test".into());
         assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
         state.list.scroll_to(ListOffset {
             item_ix: 5,
             offset_in_item: px(3.),
         });
-        state.update(Vec::new(), LogLevel::Error, "test".into());
+        let mut filter = LogFilter {
+            source: LogSourceFilter::Core,
+            ..LogFilter::default()
+        };
+        state.update(entries(0..12), &filter, "test".into());
+        assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
+        state.list.scroll_to(ListOffset {
+            item_ix: 5,
+            offset_in_item: px(3.),
+        });
+        filter.levels.clear();
+        state.update(Vec::new(), &filter, "test".into());
         assert!(state.rows.is_empty());
         assert_eq!(state.list.item_count(), 0);
         assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
@@ -485,14 +548,14 @@ mod tests {
         let entry = entries(0..1).pop().unwrap();
         state.update(
             vec![entry.clone(), entry.clone()],
-            LogLevel::Info,
+            &LogFilter::default(),
             String::new(),
         );
         assert_ne!(state.rows[0].key, state.rows[1].key);
         let keys: Vec<_> = state.rows.iter().map(|row| row.key.clone()).collect();
         let mut logs = vec![entry.clone(), entry];
         logs.extend(entries(1..2));
-        state.update(logs, LogLevel::Info, String::new());
+        state.update(logs, &LogFilter::default(), String::new());
         assert_eq!(state.rows[1].key, keys[0]);
         assert_eq!(state.rows[2].key, keys[1]);
     }

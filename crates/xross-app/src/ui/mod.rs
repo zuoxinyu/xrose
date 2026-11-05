@@ -29,10 +29,11 @@ use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::AppService;
+use xross_core::core::logs::LogFilter;
 use xross_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
 use xross_core::model::{RouteActionKind, RoutePreset};
 use xross_core::service::UiSnapshot;
-use xross_core::settings::{Language, LogLevel};
+use xross_core::settings::Language;
 use xross_core::trace::TraceStepKind;
 
 use self::manual_node::ManualNodeForm;
@@ -186,6 +187,7 @@ pub struct AppView {
     pub(crate) import_input: Entity<InputState>,
     pub(crate) log_search: Entity<InputState>,
     log_list: logs::LogListState,
+    log_filter: LogFilter,
     pub(crate) rule_name: Entity<InputState>,
     pub(crate) rule_group_name: Entity<InputState>,
     pub(crate) rule_group_id: Option<String>,
@@ -226,7 +228,6 @@ pub struct AppView {
     pub(crate) matcher_kind: MatcherKind,
     pub(crate) rule_action: RouteActionKind,
     expanded_switch_group: Option<String>,
-    pub(crate) log_level: LogLevel,
 }
 
 impl AppView {
@@ -337,6 +338,7 @@ impl AppView {
             import_input,
             log_search,
             log_list: logs::LogListState::new(),
+            log_filter: LogFilter::default(),
             rule_name,
             rule_group_name,
             rule_group_id: None,
@@ -376,7 +378,6 @@ impl AppView {
             matcher_kind: MatcherKind::Suffix,
             rule_action: RouteActionKind::Proxy,
             expanded_switch_group: None,
-            log_level: LogLevel::Info,
         };
         view.refresh_header_location();
         view.localize_inputs(window, cx);

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -44,6 +44,42 @@ pub struct LogEntry {
 impl LogEntry {
     pub fn matches(&self, min_level: LogLevel) -> bool {
         self.level >= min_level
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogSourceFilter {
+    All,
+    App,
+    Core,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogFilter {
+    pub source: LogSourceFilter,
+    pub levels: BTreeSet<LogLevel>,
+}
+
+impl Default for LogFilter {
+    fn default() -> Self {
+        Self {
+            source: LogSourceFilter::All,
+            levels: [LogLevel::Info, LogLevel::Warn, LogLevel::Error].into(),
+        }
+    }
+}
+
+impl LogFilter {
+    pub fn matches(&self, entry: &LogEntry) -> bool {
+        let source_matches = match self.source {
+            LogSourceFilter::All => true,
+            LogSourceFilter::App => entry.stream == LogStream::App,
+            LogSourceFilter::Core => matches!(
+                entry.stream,
+                LogStream::Core | LogStream::Stdout | LogStream::Stderr
+            ),
+        };
+        source_matches && self.levels.contains(&entry.level)
     }
 }
 
@@ -134,13 +170,22 @@ impl LogBus {
     }
 
     pub fn recent(&self, limit: usize, min_level: LogLevel, query: &str) -> Vec<LogEntry> {
+        self.recent_matching(limit, query, |entry| entry.matches(min_level))
+    }
+
+    pub(crate) fn recent_matching(
+        &self,
+        limit: usize,
+        query: &str,
+        matches: impl Fn(&LogEntry) -> bool,
+    ) -> Vec<LogEntry> {
         let query = query.trim().to_ascii_lowercase();
         let inner = self.inner.lock();
         let mut out: Vec<LogEntry> = inner
             .entries
             .iter()
             .rev()
-            .filter(|e| e.matches(min_level))
+            .filter(|e| matches(e))
             .filter(|e| query.is_empty() || e.message.to_ascii_lowercase().contains(&query))
             .take(limit)
             .cloned()
@@ -359,6 +404,52 @@ mod tests {
                 .message
                 .contains("hello")
         );
+    }
+
+    #[test]
+    fn source_levels_and_query_filter_live_and_restored_entries_before_limit() {
+        use LogLevel::{Debug, Error, Info, Trace, Warn};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("xross.log");
+        std::fs::write(
+            &path,
+            "2026-01-01T00:00:00Z [debug] stdout Probe restored\n",
+        )
+        .unwrap();
+        let bus = LogBus::new(20);
+        bus.load_tail(&path, 10);
+        bus.push(LogStream::Core, Error, "probe core");
+        bus.push(LogStream::Stderr, Debug, "probe stderr");
+        bus.push(LogStream::App, Error, "probe app");
+        bus.push(LogStream::Stdout, Warn, "probe warning");
+        bus.push(LogStream::Stderr, Error, "other error");
+        bus.push(LogStream::App, Info, "probe info");
+        bus.push(LogStream::App, Trace, "probe trace");
+
+        let messages = |filter: &LogFilter, limit| {
+            bus.recent_matching(limit, "  PROBE  ", |entry| filter.matches(entry))
+                .into_iter()
+                .map(|entry| entry.message)
+                .collect::<Vec<_>>()
+        };
+        let mut filter = LogFilter::default();
+        assert_eq!(
+            messages(&filter, 10),
+            ["probe core", "probe app", "probe warning", "probe info"]
+        );
+        filter.levels = [Debug, Error].into();
+        filter.source = LogSourceFilter::Core;
+        assert_eq!(
+            messages(&filter, 3),
+            ["Probe restored", "probe core", "probe stderr"]
+        );
+        assert_eq!(messages(&filter, 2), ["probe core", "probe stderr"]);
+        filter.source = LogSourceFilter::App;
+        assert_eq!(messages(&filter, 2), ["probe app"]);
+        filter.levels = [Trace].into();
+        assert_eq!(messages(&filter, 2), ["probe trace"]);
+        filter.levels.clear();
+        assert!(messages(&filter, 2).is_empty());
     }
 
     #[test]

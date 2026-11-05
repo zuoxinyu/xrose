@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
 use crate::adapters::{CompiledConfig, ValidationReport};
-use crate::core::logs::{LogBus, LogEntry, LogStream};
+use crate::core::logs::{LogBus, LogEntry, LogFilter, LogStream};
 use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
 use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarget};
 use crate::dns::{self, DnsPreset};
@@ -3324,6 +3324,11 @@ impl AppService {
 
     pub fn logs_filtered(&self, level: LogLevel, query: &str, limit: usize) -> Vec<LogEntry> {
         self.inner.core.logs().recent(limit, level, query)
+    }
+
+    pub fn logs_matching(&self, filter: &LogFilter, query: &str, limit: usize) -> Vec<LogEntry> {
+        self.logs()
+            .recent_matching(limit, query, |entry| filter.matches(entry))
     }
 
     pub fn clear_logs(&self) {
