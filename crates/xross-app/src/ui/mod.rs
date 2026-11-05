@@ -802,7 +802,6 @@ impl AppView {
         };
         div()
             .id("header-bar")
-            .relative()
             .h(px(theme::HEADER_HEIGHT))
             .flex_shrink_0()
             .flex()
@@ -922,13 +921,15 @@ impl AppView {
                             .on_click(cx.listener(|this, _, _, _| this.service.toggle_core())),
                     ),
             )
-            .child(drag_region("header-drag-right"))
             .child(
+                // Keep both halves equal so the pill stays centered. Windows
+                // uses the first matching control hitbox, so the drag region
+                // and caption buttons must occupy separate layout space.
                 div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
+                    .flex()
+                    .flex_1()
                     .h_full()
+                    .child(drag_region("header-drag-right"))
                     .child(WindowControls::new(p)),
             )
     }
