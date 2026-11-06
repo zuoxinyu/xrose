@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.13"
 directories = "6"
 rusqlite = { version = "0.41", features = ["bundled"] }
+psl = "2"
 zip = { version = "9.2", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"

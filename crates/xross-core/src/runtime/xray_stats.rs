@@ -23,6 +23,8 @@ pub struct XrayTraffic {
     pub downlink: u64,
     /// Per outbound tag counters (e.g. `node-x`).
     pub per_outbound: BTreeMap<String, (u64, u64)>,
+    #[serde(default)]
+    pub per_inbound: BTreeMap<String, (u64, u64)>,
     pub raw: Vec<XrayStat>,
 }
 
@@ -87,7 +89,15 @@ impl XrayStatsClient {
                     value,
                 });
                 let parts: Vec<&str> = name.split(">>>").collect();
-                if parts.len() >= 4 && parts[0] == "outbound" {
+                if parts.len() == 4 && parts[0] == "inbound" && parts[2] == "traffic" {
+                    let entry = traffic.per_inbound.entry(parts[1].to_string()).or_default();
+                    match parts[3] {
+                        "uplink" => entry.0 += value,
+                        "downlink" => entry.1 += value,
+                        _ => {}
+                    }
+                }
+                if parts.len() == 4 && parts[0] == "outbound" && parts[2] == "traffic" {
                     let tag = parts[1].to_string();
                     let direction = parts[3];
                     let entry = traffic.per_outbound.entry(tag.clone()).or_insert((0, 0));

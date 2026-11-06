@@ -523,6 +523,17 @@ impl CoreManager {
             .unwrap_or_default()
     }
 
+    /// Read the actual running configuration, never the pending editor state.
+    pub(crate) fn statistics_context(&self) -> Option<(AppModel, Settings, Vec<String>)> {
+        self.applied.lock().as_ref().map(|a| {
+            (
+                a.model.clone(),
+                a.settings.clone(),
+                a.compiled.inbounds.iter().map(|i| i.tag.clone()).collect(),
+            )
+        })
+    }
+
     pub(crate) fn managed_probe_model(&self) -> Option<AppModel> {
         self.applied.lock().as_ref().map(|a| a.model.clone())
     }

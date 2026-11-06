@@ -2,6 +2,7 @@
 
 pub mod crypto;
 mod mesh_sync;
+mod traffic_statistics;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -243,6 +244,9 @@ impl Store {
                     )?;
                 }
             }
+        }
+        if version < 8 {
+            traffic_statistics::migrate(&tx)?;
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;

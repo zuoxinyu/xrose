@@ -6,6 +6,7 @@ mod mesh_exit;
 pub mod mesh_sync;
 mod node_switch;
 mod routing_transfer;
+mod traffic_statistics;
 mod update_check;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,9 +28,7 @@ use crate::model::{
 };
 use crate::paths::AppPaths;
 use crate::runtime::location::{self, NodeLocation};
-use crate::runtime::{
-    ClashClient, ClashConnection, ClashProxy, TrafficHistory, TrafficSample, XrayStatsClient,
-};
+use crate::runtime::{ClashClient, ClashConnection, ClashProxy, TrafficHistory, TrafficSample};
 use crate::settings::LogLevel;
 use crate::settings::Settings;
 use crate::storage::{LatencyEntry, ProfileMeta, Store};
@@ -142,6 +141,8 @@ pub struct UiSnapshot {
     pub profiles: Vec<ProfileMeta>,
     pub active_profile: Option<String>,
     pub runtime: RuntimeView,
+    #[serde(default)]
+    pub traffic_statistics: Arc<crate::traffic_statistics::TrafficStatisticsView>,
     pub latency: BTreeMap<String, LatencyEntry>,
     #[serde(default)]
     pub downloads: BTreeMap<String, crate::runtime::probe::DownloadResult>,
@@ -256,6 +257,7 @@ struct Inner {
     profiles: RwLock<Vec<ProfileMeta>>,
     active_profile: RwLock<Option<String>>,
     traffic: Mutex<TrafficHistory>,
+    statistics: traffic_statistics::StatisticsState,
     connections: RwLock<Vec<ClashConnection>>,
     proxies: RwLock<BTreeMap<String, ClashProxy>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
@@ -353,7 +355,10 @@ impl AppService {
         let mut model = model;
         settings.sync_inbounds(&mut model);
         mesh.sync_outbounds(&mut model);
+        let statistics =
+            traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
         let inner = Arc::new(Inner {
+            statistics,
             mesh_sync: Default::default(),
             mesh_connection_errors: Default::default(),
             mesh,
@@ -518,6 +523,7 @@ impl AppService {
             profiles: self.inner.profiles.read().clone(),
             active_profile: self.inner.active_profile.read().clone(),
             runtime,
+            traffic_statistics: self.inner.statistics.view.read().clone(),
             latency: self.inner.latency.read().clone(),
             downloads: self.inner.downloads.read().clone(),
             node_locations: self.inner.node_locations.read().clone(),
@@ -858,6 +864,9 @@ impl AppService {
                 }
             }
             *current = settings.clone();
+        }
+        if settings.traffic_statistics_enabled != old.traffic_statistics_enabled {
+            self.statistics_setting_changed(settings.traffic_statistics_enabled);
         }
         if settings.watchdog != old.watchdog
             || settings.watchdog_max_retries != old.watchdog_max_retries
@@ -2060,6 +2069,8 @@ impl AppService {
         self.set_busy("core", true);
         let service = self.clone();
         self.spawn(async move {
+            service.poll_traffic_statistics().await;
+            service.flush_traffic_statistics().await;
             let result = service.inner.core.stop().await;
             service.set_busy("core", false);
             service.cleanup_tun_via_helper().await;
@@ -2134,6 +2145,8 @@ impl AppService {
                     service.toast(ToastLevel::Error, err);
                     return;
                 }
+                service.poll_traffic_statistics().await;
+                service.flush_traffic_statistics().await;
                 if let Err(err) = service.inner.core.stop().await {
                     service.set_busy("core", false);
                     service.toast(ToastLevel::Error, format!("重启前停止失败：{err}"));
@@ -3923,31 +3936,20 @@ impl AppService {
                 last_pid = state.pid;
                 if !state.phase.is_alive() {
                     service.update_connections(Vec::new());
+                    service.flush_traffic_statistics().await;
                     tick += 1;
                     continue;
                 }
-                let settings = service.inner.settings.read().clone();
-                if settings.core == CoreKind::SingBox {
-                    let client = ClashClient::new(settings.api_port, "");
-                    if let Ok(response) = client.connections().await {
-                        inner
-                            .traffic
-                            .lock()
-                            .sample(response.upload_total, response.download_total);
-                        service.update_connections(response.connections);
-                    }
-                    if tick % 5 == 0 {
-                        if let Ok(proxies) = client.proxies().await {
-                            *inner.proxies.write() = proxies.proxies;
+                service.poll_traffic_statistics().await;
+                if tick % 5 == 0 {
+                    if let Some((_, settings, _)) = service.inner.core.statistics_context() {
+                        if state.core == Some(CoreKind::SingBox) {
+                            if let Ok(proxies) =
+                                ClashClient::new(settings.api_port, "").proxies().await
+                            {
+                                *inner.proxies.write() = proxies.proxies;
+                            }
                         }
-                    }
-                } else if let Ok(binary) = inner.core.resolve_binary(CoreKind::Xray, &settings) {
-                    let client = XrayStatsClient::new(binary, settings.stats_port);
-                    if let Ok(traffic) = client.query().await {
-                        inner
-                            .traffic
-                            .lock()
-                            .sample(traffic.uplink, traffic.downlink);
                     }
                 }
                 tick += 1;
@@ -3984,6 +3986,10 @@ impl AppService {
 
     /// Best-effort cleanup called by the UI on exit.
     pub fn shutdown(&self) {
+        self.inner.rt.block_on(async {
+            self.poll_traffic_statistics().await;
+            self.flush_traffic_statistics().await;
+        });
         self.inner.mesh.shutdown();
         let _ = self.persist_model();
         if self.inner.settings.read().system_proxy {
@@ -3997,6 +4003,7 @@ impl AppService {
         let _ = self.inner.rt.block_on(async move {
             let _ = core.stop().await;
         });
+        self.inner.rt.block_on(self.flush_traffic_statistics());
         if self.inner.settings.read().effective_tun() && self.inner.helper.read().running {
             let request = HelperRequest::RemoveTun {
                 interface: self.tun_interface(),

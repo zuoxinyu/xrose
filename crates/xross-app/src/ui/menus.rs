@@ -25,6 +25,7 @@ pub(super) enum MenuTarget {
     Dns(String),
     Host(String),
     Connections,
+    TrafficStatistics,
 }
 
 #[derive(Clone)]
@@ -58,6 +59,7 @@ pub(super) enum Command {
     RefreshConnections,
     CloseConnections,
     ClearRecording,
+    ClearTrafficStatistics,
     ClearLogs,
     EditMesh(String),
     EditForward(String, PortForward),
@@ -599,6 +601,14 @@ impl AppView {
                     Command::DeleteHost(id),
                 ))
             }
+            MenuTarget::TrafficStatistics => {
+                menu = menu.item(add(
+                    "清空统计",
+                    "Clear statistics",
+                    !self.snapshot.busy.iter().any(|key| key == "traffic-clear"),
+                    Command::ClearTrafficStatistics,
+                ));
+            }
             MenuTarget::Connections => {
                 let available = self.snapshot.process.phase.is_alive()
                     && self.snapshot.settings.core.capabilities().clash_connections;
@@ -769,6 +779,7 @@ impl AppView {
             Command::DeleteDns(_) => Some((self.tr("删除服务器", "Delete server"), self.tr("删除此 DNS 服务器，应用配置后生效。", "Remove this DNS server after applying the configuration."))),
             Command::DeleteHost(_) => Some((self.tr("删除静态解析", "Delete host mapping"), self.tr("删除此域名的静态解析记录，应用配置后生效。", "Remove this static host mapping after applying the configuration."))),
             Command::CloseConnections => Some((self.tr("全部断开", "Close all connections"), self.tr("所有活动连接将立即断开，正在传输的数据可能中断。", "All active connections will close immediately; ongoing transfers may be interrupted."))),
+            Command::ClearTrafficStatistics => Some((self.tr("清空统计", "Clear statistics"), self.tr("删除全部历史流量统计和本次累计，此操作无法撤销。统计开关保持当前状态。", "Delete all traffic history and session totals. This cannot be undone. The collection setting is retained."))),
             Command::ClearRecording => Some((self.tr("清空录制", "Clear recording"), self.tr("删除本次会话的连接与测试记录，此操作无法撤销。", "Delete this session's connection and test records. This cannot be undone."))),
             Command::ClearLogs => Some((self.tr("清空日志", "Clear logs"), self.tr("清空日志记录，此操作无法撤销。", "Clear the log records. This cannot be undone."))),
             _ => None,
@@ -1011,6 +1022,7 @@ impl AppView {
                 }
             }
             Command::ClearRecording => self.service.clear_recording(),
+            Command::ClearTrafficStatistics => self.service.clear_traffic_statistics(),
             Command::ClearLogs => self.service.clear_logs(),
         }
         self.sync(cx);

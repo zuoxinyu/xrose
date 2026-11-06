@@ -21,6 +21,7 @@ pub mod storage;
 pub mod subscription;
 pub mod system;
 pub mod trace;
+pub mod traffic_statistics;
 pub mod updates;
 pub mod util;
 

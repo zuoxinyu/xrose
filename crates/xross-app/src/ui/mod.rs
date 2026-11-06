@@ -15,6 +15,7 @@ mod settings;
 mod subscriptions;
 pub(crate) mod theme;
 mod title_controls;
+mod traffic_statistics;
 mod widgets;
 
 use std::time::Duration;
@@ -155,6 +156,7 @@ fn text_input(
 }
 
 pub struct AppView {
+    traffic_ui: traffic_statistics::TrafficUi,
     mesh_form: mesh::MeshForm,
     forward_editor: Option<mesh::ForwardEditor>,
     mesh_sync_ui: mesh_sync::SyncUi,
@@ -309,7 +311,9 @@ impl AppView {
         // Debug hook used by the screenshot/regression workflow.
         let show_manual_form = std::env::var_os("XROSS_MANUAL").is_some();
         let hide_ips = snapshot.settings.privacy_mode;
+        let traffic_ui = traffic_statistics::TrafficUi::new(window, cx);
         let view = Self {
+            traffic_ui,
             mesh_form: mesh::MeshForm::new(window, cx),
             forward_editor: None,
             mesh_sync_ui: mesh_sync::SyncUi::new(window, cx),
@@ -483,6 +487,7 @@ impl AppView {
 
     /// Poll state without starving live connections while a trace is active.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
+        self.statistics_tick(cx);
         if !self.auto_trace_started {
             self.auto_trace_started = true;
             if let Ok(target) = std::env::var("XROSS_TRACE") {

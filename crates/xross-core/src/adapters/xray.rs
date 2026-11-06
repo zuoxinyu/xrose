@@ -36,6 +36,9 @@ impl CoreAdapter for XrayAdapter {
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
         let mut warnings = Vec::new();
+        if settings.traffic_statistics_enabled {
+            warnings.push("Xray 不提供进程和域名流量分类；仅记录节点流量与总量".into());
+        }
         let mut compiled_inbounds = Vec::new();
         let mut inbounds = Vec::new();
 

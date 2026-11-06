@@ -180,6 +180,8 @@ pub struct Settings {
     pub show_tray_speed: bool,
     /// Masks server addresses and node locations in the UI (on by default).
     pub privacy_mode: bool,
+    /// Collect local, persistent traffic aggregates independently of diagnostics.
+    pub traffic_statistics_enabled: bool,
 }
 
 impl Default for Settings {
@@ -227,6 +229,7 @@ impl Default for Settings {
             last_update_check: None,
             show_tray_speed: true,
             privacy_mode: true,
+            traffic_statistics_enabled: false,
             active_versions: BTreeMap::new(),
             binary_paths: BTreeMap::new(),
         }
@@ -685,5 +688,13 @@ mod tests {
         assert_eq!(restored, settings);
         let json = std::fs::read_to_string(path).unwrap();
         assert!(json.contains("mica_alt"));
+    }
+    #[test]
+    fn statistics_default_off_and_toggle_does_not_require_restart() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!old.traffic_statistics_enabled);
+        let mut new = old.clone();
+        new.traffic_statistics_enabled = true;
+        assert!(!new.requires_core_restart(&old, &crate::model::AppModel::default()));
     }
 }

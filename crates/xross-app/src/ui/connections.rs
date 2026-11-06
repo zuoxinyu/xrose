@@ -384,8 +384,10 @@ impl AppView {
             .flex_col()
             .gap_4()
             .w_full()
-            .child(header)
-            .child(card(&p).child(rows))
+            .flex_shrink_0()
+            .child(header.flex_shrink_0())
+            .child(self.traffic_statistics_card(&p, cx))
+            .child(card(&p).flex_shrink_0().child(rows))
     }
 
     pub(crate) fn page_diagnostics(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
