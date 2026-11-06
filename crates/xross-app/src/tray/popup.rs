@@ -371,7 +371,7 @@ impl PopupView {
 }
 
 impl Render for PopupView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let d = &self.dashboard;
         let lang = d.language;
@@ -455,9 +455,12 @@ impl Render for PopupView {
             .p_4()
             .gap_3()
             .bg(surface)
-            .rounded_xl()
-            .border_1()
-            .border_color(p.border)
+            // DWM and the Linux client frame already own the outer contour.
+            .when(
+                !cfg!(windows)
+                    && !matches!(window.window_decorations(), Decorations::Client { .. }),
+                |surface| surface.rounded_xl().border_1().border_color(p.border),
+            )
             .text_color(p.fg)
             .text_xs()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

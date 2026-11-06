@@ -253,6 +253,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 - 节点下拉与节点列表使用默认代理出站。节点列表的「⋯ → 自动切换设置」打开弹窗，可单独编辑各出站组。两处共用节点选择服务；菜单打开与执行时校验节点、组归属、启用状态与 busy。自动组继续自动选择，菜单说明原因，不覆盖其自动选择结果。
 - 胶囊高 28px，节点段宽 220px，图标操作段宽 32px。两段贴合 1px 外框内沿，分割线垂直贯穿内侧。悬停底色铺满整个操作段，右端圆角与外框同心。图标提供当前操作的提示与无障碍名称。
 - 托盘浮窗的「启动 Core」与「停止 Core」均为全宽、32px 高的实心按钮；停止使用红色底与高对比文字。按钮下方直接显示页脚，不插入临时提示行，启停时布局保持稳定。
+- 托盘浮窗外轮廓由一层边框负责。Windows 使用 DWM 边框与圆角，Linux 客户端装饰模式使用 GPUI Kit 的窗口边框，内容背景填满边界。其他场景由浮窗自身绘制圆角边框。
 - 实机截图：标题栏[启动](screenshots/pill-start-light.png)、[停止](screenshots/pill-stop-light.png)、[停止悬停](screenshots/pill-stop-hover-light.png)、[暗色停止](screenshots/pill-stop-dark.png)；托盘浮窗停止按钮的[浅色](screenshots/tray-stop-light.png)与[暗色](screenshots/tray-stop-dark.png)。
 
 ### 4.5 页面
