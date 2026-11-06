@@ -382,6 +382,17 @@ impl AppView {
     }
 }
 
+fn log_time_in_timezone(timestamp: &str, timezone: &impl chrono::TimeZone) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|time| {
+            time.with_timezone(timezone)
+                .time()
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| timestamp.to_owned())
+}
+
 fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
     let entry = &row.entry;
     let key = &row.key;
@@ -391,18 +402,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
         LogLevel::Warn => p.warn_text,
         LogLevel::Error => p.danger_text,
     };
-    let timestamp = entry
-        .timestamp
-        .split('T')
-        .nth(1)
-        .map(|t| {
-            t.trim_end_matches('Z')
-                .split('.')
-                .next()
-                .unwrap_or(t)
-                .to_string()
-        })
-        .unwrap_or_else(|| entry.timestamp.clone());
+    let timestamp = log_time_in_timezone(&entry.timestamp, &chrono::Local);
     div()
         .id(key.clone())
         .flex()
@@ -464,6 +464,41 @@ mod tests {
     use xross_core::core::LogEntry;
     use xross_core::core::LogStream;
     use xross_core::settings::LogLevel;
+
+    #[test]
+    fn log_time_converts_utc_and_explicit_offsets_to_the_viewers_timezone() {
+        let east = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        for timestamp in [
+            "2026-11-06T18:44:47Z",
+            "2026-11-06T18:44:47.123+00:00",
+            "2026-11-07T02:44:47+08:00",
+            "2026-11-06T14:44:47-04:00",
+        ] {
+            assert_eq!(super::log_time_in_timezone(timestamp, &east), "02:44:47");
+        }
+    }
+
+    #[test]
+    fn log_time_handles_negative_and_half_hour_offsets() {
+        let timestamp = "2026-11-07T02:10:05+08:00";
+        let west = chrono::FixedOffset::west_opt(5 * 3600).unwrap();
+        let half_hour = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap();
+        assert_eq!(super::log_time_in_timezone(timestamp, &west), "13:10:05");
+        assert_eq!(
+            super::log_time_in_timezone(timestamp, &half_hour),
+            "23:40:05"
+        );
+    }
+
+    #[test]
+    fn log_time_preserves_unparseable_timestamps() {
+        for timestamp in ["", "unknown", "2026-11-07 02:44:47"] {
+            assert_eq!(
+                super::log_time_in_timezone(timestamp, &chrono::Utc),
+                timestamp
+            );
+        }
+    }
 
     fn entries(range: std::ops::Range<i64>) -> Vec<LogEntry> {
         range

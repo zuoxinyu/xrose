@@ -12,9 +12,23 @@ use super::theme::palette;
 use super::widgets::*;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
-use gpui_kit::component::radio::Radio;
+use gpui_kit::component::tooltip::Tooltip;
 
 impl AppView {
+    fn select_default_dns(&mut self, tag: &str, cx: &mut Context<Self>) {
+        let dns = &self.snapshot.model.dns;
+        if dns.final_server.as_deref() == Some(tag)
+            || !dns
+                .servers
+                .iter()
+                .any(|server| server.tag == tag && !server.is_fakeip())
+        {
+            return;
+        }
+        self.service.set_final_dns(tag);
+        self.sync(cx);
+    }
+
     pub(crate) fn page_dns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
@@ -216,12 +230,26 @@ impl AppView {
                     let tag = server.tag.clone();
                     let is_final = final_tag == tag;
                     let menu_target = MenuTarget::Dns(tag.clone());
+                    let view = cx.entity().downgrade();
+                    let row_tag = tag.clone();
                     div().id(SharedString::from(format!("dns-row-{tag}"))).flex().items_center().gap_3().p_3().rounded_md()
                         .bg(if is_final { p.accent } else { p.bg }).border_l_2().border_color(if is_final { p.primary } else { p.border.opacity(0.) })
-                        .child(Radio::new(SharedString::from(format!("final-{tag}"))).checked(is_final).disabled(server.is_fakeip())
+                        .when(!server.is_fakeip(), |d| d.cursor_pointer().hover(move |style| style.bg(p.accent)))
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_default_dns(&row_tag, cx)))
+                        .child(gpui_base::Radio::new(SharedString::from(format!("final-{tag}"))).checked(is_final).disabled(server.is_fakeip())
+                            .size(px(super::theme::ICON_BUTTON_SIZE)).flex_shrink_0()
+                            .flex().items_center().justify_center().rounded_full()
+                            .border_2().border_color(p.border.opacity(0.))
+                            .focus_visible(move |style| style.border_color(p.primary))
+                            .when(server.is_fakeip(), |d| d.opacity(super::theme::DISABLED_OPACITY))
+                            .when(!server.is_fakeip(), |d| d.cursor_pointer().hover(move |style| style.bg(p.accent)))
                             .accessibility_label(self.tr("设为默认 DNS", "Use as default DNS"))
-                            .tooltip(self.tr("未匹配其他规则时使用此服务器", "Use this server when no other rule matches"))
-                            .on_change(cx.listener(move |this, _, _, cx| { this.service.set_final_dns(tag.clone()); this.sync(cx); })))
+                            .tooltip(move |window, cx| Tooltip::new(super::tr(lang, "未匹配其他规则时使用此服务器", "Use this server when no other rule matches")).build(window, cx))
+                            .child(radio_indicator(is_final, if is_final { p.primary } else { p.muted_fg }, p.primary))
+                            .on_change(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                let _ = view.update(cx, |this, cx| this.select_default_dns(&tag, cx));
+                            }))
                         .child(div().flex().flex_col().gap_1().flex_1().min_w(px(0.))
                             .child(div().flex().items_center().gap_2()
                                 .child(div().text_sm().text_color(p.fg).child(server.tag.clone()))
@@ -230,6 +258,7 @@ impl AppView {
                             .when(!server.is_fakeip(), |d| d.child(div().text_sm().text_color(p.muted_fg).truncate().child(server.display_address())))
                             .child(div().text_xs().text_color(p.muted_fg).truncate().child(if server.is_fakeip() { self.tr("用于 Fake-IP 解析", "Used for Fake-IP resolution").to_string() } else if server.domains.is_empty() { self.tr("匹配所有域名", "All domains").to_string() } else { server.domains.join(", ") })))
                         .child(more_button(SharedString::from(format!("dns-menu-{}", server.tag)), self.tr("服务器操作", "Server actions"))
+                            .on_click(|_, _, cx| cx.stop_propagation())
                             .dropdown_menu(menus::builder(cx.entity().downgrade(), menu_target.clone())))
                         .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
                 })),

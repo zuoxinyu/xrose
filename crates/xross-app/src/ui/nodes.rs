@@ -1145,23 +1145,7 @@ fn render_node_row(
                     )
                 })
                 // Radio: disabled in automatic groups, where the chosen node is only marked.
-                .child(
-                    div()
-                        .w(px(20.))
-                        .h(px(20.))
-                        .flex_shrink_0()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(radio_border)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(if selected {
-                            div().size(px(10.)).rounded_full().bg(radio_dot)
-                        } else {
-                            div()
-                        }),
-                )
+                .child(radio_indicator(selected, radio_border, radio_dot))
                 // Node metadata
                 .child(
                     div()

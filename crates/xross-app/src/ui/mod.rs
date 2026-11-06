@@ -200,6 +200,10 @@ pub struct AppView {
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
     content_scroll: ScrollHandle,
+    settings_tab: settings::SettingsTab,
+    settings_scroll: ScrollHandle,
+    settings_tab_scroll: ScrollHandle,
+    settings_tab_focus: [FocusHandle; 6],
     pub(crate) rule_value: Entity<InputState>,
     pub(crate) dns_tag: Entity<InputState>,
     pub(crate) dns_address: Entity<InputState>,
@@ -353,6 +357,10 @@ impl AppView {
             action_menu: None,
             active_route_drag: None,
             content_scroll: ScrollHandle::new(),
+            settings_tab: settings::SettingsTab::default(),
+            settings_scroll: ScrollHandle::new(),
+            settings_tab_scroll: ScrollHandle::new(),
+            settings_tab_focus: std::array::from_fn(|_| cx.focus_handle()),
             rule_value,
             dns_tag,
             dns_address,
@@ -685,6 +693,14 @@ impl AppView {
     fn sidebar_traffic(&self, cx: &App) -> impl IntoElement {
         let p = palette(cx);
         let running = self.snapshot.process.phase.is_alive();
+        let traffic_label = |symbol: &'static str, label: SharedString| {
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().w(px(12.)).flex_shrink_0().text_center().child(symbol))
+                .child(label)
+        };
         div()
             .id("sidebar-traffic")
             .flex()
@@ -697,25 +713,27 @@ impl AppView {
             .children(
                 [
                     (
-                        self.tr("↓ 下行", "↓ Download"),
+                        "↓",
+                        self.tr("下行", "Download"),
                         self.snapshot.runtime.down_speed,
                         p.data_down,
                     ),
                     (
-                        self.tr("↑ 上行", "↑ Upload"),
+                        "↑",
+                        self.tr("上行", "Upload"),
                         self.snapshot.runtime.up_speed,
                         p.data_up,
                     ),
                 ]
                 .into_iter()
-                .map(|(label, speed, color)| {
+                .map(|(symbol, label, speed, color)| {
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
                         .gap_2()
                         .text_color(if running { color } else { p.muted_fg })
-                        .child(label)
+                        .child(traffic_label(symbol, label))
                         .child(
                             div()
                                 .font_family(cx.theme().mono_font_family.clone())
@@ -730,7 +748,7 @@ impl AppView {
                     .justify_between()
                     .gap_2()
                     .text_color(p.muted_fg)
-                    .child(self.tr("累计", "Total"))
+                    .child(traffic_label("∑", self.tr("累计", "Total")))
                     .child(xross_core::util::format_bytes(
                         self.snapshot
                             .runtime
@@ -843,7 +861,9 @@ impl AppView {
                         Button::new("header-node-selector")
                             .compact()
                             .ghost()
-                            .h_full()
+                            // The dropdown wrapper sizes to its trigger, so give
+                            // the button the capsule's full inner height explicitly.
+                            .h(px(theme::STATUS_HEIGHT - 2.))
                             .w(px(theme::STATUS_NODE_WIDTH))
                             .rounded(gpui_kit::component::button::ButtonRounded::None)
                             .rounded_tl(px(theme::STATUS_END_RADIUS))
@@ -1019,7 +1039,7 @@ impl AppView {
             Page::Connections => self.page_connections(cx).into_any_element(),
             Page::Diagnostics => self.page_diagnostics(cx).into_any_element(),
             Page::Logs => self.page_logs(cx).into_any_element(),
-            Page::Settings => self.page_settings(window, cx).into_any_element(),
+            Page::Settings => self.page_settings(cx).into_any_element(),
             Page::About => self.page_about(cx).into_any_element(),
             Page::Mesh => self.page_mesh(cx).into_any_element(),
         }
@@ -1316,6 +1336,7 @@ impl Render for AppView {
                     .flex_col()
                     .flex_1()
                     .h_full()
+                    .min_w(px(0.))
                     .bg(p.bg)
                     .overflow_hidden()
                     .child(self.header(cx))
@@ -1361,10 +1382,12 @@ impl Render for AppView {
                             .flex_1()
                             .min_h(px(0.))
                             .w_full()
-                            .when(self.page == Page::Logs, |d| {
+                            .when(matches!(self.page, Page::Logs | Page::Settings), |d| {
                                 d.flex().flex_col().overflow_hidden()
                             })
-                            .when(self.page != Page::Logs, |d| d.overflow_y_scroll())
+                            .when(!matches!(self.page, Page::Logs | Page::Settings), |d| {
+                                d.overflow_y_scroll()
+                            })
                             .p(px(theme::PAGE_PAD))
                             .child(self.page_content(window, cx)),
                     ),

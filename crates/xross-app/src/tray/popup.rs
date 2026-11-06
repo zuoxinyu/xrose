@@ -739,7 +739,11 @@ impl Render for PopupView {
                                     format_speed(d.up_speed),
                                     p.data_up,
                                 ),
-                                (tr(lang, "累计流量", "Total traffic"), d.total.clone(), p.fg),
+                                (
+                                    tr(lang, "∑ 累计流量", "∑ Total traffic"),
+                                    d.total.clone(),
+                                    p.fg,
+                                ),
                             ]
                             .into_iter()
                             .map(|(label, value, color)| {

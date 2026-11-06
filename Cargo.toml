@@ -70,6 +70,8 @@ block = { path = "vendor/block" }
 gpui-pre = { path = "vendor/gpui-pre" }
 # The Windows backend selects Natural Symmetric for glyph rasterization.
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# Keep dialog slide motion independent of opacity until supported upstream.
+gpui-component = { path = "vendor/gpui-component" }
 
 [profile.dev]
 # 精简开发环境下的 PDB 调试信息：仅保留行号，大幅减小 PDB 体积并大幅加速链接

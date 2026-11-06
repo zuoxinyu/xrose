@@ -65,6 +65,21 @@ pub fn dot(color: Hsla) -> impl IntoElement {
     div().size(px(8.)).flex_shrink_0().rounded_full().bg(color)
 }
 
+pub fn radio_indicator(checked: bool, border: Hsla, dot: Hsla) -> Div {
+    div()
+        .size(px(20.))
+        .flex_shrink_0()
+        .rounded_full()
+        .border_1()
+        .border_color(border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(checked, |d| {
+            d.child(div().size(px(10.)).rounded_full().bg(dot))
+        })
+}
+
 pub fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool) -> Switch {
     Switch::new(id).checked(checked).label(label.into())
 }

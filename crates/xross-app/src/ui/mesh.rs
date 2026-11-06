@@ -11,13 +11,13 @@ use super::{
 pub(super) use forwards::ForwardEditor;
 use gpui_base::{Disableable, SelectableText};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::mesh::{
@@ -235,6 +235,7 @@ impl AppView {
         id: String,
         label: &str,
         values: Vec<String>,
+        monospace: bool,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -355,6 +356,9 @@ impl AppView {
             .flex_1()
             .w_full()
             .min_w(px(0.))
+            .when(monospace, |d| {
+                d.font_family(cx.theme().mono_font_family.clone())
+            })
             .child(measure)
             .child(content);
         div()
@@ -963,6 +967,7 @@ impl AppView {
                     format!("mesh-{}-local-name", profile.id),
                     &self.tr("本机设备名", "Local device name"),
                     vec![local_name.clone()],
+                    false,
                     &p,
                     cx,
                 ));
@@ -1016,6 +1021,7 @@ impl AppView {
                         format!("mesh-{}-{key}", profile.id),
                         &label,
                         values,
+                        matches!(key, "addresses" | "routes"),
                         &p,
                         cx,
                     ));
@@ -1154,6 +1160,7 @@ impl AppView {
                                                 peer_id.clone(),
                                                 "",
                                                 peer.addresses,
+                                                true,
                                                 &p,
                                                 cx,
                                             ),
