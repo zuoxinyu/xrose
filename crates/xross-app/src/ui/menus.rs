@@ -17,6 +17,7 @@ pub(super) enum MenuTarget {
     RoutingFiles,
     NodeSelector,
     DefaultOutbound,
+    OutboundGroup(String),
     FrontProxy,
     Node(String),
     Nodes,
@@ -35,6 +36,10 @@ pub(super) enum Command {
     ExportRoute(ExportScope),
     SelectNode(String, String),
     SetDefaultOutbound(String),
+    ManageOutboundGroups,
+    EditOutboundGroup(String),
+    DeleteOutboundGroup(String),
+    NodeOutboundGroups(String),
     SetFrontProxy(Option<String>),
     EditNode(String),
     TestNode(String),
@@ -306,6 +311,57 @@ impl AppView {
                         .checked(current.as_ref() == Some(&group.id)),
                     );
                 }
+                menu = menu.separator().item(add(
+                    "管理出站组…",
+                    "Manage outbound groups…",
+                    true,
+                    Command::ManageOutboundGroups,
+                ));
+            }
+            MenuTarget::OutboundGroup(id) => {
+                let model = &self.snapshot.model;
+                let Some(group) = model.group(&id) else {
+                    return menu;
+                };
+                let reason = model.outbound_group_deletion_reason(&id);
+                menu = menu
+                    .item(add(
+                        "设为默认代理出站",
+                        "Use as default proxy group",
+                        model.default_group_id().as_ref() != Some(&id)
+                            && group.enabled
+                            && group.members.iter().any(|id| {
+                                model
+                                    .node(id)
+                                    .is_some_and(|n| n.usable_with(self.snapshot.settings.core))
+                            }),
+                        Command::SetDefaultOutbound(id.clone()),
+                    ))
+                    .separator()
+                    .item(add(
+                        "删除出站组",
+                        "Delete outbound group",
+                        reason.is_none(),
+                        Command::DeleteOutboundGroup(id),
+                    ));
+                if let Some(reason) = reason {
+                    let reason = match reason {
+                        "此组为默认代理出站，请先选择其他默认出站组" => self
+                            .tr(
+                                "请先选择其他默认出站组",
+                                "Choose another default group first",
+                            ),
+                        "此组被路由规则引用，请先修改规则的出站组" => self.tr(
+                            "请先修改引用此组的路由规则",
+                            "Update routing rules that reference this group first",
+                        ),
+                        _ => self.tr(
+                            "请先修改引用此组的 DNS 设置",
+                            "Update DNS settings that reference this group first",
+                        ),
+                    };
+                    menu = menu.label(reason);
+                }
             }
             MenuTarget::NodeSelector => {
                 let group = self
@@ -373,6 +429,12 @@ impl AppView {
                         Command::EditNode(id.clone()),
                     ))
                     .item(add(
+                        "所属出站组…",
+                        "Outbound group membership…",
+                        !busy("core"),
+                        Command::NodeOutboundGroups(id.clone()),
+                    ))
+                    .item(add(
                         "HTTP 测速",
                         "HTTP test",
                         node.enabled && !testing,
@@ -403,6 +465,12 @@ impl AppView {
             MenuTarget::Nodes => {
                 let failed = self.snapshot.latency.values().any(|e| e.delay_ms.is_none());
                 menu = menu
+                    .item(add(
+                        "管理出站组…",
+                        "Manage outbound groups…",
+                        true,
+                        Command::ManageOutboundGroups,
+                    ))
                     .item(add(
                         "自动切换设置…",
                         "Auto-switch settings…",
@@ -792,6 +860,10 @@ impl AppView {
             return;
         }
         let confirmation = match &command {
+            Command::DeleteOutboundGroup(_) => Some((
+                self.tr("删除出站组", "Delete outbound group"),
+                self.tr("删除此出站组及其成员关联。节点仍可在节点列表中使用。", "Delete this group and its memberships. Its nodes remain available in the node list."),
+            )),
             Command::LogoutMesh(_) => Some((self.tr("注销设备身份","Log out device"),self.tr("断开此 Tailscale 组网并注销本机身份，下次连接需要重新授权。","Disconnect this Tailscale network and sign out this device. The next connection requires authorization."))),
             Command::DeleteService(_, _) => Some((self.tr("删除转发", "Delete forward"), self.tr("删除后将停止该端口的转发，组网连接保持。", "Forwarding on this port will stop. The mesh connection stays active."))),
             Command::DeleteForward(_, rule) => Some((
@@ -845,6 +917,14 @@ impl AppView {
             }
         }
         match command {
+            Command::ManageOutboundGroups => self.open_outbound_groups(window, cx),
+            Command::EditOutboundGroup(id) => self.open_outbound_group_editor(Some(id), window, cx),
+            Command::NodeOutboundGroups(id) => self.open_node_outbound_groups(id, window, cx),
+            Command::DeleteOutboundGroup(id) => {
+                if let Err(error) = self.service.delete_outbound_group(&id) {
+                    self.service.toast(ToastLevel::Error, error.to_string());
+                }
+            }
             Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),

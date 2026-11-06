@@ -5,6 +5,7 @@ mod mesh_discovery;
 mod mesh_exit;
 pub mod mesh_sync;
 mod node_switch;
+mod outbound_groups;
 mod routing_transfer;
 mod traffic_statistics;
 mod update_check;

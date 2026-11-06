@@ -1,4 +1,5 @@
 mod mesh_exits;
+mod outbound_groups;
 mod switching;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -387,6 +388,15 @@ impl AppView {
                                     .dropdown_menu(
                                         menus::builder(cx.entity().downgrade(), MenuTarget::Nodes),
                                     ),
+                                )
+                                .child(
+                                    Button::new("manage-outbound-groups")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .label(self.tr("出站组", "Outbound groups"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_outbound_groups(window, cx);
+                                        })),
                                 )
                                 .child(
                                     Button::new("toggle-add-drawer")

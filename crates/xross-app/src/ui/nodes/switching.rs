@@ -30,6 +30,7 @@ impl AppView {
             return;
         };
         let selection = cx.new(|_| initial);
+        let advanced = cx.new(|_| false);
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let Some(view) = view.upgrade() else {
@@ -38,7 +39,13 @@ impl AppView {
             view.update(cx, |this, cx| {
                 let p = palette(cx);
                 let body = match this.snapshot.model.group(selection.read(cx)) {
-                    Some(group) => this.node_switch_controls(group, selection.clone(), &p, cx),
+                    Some(group) => this.node_switch_controls(
+                        group,
+                        selection.clone(),
+                        advanced.clone(),
+                        &p,
+                        cx,
+                    ),
                     None => empty_hint(
                         &p,
                         this.tr(
@@ -63,52 +70,10 @@ impl AppView {
         &self,
         group: &OutboundGroup,
         selection: Entity<String>,
+        advanced: Entity<bool>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let disabled = this_busy(&self.snapshot.busy, "core") || !group.enabled;
-        let policy = group.switch_policy;
-        let interval = group.interval_secs.max(30);
-        let mode = match (group.switch_mode(), group.kind) {
-            // Native latency groups already choose by latency. Editing their conditions opts
-            // into the same client-side measurements as explicitly choosing this mode.
-            (SwitchMode::GroupDefault, GroupKind::UrlTest) => SwitchMode::Latency,
-            (mode, _) => mode,
-        };
-        let mode_id = group.id.clone();
-        let modes = ChoiceGroup::new(
-            "node-switch-mode",
-            vec![
-                self.tr("关闭", "Off"),
-                self.tr("仅故障切换", "Failover only"),
-                self.tr("延迟优先", "Lowest latency"),
-                self.tr("吞吐优先", "Highest throughput"),
-            ],
-            MODES.iter().position(|m| *m == mode),
-        )
-        .disabled(disabled)
-        .on_change(cx.listener(move |this, i: &usize, _, cx| {
-            this.save_node_switch(
-                &mode_id,
-                NodeSwitchPolicy {
-                    mode: MODES[*i],
-                    ..policy
-                },
-                interval,
-                cx,
-            );
-        }));
-        let row = |label: SharedString| {
-            div().flex().flex_wrap().items_center().gap_2().child(
-                div()
-                    .w(px(crate::ui::theme::SETTING_LABEL_WIDTH))
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(p.muted_fg)
-                    .child(label),
-            )
-        };
-        let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
         let controls = div().flex().flex_col().gap_3();
         let groups = &self.snapshot.model.groups;
         let controls = controls.when(groups.len() > 1, |d| {
@@ -128,16 +93,100 @@ impl AppView {
                     cx.notify();
                 }
             }));
-            d.child(row(self.tr("配置出站组", "Configure group")).child(choices))
+            d.child(
+                self.policy_row(self.tr("配置出站组", "Configure group"), p)
+                    .child(choices),
+            )
         });
-        let controls = controls.child(row(self.tr("切换模式", "Switch mode")).child(modes));
+        let id = group.id.clone();
+        controls
+            .child(self.node_policy_fields(
+                group,
+                advanced,
+                move |this, policy, interval, cx| {
+                    this.save_node_switch(&id, policy, interval, cx);
+                },
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn policy_row(&self, label: SharedString, p: &Palette) -> Div {
+        div().flex().flex_wrap().items_center().gap_2().child(
+            div()
+                .w(px(crate::ui::theme::SETTING_LABEL_WIDTH))
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(p.muted_fg)
+                .child(label),
+        )
+    }
+
+    pub(super) fn node_policy_fields(
+        &self,
+        group: &OutboundGroup,
+        advanced: Entity<bool>,
+        on_change: impl Fn(&mut Self, NodeSwitchPolicy, u64, &mut Context<Self>) + Clone + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = palette(cx);
+        let disabled = this_busy(&self.snapshot.busy, "core");
+        let policy = group.switch_policy;
+        let interval = group.interval_secs.max(30);
+        let mode = match (group.switch_mode(), group.kind) {
+            (SwitchMode::GroupDefault, GroupKind::UrlTest) => SwitchMode::Latency,
+            (mode, _) => mode,
+        };
+        let mode_handler = on_change.clone();
+        let modes = ChoiceGroup::new(
+            "node-switch-mode",
+            vec![
+                self.tr("关闭", "Off"),
+                self.tr("仅故障切换", "Failover only"),
+                self.tr("延迟优先", "Lowest latency"),
+                self.tr("吞吐优先", "Highest throughput"),
+            ],
+            MODES.iter().position(|m| *m == mode),
+        )
+        .disabled(disabled)
+        .on_change(cx.listener(move |this, i: &usize, _, cx| {
+            mode_handler(
+                this,
+                NodeSwitchPolicy {
+                    mode: MODES[*i],
+                    ..policy
+                },
+                interval,
+                cx,
+            );
+        }));
+        let expanded = *advanced.read(cx);
+        let disclosure = Button::new("node-policy-advanced")
+            .ghost()
+            .icon(if expanded {
+                IconName::ChevronUp
+            } else {
+                IconName::ChevronRight
+            })
+            .tooltip(self.tr("高级设置", "Advanced settings"))
+            .accessibility_label(self.tr("高级设置", "Advanced settings"))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                advanced.update(cx, |value, _| *value = !*value);
+                cx.notify();
+            }));
+        let mut controls = div().flex().flex_col().gap_3().child(
+            self.policy_row(self.tr("自动切换", "Auto switch"), &p)
+                .child(modes)
+                .child(disclosure),
+        );
         if mode == SwitchMode::GroupDefault {
-            return controls
-                .child(note(self.tr(
-                    "此组沿用导入的负载均衡设置。选择上方任一模式可更改。",
-                    "This group uses imported load balancing. Choose a mode above to change it.",
-                )))
-                .into_any_element();
+            controls = controls.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                "此组沿用导入的负载均衡设置。选择切换模式可更改策略。",
+                "This group uses imported load balancing. Choose a mode to change its policy.",
+            )));
+        }
+        if !expanded {
+            return controls;
         }
         let policy = NodeSwitchPolicy { mode, ..policy };
         let scopes = [
@@ -145,7 +194,7 @@ impl AppView {
             FallbackScope::SameSubscription,
             FallbackScope::SameRegion,
         ];
-        let scope_id = group.id.clone();
+        let scope_handler = on_change.clone();
         let scope = ChoiceGroup::new(
             "node-fallback-scope",
             vec![
@@ -157,8 +206,8 @@ impl AppView {
         )
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
-            this.save_node_switch(
-                &scope_id,
+            scope_handler(
+                this,
                 NodeSwitchPolicy {
                     fallback: scopes[*i],
                     ..policy
@@ -172,7 +221,7 @@ impl AppView {
         if !counts.contains(&count) {
             counts.push(count);
         }
-        let count_id = group.id.clone();
+        let count_handler = on_change.clone();
         let failures = ChoiceGroup::new(
             "node-failure-count",
             counts.iter().map(|n| n.to_string().into()).collect(),
@@ -180,8 +229,8 @@ impl AppView {
         )
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
-            this.save_node_switch(
-                &count_id,
+            count_handler(
+                this,
                 NodeSwitchPolicy {
                     consecutive_failures: counts[*i],
                     ..policy
@@ -195,7 +244,7 @@ impl AppView {
             intervals.push(interval);
             intervals.sort_unstable();
         }
-        let interval_id = group.id.clone();
+
         let timing = ChoiceGroup::new(
             "node-check-interval",
             intervals.iter().map(|s| format!("{s} s").into()).collect(),
@@ -203,8 +252,10 @@ impl AppView {
         )
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
-            this.save_node_switch(&interval_id, policy, intervals[*i], cx);
+            on_change(this, policy, intervals[*i], cx);
         }));
+        let row = |label| self.policy_row(label, &p);
+        let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
         let explanation = if mode == SwitchMode::Off {
             self.tr(
                 "启用自动切换后使用这些条件。",
@@ -236,7 +287,7 @@ impl AppView {
             })
             .when(group.managed() && this_busy(&self.snapshot.busy, "auto-probe"), |d| {
                 d.child(note(self.tr("正在检查节点…", "Checking nodes…")))
-            }).into_any_element()
+            })
     }
 
     fn save_node_switch(

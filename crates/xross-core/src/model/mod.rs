@@ -233,6 +233,41 @@ impl AppModel {
             .or_else(|| self.groups.iter().find(|g| g.enabled).map(|g| g.id.clone()))
     }
 
+    /// Checks every stored reference, including disabled rules.
+    pub fn outbound_group_deletion_reason(&self, id: &str) -> Option<&'static str> {
+        let Some(group) = self.group(id) else {
+            return Some("出站组不存在，请刷新后重试");
+        };
+        if self.default_group_id().as_deref() == Some(id) {
+            return Some("此组为默认代理出站，请先选择其他默认出站组");
+        }
+        if self
+            .routing
+            .rule_groups
+            .iter()
+            .flat_map(|g| &g.rules)
+            .chain(&self.routing.rules)
+            .map(|r| &r.action)
+            .chain(std::iter::once(&self.routing.final_action))
+            .any(|action| action.group.as_deref() == Some(id))
+        {
+            return Some("此组被路由规则引用，请先修改规则的出站组");
+        }
+        if self
+            .dns
+            .servers
+            .iter()
+            .filter_map(|s| s.detour.as_deref())
+            .any(|detour| {
+                detour == group.tag()
+                    || (detour == id && !matches!(detour, "proxy" | "default" | "direct"))
+            })
+        {
+            return Some("此组被 DNS 引用，请先修改 DNS 的出站设置");
+        }
+        None
+    }
+
     /// Resolves a `Proxy` action to a group, falling back to the default group.
     pub fn resolve_proxy_group(&self, action: &RouteAction) -> Option<String> {
         action

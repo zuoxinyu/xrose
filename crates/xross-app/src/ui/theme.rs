@@ -204,6 +204,7 @@ pub const DRAG_SCROLL_STEP: f32 = 12.;
 pub const INSERTION_LINE: f32 = 2.;
 pub const DIALOG_WIDTH: f32 = 440.;
 pub const DIALOG_WIDE: f32 = 720.;
+pub const MEMBER_LIST_HEIGHT: f32 = 192.;
 
 pub fn switch_off() -> Hsla {
     hsl(0., 0., 0.5)
