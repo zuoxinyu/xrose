@@ -160,6 +160,7 @@ pub struct AppView {
     mesh_form: mesh::MeshForm,
     forward_editor: Option<mesh::ForwardEditor>,
     mesh_sync_ui: mesh_sync::SyncUi,
+    mesh_probe_feedback: mesh::ProbeFeedback,
     mesh_expanded: std::collections::HashSet<String>,
     collapsed_mesh_devices: std::collections::HashSet<String>,
     mesh_overflow: std::collections::HashMap<String, bool>,
@@ -193,7 +194,6 @@ pub struct AppView {
     log_list: logs::LogListState,
     log_filter: LogFilter,
     pub(crate) rule_name: Entity<InputState>,
-    pub(crate) rule_group_name: Entity<InputState>,
     pub(crate) rule_group_id: Option<String>,
     route_drag_epoch: u64,
     route_scroll_running: bool,
@@ -251,7 +251,6 @@ impl AppView {
         let node_search = text_input(window, cx, "按名称或地址过滤节点…");
         let log_search = text_input(window, cx, "搜索日志…");
         let rule_name = text_input(window, cx, "规则名称");
-        let rule_group_name = text_input(window, cx, "分组名称");
         let rule_value = text_input(window, cx, "example.com, 或 cn（Geo），或 10.0.0.0/8");
         let dns_tag = text_input(window, cx, "tag，例如 remote");
         let dns_address = text_input(window, cx, "1.1.1.1 或 https://1.1.1.1/dns-query");
@@ -317,6 +316,7 @@ impl AppView {
             mesh_form: mesh::MeshForm::new(window, cx),
             forward_editor: None,
             mesh_sync_ui: mesh_sync::SyncUi::new(window, cx),
+            mesh_probe_feedback: mesh::ProbeFeedback::default(),
             mesh_expanded: std::collections::HashSet::new(),
             collapsed_mesh_devices: std::collections::HashSet::new(),
             mesh_overflow: std::collections::HashMap::new(),
@@ -347,7 +347,6 @@ impl AppView {
             log_list: logs::LogListState::new(),
             log_filter: LogFilter::default(),
             rule_name,
-            rule_group_name,
             rule_group_id: None,
             route_drag_epoch: 0,
             route_scroll_running: false,
@@ -426,7 +425,6 @@ impl AppView {
                 self.tr("订阅名称（可选）", "Subscription name (optional)"),
             ),
             (&self.rule_name, self.tr("规则名称", "Rule name")),
-            (&self.rule_group_name, self.tr("分组名称", "Group name")),
             (
                 &self.rule_value,
                 self.tr(
@@ -518,6 +516,9 @@ impl AppView {
         if refresh_due {
             self.snapshot = self.service.snapshot();
             self.last_refresh = now;
+            if !self.snapshot.busy.iter().any(|key| key == "mesh") {
+                self.mesh_probe_feedback.observe(&self.snapshot.mesh, now);
+            }
             if !self.snapshot.busy.iter().any(|b| b == "latency") {
                 self.latency_pending.clear();
             }

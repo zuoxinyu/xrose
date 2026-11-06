@@ -1,6 +1,7 @@
 use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xross_core::model::{
@@ -16,6 +17,132 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
 
 impl AppView {
+    pub(super) fn open_rule_group_dialog(
+        &self,
+        group_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let group = group_id.as_ref().and_then(|id| {
+            self.snapshot
+                .model
+                .routing
+                .rule_groups
+                .iter()
+                .find(|group| &group.id == id)
+        });
+        if group_id.is_some() && group.is_none() {
+            return;
+        }
+        let editing = group_id.is_some();
+        let name = cx.new(|cx| {
+            let mut input =
+                InputState::new(window, cx).placeholder(self.tr("分组名称", "Group name"));
+            if let Some(group) = group {
+                input.set_value(group.name.clone(), window, cx);
+            }
+            input
+        });
+        let error = cx.new(|_| None::<String>);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let input = name.clone();
+                let input_focus = name.read(cx).focus_handle(cx);
+                let failure = error.clone();
+                let editing_id = group_id.clone();
+                let save_view = cx.entity().downgrade();
+                super::dialogs::settings_dialog(
+                    dialog,
+                    if editing {
+                        this.tr("重命名分组", "Rename group")
+                    } else {
+                        this.tr("添加分组", "Add group")
+                    },
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(Input::new(&name))
+                        .when_some(error.read(cx).clone(), |d, message| {
+                            d.child(div().text_sm().text_color(p.danger_text).child(message))
+                        }),
+                    &p,
+                    window,
+                )
+                .w(px(super::theme::DIALOG_WIDTH))
+                .footer(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel-rule-group")
+                                .compact()
+                                .label(this.tr("取消", "Cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("save-rule-group")
+                                .compact()
+                                .primary()
+                                .label(if editing {
+                                    this.tr("保存", "Save")
+                                } else {
+                                    this.tr("添加分组", "Add group")
+                                })
+                                .on_click(move |_, window, cx| {
+                                    input_focus.dispatch_action(
+                                        &gpui_kit::component::dialog::Confirm { secondary: false },
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                        ),
+                )
+                .on_ok(move |_, _, cx| {
+                    save_view
+                        .update(cx, |this, cx| {
+                            let value = input.read(cx).value().to_string();
+                            if value.trim().is_empty() {
+                                let message =
+                                    this.tr("请填写分组名称", "Enter a group name").to_string();
+                                failure.update(cx, |error, cx| {
+                                    *error = Some(message);
+                                    cx.notify();
+                                });
+                                cx.notify();
+                                return false;
+                            }
+                            match this.service.save_rule_group(editing_id.as_deref(), &value) {
+                                Ok(id) => {
+                                    this.route_drag_epoch += 1;
+                                    if editing_id.is_none() {
+                                        this.rule_group_id = Some(id);
+                                    }
+                                    this.sync(cx);
+                                    true
+                                }
+                                Err(err) => {
+                                    failure.update(cx, |error, cx| {
+                                        *error = Some(err.to_string());
+                                        cx.notify();
+                                    });
+                                    cx.notify();
+                                    false
+                                }
+                            }
+                        })
+                        .unwrap_or(false)
+                })
+            })
+        });
+    }
+
     pub(crate) fn page_routing(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
@@ -181,14 +308,33 @@ impl AppView {
         // Custom groups survive preset changes and precede the ungrouped rules.
         body = body.child(
             card(&p)
-                .child(section_title(
-                    &p,
-                    self.tr("规则分组", "Rule groups"),
-                    self.tr(
-                        "自定义分组按顺序优先匹配，随后匹配未分组与预设规则",
-                        "Custom groups run in order before ungrouped and preset rules",
-                    ),
-                ))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(section_title(
+                            &p,
+                            self.tr("规则分组", "Rule groups"),
+                            self.tr(
+                                "自定义分组按顺序优先匹配，随后匹配未分组与预设规则",
+                                "Custom groups run in order before ungrouped and preset rules",
+                            ),
+                        ))
+                        .child(
+                            Button::new("create-rule-group")
+                                .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                .primary()
+                                .icon(IconName::Plus)
+                                .label(self.tr("添加分组", "Add group"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_rule_group_dialog(None, window, cx);
+                                })),
+                        ),
+                )
                 .child(
                     div()
                         .flex()
@@ -229,12 +375,9 @@ impl AppView {
                                         .compact()
                                         .ghost()
                                         .label(format!("{} · {}", name, group.rules.len()))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                        .on_click(cx.listener(move |this, _, _, cx| {
                                             this.route_drag_epoch += 1;
                                             this.rule_group_id = Some(id.clone());
-                                            this.rule_group_name.update(cx, |input, cx| {
-                                                input.set_value(name.clone(), window, cx)
-                                            });
                                             this.sync(cx);
                                         })),
                                 )
@@ -263,71 +406,6 @@ impl AppView {
                                     this.sync(cx);
                                 })),
                         ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w(px(super::theme::FORM_FIELD_WIDTH))
-                                .child(Input::new(&self.rule_group_name)),
-                        )
-                        .child(
-                            Button::new("create-rule-group")
-                                .compact()
-                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .label(self.tr("新建分组", "New group"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    let name = this.rule_group_name.read(cx).value().to_string();
-                                    match this.service.save_rule_group(None, &name) {
-                                        Ok(id) => this.rule_group_id = Some(id),
-                                        Err(err) => this.service.toast(
-                                            xross_core::service::ToastLevel::Error,
-                                            err.to_string(),
-                                        ),
-                                    }
-                                    this.sync(cx);
-                                })),
-                        )
-                        .when_some(selected_group, |d, group| {
-                            let id = group.id.clone();
-                            let toggle_id = id.clone();
-                            d.child(
-                                Button::new("rename-rule-group")
-                                    .compact()
-                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .label(self.tr("重命名", "Rename"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let name =
-                                            this.rule_group_name.read(cx).value().to_string();
-                                        if let Err(err) =
-                                            this.service.save_rule_group(Some(&id), &name)
-                                        {
-                                            this.service.toast(
-                                                xross_core::service::ToastLevel::Error,
-                                                err.to_string(),
-                                            );
-                                        }
-                                        this.sync(cx);
-                                    })),
-                            )
-                            .child(
-                                toggle(
-                                    "enable-rule-group",
-                                    self.tr("启用分组", "Enable group"),
-                                    group.enabled,
-                                )
-                                .on_change(cx.listener(
-                                    move |this, value, _, cx| {
-                                        this.service.set_rule_group_enabled(&toggle_id, *value);
-                                        this.sync(cx);
-                                    },
-                                )),
-                            )
-                        }),
                 ),
         );
 

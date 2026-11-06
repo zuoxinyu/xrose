@@ -503,7 +503,7 @@ impl AppView {
             .bg(p.panel)
             .text_color(p.fg)
             .border_color(p.border)
-            .entrance(DialogEntrance::None)
+            .entrance(crate::ui::dialogs::DIALOG_ENTRANCE)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
             .title(if editor.original.is_some() {

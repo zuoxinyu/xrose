@@ -15,6 +15,7 @@ pub(super) struct SyncUi {
     receive: Option<(String, String, String)>,
     code: Entity<InputState>,
     review: String,
+    merge_requested: bool,
     selected: BTreeSet<String>,
     page: usize,
 }
@@ -27,6 +28,7 @@ impl SyncUi {
             receive: None,
             code: cx.new(|cx| InputState::new(window, cx).masked(true)),
             review: String::new(),
+            merge_requested: false,
             selected: BTreeSet::new(),
             page: 0,
         }
@@ -45,6 +47,10 @@ impl SyncUi {
         cx: &mut Context<AppView>,
     ) {
         self.receive = Some((profile, peer, name));
+        self.review.clear();
+        self.selected.clear();
+        self.page = 0;
+        self.merge_requested = false;
         self.code
             .update(cx, |input, cx| input.set_value("", window, cx));
     }
@@ -108,6 +114,87 @@ pub(super) fn badges(peer: &MeshPeer, provider: MeshProvider, lang: Language, p:
     row
 }
 impl AppView {
+    pub(super) fn open_mesh_receive_dialog(
+        &mut self,
+        profile: String,
+        peer: String,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(review) = &self.snapshot.mesh_sync.review {
+            self.service.cancel_mesh_review(&review.id);
+        }
+        self.mesh_sync_ui
+            .open_receive(profile.clone(), peer.clone(), name, window, cx);
+        self.sync(cx);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let busy = this.snapshot.busy.iter().any(|key| key == "mesh-sync");
+                let review = this
+                    .snapshot
+                    .mesh_sync
+                    .review
+                    .as_ref()
+                    .filter(|review| review.profile == profile && review.peer == peer);
+                let body = if review.is_some() {
+                    this.sync_review(&p, cx).unwrap()
+                } else if this.mesh_sync_ui.merge_requested && !busy {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .child(this.tr("已合并所选配置", "Selected configuration merged"))
+                        .child(
+                            Button::new("mesh-receive-done")
+                                .compact()
+                                .primary()
+                                .label(this.tr("完成", "Done"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                } else {
+                    this.receive_controls(&profile, &p, cx).unwrap_or_else(div)
+                };
+                let close_view = cx.entity().downgrade();
+                let close_profile = profile.clone();
+                let close_peer = peer.clone();
+                super::dialogs::settings_dialog(
+                    dialog,
+                    this.tr("接收配置", "Receive configuration"),
+                    body,
+                    &p,
+                    window,
+                )
+                .overlay_closable(false)
+                .on_cancel(move |_, _, _| !busy)
+                .on_close(move |_, window, cx| {
+                    let _ = close_view.update(cx, |this, cx| {
+                        if let Some(review) =
+                            this.service.snapshot().mesh_sync.review.filter(|review| {
+                                review.profile == close_profile && review.peer == close_peer
+                            })
+                        {
+                            this.service.cancel_mesh_review(&review.id);
+                        }
+                        this.mesh_sync_ui.receive = None;
+                        this.mesh_sync_ui.review.clear();
+                        this.mesh_sync_ui.selected.clear();
+                        this.mesh_sync_ui.merge_requested = false;
+                        this.mesh_sync_ui
+                            .code
+                            .update(cx, |input, cx| input.set_value("", window, cx));
+                        this.sync(cx);
+                    });
+                })
+            })
+        });
+    }
+
     pub(super) fn open_mesh_share_dialog(
         &mut self,
         id: String,
@@ -374,12 +461,7 @@ impl AppView {
         panel.child(actions)
     }
 
-    pub(super) fn receive_controls(
-        &mut self,
-        id: &str,
-        p: &Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<Div> {
+    fn receive_controls(&mut self, id: &str, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
         let lang = self.lang();
         let busy = self
             .snapshot
@@ -387,12 +469,23 @@ impl AppView {
             .iter()
             .any(|s| s == "mesh-sync" || s == "mesh-share");
         let (profile, peer, name) = self.mesh_sync_ui.receive.clone().filter(|v| v.0 == id)?;
+        let available = self
+            .snapshot
+            .mesh
+            .networks
+            .iter()
+            .filter(|network| {
+                network.profile_id == profile
+                    && network.phase == xross_core::mesh::MeshPhase::Connected
+            })
+            .flat_map(|network| &network.peers)
+            .any(|candidate| candidate.id == peer && candidate.online && candidate.xross.is_some());
+        let empty = self.mesh_sync_ui.code.read(cx).value().trim().is_empty();
         Some(
             div()
                 .flex()
                 .flex_col()
                 .gap_2()
-                .pt_2()
                 .child(div().text_sm().text_color(p.muted_fg).child(format!(
                     "{} · {}",
                     tr(
@@ -403,6 +496,13 @@ impl AppView {
                     name
                 )))
                 .child(Input::new(&self.mesh_sync_ui.code))
+                .when(!available, |d| {
+                    d.child(div().text_sm().text_color(p.warn_text).child(tr(
+                        lang,
+                        "设备当前不可用，请确认网络已连接且对端在线。",
+                        "The device is unavailable. Check the network and the sender’s connection.",
+                    )))
+                })
                 .child(
                     div()
                         .flex()
@@ -411,8 +511,13 @@ impl AppView {
                             Button::new("mesh-fetch")
                                 .compact()
                                 .primary()
-                                .disabled(busy)
-                                .label(tr(lang, "接收并预览", "Receive and preview"))
+                                .disabled(busy || empty || !available)
+                                .loading(busy)
+                                .label(if busy {
+                                    tr(lang, "正在接收…", "Receiving…")
+                                } else {
+                                    tr(lang, "接收并预览", "Receive and preview")
+                                })
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let code = this.mesh_sync_ui.code.read(cx).value().to_string();
                                     this.service.receive_mesh_data(
@@ -423,23 +528,23 @@ impl AppView {
                                     this.mesh_sync_ui
                                         .code
                                         .update(cx, |input, cx| input.set_value("", window, cx));
+                                    this.sync(cx);
                                 })),
                         )
                         .child(
                             Button::new("mesh-close-receive")
                                 .compact()
+                                .disabled(busy)
                                 .label(tr(lang, "关闭", "Close"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.mesh_sync_ui.receive = None;
-                                    cx.notify();
-                                })),
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
                         ),
                 ),
         )
     }
-    pub(super) fn sync_review(&mut self, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
+    fn sync_review(&mut self, p: &Palette, cx: &mut Context<Self>) -> Option<Div> {
         const PAGE: usize = 20;
         let review = self.snapshot.mesh_sync.review.as_ref()?;
+        let busy = self.snapshot.busy.iter().any(|k| k == "mesh-sync");
         let lang = self.lang();
         let device = self
             .snapshot
@@ -464,9 +569,8 @@ impl AppView {
                 .map(|r| r.key.clone())
                 .collect();
             ui.page = 0;
-            ui.receive = None;
         }
-        let mut card = card(p).child(section_title(
+        let mut card = div().flex().flex_col().gap_3().child(section_title(
             p,
             title,
             tr(
@@ -489,7 +593,7 @@ impl AppView {
                     format!("{} · {} · {}", label(lang, row.category), row.name, diff),
                     ui.selected.contains(&key),
                 )
-                .disabled(row.difference == Difference::Identical)
+                .disabled(busy || row.difference == Difference::Identical)
                 .on_change(cx.listener(move |this, on, _, cx| {
                     if *on {
                         this.mesh_sync_ui.selected.insert(key.clone());
@@ -501,14 +605,13 @@ impl AppView {
             );
         }
         let id = review.id.clone();
-        let cancel = id.clone();
         let mut bar = div().flex().items_center().gap_2().flex_wrap();
         if pages > 1 {
             bar = bar
                 .child(
                     Button::new("sync-prev")
                         .compact()
-                        .disabled(ui.page == 0)
+                        .disabled(busy || ui.page == 0)
                         .label(tr(lang, "上一页", "Previous"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.mesh_sync_ui.page = this.mesh_sync_ui.page.saturating_sub(1);
@@ -519,7 +622,7 @@ impl AppView {
                 .child(
                     Button::new("sync-next")
                         .compact()
-                        .disabled(ui.page + 1 >= pages)
+                        .disabled(busy || ui.page + 1 >= pages)
                         .label(tr(lang, "下一页", "Next"))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.mesh_sync_ui.page = (this.mesh_sync_ui.page + 1).min(pages - 1);
@@ -527,7 +630,6 @@ impl AppView {
                         })),
                 );
         }
-        let busy = self.snapshot.busy.iter().any(|k| k == "mesh-sync");
         Some(
             card.child(
                 bar.child(
@@ -535,14 +637,17 @@ impl AppView {
                         .primary()
                         .compact()
                         .disabled(busy || ui.selected.is_empty())
+                        .loading(busy)
                         .label(format!(
                             "{} ({})",
                             tr(lang, "合并所选项目", "Merge selected"),
                             ui.selected.len()
                         ))
-                        .on_click(cx.listener(move |this, _, _, _| {
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mesh_sync_ui.merge_requested = true;
                             this.service
-                                .merge_mesh_data(id.clone(), this.mesh_sync_ui.selected.clone())
+                                .merge_mesh_data(id.clone(), this.mesh_sync_ui.selected.clone());
+                            this.sync(cx);
                         })),
                 )
                 .child(
@@ -550,10 +655,7 @@ impl AppView {
                         .compact()
                         .disabled(busy)
                         .label(tr(lang, "取消", "Cancel"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.service.cancel_mesh_review(&cancel);
-                            cx.notify();
-                        })),
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
                 ),
             ),
         )

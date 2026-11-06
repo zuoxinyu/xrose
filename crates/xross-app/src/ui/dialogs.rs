@@ -14,6 +14,9 @@ use xross_core::service::ToastLevel;
 
 use super::{AppView, theme::palette, widgets::ChoiceGroup};
 
+/// Shared motion policy for form, detail, and confirmation dialogs.
+pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
+
 /// Places settings in a scrollable surface so the close control stays reachable.
 pub(super) fn settings_dialog(
     dialog: Dialog,
@@ -28,7 +31,7 @@ pub(super) fn settings_dialog(
         .bg(p.panel)
         .text_color(p.fg)
         .border_color(p.border)
-        .entrance(DialogEntrance::None)
+        .entrance(DIALOG_ENTRANCE)
         .on_ok(|_, _, _| false)
         .title(title)
         .child(
@@ -79,7 +82,7 @@ impl AppView {
             .bg(p.panel)
             .text_color(p.fg)
             .border_color(p.border)
-            .entrance(DialogEntrance::None)
+            .entrance(DIALOG_ENTRANCE)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
             .title(if editing {
@@ -233,7 +236,7 @@ impl AppView {
                 .bg(p.panel)
                 .text_color(p.fg)
                 .border_color(p.border)
-                .entrance(DialogEntrance::None)
+                .entrance(DIALOG_ENTRANCE)
                 .title(title.clone())
                 .child(
                     div()

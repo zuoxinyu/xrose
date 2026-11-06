@@ -390,15 +390,6 @@ impl AppView {
                                     ),
                                 )
                                 .child(
-                                    Button::new("manage-outbound-groups")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("出站组", "Outbound groups"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_outbound_groups(window, cx);
-                                        })),
-                                )
-                                .child(
                                     Button::new("toggle-add-drawer")
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))

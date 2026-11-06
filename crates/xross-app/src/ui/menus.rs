@@ -898,6 +898,7 @@ impl AppView {
                     let command = command.clone();
                     dialog
                         .confirm()
+                        .entrance(super::dialogs::DIALOG_ENTRANCE)
                         .centered()
                         .w(px(super::theme::DIALOG_WIDTH))
                         .bg(panel)
@@ -963,8 +964,7 @@ impl AppView {
                     && peer.xross.is_some()
                 {
                     let name = peer.name.clone();
-                    self.mesh_sync_ui
-                        .open_receive(profile_id, peer_id, name, window, cx);
+                    self.open_mesh_receive_dialog(profile_id, peer_id, name, window, cx);
                 }
             }
             Command::ProbePeer(profile_id, peer_id) => {
@@ -972,7 +972,9 @@ impl AppView {
                     && let Some((provider, peer)) = self.mesh_peer(&profile_id, &peer_id)
                     && let Some(ip) = peer.addresses.first()
                 {
-                    self.service.mesh_probe(provider, ip.clone());
+                    let ip = ip.clone();
+                    self.mesh_probe_feedback.clear(&profile_id);
+                    self.service.mesh_probe(provider, ip);
                 }
             }
             Command::LoginMesh(id) => {
@@ -1080,21 +1082,7 @@ impl AppView {
             Command::AssignRule(id, group) => self.service.assign_rule_group(&id, group.as_deref()),
             Command::DeleteRule(id) => self.service.delete_rule(&id),
             Command::RenameGroup(id) => {
-                if let Some(group) = self
-                    .snapshot
-                    .model
-                    .routing
-                    .rule_groups
-                    .iter()
-                    .find(|g| g.id == id)
-                {
-                    self.rule_group_id = Some(id);
-                    let name = group.name.clone();
-                    self.rule_group_name.update(cx, |input, cx| {
-                        input.set_value(name, window, cx);
-                    });
-                    self.rule_group_name.focus_handle(cx).focus(window, cx);
-                }
+                self.open_rule_group_dialog(Some(id), window, cx);
             }
             Command::EnableGroup(id) => {
                 if let Some(group) = self

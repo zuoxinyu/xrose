@@ -14,7 +14,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::dialog::{Dialog, DialogEntrance};
+use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
@@ -24,6 +24,56 @@ use xross_core::mesh::{
     EasyTierOptions, MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret,
 };
 use xross_core::service::ToastLevel;
+
+const PROBE_FEEDBACK_DURATION: std::time::Duration = std::time::Duration::from_secs(6);
+
+#[derive(Default)]
+pub(super) struct ProbeFeedback {
+    results: std::collections::HashMap<String, (xross_core::mesh::MeshProbe, std::time::Instant)>,
+}
+
+impl ProbeFeedback {
+    pub fn clear(&mut self, profile: &str) {
+        self.results.remove(profile);
+    }
+
+    pub fn observe(&mut self, mesh: &xross_core::mesh::MeshSnapshot, now: std::time::Instant) {
+        self.results.retain(|id, _| {
+            mesh.networks.iter().any(|network| {
+                network.profile_id == *id
+                    && network.phase == MeshPhase::Connected
+                    && network.probe.is_some()
+            })
+        });
+        for network in mesh
+            .networks
+            .iter()
+            .filter(|network| network.phase == MeshPhase::Connected)
+        {
+            if let Some(probe) = &network.probe {
+                let entry = self
+                    .results
+                    .entry(network.profile_id.clone())
+                    .or_insert_with(|| (probe.clone(), now));
+                if entry.0 != *probe {
+                    *entry = (probe.clone(), now);
+                }
+            }
+        }
+    }
+
+    fn for_peer(
+        &self,
+        profile: &str,
+        peer: &xross_core::mesh::MeshPeer,
+        now: std::time::Instant,
+    ) -> Option<&xross_core::mesh::MeshProbe> {
+        let (probe, observed) = self.results.get(profile)?;
+        (now.saturating_duration_since(*observed) < PROBE_FEEDBACK_DURATION
+            && peer.addresses.contains(&probe.ip))
+        .then_some(probe)
+    }
+}
 
 pub(crate) struct MeshForm {
     editing: bool,
@@ -527,7 +577,7 @@ impl AppView {
             .bg(p.panel)
             .text_color(p.fg)
             .border_color(p.border)
-            .entrance(DialogEntrance::None)
+            .entrance(super::dialogs::DIALOG_ENTRANCE)
             .overlay_closable(false)
             .on_ok(|_, _, _| false)
             .title(if self.mesh_form.editing {
@@ -693,9 +743,6 @@ impl AppView {
         );
 
         body = body.child(self.forward_card(&p, busy, cx));
-        if let Some(review) = self.sync_review(&p, cx) {
-            body = body.child(review);
-        }
         for profile in self.snapshot.mesh.profiles.clone() {
             let provider = profile.provider;
             let id = profile.id.clone();
@@ -974,29 +1021,6 @@ impl AppView {
                     ));
                 }
             }
-            if let Some(probe) = state.probe {
-                network = network.child(
-                    div()
-                        .text_sm()
-                        .text_color(if probe.success { p.success } else { p.warning })
-                        .min_w(px(0.))
-                        .line_clamp(3)
-                        .child(format!(
-                            "{} · {}{}",
-                            probe.ip,
-                            probe.detail,
-                            probe
-                                .latency_ms
-                                .map(|ms| format!(" · {ms:.1} ms"))
-                                .unwrap_or_default()
-                        )),
-                );
-            }
-            if state.phase == MeshPhase::Connected
-                && let Some(panel) = self.receive_controls(&profile.id, &p, cx)
-            {
-                network = network.child(panel);
-            }
             let peer_count = state.peers.len();
             if peer_count > 0 {
                 let profile_id = profile.id.clone();
@@ -1040,7 +1064,39 @@ impl AppView {
                     let has_address = !peer.addresses.is_empty();
                     let peer_id = format!("mesh-peer-{}-{}", profile.id, peer.id);
                     let expanded = self.mesh_expanded.contains(&peer_id);
-                    let badges = super::mesh_sync::badges(&peer, provider, lang, &p);
+                    let mut badges = super::mesh_sync::badges(&peer, provider, lang, &p);
+                    if let Some(probe) = self.mesh_probe_feedback.for_peer(
+                        &profile.id,
+                        &peer,
+                        std::time::Instant::now(),
+                    ) {
+                        let color = if probe.success {
+                            p.ok_text
+                        } else {
+                            p.danger_text
+                        };
+                        let label = if probe.success {
+                            match probe.latency_ms {
+                                Some(ms) => format!("{} {ms:.1} ms", tr(lang, "可达", "Reachable")),
+                                None => tr(lang, "设备可达", "Device reachable").to_string(),
+                            }
+                        } else {
+                            tr(lang, "探测失败", "Probe failed").to_string()
+                        };
+                        let detail = if self.hide_ips {
+                            label.clone()
+                        } else {
+                            probe.detail.clone()
+                        };
+                        badges = badges.child(
+                            div()
+                                .id(SharedString::from(format!("{peer_id}-probe")))
+                                .child(pill(label, color, color.opacity(SEMANTIC_ALPHA)))
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(detail.clone()).build(window, cx)
+                                }),
+                        );
+                    }
                     let mut subnets = peer.subnets.clone();
                     if let Some(x) = &peer.xross {
                         subnets.extend(x.subnets.clone());
@@ -1166,5 +1222,118 @@ impl AppView {
             ));
         }
         body
+    }
+}
+
+#[cfg(test)]
+mod probe_feedback_tests {
+    use super::{PROBE_FEEDBACK_DURATION, ProbeFeedback};
+    use std::time::{Duration, Instant};
+    use xross_core::mesh::{MeshPeer, MeshPhase, MeshProbe, MeshRuntimeView, MeshSnapshot};
+
+    #[test]
+    fn polling_does_not_extend_feedback_and_results_stay_on_the_target_device() {
+        let now = Instant::now();
+        let peer = MeshPeer {
+            addresses: vec!["192.0.2.2".into()],
+            ..Default::default()
+        };
+        let other_peer = MeshPeer {
+            addresses: vec!["192.0.2.3".into()],
+            ..Default::default()
+        };
+        let mesh = MeshSnapshot {
+            networks: vec![MeshRuntimeView {
+                profile_id: "test-network".into(),
+                phase: MeshPhase::Connected,
+                probe: Some(MeshProbe {
+                    ip: "192.0.2.2".into(),
+                    success: true,
+                    latency_ms: Some(12.0),
+                    detail: "设备可达".into(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut feedback = ProbeFeedback::default();
+        feedback.observe(&mesh, now);
+        assert!(feedback.for_peer("test-network", &peer, now).is_some());
+        assert!(
+            feedback
+                .for_peer("test-network", &other_peer, now)
+                .is_none()
+        );
+        assert!(feedback.for_peer("other-network", &peer, now).is_none());
+        feedback.observe(&mesh, now + Duration::from_secs(5));
+        assert!(
+            feedback
+                .for_peer("test-network", &peer, now + PROBE_FEEDBACK_DURATION)
+                .is_none()
+        );
+
+        feedback.clear("test-network");
+        feedback.observe(&mesh, now + Duration::from_secs(10));
+        assert!(
+            feedback
+                .for_peer("test-network", &peer, now + Duration::from_secs(10))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn changed_or_cleared_results_restart_feedback_and_disconnect_removes_it() {
+        let now = Instant::now();
+        let peer = MeshPeer {
+            addresses: vec!["192.0.2.2".into()],
+            ..Default::default()
+        };
+        let mut mesh = MeshSnapshot {
+            networks: vec![MeshRuntimeView {
+                profile_id: "test-network".into(),
+                phase: MeshPhase::Connected,
+                probe: Some(MeshProbe {
+                    ip: "192.0.2.2".into(),
+                    success: false,
+                    latency_ms: None,
+                    detail: "探测失败".into(),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut feedback = ProbeFeedback::default();
+        feedback.observe(&mesh, now);
+        assert!(
+            !feedback
+                .for_peer("test-network", &peer, now)
+                .unwrap()
+                .success
+        );
+        mesh.networks[0].probe.as_mut().unwrap().success = true;
+        feedback.observe(&mesh, now + Duration::from_secs(8));
+        assert!(
+            feedback
+                .for_peer("test-network", &peer, now + Duration::from_secs(8))
+                .unwrap()
+                .success
+        );
+        let completed = mesh.networks[0].probe.take();
+        feedback.observe(&mesh, now + Duration::from_secs(9));
+        assert!(
+            feedback
+                .for_peer("test-network", &peer, now + Duration::from_secs(9))
+                .is_none()
+        );
+        mesh.networks[0].probe = completed;
+        feedback.observe(&mesh, now + Duration::from_secs(10));
+        assert!(
+            feedback
+                .for_peer("test-network", &peer, now + Duration::from_secs(10))
+                .is_some()
+        );
+        mesh.networks[0].phase = MeshPhase::Disconnected;
+        feedback.observe(&mesh, now + Duration::from_secs(11));
+        assert!(feedback.results.is_empty());
     }
 }
