@@ -33,6 +33,7 @@ Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
 - 错误使用 `crate::error::Error`，信息需可操作。
 - 序列化枚举用 `rename_all = "snake_case"`，配置结构保留 `#[serde(default)]`。
 - 依赖统一在 `[workspace.dependencies]` 声明。
+- 如果实现需要 vendor 第三方库，必须先说明原因、替代方案与维护成本，询问用户意见并获得明确同意后再引入；不得自行复制第三方库源码或新增对应的本地依赖覆盖。
 - 持久化结构变更：提升 `SCHEMA_VERSION` 并添加迁移。
 - 提交信息采用 conventional 风格，小写 scope，一次提交一个关注点。
 - 测试写在被测文件底部 `#[cfg(test)]`，不依赖网络、真实内核、root 或显示器。

@@ -15,7 +15,7 @@ use xross_core::service::ToastLevel;
 use super::{AppView, theme::palette, widgets::ChoiceGroup};
 
 /// Shared motion policy for form, detail, and confirmation dialogs.
-pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::Slide;
+pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
 
 /// Places settings in a scrollable surface so the close control stays reachable.
 pub(super) fn settings_dialog(
