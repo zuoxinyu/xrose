@@ -50,6 +50,9 @@ pub fn compile_mesh(
     profile.validate()?;
     let mut routes = vec!["100.64.0.0/10".to_string(), "fd7a:115c:a1e0::/48".into()];
     routes.extend(profile.remote_subnets.clone());
+    // This TUN only captures mesh prefixes. On Windows, let the OS route
+    // control-plane connections through an existing VPN when necessary.
+    // Automatic uplink binding can bypass that working route and time out.
     let mut config = json!({
         "log":{"level":"error"},
         "endpoints":[{"type":"tailscale","tag":"mesh-ts","state_directory":directory.join("identity"),"hostname":profile.hostname,
@@ -59,7 +62,7 @@ pub fn compile_mesh(
         "inbounds":[{"type":"direct","tag":"mesh-dns","listen":crate::mesh::DNS_ADDRESS,"listen_port":53},
             {"type":"tun","tag":"mesh-tun","interface_name":profile.interface_name(),"address":[crate::mesh::TAILSCALE_TUN_ADDRESS,crate::mesh::TAILSCALE_TUN_IPV6_ADDRESS],"mtu":1280,"stack":"gvisor","auto_route":true,"strict_route":false,"route_address":routes}],
         "outbounds":[{"type":"direct","tag":"direct"}],
-        "route":{"auto_detect_interface":true,"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
+        "route":{"auto_detect_interface":!cfg!(windows),"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
         "dns":{"servers":[{"type":"local","tag":"local"},{"type":"tailscale","tag":"mesh-dns","endpoint":"mesh-ts","accept_default_resolvers":false}],
             "rules":[{"inbound":"mesh-dns","action":"route","server":"mesh-dns"}],"final":"local"}
     });
@@ -1610,6 +1613,7 @@ mod tests {
         assert_eq!(json["endpoints"][0]["system_interface"], false);
         assert_eq!(json["endpoints"][0]["advertise_exit_node"], false);
         assert_eq!(json["endpoints"][0]["advertise_routes"], json!([]));
+        assert_eq!(json["route"]["auto_detect_interface"], !cfg!(windows));
         let tun = &json["inbounds"][1];
         assert_eq!(tun["strict_route"], false);
         assert_eq!(

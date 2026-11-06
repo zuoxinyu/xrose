@@ -17,7 +17,8 @@ pub mod worker;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+// Require the helper that applies the Windows control-plane routing fix.
+pub const PROTOCOL_VERSION: u32 = 7;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {

@@ -196,7 +196,7 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
             runtime
                 .block_on(mesh::tailscale::check_api(&paths))
                 .map_err(|e| e.to_string())?;
-            println!("Tailscale gRPC 版本、鉴权和状态订阅验证通过（未创建网卡或 DNS 规则）");
+            println!("Tailscale gRPC 版本、鉴权、状态订阅及登录准备验证通过（未创建网卡或 DNS 规则）");
         }
         "check" => {
             runtime

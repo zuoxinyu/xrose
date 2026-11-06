@@ -245,7 +245,7 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
     Ok(())
 }
 
-/// Real gRPC contract check without TUN, DNS listeners or OS changes.
+/// Verify gRPC authentication and a login-ready state without TUN or DNS changes.
 pub async fn check_api(paths: &crate::paths::AppPaths) -> Result<()> {
     let directory = paths.runtime_dir.join("mesh-api-check");
     super::platform::secure_directory(&directory)?;
@@ -262,14 +262,23 @@ pub async fn check_api(paths: &crate::paths::AppPaths) -> Result<()> {
     if denied.verify_version().await.is_ok() {
         return Err(Error::other("组网 API 未拒绝无效凭证，已停止验证"));
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
     while tokio::time::Instant::now() < deadline {
-        if backend.state.lock().updated_at > 0 {
+        let state = backend.state.lock().clone();
+        if matches!(state.phase, MeshPhase::Connected | MeshPhase::NeedsApproval)
+            || (state.phase == MeshPhase::NeedsLogin && state.login_url.is_some())
+        {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    Err(Error::other("组网 API 状态订阅超时"))
+    if backend.state.lock().updated_at == 0 {
+        Err(Error::other("组网 API 状态订阅超时"))
+    } else {
+        Err(Error::other(
+            "Tailscale 登录链接获取超时，请检查控制服务器连接和当前 VPN 路由",
+        ))
+    }
 }
 
 // Wire field numbers are pinned to sing-box v1.14.4 daemon/started_service.proto.

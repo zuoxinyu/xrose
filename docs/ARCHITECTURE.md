@@ -82,6 +82,7 @@ EasyTier 使用公开的 Instance/PeerManager API，出口 TCP/UDP 经独立用�
 编译、校验、必要的重启及进程检查，失败回滚已保存配置，保留用户待应用编辑。
 Tailscale 使用用户态 endpoint 和仅包含批准路由的专用 TUN，避免 `accept_routes`
 把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 DNS：Windows NRPT、macOS `/etc/resolver`、Linux systemd-resolved 按接口域名路由。
+Windows 的独立 Tailscale 组件关闭 `auto_detect_interface`，控制服务器连接使用系统路由，以支持已有代理 TUN 或 VPN。组网 TUN 仍仅接管指定网段。协议版本 7 要求更新提权助手，使工作进程使用修正后的配置。CLI 的 `mesh api-check` 等待登录链接、待审批或已连接状态后才报告成功。
 出口和发布子网不加入宿主机默认路由；来自 Tailscale 的流量仅允许访问用户发布的网段，发布出口时允许互联网目的地。Unix 工作进程使用独立进程组，停止时回收子进程。
 组网发现使用版本化 TCP 协议。服务仅向已连接网络的成员地址发送握手，EasyTier 监听本机虚拟地址，Tailscale 在用户态端点将本机地址的专用端口转交已预留的回环监听器。组网页展示经发现的 Xross 信息与后端公布的能力。共享由用户选择数据并生成限时随机密钥；请求使用挑战应答，数据包另行加密认证。接收端在内存中预览独立项目，确认时复查当前配置、依赖和运行中的组网，使用一个 SQLite 事务更新加密记录。发现协议、共享码和预览不写入数据库。
 
