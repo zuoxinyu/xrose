@@ -48,7 +48,7 @@ pub enum MeshCommand {
     SetForwards {
         profile_id: String,
         id: String,
-        rules: Vec<super::PortForward>,
+        rules: super::ForwardRules,
     },
     Probe {
         provider: MeshProvider,
@@ -80,7 +80,7 @@ pub enum WorkerCommand {
     },
     SetForwards {
         id: String,
-        rules: Vec<super::PortForward>,
+        rules: super::ForwardRules,
     },
 }
 
@@ -430,7 +430,9 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             id,
             rules,
         } => {
-            if rules.len() > 64 || uuid::Uuid::parse_str(id).is_err() {
+            if (rules.local.len() > 64 || rules.services.len() > 64)
+                || uuid::Uuid::parse_str(id).is_err()
+            {
                 return Err(Error::config("端口转发请求无效"));
             }
             let worker = session

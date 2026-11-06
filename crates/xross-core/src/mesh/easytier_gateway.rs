@@ -276,7 +276,7 @@ fn invalid() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, "SOCKS request rejected")
 }
 
-async fn authenticate(socket: &mut TcpStream, password: &str) -> std::io::Result<()> {
+pub(super) async fn authenticate(socket: &mut TcpStream, password: &str) -> std::io::Result<()> {
     if socket.read_u8().await? != 5 {
         return Err(invalid());
     }

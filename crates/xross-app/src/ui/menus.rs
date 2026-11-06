@@ -4,7 +4,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
-use xross_core::mesh::{MeshPeer, MeshProvider, PortForward};
+use xross_core::mesh::{MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xross_core::route::transfer::ExportScope;
 use xross_core::service::ToastLevel;
 
@@ -13,6 +13,7 @@ pub(super) enum MenuTarget {
     Mesh(String),
     MeshPeer(String, String),
     Forward(String, PortForward),
+    ServiceForward(String, ServiceForward),
     RoutingFiles,
     NodeSelector,
     DefaultOutbound,
@@ -64,6 +65,8 @@ pub(super) enum Command {
     EditMesh(String),
     EditForward(String, PortForward),
     DeleteForward(String, PortForward),
+    EditService(String, ServiceForward),
+    DeleteService(String, ServiceForward),
     LoginMesh(String),
     LogoutMesh(String),
     ShareMesh(String),
@@ -219,6 +222,23 @@ impl AppView {
                         tr(lang, "删除转发", "Delete forward"),
                         !busy("mesh"),
                         Command::DeleteForward(id, rule),
+                    ));
+            }
+            MenuTarget::ServiceForward(id, rule) => {
+                let available = !busy("mesh");
+                menu = menu
+                    .item(item(
+                        &view,
+                        tr(lang, "编辑转发", "Edit forward"),
+                        available,
+                        Command::EditService(id.clone(), rule.clone()),
+                    ))
+                    .separator()
+                    .item(item(
+                        &view,
+                        tr(lang, "删除转发", "Delete forward"),
+                        available,
+                        Command::DeleteService(id, rule),
                     ));
             }
             MenuTarget::MeshPeer(profile_id, peer_id) => {
@@ -687,6 +707,15 @@ impl AppView {
                         .iter()
                         .any(|p| &p.id == id && p.port_forwards.contains(old))
             }
+            Command::EditService(id, old) | Command::DeleteService(id, old) => {
+                !busy("mesh")
+                    && self
+                        .snapshot
+                        .mesh
+                        .profiles
+                        .iter()
+                        .any(|p| &p.id == id && p.service_forwards.contains(old))
+            }
             Command::DeleteMesh(id) => self.snapshot.mesh.profiles.iter().any(|p| &p.id == id),
             Command::EditNode(id)
             | Command::TestNode(id)
@@ -734,6 +763,8 @@ impl AppView {
                 | Command::ClearRecording
                 | Command::EditForward(_, _)
                 | Command::DeleteForward(_, _)
+                | Command::EditService(_, _)
+                | Command::DeleteService(_, _)
                 | Command::ReceiveFromPeer(_, _)
                 | Command::ProbePeer(_, _)
         ) && busy("core")
@@ -762,6 +793,7 @@ impl AppView {
         }
         let confirmation = match &command {
             Command::LogoutMesh(_) => Some((self.tr("注销设备身份","Log out device"),self.tr("断开此 Tailscale 组网并注销本机身份，下次连接需要重新授权。","Disconnect this Tailscale network and sign out this device. The next connection requires authorization."))),
+            Command::DeleteService(_, _) => Some((self.tr("删除转发", "Delete forward"), self.tr("删除后将停止该端口的转发，组网连接保持。", "Forwarding on this port will stop. The mesh connection stays active."))),
             Command::DeleteForward(_, rule) => Some((
                 self.tr("删除端口转发", "Delete port forward"),
                 format!("{} {} · {}", rule.protocol.key().to_uppercase(), rule.listen.port(), self.tr("删除后将停止监听此端口。", "This port will stop accepting traffic.")).into()
@@ -831,6 +863,12 @@ impl AppView {
                 self.refresh_header_location();
             }
             Command::EditForward(id, old) => self.open_forward_editor(id, Some(old), window, cx),
+            Command::EditService(id, old) => self.open_service_editor(id, Some(old), window, cx),
+            Command::DeleteService(id, old) => {
+                if let Err(e) = self.service.edit_mesh_service(&id, Some(&old), None) {
+                    self.service.toast(ToastLevel::Error, e.to_string());
+                }
+            }
             Command::DeleteForward(id, old) => {
                 if let Err(e) = self.service.edit_mesh_forward(&id, Some(&old), None) {
                     self.service.toast(ToastLevel::Error, e.to_string());

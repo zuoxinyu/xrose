@@ -44,6 +44,7 @@ pub(crate) struct MeshForm {
     exit_node: Entity<InputState>,
     advertised: Entity<InputState>,
     forwards: Entity<InputState>,
+    service_forwards: Vec<xross_core::mesh::ServiceForward>,
     outbound_port: Entity<InputState>,
     advertise_exit: bool,
     connect_on_startup: bool,
@@ -70,6 +71,7 @@ impl MeshForm {
             exit_node: super::text_input(window, cx, ""),
             advertised: super::text_input(window, cx, "192.168.10.0/24"),
             forwards: super::text_input(window, cx, "tcp://127.0.0.1:8080/10.126.126.2:80"),
+            service_forwards: Vec::new(),
             outbound_port: super::text_input(window, cx, ""),
             advertise_exit: false,
             connect_on_startup: false,
@@ -77,6 +79,7 @@ impl MeshForm {
     }
 
     fn load(&mut self, profile: MeshProfileView, window: &mut Window, cx: &mut Context<AppView>) {
+        self.service_forwards = profile.service_forwards.clone();
         self.advanced_open = false;
         self.easytier = profile.easytier;
         self.id = profile.id;
@@ -171,6 +174,7 @@ impl MeshForm {
                     .map_err(|_| xross_core::Error::config("出口出站端口必须为 1024–65535"))?
             },
             outbound_secret: MeshSecret::default(),
+            service_forwards: self.service_forwards.clone(),
         })
     }
 }

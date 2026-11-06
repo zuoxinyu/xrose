@@ -1,4 +1,4 @@
-//! Independently managed listeners dial through the authenticated, mesh-only SOCKS inbound.
+//! Scoped listeners dial either the authenticated mesh SOCKS inbound or a host service.
 use super::{ForwardProtocol, MeshSecret, PortForward};
 use crate::{Error, Result};
 use async_socks5::{AddrKind, Auth, SocksDatagram};
@@ -19,7 +19,7 @@ pub(super) struct Forwards {
     listeners: Vec<Listener>,
 }
 struct Proxy {
-    address: SocketAddr,
+    address: Option<SocketAddr>,
     password: MeshSecret,
 }
 struct Listener {
@@ -31,8 +31,34 @@ struct Listener {
 impl Forwards {
     pub fn new(address: SocketAddr, password: MeshSecret) -> Self {
         Self {
-            proxy: Arc::new(Proxy { address, password }),
+            proxy: Arc::new(Proxy {
+                address: Some(address),
+                password,
+            }),
             listeners: Vec::new(),
+        }
+    }
+    pub fn direct() -> Self {
+        Self {
+            proxy: Arc::new(Proxy {
+                address: None,
+                password: MeshSecret::default(),
+            }),
+            listeners: Vec::new(),
+        }
+    }
+    pub fn check_address(&self, address: std::net::IpAddr) -> Result<()> {
+        if self.listeners.iter().any(|l| l.listen.ip() != address) {
+            return Err(Error::other("服务转发的虚拟地址已变化，请重新连接组网"));
+        }
+        Ok(())
+    }
+    /// Release only ports being moved to the other direction, before its bind.
+    pub async fn release_ports(&mut self, ports: &[(ForwardProtocol, u16)]) {
+        for i in (0..self.listeners.len()).rev() {
+            if ports.contains(&(self.listeners[i].protocol, self.listeners[i].listen.port())) {
+                self.stop(i).await;
+            }
         }
     }
     pub async fn apply(&mut self, rules: &[PortForward]) -> Result<()> {
@@ -107,14 +133,17 @@ impl Proxy {
         Some(Auth::new("xross", self.password.0.clone()))
     }
     async fn connect(&self, target: SocketAddr) -> Option<TcpStream> {
-        let mut stream = TcpStream::connect(self.address).await.ok()?;
+        let Some(address) = self.address else {
+            return TcpStream::connect(target).await.ok();
+        };
+        let mut stream = TcpStream::connect(address).await.ok()?;
         async_socks5::connect(&mut stream, target, self.auth())
             .await
             .ok()?;
         Some(stream)
     }
     async fn associate(&self) -> Option<SocksDatagram<TcpStream>> {
-        let stream = TcpStream::connect(self.address).await.ok()?;
+        let stream = TcpStream::connect(self.address?).await.ok()?;
         let socket = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
             .await
             .ok()?;
@@ -183,6 +212,34 @@ async fn udp_session(
     mut input: mpsc::Receiver<Vec<u8>>,
     replies: mpsc::Sender<Packet>,
 ) {
+    if proxy.address.is_none() {
+        let bind: SocketAddr = if target.is_ipv4() {
+            ([0, 0, 0, 0], 0).into()
+        } else {
+            (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+        };
+        let Ok(socket) = UdpSocket::bind(bind).await else {
+            return;
+        };
+        if socket.connect(target).await.is_err() {
+            return;
+        }
+        let mut buf = vec![0; 65535];
+        loop {
+            tokio::select! {
+                packet = input.recv() => {
+                    let Some(packet) = packet else { break; };
+                    if socket.send(&packet).await.is_err() { break; }
+                }
+                result = socket.recv(&mut buf) => {
+                    let Ok(n) = result else { break; };
+                    if replies.send((client, buf[..n].to_vec())).await.is_err() { break; }
+                }
+                _ = tokio::time::sleep(UDP_IDLE) => break,
+            }
+        }
+        return;
+    }
     let Ok(Some(relay)) = tokio::time::timeout(CONNECT_TIMEOUT, proxy.associate()).await else {
         return;
     };
@@ -199,5 +256,120 @@ async fn udp_session(
             }
             _ = tokio::time::sleep(UDP_IDLE) => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn live_listener_edits_and_failed_bind_keep_unrelated_tcp_stream() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let server = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = server.local_addr().unwrap();
+            let _echo = AbortOnDropHandle::new(tokio::spawn(async move {
+                let (mut socket, _) = server.accept().await.unwrap();
+                let (mut input, mut output) = socket.split();
+                let _ = tokio::io::copy(&mut input, &mut output).await;
+            }));
+            let reserve = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listen = reserve.local_addr().unwrap();
+            drop(reserve);
+            let rule = PortForward {
+                protocol: ForwardProtocol::Tcp,
+                listen,
+                target,
+            };
+            let mut forwards = Forwards::direct();
+            forwards.apply(&[rule.clone()]).await.unwrap();
+            let mut client = TcpStream::connect(listen).await.unwrap();
+            let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut second = rule.clone();
+            second.listen = occupied.local_addr().unwrap();
+            assert!(
+                forwards
+                    .apply(&[rule.clone(), second.clone()])
+                    .await
+                    .is_err()
+            );
+            drop(occupied);
+            for added in [true, false] {
+                // The already connected stream must survive adding/removing another listener.
+                let rules = if added {
+                    vec![rule.clone(), second.clone()]
+                } else {
+                    vec![rule.clone()]
+                };
+                forwards.apply(&rules).await.unwrap();
+                client.write_all(b"ping").await.unwrap();
+                let mut reply = [0; 4];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"ping");
+            }
+        })
+        .await
+        .expect("listener update fixture timed out");
+    }
+
+    #[tokio::test]
+    async fn service_forward_tcp_udp_round_trip_and_cleanup() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let tcp_target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let udp_target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let tcp_address = tcp_target.local_addr().unwrap();
+            let udp_address = udp_target.local_addr().unwrap();
+            let echo_tcp = AbortOnDropHandle::new(tokio::spawn(async move {
+                let (mut socket, _) = tcp_target.accept().await.unwrap();
+                let mut bytes = [0; 4];
+                socket.read_exact(&mut bytes).await.unwrap();
+                socket.write_all(&bytes).await.unwrap();
+            }));
+            let echo_udp = AbortOnDropHandle::new(tokio::spawn(async move {
+                let mut bytes = [0; 8];
+                for _ in 0..2 {
+                    let (n, peer) = udp_target.recv_from(&mut bytes).await.unwrap();
+                    udp_target.send_to(&bytes[..n], peer).await.unwrap();
+                }
+            }));
+            let reserve = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let listen = reserve.local_addr().unwrap();
+            drop(reserve);
+            let mut forwards = Forwards::direct();
+            let rules = vec![
+                PortForward {
+                    protocol: ForwardProtocol::Tcp,
+                    listen,
+                    target: tcp_address,
+                },
+                PortForward {
+                    protocol: ForwardProtocol::Udp,
+                    listen,
+                    target: udp_address,
+                },
+            ];
+            forwards.apply(&rules).await.unwrap();
+            let mut client = TcpStream::connect(listen).await.unwrap();
+            client.write_all(b"ping").await.unwrap();
+            let mut reply = [0; 4];
+            client.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"ping");
+            for message in [b"one", b"two"] {
+                let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                client.send_to(message, listen).await.unwrap();
+                let (n, source) = client.recv_from(&mut reply).await.unwrap();
+                assert_eq!(&reply[..n], message);
+                assert_eq!(source, listen);
+            }
+            echo_tcp.await.unwrap();
+            echo_udp.await.unwrap();
+            forwards.apply(&[]).await.unwrap();
+            assert!(TcpStream::connect(listen).await.is_err());
+            let _tcp = TcpListener::bind(listen).await.unwrap();
+            let _udp = UdpSocket::bind(listen).await.unwrap();
+        })
+        .await
+        .expect("local service fixture timed out");
     }
 }

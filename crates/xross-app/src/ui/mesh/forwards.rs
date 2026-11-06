@@ -4,11 +4,28 @@ use crate::ui::{
     text_input,
     theme::{CONTROL_HEIGHT, DIALOG_WIDTH},
 };
-use xross_core::mesh::{ForwardProtocol, PortForward};
+use xross_core::mesh::{ForwardProtocol, ForwardRule, PortForward, ServiceForward};
+
+fn local_rule(rule: &ServiceForward) -> PortForward {
+    PortForward {
+        protocol: rule.protocol,
+        listen: ([127, 0, 0, 1], rule.port).into(),
+        target: rule.target,
+    }
+}
+fn service_rule(rule: &PortForward) -> ServiceForward {
+    ServiceForward {
+        protocol: rule.protocol,
+        port: rule.listen.port(),
+        target: rule.target,
+    }
+}
 
 pub(in crate::ui) struct ForwardEditor {
     profile_id: String,
     original: Option<PortForward>,
+    service: bool,
+    original_service: bool,
     network_scroll: ScrollHandle,
     protocol: ForwardProtocol,
     listen: Entity<InputState>,
@@ -55,23 +72,20 @@ impl AppView {
         }
         if profiles
             .iter()
-            .all(|profile| profile.port_forwards.is_empty())
+            .all(|p| p.port_forwards.is_empty() && p.service_forwards.is_empty())
         {
             return panel.child(div().text_sm().text_color(p.muted_fg).child(
                 if profiles.is_empty() {
-                    self.tr(
-                        "先添加网络，再设置本地端口转发。",
-                        "Add a network to set up port forwarding.",
-                    )
+                    self.tr("先添加网络，再设置端口转发。", "Add a network to set up port forwarding.")
                 } else {
-                    self.tr(
-                        "暂无转发规则。添加转发可将本地端口映射到组网设备。",
-                        "Add a forward to map a local port to a device on the mesh.",
-                    )
+                    self.tr("添加转发可访问组网设备，或将本机可达的服务提供给组网成员。", "Forward to mesh devices or share host-reachable services with mesh peers.")
                 },
             ));
         }
-        for profile in profiles.iter().filter(|p| !p.port_forwards.is_empty()) {
+        for profile in profiles
+            .iter()
+            .filter(|p| !p.port_forwards.is_empty() || !p.service_forwards.is_empty())
+        {
             let mut group = div().flex().flex_col().gap_1().child(
                 div()
                     .flex()
@@ -87,11 +101,30 @@ impl AppView {
                     )
                     .child(pill(profile.provider.label(), p.muted_fg, p.panel_alt)),
             );
-            for (index, rule) in profile.port_forwards.iter().enumerate() {
-                let id = format!("mesh-forward-{}-{index}", profile.id);
+            let rules = profile
+                .port_forwards
+                .iter()
+                .cloned()
+                .map(|r| (false, r))
+                .chain(
+                    profile
+                        .service_forwards
+                        .iter()
+                        .map(|r| (true, local_rule(r))),
+                );
+            for (index, (service, rule)) in rules.enumerate() {
+                let id = format!(
+                    "mesh-{}-{}-{index}",
+                    if service { "service" } else { "forward" },
+                    profile.id
+                );
                 let menu = menus::builder(
                     cx.entity().downgrade(),
-                    MenuTarget::Forward(profile.id.clone(), rule.clone()),
+                    if service {
+                        MenuTarget::ServiceForward(profile.id.clone(), service_rule(&rule))
+                    } else {
+                        MenuTarget::Forward(profile.id.clone(), rule.clone())
+                    },
                 );
                 let endpoint = |addr: std::net::SocketAddr| {
                     if self.hide_ips {
@@ -110,6 +143,15 @@ impl AppView {
                         .border_color(p.border)
                         .py_1()
                         .child(pill(rule.protocol.key().to_uppercase(), p.fg, p.panel_alt))
+                        .child(pill(
+                            if service {
+                                self.tr("组网 → 本机", "Mesh → Host")
+                            } else {
+                                self.tr("本机 → 组网", "Host → Mesh")
+                            },
+                            p.muted_fg,
+                            p.panel_alt,
+                        ))
                         .child(
                             div()
                                 .flex_1()
@@ -118,7 +160,40 @@ impl AppView {
                                 .whitespace_normal()
                                 .child(format!(
                                     "{} → {}",
-                                    endpoint(rule.listen),
+                                    if service {
+                                        let addresses = self
+                                            .snapshot
+                                            .mesh
+                                            .networks
+                                            .iter()
+                                            .find(|n| n.profile_id == profile.id)
+                                            .map(|n| {
+                                                n.addresses
+                                                    .iter()
+                                                    .filter_map(|v| {
+                                                        v.split('/')
+                                                            .next()?
+                                                            .parse::<std::net::IpAddr>()
+                                                            .ok()
+                                                    })
+                                                    .map(|ip| {
+                                                        endpoint((ip, rule.listen.port()).into())
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            })
+                                            .unwrap_or_default();
+                                        if addresses.is_empty() {
+                                            format!(
+                                                "{}:{}",
+                                                self.tr("本机虚拟地址", "Device mesh address"),
+                                                rule.listen.port()
+                                            )
+                                        } else {
+                                            addresses.join(", ")
+                                        }
+                                    } else {
+                                        endpoint(rule.listen)
+                                    },
                                     endpoint(rule.target)
                                 )),
                         )
@@ -144,11 +219,46 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let listen = text_input(window, cx, "127.0.0.1:8080");
+        self.open_forward_editor_kind(profile_id, original, false, window, cx);
+    }
+
+    pub(in crate::ui) fn open_service_editor(
+        &mut self,
+        profile_id: String,
+        original: Option<ServiceForward>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_forward_editor_kind(
+            profile_id,
+            original.as_ref().map(local_rule),
+            true,
+            window,
+            cx,
+        );
+    }
+
+    fn open_forward_editor_kind(
+        &mut self,
+        profile_id: String,
+        original: Option<PortForward>,
+        service: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let listen = text_input(window, cx, if service { "8080" } else { "127.0.0.1:8080" });
         let target = text_input(window, cx, "192.0.2.2:80");
         if let Some(rule) = &original {
             listen.update(cx, |input, cx| {
-                input.set_value(rule.listen.to_string(), window, cx)
+                input.set_value(
+                    if service {
+                        rule.listen.port().to_string()
+                    } else {
+                        rule.listen.to_string()
+                    },
+                    window,
+                    cx,
+                )
             });
             target.update(cx, |input, cx| {
                 input.set_value(rule.target.to_string(), window, cx)
@@ -160,6 +270,8 @@ impl AppView {
         self.forward_editor = Some(ForwardEditor {
             profile_id,
             original,
+            service,
+            original_service: service,
             network_scroll: ScrollHandle::new(),
             protocol,
             listen,
@@ -183,6 +295,7 @@ impl AppView {
         let p = palette(cx);
         let profiles = &self.snapshot.mesh.profiles;
         let selected = profiles.iter().position(|p| p.id == editor.profile_id);
+        let service = editor.service;
         let network_label = |p: &MeshProfileView| format!("{} · {}", p.name, p.provider.label());
         let mut network = div()
             .flex()
@@ -244,6 +357,47 @@ impl AppView {
                 cx.notify();
             }
         }));
+        let direction = ChoiceGroup::new(
+            "forward-direction",
+            vec![
+                self.tr("本机 → 组网", "Host → Mesh"),
+                self.tr("组网 → 本机", "Mesh → Host"),
+            ],
+            usize::from(service),
+        )
+        .on_change(cx.listener(|this, index, window, cx| {
+            if let Some(editor) = &mut this.forward_editor {
+                let service = *index == 1;
+                if service == editor.service {
+                    return;
+                }
+                let value = editor.listen.read(cx).value();
+                let next = if service {
+                    value
+                        .trim()
+                        .parse::<std::net::SocketAddr>()
+                        .map(|a| a.port().to_string())
+                        .unwrap_or_default()
+                } else {
+                    value
+                        .trim()
+                        .parse::<u16>()
+                        .map(|port| format!("127.0.0.1:{port}"))
+                        .unwrap_or_default()
+                };
+                editor.service = service;
+                editor.error = None;
+                editor.listen.update(cx, |input, cx| {
+                    input.set_placeholder(
+                        if service { "8080" } else { "127.0.0.1:8080" },
+                        window,
+                        cx,
+                    );
+                    input.set_value(next, window, cx);
+                });
+                cx.notify();
+            }
+        }));
         let body = div()
             .id("forward-editor-body")
             .max_h(window.viewport_size().height * 0.62)
@@ -253,6 +407,9 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_3()
+            .child(div().flex().flex_col().gap_1()
+                .child(div().text_sm().child(self.tr("转发方向", "Direction")))
+                .child(direction))
             .child(network)
             .child(
                 div()
@@ -263,17 +420,20 @@ impl AppView {
                     .child(protocol),
             )
             .child(field(
-                self.tr("本地监听地址和端口", "Local listen address and port"),
+                if service { self.tr("组网服务端口", "Mesh service port") } else { self.tr("本地监听地址和端口", "Local listen address and port") },
                 &editor.listen,
             ))
             .child(field(
-                self.tr("目标设备地址和端口", "Destination address and port"),
+                if service { self.tr("本机可达的服务地址和端口", "Host-reachable service address and port") } else { self.tr("目标设备地址和端口", "Destination address and port") },
                 &editor.target,
             ))
-            .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+            .child(div().text_xs().text_color(p.muted_fg).child(if service { self.tr(
+                "目标可填写回环或局域网 IP。组网成员通过本机虚拟地址访问此端口；连接期间保存立即生效。",
+                "Use a loopback or LAN IP as the target. Peers access this port on your mesh address. Changes apply immediately while connected."
+            ) } else { self.tr(
                 "仅本机访问请监听 127.0.0.1。IPv6 地址使用方括号。",
                 "Listen on 127.0.0.1 for local access only. Enclose IPv6 addresses in brackets.",
-            )))
+            ) }))
             .when_some(editor.error.clone(), |d, error| {
                 d.child(div().text_sm().text_color(p.danger_text).child(error))
             });
@@ -300,14 +460,30 @@ impl AppView {
                         let rule = PortForward::parse(&format!(
                             "{}://{}/{}",
                             editor.protocol.key(),
-                            listen.trim(),
+                            if editor.service {
+                                format!("127.0.0.1:{}", listen.trim())
+                            } else {
+                                listen.trim().to_owned()
+                            },
                             target.trim()
                         ));
                         match rule.and_then(|r| {
-                            this.service.edit_mesh_forward(
+                            let old = editor.original.as_ref().map(|r| {
+                                if editor.original_service {
+                                    ForwardRule::ToHost(service_rule(r))
+                                } else {
+                                    ForwardRule::ToMesh(r.clone())
+                                }
+                            });
+                            let rule = if editor.service {
+                                ForwardRule::ToHost(service_rule(&r))
+                            } else {
+                                ForwardRule::ToMesh(r)
+                            };
+                            this.service.edit_mesh_forward_rule(
                                 &editor.profile_id,
-                                editor.original.as_ref(),
-                                Some(r),
+                                old.as_ref(),
+                                Some(rule),
                             )
                         }) {
                             Ok(()) => {

@@ -96,6 +96,26 @@ pub fn compile_mesh(
     Ok(config)
 }
 
+/// A fixed authenticated bridge applies service rules without restarting the endpoint.
+pub(crate) fn allow_mesh_services(
+    config: &mut Value,
+    address: std::net::SocketAddr,
+    password: &str,
+) {
+    config["outbounds"].as_array_mut().unwrap().push(json!({
+        "type":"socks", "tag":"mesh-services", "server":address.ip().to_string(),
+        "server_port":address.port(), "version":"5", "username":"xross", "password":password
+    }));
+    config["route"]["rules"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "inbound":"mesh-ts", "ip_cidr":["127.0.0.1/32","::1/128"],
+            "source_ip_cidr":["100.64.0.0/10","fd7a:115c:a1e0::/48"],
+            "action":"route", "outbound":"mesh-services"
+        }),
+    );
+}
+
 /// Incoming connections to the endpoint's own addresses are mapped to loopback by sing-box.
 pub(crate) fn allow_mesh_discovery(config: &mut Value, local_port: u16) {
     if local_port >= 1024 {
@@ -1293,6 +1313,69 @@ fn build_dns(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_service_forward_matches_only_own_endpoint_and_selected_port() {
+        use crate::mesh::{ForwardProtocol, MeshProfile, MeshProvider, ServiceForward};
+        let profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            service_forwards: vec![
+                ServiceForward {
+                    protocol: ForwardProtocol::Tcp,
+                    port: 18080,
+                    target: "192.0.2.10:80".parse().unwrap(),
+                },
+                ServiceForward {
+                    protocol: ForwardProtocol::Udp,
+                    port: 15353,
+                    target: "[::1]:5353".parse().unwrap(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut config = super::compile_mesh(
+            &profile,
+            std::path::Path::new("fixture"),
+            19090,
+            "fixture",
+            (19091, "fixture"),
+        )
+        .unwrap();
+        assert_eq!(
+            config["endpoints"][0]["advertise_routes"],
+            serde_json::json!([])
+        );
+        super::allow_mesh_services(&mut config, "127.0.0.1:19092".parse().unwrap(), "fixture");
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let rule = &rules[0];
+        assert_eq!(rule["inbound"], "mesh-ts");
+        assert_eq!(
+            rule["ip_cidr"],
+            serde_json::json!(["127.0.0.1/32", "::1/128"])
+        );
+        assert_eq!(rule["outbound"], "mesh-services");
+        assert!(rule.get("override_address").is_none());
+        let mut empty = profile.clone();
+        empty.service_forwards.clear();
+        let mut unchanged = super::compile_mesh(
+            &empty,
+            std::path::Path::new("fixture"),
+            19090,
+            "fixture",
+            (19091, "fixture"),
+        )
+        .unwrap();
+        super::allow_mesh_services(
+            &mut unchanged,
+            "127.0.0.1:19092".parse().unwrap(),
+            "fixture",
+        );
+        assert_eq!(config, unchanged);
+        assert!(
+            rules
+                .iter()
+                .any(|r| r["inbound"] == "mesh-ts" && r["action"] == "reject")
+        );
+    }
     #[test]
     fn managed_route_pins_an_eligible_node_and_keeps_other_groups_idle() {
         let (mut model, settings, ctx) = sample();

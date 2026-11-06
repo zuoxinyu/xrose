@@ -165,37 +165,45 @@ impl MeshController {
     pub(crate) fn forward_edit(
         &self,
         id: &str,
-        old: Option<&super::PortForward>,
-        new: Option<super::PortForward>,
-    ) -> Result<(Vec<super::PortForward>, Vec<super::PortForward>)> {
+        old: Option<&super::ForwardRule>,
+        new: Option<super::ForwardRule>,
+    ) -> Result<(super::ForwardRules, super::ForwardRules)> {
+        use super::{ForwardRule, ForwardRules};
         let mut profile = self.profile(id)?;
-        let original = profile.port_forwards.clone();
+        let original = ForwardRules::from_profile(&profile);
+        let mut next = original.clone();
         if let Some(old) = old {
-            let index = profile
-                .port_forwards
-                .iter()
-                .position(|r| r == old)
-                .ok_or_else(|| Error::other("这条转发已被更改，请重新打开"))?;
-            if let Some(rule) = new {
-                profile.port_forwards[index] = rule;
-            } else {
-                profile.port_forwards.remove(index);
+            fn remove<T: PartialEq>(rules: &mut Vec<T>, old: &T) -> Result<()> {
+                let index = rules
+                    .iter()
+                    .position(|r| r == old)
+                    .ok_or_else(|| Error::other("这条转发已被更改，请重新打开"))?;
+                rules.remove(index);
+                Ok(())
             }
-        } else if let Some(rule) = new {
-            profile.port_forwards.push(rule);
+            match old {
+                ForwardRule::ToMesh(r) => remove(&mut next.local, r)?,
+                ForwardRule::ToHost(r) => remove(&mut next.services, r)?,
+            }
         }
+        match new {
+            Some(ForwardRule::ToMesh(r)) => next.local.push(r),
+            Some(ForwardRule::ToHost(r)) => next.services.push(r),
+            None => {}
+        }
+        next.assign(&mut profile);
         profile.validate()?;
-        Ok((original, profile.port_forwards))
+        Ok((original, next))
     }
 
     /// The caller holds the mesh operation lock throughout live acknowledgement and persistence.
     pub(crate) async fn apply_forward_edit(
         &self,
         id: &str,
-        old: &[super::PortForward],
-        next: &[super::PortForward],
+        old: &super::ForwardRules,
+        next: &super::ForwardRules,
     ) -> Result<()> {
-        if self.profile(id)?.port_forwards != old {
+        if super::ForwardRules::from_profile(&self.profile(id)?) != *old {
             return Err(Error::other("转发列表已变更，请重新选择"));
         }
         let live = self.networks.read().iter().any(|n| {
@@ -215,10 +223,10 @@ impl MeshController {
             let mut profiles = self.profiles.write();
             let profile = profiles
                 .iter_mut()
-                .find(|p| p.id == id && p.port_forwards == old)
+                .find(|p| p.id == id && super::ForwardRules::from_profile(p) == *old)
                 .ok_or_else(|| Error::other("组网配置已变更，请重新选择"))?;
             let mut updated = profile.clone();
-            updated.port_forwards = next.to_vec();
+            next.assign(&mut updated);
             self.store.save_mesh_profile(&updated)?;
             *profile = updated;
             Ok(())
@@ -231,7 +239,7 @@ impl MeshController {
     async fn restore_forwards(
         &self,
         id: &str,
-        rules: &[super::PortForward],
+        rules: &super::ForwardRules,
         cause: Error,
     ) -> Result<()> {
         if self.live_forwards(id, rules).await.is_err() {
@@ -241,12 +249,12 @@ impl MeshController {
         }
         Err(cause)
     }
-    async fn live_forwards(&self, profile_id: &str, rules: &[super::PortForward]) -> Result<()> {
+    async fn live_forwards(&self, profile_id: &str, rules: &super::ForwardRules) -> Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         self.send(MeshCommand::SetForwards {
             profile_id: profile_id.into(),
             id: id.clone(),
-            rules: rules.to_vec(),
+            rules: rules.clone(),
         })
         .await?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -608,8 +616,28 @@ mod tests {
             })
             .unwrap();
         let original = controller.profile(&id).unwrap();
-        let tcp = PortForward::parse("tcp://127.0.0.1:15000/192.0.2.2:80").unwrap();
-        let udp = PortForward::parse("udp://127.0.0.1:15000/192.0.2.2:53").unwrap();
+        let mut published = original.clone();
+        published
+            .service_forwards
+            .push(super::super::ServiceForward {
+                protocol: super::super::ForwardProtocol::Tcp,
+                port: 18080,
+                target: "127.0.0.1:8080".parse().unwrap(),
+            });
+        controller.networks.write().push(MeshRuntimeView {
+            profile_id: id.clone(),
+            phase: super::super::MeshPhase::Connected,
+            ..Default::default()
+        });
+        assert!(controller.save(published).is_err());
+        assert_eq!(controller.profile(&id).unwrap(), original);
+        controller.networks.write().clear();
+        let tcp = super::super::ForwardRule::ToMesh(
+            PortForward::parse("tcp://127.0.0.1:15000/192.0.2.2:80").unwrap(),
+        );
+        let udp = super::super::ForwardRule::ToMesh(
+            PortForward::parse("udp://127.0.0.1:15000/192.0.2.2:53").unwrap(),
+        );
         let (old, next) = controller
             .forward_edit(&id, None, Some(tcp.clone()))
             .unwrap();
@@ -626,7 +654,7 @@ mod tests {
             .unwrap();
         assert!(
             controller
-                .apply_forward_edit(&id, &next, &[])
+                .apply_forward_edit(&id, &next, &super::super::ForwardRules::default())
                 .await
                 .is_err()
         );
@@ -635,7 +663,7 @@ mod tests {
                 .forward_edit(&id, Some(&udp), Some(tcp.clone()))
                 .is_err()
         );
-        assert_eq!(store.mesh_profiles().unwrap()[0].port_forwards, both);
+        assert_eq!(store.mesh_profiles().unwrap()[0].port_forwards, both.local);
         let (old, next) = controller.forward_edit(&id, Some(&tcp), None).unwrap();
         controller
             .apply_forward_edit(&id, &old, &next)
@@ -643,6 +671,34 @@ mod tests {
             .unwrap();
         assert!(controller.forward_edit(&id, Some(&tcp), None).is_err());
         let (old, next) = controller.forward_edit(&id, Some(&udp), None).unwrap();
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        // A single edit can change direction and persist both lists together.
+        let service = super::super::ForwardRule::ToHost(super::super::ServiceForward {
+            protocol: super::super::ForwardProtocol::Tcp,
+            port: 18080,
+            target: "127.0.0.1:8080".parse().unwrap(),
+        });
+        let (old, next) = controller
+            .forward_edit(&id, None, Some(service.clone()))
+            .unwrap();
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        let (old, next) = controller
+            .forward_edit(&id, Some(&service), Some(tcp.clone()))
+            .unwrap();
+        assert!(next.services.is_empty());
+        assert_eq!(next.local.len(), 1);
+        controller
+            .apply_forward_edit(&id, &old, &next)
+            .await
+            .unwrap();
+        assert!(controller.forward_edit(&id, Some(&service), None).is_err());
+        let (old, next) = controller.forward_edit(&id, Some(&tcp), None).unwrap();
         controller
             .apply_forward_edit(&id, &old, &next)
             .await

@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -247,6 +247,30 @@ impl Store {
         }
         if version < 8 {
             traffic_statistics::migrate(&tx)?;
+        }
+        if version < 9 {
+            let mut stmt = tx.prepare("SELECT id, payload FROM mesh_profiles")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, payload) in rows {
+                let mut profile: serde_json::Value =
+                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                if profile.get("service_forwards").is_none() {
+                    profile["service_forwards"] = serde_json::json!([]);
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&profile)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("组网配置加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE mesh_profiles SET payload=?1 WHERE id=?2",
+                        params![encrypted, id],
+                    )?;
+                }
+            }
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
@@ -818,6 +842,50 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v9_adds_service_forwards_without_publishing_services_or_changing_identity() {
+        let (store, dir) = store();
+        let profile = crate::mesh::MeshProfile {
+            provider: crate::mesh::MeshProvider::Tailscale,
+            ..Default::default()
+        };
+        let mut legacy = serde_json::to_value(&profile).unwrap();
+        legacy.as_object_mut().unwrap().remove("service_forwards");
+        legacy["extra"] = serde_json::json!("preserve");
+        let encrypted = store.secrets.encrypt(&legacy.to_string());
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO mesh_profiles VALUES (?1,?2,17)",
+                params![profile.id, encrypted],
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 8)
+            .unwrap();
+        drop(store);
+        let store = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        let (payload, stamp): (String, i64) = store
+            .conn
+            .lock()
+            .query_row(
+                "SELECT payload, updated_at FROM mesh_profiles WHERE id=?1",
+                [&profile.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(SecretBox::is_encrypted(&payload));
+        assert_eq!(stamp, 17);
+        let value: serde_json::Value =
+            serde_json::from_str(&store.secrets.decrypt(&payload).unwrap()).unwrap();
+        assert_eq!(value["service_forwards"], serde_json::json!([]));
+        assert_eq!(value["extra"], "preserve");
+        assert_eq!(store.mesh_profiles().unwrap(), vec![profile]);
     }
 
     #[test]

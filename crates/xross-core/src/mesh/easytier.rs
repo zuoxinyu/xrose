@@ -229,6 +229,7 @@ pub struct Backend {
     profile: MeshProfile,
     gateway: Option<super::easytier_gateway::Gateway>,
     forward_gateway: Option<(super::easytier_gateway::Gateway, super::forwards::Forwards)>,
+    services: super::forwards::Forwards,
     started: std::time::Instant,
     observation: std::sync::Arc<parking_lot::Mutex<StartupObservation>>,
     _events: tokio_util::task::AbortOnDropHandle<()>,
@@ -258,11 +259,15 @@ impl Backend {
             profile,
             gateway: None,
             forward_gateway: None,
+            services: super::forwards::Forwards::direct(),
             started: std::time::Instant::now(),
             observation,
             _events: events,
         };
-        if result.profile.outbound_port != 0 || !result.profile.port_forwards.is_empty() {
+        if result.profile.outbound_port != 0
+            || !result.profile.port_forwards.is_empty()
+            || !result.profile.service_forwards.is_empty()
+        {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
             let address = loop {
                 if let Some(ip) = result.instance.get_global_ctx().get_ipv4() {
@@ -289,8 +294,66 @@ impl Backend {
             }
             let rules = result.profile.port_forwards.clone();
             result.set_forwards(&rules).await?;
+            let services = result.profile.service_forwards.clone();
+            // Address allocation can precede OS adapter readiness.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match result.set_services(&services).await {
+                    Ok(()) => break,
+                    Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+                    Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                }
+            }
         }
         Ok(result)
+    }
+    pub(super) async fn set_forward_rules(&mut self, rules: &super::ForwardRules) -> Result<()> {
+        // A direction change can reuse a port formerly bound on a wildcard address.
+        // Release only that rule, including when rolling back a failed update.
+        if let Some((_, forwards)) = &mut self.forward_gateway {
+            forwards
+                .release_ports(
+                    &rules
+                        .services
+                        .iter()
+                        .map(|r| (r.protocol, r.port))
+                        .collect::<Vec<_>>(),
+                )
+                .await;
+        }
+        self.services
+            .release_ports(
+                &rules
+                    .local
+                    .iter()
+                    .map(|r| (r.protocol, r.listen.port()))
+                    .collect::<Vec<_>>(),
+            )
+            .await;
+        self.set_forwards(&rules.local).await?;
+        self.set_services(&rules.services).await
+    }
+    pub(super) async fn set_services(&mut self, services: &[super::ServiceForward]) -> Result<()> {
+        if services.is_empty() {
+            return self.services.apply(&[]).await;
+        }
+        let address = self
+            .instance
+            .get_global_ctx()
+            .get_ipv4()
+            .ok_or_else(|| Error::other("请等待 EasyTier 获得虚拟地址后重试"))?;
+        let rules = services
+            .iter()
+            .map(|r| super::PortForward {
+                protocol: r.protocol,
+                listen: (std::net::IpAddr::V4(address.address()), r.port).into(),
+                target: r.target,
+            })
+            .collect::<Vec<_>>();
+        if rules.iter().any(|r| r.listen == r.target) {
+            return Err(Error::config("服务转发不能指向自身监听地址"));
+        }
+        self.services.apply(&rules).await
     }
     pub(super) async fn set_forwards(&mut self, rules: &[super::PortForward]) -> Result<()> {
         if self.forward_gateway.is_none() && !rules.is_empty() {
@@ -334,6 +397,7 @@ impl Backend {
             ..Default::default()
         };
         if let Some(ip) = ctx.get_ipv4() {
+            self.services.check_address(ip.address().into())?;
             if let Some(gateway) = &self.gateway {
                 gateway.check_address(ip.address().into())?;
             }

@@ -3574,6 +3574,19 @@ impl AppService {
         old: Option<&crate::mesh::PortForward>,
         rule: Option<crate::mesh::PortForward>,
     ) -> Result<()> {
+        self.edit_mesh_forward_rule(
+            profile,
+            old.cloned().map(crate::mesh::ForwardRule::ToMesh).as_ref(),
+            rule.map(crate::mesh::ForwardRule::ToMesh),
+        )
+    }
+
+    pub fn edit_mesh_forward_rule(
+        &self,
+        profile: &str,
+        old: Option<&crate::mesh::ForwardRule>,
+        rule: Option<crate::mesh::ForwardRule>,
+    ) -> Result<()> {
         let (old, next) = self.inner.mesh.forward_edit(profile, old, rule)?;
         if old == next {
             return Ok(());
@@ -3603,6 +3616,20 @@ impl AppService {
 
     pub fn save_mesh_profile(&self, profile: crate::mesh::MeshProfile) -> Result<String> {
         self.save_mesh_profile_inner(profile, None)
+    }
+
+    /// Uses the same live acknowledgement and persistence transaction as local forwarding.
+    pub fn edit_mesh_service(
+        &self,
+        id: &str,
+        old: Option<&crate::mesh::ServiceForward>,
+        rule: Option<crate::mesh::ServiceForward>,
+    ) -> Result<()> {
+        self.edit_mesh_forward_rule(
+            id,
+            old.cloned().map(crate::mesh::ForwardRule::ToHost).as_ref(),
+            rule.map(crate::mesh::ForwardRule::ToHost),
+        )
     }
 
     pub fn save_mesh_profile_with_startup(
@@ -4508,6 +4535,45 @@ mod tests {
         );
         service.delete_mesh_profile(&et.id).unwrap();
         assert!(service.settings().startup_easytier.is_none());
+    }
+
+    #[test]
+    fn service_forward_edits_preserve_profile_and_reject_stale_updates() {
+        use crate::mesh::{ForwardProtocol, MeshProfile, MeshProvider, ServiceForward};
+        let (service, _dir) = service();
+        let profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            ..Default::default()
+        };
+        service.inner.mesh.save(profile.clone()).unwrap();
+        let rule = ServiceForward {
+            protocol: ForwardProtocol::Tcp,
+            port: 18080,
+            target: "127.0.0.1:8080".parse().unwrap(),
+        };
+        service
+            .edit_mesh_service(&profile.id, None, Some(rule.clone()))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while service.is_busy("mesh") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let saved = service.inner.mesh.profile(&profile.id).unwrap();
+        assert_eq!(saved.service_forwards, vec![rule.clone()]);
+        assert_eq!(saved.hostname, profile.hostname);
+        service
+            .edit_mesh_service(&profile.id, Some(&rule), None)
+            .unwrap();
+        while service.is_busy("mesh") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            service
+                .edit_mesh_service(&profile.id, Some(&rule), None)
+                .is_err()
+        );
     }
 
     #[test]

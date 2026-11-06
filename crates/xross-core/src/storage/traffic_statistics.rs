@@ -245,7 +245,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            8
+            crate::storage::SCHEMA_VERSION
         );
     }
     #[test]

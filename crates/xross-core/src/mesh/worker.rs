@@ -182,13 +182,13 @@ impl Backend {
     async fn update_forwards(
         &mut self,
         current: &mut super::MeshProfile,
-        rules: Vec<super::PortForward>,
+        rules: super::ForwardRules,
     ) -> Result<()> {
         let mut next = current.clone();
-        next.port_forwards = rules;
+        rules.assign(&mut next);
         next.validate()?;
-        if let Err(error) = self.set_forwards(&next.port_forwards).await {
-            self.set_forwards(&current.port_forwards)
+        if let Err(error) = self.set_forwards(&rules).await {
+            self.set_forwards(&super::ForwardRules::from_profile(current))
                 .await
                 .map_err(|_| Error::other("未能恢复原转发监听，请释放冲突端口后重试"))?;
             return Err(error);
@@ -196,10 +196,13 @@ impl Backend {
         *current = next;
         Ok(())
     }
-    async fn set_forwards(&mut self, rules: &[super::PortForward]) -> Result<()> {
+    async fn set_forwards(&mut self, rules: &super::ForwardRules) -> Result<()> {
         match self {
-            Self::EasyTier(e) => e.set_forwards(rules).await,
-            Self::Tailscale(t) => t.forwards.apply(rules).await,
+            Self::EasyTier(e) => e.set_forward_rules(rules).await,
+            Self::Tailscale(t) => {
+                t.forwards.apply(&rules.local).await?;
+                t.set_services(&rules.services)
+            }
         }
     }
     async fn snapshot(&mut self) -> Result<MeshRuntimeView> {

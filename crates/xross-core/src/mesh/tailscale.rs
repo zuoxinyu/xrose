@@ -175,6 +175,18 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             super::PortForward::parse("tcp://127.0.0.1:18080/100.64.1.2:80")?,
             super::PortForward::parse("udp://127.0.0.1:15353/100.64.1.2:53")?,
         ];
+        profile.service_forwards = vec![
+            super::ServiceForward {
+                protocol: super::ForwardProtocol::Tcp,
+                port: 28080,
+                target: "127.0.0.1:8080".parse().unwrap(),
+            },
+            super::ServiceForward {
+                protocol: super::ForwardProtocol::Udp,
+                port: 25353,
+                target: "[::1]:5353".parse().unwrap(),
+            },
+        ];
         let mut config = crate::adapters::singbox::compile_mesh(
             &profile,
             &directory,
@@ -182,6 +194,11 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             "offline-test-secret",
             (19091, "fixture-forward"),
         )?;
+        crate::adapters::singbox::allow_mesh_services(
+            &mut config,
+            "127.0.0.1:19092".parse().unwrap(),
+            "fixture-services",
+        );
         crate::adapters::singbox::allow_mesh_discovery(&mut config, 19093);
         let path = directory.join(if publish {
             "publish.json"
@@ -528,6 +545,7 @@ impl Client {
 }
 pub struct Backend {
     pub(super) forwards: super::forwards::Forwards,
+    services: super::service_gateway::Gateway,
     child: Child,
     client: Client,
     state: Arc<Mutex<MeshRuntimeView>>,
@@ -690,6 +708,12 @@ impl Backend {
             &secret,
             (bridge.port(), &password.0),
         )?;
+        let services = super::service_gateway::Gateway::start(&p.service_forwards).await?;
+        crate::adapters::singbox::allow_mesh_services(
+            &mut config,
+            services.address,
+            &services.password.0,
+        );
         crate::adapters::singbox::allow_mesh_discovery(&mut config, sync_port);
         if !with_interface {
             config["inbounds"] = serde_json::json!([]);
@@ -815,12 +839,28 @@ impl Backend {
         });
         Ok(Self {
             forwards,
+            services,
             child,
             client,
             state,
             task,
             profile: p,
         })
+    }
+    pub(super) fn set_services(&self, rules: &[super::ServiceForward]) -> Result<()> {
+        let addresses = &self.state.lock().addresses;
+        if rules.iter().any(|r| {
+            addresses
+                .iter()
+                .any(|a| a.parse::<std::net::IpAddr>().ok() == Some(r.target.ip()))
+                && rules
+                    .iter()
+                    .any(|other| other.port == r.target.port() && other.protocol == r.protocol)
+        }) {
+            return Err(Error::config("服务转发不能指向本机组网监听地址"));
+        }
+        self.services.apply(rules);
+        Ok(())
     }
     pub fn snapshot(&mut self) -> Result<MeshRuntimeView> {
         if self

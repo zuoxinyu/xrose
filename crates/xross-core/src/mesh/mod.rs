@@ -10,6 +10,7 @@ pub use easytier_options::{EasyTierDeviceOptions, EasyTierOptions, P2pPolicy, Tc
 mod forwards;
 pub mod ipc;
 pub mod platform;
+mod service_gateway;
 pub mod sync;
 pub mod tailscale;
 pub mod worker;
@@ -17,8 +18,8 @@ pub mod worker;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-// Require the helper that applies the Windows control-plane routing fix.
-pub const PROTOCOL_VERSION: u32 = 7;
+// Require workers with live updates in both forwarding directions.
+pub const PROTOCOL_VERSION: u32 = 9;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -30,6 +31,31 @@ pub const TAILSCALE_TUN_ADDRESS: &str = "10.255.253.1/30";
 pub const TAILSCALE_TUN_NETWORK: &str = "10.255.253.0/30";
 pub const TAILSCALE_TUN_IPV6_ADDRESS: &str = "fdfe:dcba:9877::1/126";
 pub const TAILSCALE_TUN_IPV6_NETWORK: &str = "fdfe:dcba:9877::/126";
+
+/// One editor operation can move a rule between directions atomically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardRule {
+    ToMesh(PortForward),
+    ToHost(ServiceForward),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardRules {
+    pub local: Vec<PortForward>,
+    pub services: Vec<ServiceForward>,
+}
+impl ForwardRules {
+    pub fn from_profile(profile: &MeshProfile) -> Self {
+        Self {
+            local: profile.port_forwards.clone(),
+            services: profile.service_forwards.clone(),
+        }
+    }
+    pub fn assign(&self, profile: &mut MeshProfile) {
+        profile.port_forwards.clone_from(&self.local);
+        profile.service_forwards.clone_from(&self.services);
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +112,7 @@ pub struct MeshProfile {
     pub advertise_exit_node: bool,
     pub advertised_subnets: Vec<String>,
     pub port_forwards: Vec<PortForward>,
+    pub service_forwards: Vec<ServiceForward>,
     /// Zero disables the loopback gateway and its generated outbound node.
     pub outbound_port: u16,
     pub outbound_secret: MeshSecret,
@@ -109,6 +136,7 @@ impl Default for MeshProfile {
             advertise_exit_node: false,
             advertised_subnets: Vec::new(),
             port_forwards: Vec::new(),
+            service_forwards: Vec::new(),
             outbound_port: 0,
             outbound_secret: MeshSecret::default(),
         }
@@ -248,8 +276,35 @@ impl MeshProfile {
         {
             return Err(Error::config("出口出站凭据无效，请重新保存组网配置"));
         }
-        if self.advertised_subnets.len() > 128 || self.port_forwards.len() > 64 {
+        if self.advertised_subnets.len() > 128
+            || self.port_forwards.len() > 64
+            || self.service_forwards.len() > 64
+        {
             return Err(Error::config("子网或转发规则数量过多"));
+        }
+        for (index, rule) in self.service_forwards.iter().enumerate() {
+            rule.validate()?;
+            if self.service_forwards[..index]
+                .iter()
+                .any(|other| other.protocol == rule.protocol && other.port == rule.port)
+            {
+                return Err(Error::config("同一网络的服务转发协议和端口不能重复"));
+            }
+            if self
+                .port_forwards
+                .iter()
+                .any(|other| other.protocol == rule.protocol && other.listen.port() == rule.port)
+                || rule.port == self.outbound_port
+            {
+                return Err(Error::config("服务转发端口与端口转发或出口端口冲突"));
+            }
+            if let Ok(address) = self.ipv4.parse::<ipnet::Ipv4Net>() {
+                if rule.target.ip() == std::net::IpAddr::V4(address.addr())
+                    && rule.target.port() == rule.port
+                {
+                    return Err(Error::config("服务转发不能指向自身监听地址"));
+                }
+            }
         }
         for (index, rule) in self.port_forwards.iter().enumerate() {
             rule.validate()?;
@@ -309,8 +364,36 @@ impl MeshProfile {
             advertise_exit_node: self.advertise_exit_node,
             advertised_subnets: self.advertised_subnets.clone(),
             port_forwards: self.port_forwards.clone(),
+            service_forwards: self.service_forwards.clone(),
             outbound_port: self.outbound_port,
         }
+    }
+}
+
+/// A port on this device's mesh address forwards to a host-reachable service.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceForward {
+    pub protocol: ForwardProtocol,
+    pub port: u16,
+    pub target: std::net::SocketAddr,
+}
+impl ServiceForward {
+    pub fn validate(&self) -> Result<()> {
+        PortForward {
+            protocol: self.protocol,
+            listen: ([127, 0, 0, 1], self.port).into(),
+            target: self.target,
+        }
+        .validate()?;
+        if self.port == sync::PORT {
+            return Err(Error::config(
+                "服务端口与组网配置同步端口冲突，请使用其他端口",
+            ));
+        }
+        if self.target.ip() == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST) {
+            return Err(Error::config("服务转发目标不能是广播地址"));
+        }
+        Ok(())
     }
 }
 
@@ -396,6 +479,8 @@ pub struct MeshProfileView {
     pub advertise_exit_node: bool,
     pub advertised_subnets: Vec<String>,
     pub port_forwards: Vec<PortForward>,
+    #[serde(default)]
+    pub service_forwards: Vec<ServiceForward>,
     /// Zero disables the loopback gateway and its generated outbound node.
     pub outbound_port: u16,
 }
@@ -535,6 +620,67 @@ impl MeshSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_forward_validation_and_legacy_defaults() {
+        use super::*;
+        let mut profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            ..Default::default()
+        };
+        let tcp = ServiceForward {
+            protocol: ForwardProtocol::Tcp,
+            port: 18080,
+            target: "127.0.0.1:8080".parse().unwrap(),
+        };
+        profile.service_forwards = vec![
+            tcp.clone(),
+            ServiceForward {
+                protocol: ForwardProtocol::Udp,
+                ..tcp.clone()
+            },
+        ];
+        assert!(profile.validate().is_ok());
+        profile.service_forwards.push(tcp.clone());
+        assert!(profile.validate().is_err());
+        profile.service_forwards = vec![tcp.clone()];
+        profile.port_forwards = vec![PortForward {
+            protocol: ForwardProtocol::Tcp,
+            listen: "0.0.0.0:18080".parse().unwrap(),
+            target: tcp.target,
+        }];
+        assert!(profile.validate().is_err());
+        for target in [
+            "0.0.0.0:80",
+            "224.0.0.1:80",
+            "255.255.255.255:80",
+            "127.0.0.1:0",
+        ] {
+            assert!(
+                ServiceForward {
+                    target: target.parse().unwrap(),
+                    ..tcp.clone()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            ServiceForward {
+                port: sync::PORT,
+                ..tcp
+            }
+            .validate()
+            .is_err()
+        );
+        let mut legacy = serde_json::to_value(MeshProfile::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("service_forwards");
+        assert!(
+            serde_json::from_value::<MeshProfile>(legacy)
+                .unwrap()
+                .service_forwards
+                .is_empty()
+        );
+    }
     use super::*;
     #[test]
     fn exit_list_requires_connected_profile_capability_and_usable_address() {

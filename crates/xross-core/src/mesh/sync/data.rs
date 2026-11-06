@@ -510,6 +510,7 @@ impl Bundle {
                         value.advertised_subnets = old.advertised_subnets.clone();
                         value.advertise_exit_node = old.advertise_exit_node;
                         value.port_forwards = old.port_forwards.clone();
+                        value.service_forwards = old.service_forwards.clone();
                         value.validate()?;
                         *old = value;
                     } else {
@@ -615,6 +616,17 @@ mod tests {
             ..Default::default()
         };
         let mut local = source.clone();
+        let service = crate::mesh::ServiceForward {
+            protocol: crate::mesh::ForwardProtocol::Tcp,
+            port: 18080,
+            target: "127.0.0.1:8080".parse().unwrap(),
+        };
+        source.service_forwards.push(service.clone());
+        local.service_forwards.push(crate::mesh::ServiceForward {
+            port: 18081,
+            ..service
+        });
+        let local_services = local.service_forwards.clone();
         local.easytier.device.tcp_hole_punching = false;
         source.easytier.latency_first = true;
         source.easytier.device.system_forwarding = true;
@@ -624,6 +636,7 @@ mod tests {
             panic!("expected a network")
         };
         assert!(shared.easytier.latency_first && !shared.easytier.device.system_forwarding);
+        assert!(shared.service_forwards.is_empty());
         let mut local = vec![local];
         bundle
             .merge(
@@ -635,6 +648,7 @@ mod tests {
             )
             .unwrap();
         assert!(local[0].easytier.latency_first);
+        assert_eq!(local[0].service_forwards, local_services);
         assert!(
             !local[0].easytier.device.tcp_hole_punching
                 && !local[0].easytier.device.system_forwarding
