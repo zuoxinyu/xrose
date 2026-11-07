@@ -7,8 +7,8 @@ license.workspace = true
 
 [dependencies]
 xrose-core = { path = "../xrose-core" }
-gpui-kit = "0.8.1"
-gpui-base = "0.8.1"
+gpui-kit.workspace = true
+gpui-base.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
