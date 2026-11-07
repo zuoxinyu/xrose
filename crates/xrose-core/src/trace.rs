@@ -941,6 +941,14 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     Ok(())
 }
 
+fn trace_command(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    command.kill_on_drop(true);
+    command
+}
+
 /// Use sing-box's own rule-set decoder and matcher. Only a bounded status
 /// prefix is needed, even when one matching rule contains thousands of domains.
 async fn cached_set_match(
@@ -982,14 +990,13 @@ async fn cached_set_match(
         }
         for target in &targets {
             use std::process::Stdio;
-            let mut child = tokio::process::Command::new(binary)
+            let mut child = trace_command(binary)
                 .args(["rule-set", "match", "--format", set.format.as_str(), "--"])
                 .arg(&path)
                 .arg(target)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
-                .kill_on_drop(true)
                 .spawn()
                 .ok()?;
             let mut prefix = [0; 12];
@@ -1453,7 +1460,7 @@ async fn icmp_test(target: &TraceTarget, running: bool, model: &AppModel) -> Rem
         .parse::<IpAddr>()
         .map(|ip| ip.is_ipv6())
         .unwrap_or(false);
-    let mut command = tokio::process::Command::new("ping");
+    let mut command = trace_command("ping");
     #[cfg(target_os = "windows")]
     {
         command.args(["-n", "1", "-w", "3000"]);
@@ -1808,6 +1815,35 @@ fn matches_probe_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn trace_child_has_no_visible_console() {
+        const CHILD: &str = "XROSE_TEST_INSPECT_TRACE_CONSOLE";
+        if std::env::var_os(CHILD).is_some() {
+            use windows_sys::Win32::{
+                System::Console::GetConsoleWindow, UI::WindowsAndMessaging::IsWindowVisible,
+            };
+            // SAFETY: both calls inspect the current process's console window.
+            let visible = unsafe { IsWindowVisible(GetConsoleWindow()) };
+            assert_eq!(visible, 0);
+            return;
+        }
+        let output = trace_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "trace::tests::trace_child_has_no_visible_console",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .await
+            .unwrap();
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && report.contains("1 passed"),
+            "{report}"
+        );
+    }
 
     #[test]
     fn direct_trace_identifies_firewall_group_and_prioritized_mesh_route() {
