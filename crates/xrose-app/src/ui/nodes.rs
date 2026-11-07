@@ -28,6 +28,13 @@ use super::widgets::*;
 use super::{AppView, Page};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum NodeSection<'a> {
+    Manual,
+    Subscription(&'a str),
+    MeshExits,
+}
+
 /// "Fastest" is only shown when it leads the runner-up by at least
 /// `max(FASTEST_MIN_GAP_MS, FASTEST_MIN_GAP_RATIO * runner_up)`.
 const FASTEST_MIN_GAP_MS: u32 = 30;
@@ -716,32 +723,50 @@ impl AppView {
                 })
                 // Node list: either Grouped by Subscription or Flat List.
                 .when(!grouped, |container| {
-                    container.children(
-                        display_nodes
-                            .iter()
-                            .filter_map(|node| rows.remove(&node.id)),
-                    )
+                    container
+                        .children(
+                            display_nodes
+                                .iter()
+                                .filter_map(|node| rows.remove(&node.id)),
+                        )
+                        .children(exit_rows.drain(..))
                 })
                 .when(grouped, |container| {
-                    // Partition nodes into Subscription Groups
-                    let mut sub_groups: BTreeMap<Option<String>, Vec<Node>> = BTreeMap::new();
+                    let mut sub_groups: BTreeMap<NodeSection, Vec<&Node>> = BTreeMap::new();
                     for node in display_nodes.iter() {
-                        sub_groups
-                            .entry(node.subscription_id.clone())
-                            .or_default()
-                            .push(node.clone());
+                        let section = if node.is_mesh_gateway() {
+                            NodeSection::MeshExits
+                        } else if let Some(id) = &node.subscription_id {
+                            NodeSection::Subscription(id)
+                        } else {
+                            NodeSection::Manual
+                        };
+                        sub_groups.entry(section).or_default().push(node);
+                    }
+                    if !exit_rows.is_empty() {
+                        sub_groups.entry(NodeSection::MeshExits).or_default();
                     }
 
                     let collapsed_set = self.collapsed_subs.clone();
 
-                    container.children(sub_groups.into_iter().map(|(sub_id, group_nodes)| {
-                        let group_key = sub_id.clone().unwrap_or_else(|| "manual".to_string());
+                    container.children(sub_groups.into_iter().map(|(section, group_nodes)| {
+                        let mesh = section == NodeSection::MeshExits;
+                        let group_key = match section {
+                            NodeSection::MeshExits => "mesh-exits".into(),
+                            NodeSection::Manual => "manual".into(),
+                            NodeSection::Subscription(id) => format!("subscription-{id}"),
+                        };
                         let is_collapsed = collapsed_set.contains(&group_key);
-                        let sub_title = match &sub_id {
-                            Some(id) => sub_names.get(id).cloned().unwrap_or_else(|| {
-                                self.tr("订阅节点", "Subscription nodes").to_string()
-                            }),
-                            None => self
+                        let sub_title = match section {
+                            NodeSection::MeshExits => {
+                                self.tr("组网出口节点", "Mesh exit nodes").to_string()
+                            }
+                            NodeSection::Subscription(id) => {
+                                sub_names.get(id).cloned().unwrap_or_else(|| {
+                                    self.tr("订阅节点", "Subscription nodes").to_string()
+                                })
+                            }
+                            NodeSection::Manual => self
                                 .tr("手动导入 / 未分类", "Manual / Uncategorized")
                                 .to_string(),
                         };
@@ -798,44 +823,49 @@ impl AppView {
                                                     .child(sub_title),
                                             )
                                             .child(pill(
-                                                format!("{} 个", group_nodes.len()),
+                                                format!(
+                                                    "{}{}",
+                                                    group_nodes.len()
+                                                        + if mesh { exit_rows.len() } else { 0 },
+                                                    self.tr(" 个", "")
+                                                ),
                                                 p.muted_fg,
                                                 p.panel_alt,
                                             )),
                                     )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "ping-sub-{}",
-                                            group_key
-                                        )))
-                                        .compact()
-                                        .ghost()
-                                        .label(self.tr("测速本组", "Test group"))
-                                        .disabled(tests_busy)
-                                        .tooltip(self.tr(
-                                            "测试该订阅下所有节点的延迟",
-                                            "Test latency of all nodes in this subscription",
-                                        ))
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
+                                    .when(!group_nodes.is_empty(), |header| {
+                                        header.child(
+                                            Button::new(SharedString::from(format!(
+                                                "ping-sub-{}",
+                                                group_key
+                                            )))
+                                            .compact()
+                                            .ghost()
+                                            .label(self.tr("测速本组", "Test group"))
+                                            .disabled(tests_busy)
+                                            .tooltip(self.tr(
+                                                "测试本组已配置节点的延迟",
+                                                "Test latency of configured nodes in this group",
+                                            ))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.latency_pending
                                                     .extend(node_ids_for_ping.iter().cloned());
                                                 this.service.test_latency(LatencyScope::Nodes(
                                                     node_ids_for_ping.clone(),
                                                 ));
                                                 this.sync(cx);
-                                            }),
-                                        ),
-                                    ),
+                                            })),
+                                        )
+                                    }),
                             )
                             .when(!is_collapsed, |d| {
                                 d.children(
                                     group_nodes.iter().filter_map(|node| rows.remove(&node.id)),
                                 )
+                                .when(mesh, |d| d.children(exit_rows.drain(..)))
                             })
                     }))
-                })
-                .children(exit_rows),
+                }),
         );
 
         body

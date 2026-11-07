@@ -350,8 +350,7 @@ impl AppModel {
             self.nodes.push(node.clone());
             added += 1;
             // Mesh gateways also join native selector and latency groups when first installed.
-            let mesh_gateway =
-                node.id.starts_with("mesh-exit-") && node.tags.iter().any(|t| t == "mesh-exit");
+            let mesh_gateway = node.is_mesh_gateway();
             for group in &mut self.groups {
                 let native_mesh_group = mesh_gateway
                     && !group.managed()

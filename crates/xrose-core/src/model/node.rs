@@ -430,9 +430,12 @@ impl Node {
         crate::util::host_port(&self.server, self.port)
     }
 
+    pub fn is_mesh_gateway(&self) -> bool {
+        self.id.starts_with("mesh-exit-") && self.tags.iter().any(|t| t == "mesh-exit")
+    }
+
     pub(crate) fn needs_front(&self, front: &Node) -> bool {
-        let local_mesh_exit = self.id.starts_with("mesh-exit-")
-            && self.tags.iter().any(|t| t == "mesh-exit")
+        let local_mesh_exit = self.is_mesh_gateway()
             && self
                 .server
                 .parse::<std::net::IpAddr>()
