@@ -262,7 +262,9 @@ impl AppView {
                         .child(
                             Button::new("open-log-dir")
                                 .ghost()
-                                .label(self.tr("打开日志目录", "Open log folder"))
+                                .icon(IconName::FolderOpen)
+                                .tooltip(self.tr("打开日志目录", "Open log folder"))
+                                .accessibility_label(self.tr("打开日志目录", "Open log folder"))
                                 .on_click(cx.listener(|this, _, _, _| {
                                     this.service.open_url(&format!(
                                         "file://{}",

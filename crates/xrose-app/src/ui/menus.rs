@@ -8,7 +8,7 @@ use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xrose_core::model::WorkMode;
 use xrose_core::route::transfer::ExportScope;
-use xrose_core::service::ToastLevel;
+use xrose_core::service::{LatencyScope, ToastLevel};
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
@@ -36,6 +36,7 @@ pub(super) enum MenuTarget {
 
 #[derive(Clone)]
 pub(super) enum Command {
+    BatchTcp(Vec<String>),
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
     ImportRoute,
@@ -178,14 +179,20 @@ impl AppView {
                     !ids.is_empty() && !busy("latency") && !busy("download") && !busy("auto-probe");
                 menu = menu
                     .item(add(
-                        "批量 HTTP 测速",
-                        "Batch HTTP test",
+                        "TCP 测速",
+                        "TCP test",
+                        available,
+                        Command::BatchTcp(ids.clone()),
+                    ))
+                    .item(add(
+                        "HTTP 测速",
+                        "HTTP test",
                         available,
                         Command::BatchHttp(ids.clone()),
                     ))
                     .item(add(
-                        "批量下载测速",
-                        "Batch download test",
+                        "下载测速",
+                        "Download test",
                         available,
                         Command::BatchDownload(ids),
                     ));
@@ -843,7 +850,7 @@ impl AppView {
         };
         let busy = |key: &str| self.snapshot.busy.iter().any(|s| s == key);
         let exists = match &command {
-            Command::BatchHttp(_) | Command::BatchDownload(_) => {
+            Command::BatchTcp(_) | Command::BatchHttp(_) | Command::BatchDownload(_) => {
                 self.batch_mode && !busy("latency") && !busy("download") && !busy("auto-probe")
             }
             Command::SelectNode(group_id, node_id) => {
@@ -1162,6 +1169,10 @@ impl AppView {
                     self.latency_pending.insert(id.clone());
                     self.service.test_real_latency(&id);
                 }
+            }
+            Command::BatchTcp(ids) => {
+                self.latency_pending.extend(ids.iter().cloned());
+                self.service.test_latency(LatencyScope::Nodes(ids));
             }
             Command::BatchHttp(ids) => {
                 self.latency_pending.extend(ids.iter().cloned());

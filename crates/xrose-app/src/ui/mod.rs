@@ -1,6 +1,5 @@
 mod about;
 mod connections;
-mod process_icons;
 mod dialogs;
 mod dns;
 mod logs;
@@ -10,6 +9,7 @@ mod mesh;
 mod mesh_sync;
 mod network_diagnostics;
 mod nodes;
+mod process_icons;
 mod qr;
 mod route_drag;
 mod route_transfer;
@@ -335,6 +335,12 @@ impl AppView {
                 )
                 .default_value("https://www.gstatic.com/generate_204")
         });
+        cx.subscribe(&trace_input, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         let manual_form = ManualNodeForm::new(window, cx);
 
         let initial_page = match std::env::var("XROSE_PAGE").unwrap_or_default().as_str() {
@@ -1202,8 +1208,11 @@ impl AppView {
                     .text_color(p.muted_fg)
                     .child(self.tr("近 60 秒", "Last 60 seconds"))
                     .child(
-                        traffic_label(IconName::ArrowDown, self.tr("下行 · 实线", "Download · solid"))
-                            .text_color(p.data_down),
+                        traffic_label(
+                            IconName::ArrowDown,
+                            self.tr("下行 · 实线", "Download · solid"),
+                        )
+                        .text_color(p.data_down),
                     )
                     .child(
                         traffic_label(IconName::ArrowUp, self.tr("上行 · 虚线", "Upload · dashed"))

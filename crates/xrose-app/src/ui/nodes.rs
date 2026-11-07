@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants, DropdownButton};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
@@ -604,34 +604,20 @@ impl AppView {
                                             }))
                                     })
                                     .child({
-                                        let sel = selected_ids.clone();
-                                        DropdownButton::new("batch-test")
-                                            .disabled(selected_count == 0 || tests_busy)
-                                            .menu_accessibility_label(
-                                                self.tr("更多批量测速方式", "More batch tests"),
-                                            )
-                                            .dropdown_menu(menus::builder(
-                                                cx.entity().downgrade(),
-                                                MenuTarget::BatchTests(selected_ids.clone()),
-                                            ))
-                                            .button(
-                                                Button::new("batch-ping")
-                                                    .compact()
-                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                                    .label(
-                                                        self.tr("批量 TCP 测速", "Batch TCP test"),
-                                                    )
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.latency_pending
-                                                                .extend(sel.iter().cloned());
-                                                            this.service.test_latency(
-                                                                LatencyScope::Nodes(sel.clone()),
-                                                            );
-                                                            this.sync(cx);
-                                                        },
-                                                    )),
-                                            )
+                                        let button = Button::new("batch-test")
+                                            .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                            .label(self.tr("批量测速", "Batch test"));
+                                        if selected_count == 0 || tests_busy {
+                                            button.disabled(true).into_any_element()
+                                        } else {
+                                            button
+                                                .dropdown_menu(menus::builder(
+                                                    cx.entity().downgrade(),
+                                                    MenuTarget::BatchTests(selected_ids.clone()),
+                                                ))
+                                                .into_any_element()
+                                        }
                                     })
                                     .child({
                                         let sel = selected_ids.clone();

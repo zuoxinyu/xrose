@@ -194,13 +194,20 @@ pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant 
         .active(p.danger.opacity(SEMANTIC_ALPHA))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChoiceStyle {
+    Default,
+    Small,
+    Cards,
+}
+
 /// Controlled radio group with roving focus and arrow-key selection.
 #[derive(gpui_kit::IntoElement)]
 pub struct ChoiceGroup {
     id: ElementId,
     labels: Vec<SharedString>,
     selected: Option<usize>,
-    cards: bool,
+    style: ChoiceStyle,
     scroll: Option<(ScrollHandle, Pixels)>,
     disabled: bool,
     handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
@@ -215,14 +222,18 @@ impl ChoiceGroup {
             id: id.into(),
             labels,
             selected: selected.into(),
-            cards: false,
+            style: ChoiceStyle::Default,
             scroll: None,
             disabled: false,
             handler: None,
         }
     }
     pub fn cards(mut self) -> Self {
-        self.cards = true;
+        self.style = ChoiceStyle::Cards;
+        self
+    }
+    pub fn small(mut self) -> Self {
+        self.style = ChoiceStyle::Small;
         self
     }
     pub fn scrollable(mut self, handle: &ScrollHandle, max_height: Pixels) -> Self {
@@ -270,7 +281,7 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
         let key_handles = handles.clone();
         let key_handler = self.handler.clone();
         let selected = self.selected.filter(|&index| index < count);
-        let cards = self.cards;
+        let style = self.style;
         let disabled = self.disabled;
         let layout = match &self.scroll {
             Some((handle, _)) => handle.clone(),
@@ -360,7 +371,6 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             });
         for (index, label) in self.labels.into_iter().enumerate() {
             let checked = selected == Some(index);
-            let focused = handles[index].is_focused(window);
             let handler = self.handler.clone();
             group = group.child(
                 gpui_base::Radio::new((self.id.clone(), index.to_string()))
@@ -369,7 +379,7 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     .tab_stop(index == selected.unwrap_or(0) && !disabled)
                     .track_focus(&handles[index])
                     .accessibility_label(label.clone())
-                    .when(cards, |option| {
+                    .when(style == ChoiceStyle::Cards, |option| {
                         let tooltip = label.clone();
                         option.max_w_full().tooltip(move |window, cx| {
                             Tooltip::new(tooltip.clone()).build(window, cx)
@@ -386,25 +396,25 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .h(px(if cards {
-                        CONTROL_HEIGHT
-                    } else {
-                        ICON_BUTTON_SIZE
+                    .h(px(match style {
+                        ChoiceStyle::Small => 24.,
+                        ChoiceStyle::Default => ICON_BUTTON_SIZE,
+                        ChoiceStyle::Cards => CONTROL_HEIGHT,
                     }))
-                    .px_3()
+                    .map(|option| match style {
+                        ChoiceStyle::Small => option.px_2().text_xs(),
+                        _ => option.px_3().text_sm(),
+                    })
                     .cursor_pointer()
                     // Subtract the track's 1px border and 2px padding from its 6px radius.
                     .rounded_sm()
                     .border_1()
-                    .border_color(if focused && !checked {
-                        p.primary
-                    } else {
-                        p.border.opacity(0.)
-                    })
-                    .text_sm()
+                    .border_color(p.border.opacity(0.))
                     .text_color(if checked { p.primary } else { p.muted_fg })
                     .when(!disabled && !checked, |option| {
-                        option.hover(move |s| s.bg(p.panel_alt))
+                        option
+                            .hover(move |s| s.bg(p.panel_alt))
+                            .focus_visible(move |s| s.border_color(p.primary))
                     })
                     .child(div().min_w_0().truncate().child(label)),
             );

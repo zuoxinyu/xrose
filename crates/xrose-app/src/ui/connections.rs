@@ -14,7 +14,9 @@ use xrose_core::flow::{ConnectionMetrics, ConnectionSort, ProcessLiveTraffic};
 use xrose_core::model::{CoreKind, RouteAction, RouteActionKind, WorkMode};
 use xrose_core::runtime::ClashConnection;
 use xrose_core::service::ToastLevel;
-use xrose_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
+use xrose_core::trace::{
+    TracePhase, TraceProtocol, TraceSession, TraceStatus, TraceStepKind, parse_target,
+};
 use xrose_core::util::format_bytes;
 
 use super::menus::{self, MenuTarget};
@@ -785,16 +787,6 @@ impl AppView {
                                         }
                                     })),
                             )
-                            .child(
-                                more_button(
-                                    SharedString::from(format!("connection-rules-{id}")),
-                                    self.tr("防火墙规则", "Firewall rules"),
-                                )
-                                .dropdown_menu(menus::builder(
-                                    cx.entity().downgrade(),
-                                    rule_menu.clone(),
-                                )),
-                            )
                             .when(!closed && !self.show_recorded_connections, |d| {
                                 d.child(
                                     danger_icon_button(
@@ -810,7 +802,20 @@ impl AppView {
                                         move |this, _, _, _| this.service.close_connection(&id),
                                     )),
                                 )
-                            }),
+                            })
+                            .child(
+                                more_button(
+                                    SharedString::from(format!(
+                                        "connection-rules-{}",
+                                        connection.id
+                                    )),
+                                    self.tr("防火墙规则", "Firewall rules"),
+                                )
+                                .dropdown_menu(menus::builder(
+                                    cx.entity().downgrade(),
+                                    rule_menu.clone(),
+                                )),
+                            ),
                     ),
             )
             .child(
@@ -1127,6 +1132,16 @@ impl AppView {
         let p = palette(cx);
         let kind = self.diagnostic_rule_kind;
         let value = target.value(kind).to_string();
+        let kinds = [
+            (DiagnosticRuleKind::Domain, self.tr("域名", "Domain")),
+            (DiagnosticRuleKind::Ip, self.tr("IP", "IP")),
+            (DiagnosticRuleKind::Process, self.tr("进程", "Process")),
+        ];
+        let actions = [
+            (RouteActionKind::Proxy, self.tr("代理", "Proxy")),
+            (RouteActionKind::Direct, self.tr("直连", "Direct")),
+            (RouteActionKind::Block, self.tr("拦截", "Block")),
+        ];
         div()
             .flex()
             .flex_col()
@@ -1138,6 +1153,13 @@ impl AppView {
             .border_color(p.primary.opacity(0.25))
             .child(
                 div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.fg)
+                    .child(self.tr("快速添加规则", "Quick rule")),
+            )
+            .child(
+                div()
                     .flex()
                     .items_center()
                     .gap_2()
@@ -1145,26 +1167,20 @@ impl AppView {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.fg)
-                            .child(self.tr("快速添加规则", "Quick rule")),
+                            .text_color(p.muted_fg)
+                            .child(self.tr("匹配条件：", "Match type:")),
                     )
-                    .children(
-                        [
-                            (DiagnosticRuleKind::Domain, self.tr("域名", "Domain")),
-                            (DiagnosticRuleKind::Ip, self.tr("IP", "IP")),
-                            (DiagnosticRuleKind::Process, self.tr("进程", "Process")),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (k, label))| {
-                            chip(format!("{prefix}-rule-kind-{i}"), label, kind == k, &p).on_click(
-                                cx.listener(move |this, _, _, cx| {
-                                    this.diagnostic_rule_kind = k;
-                                    cx.notify();
-                                }),
-                            )
-                        }),
+                    .child(
+                        ChoiceGroup::new(
+                            (ElementId::from(prefix), "rule-kind"),
+                            kinds.iter().map(|(_, label)| label.clone()).collect(),
+                            kinds.iter().position(|(k, _)| *k == kind),
+                        )
+                        .small()
+                        .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                            this.diagnostic_rule_kind = kinds[*index].0;
+                            cx.notify();
+                        })),
                     )
                     .child(
                         div()
@@ -1187,29 +1203,26 @@ impl AppView {
                     .items_center()
                     .gap_2()
                     .flex_wrap()
-                    .children(
-                        [
-                            (RouteActionKind::Proxy, self.tr("代理", "Proxy")),
-                            (RouteActionKind::Direct, self.tr("直连", "Direct")),
-                            (RouteActionKind::Block, self.tr("拦截", "Block")),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (action, label))| {
-                            chip(
-                                format!("{prefix}-rule-action-{i}"),
-                                label,
-                                self.diagnostic_rule_action == action,
-                                &p,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.diagnostic_rule_action = action;
-                                    cx.notify();
-                                },
-                            ))
-                        }),
-                    )
+                    .child(div().text_sm().text_color(p.muted_fg).child(self.tr("路由规则：", "Routing rule:")))
+                    .child(
+                        ChoiceGroup::new(
+                            (ElementId::from(prefix), "rule-action"),
+                            actions.iter().map(|(_, label)| label.clone()).collect(),
+                            actions.iter().position(|(a, _)| *a == self.diagnostic_rule_action),
+                        )
+                        .small()
+                        .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                            this.diagnostic_rule_action = actions[*index].0;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_wrap()
                     .child(
                         Button::new(SharedString::from(format!("{prefix}-add-rule")))
                             .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
@@ -1255,6 +1268,31 @@ impl AppView {
             .as_ref()
             .is_some_and(|t| matches!(t.phase, TracePhase::Request | TracePhase::Response));
         let success = trace.as_ref().and_then(|t| t.success);
+        let presets = [
+            (TraceProtocol::Https, "https://www.gstatic.com/generate_204"),
+            (TraceProtocol::Tcp, "tcp://1.1.1.1:443"),
+            (TraceProtocol::Udp, "udp://8.8.8.8:53"),
+            (TraceProtocol::Icmp, "icmp://1.1.1.1"),
+        ];
+        let protocol = parse_target(&self.trace_input.read(cx).value())
+            .ok()
+            .map(|target| target.protocol);
+        let protocol_group = ChoiceGroup::new(
+            "trace-protocol",
+            presets
+                .iter()
+                .map(|(proto, _)| proto.label().into())
+                .collect(),
+            presets
+                .iter()
+                .position(|(proto, _)| Some(*proto) == protocol),
+        )
+        .small()
+        .on_change(cx.listener(move |this, index: &usize, window, cx| {
+            this.trace_input.update(cx, |input, cx| {
+                input.set_value(presets[*index].1, window, cx)
+            });
+        }));
         card(&p)
             .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
                 .child(section_title(&p, self.tr("链路测试", "Link trace"), self.tr("发起探测请求，依次检查 DNS 解析、路由匹配与出站连通性", "Send a probe request to inspect DNS resolution, route matching, and outbound connectivity")))
@@ -1266,8 +1304,7 @@ impl AppView {
                 .child(Button::new("trace-clear").compact().h(px(crate::ui::theme::CONTROL_HEIGHT)).ghost().label(self.tr("清除", "Clear"))
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_trace(); this.expanded_trace_step = None; this.sync(cx); }))))
             .child(div().flex().items_center().gap_2().flex_wrap()
-                .children([("HTTPS", "https://www.gstatic.com/generate_204"), ("TCP", "tcp://1.1.1.1:443"), ("UDP", "udp://8.8.8.8:53"), ("ICMP", "icmp://1.1.1.1")].into_iter().map(|(label, value)| chip(format!("trace-example-{label}"), label, false, &p)
-                    .on_click(cx.listener(move |this, _, window, cx| { this.trace_input.update(cx, |input, cx| input.set_value(value, window, cx)); cx.notify(); }))))
+                .child(protocol_group)
                 .child(div().text_xs().text_color(p.muted_fg).child(self.tr("点击阶段查看完整详情", "Select a stage for full details"))))
             .child(self.trace_graph(trace.as_ref(), cx))
             .when_some(trace.as_ref(), |d, trace| {
@@ -1575,29 +1612,6 @@ impl AppView {
                     ),
             )
     }
-}
-
-fn chip(
-    id: impl Into<SharedString>,
-    label: impl Into<SharedString>,
-    selected: bool,
-    p: &Palette,
-) -> Stateful<Div> {
-    div()
-        .id(id.into())
-        .px_2()
-        .py_1()
-        .rounded_full()
-        .flex_shrink_0()
-        .text_xs()
-        .cursor_pointer()
-        .bg(if selected {
-            p.primary.opacity(0.15)
-        } else {
-            p.panel_alt
-        })
-        .text_color(if selected { p.primary } else { p.muted_fg })
-        .child(label.into())
 }
 
 fn rate_pair(up: u64, down: u64, p: &Palette) -> Div {
