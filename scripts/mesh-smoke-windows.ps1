@@ -21,14 +21,14 @@ $tempRoot=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')+'\'
 if (-not $root.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'TestHome must be a throwaway directory below TEMP.' }
 $ids=@($ProfileIds.Split(',') | Where-Object {$_})
 foreach($id in $ids) { $parsed=[Guid]::Empty; if (-not [Guid]::TryParse($id,[ref]$parsed)) { throw 'Invalid profile ID' } }
-$source=Join-Path (Split-Path -Parent $PSScriptRoot) 'target\debug\xross-cli.exe'
+$source=Join-Path (Split-Path -Parent $PSScriptRoot) 'target\debug\xrose-cli.exe'
 $binDir=Join-Path $root 'test-bin'
 New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-$cli=Join-Path $binDir 'xross-cli.exe'
+$cli=Join-Path $binDir 'xrose-cli.exe'
 Copy-Item -LiteralPath $source -Destination $cli -Force
-$env:XROSS_HOME=$root
-$env:XROSS_HELPER_SOCKET='io.xross.mesh-test.'+[Guid]::NewGuid().ToString('N')
-$env:XROSS_HELPER_SOCKET | Set-Content -LiteralPath (Join-Path $root 'test-socket.txt')
+$env:XROSE_HOME=$root
+$env:XROSE_HELPER_SOCKET='io.xrose.mesh-test.'+[Guid]::NewGuid().ToString('N')
+$env:XROSE_HELPER_SOCKET | Set-Content -LiteralPath (Join-Path $root 'test-socket.txt')
 $helper=$null; $session=$null
 $connected=@{}; $probes=@{}; $dnsVerified=[string]::IsNullOrEmpty($DnsName); $connectedAt=$null
 $targets=@($ProbeAddresses.Split(',') | Where-Object {$_})
@@ -38,7 +38,7 @@ function DefaultRoutes {
     @(Get-NetRoute | Where-Object {$_.DestinationPrefix -in @('0.0.0.0/0','::/0')} | ForEach-Object {"$($_.DestinationPrefix)|$($_.NextHop)|$($_.InterfaceIndex)"} | Sort-Object) -join ';'
 }
 function OriginalDns {
-    @(Get-DnsClientServerAddress | Where-Object {$_.InterfaceAlias -notlike 'xross-mesh-*'} | ForEach-Object {"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')"} | Sort-Object) -join ';'
+    @(Get-DnsClientServerAddress | Where-Object {$_.InterfaceAlias -notlike 'xrose-mesh-*'} | ForEach-Object {"$($_.InterfaceIndex)|$($_.AddressFamily)|$($_.ServerAddresses -join ',')"} | Sort-Object) -join ';'
 }
 function ManagementReachable {
     $client=New-Object Net.Sockets.TcpClient
@@ -86,8 +86,8 @@ try {
                 Start-Sleep -Seconds 7
                 $after=(& $cli mesh status | ConvertFrom-Json).networks
                 $result.owner_crash_cleanup=@($after | Where-Object {$ids -contains $_.profile_id -and $_.phase -notin @('disconnected','failed')}).Count -eq 0
-                $names=@($ids | ForEach-Object {"xross-mesh-et-$($_.Substring(0,8))"; "xross-mesh-ts-$($_.Substring(0,8))"})
-                $markers=@($ids | ForEach-Object {"Xross mesh $_"})
+                $names=@($ids | ForEach-Object {"xrose-mesh-et-$($_.Substring(0,8))"; "xrose-mesh-ts-$($_.Substring(0,8))"})
+                $markers=@($ids | ForEach-Object {"Xrose mesh $_"})
                 $result.owner_crash_cleanup=$result.owner_crash_cleanup -and @(Get-NetAdapter | Where-Object {$names -contains $_.Name}).Count -eq 0 -and @(Get-DnsClientNrptRule | Where-Object {$markers -contains $_.DisplayName}).Count -eq 0
                 break
             }
@@ -104,7 +104,7 @@ finally {
     if($helper -and -not $helper.HasExited){Stop-Process -Id $helper.Id -Force -ErrorAction SilentlyContinue}
     Start-Sleep -Seconds 2
     foreach($id in $ids) {
-        Get-DnsClientNrptRule | Where-Object {$_.DisplayName -eq "Xross mesh $id"} | ForEach-Object {Remove-DnsClientNrptRule -Name $_.Name -Force}
+        Get-DnsClientNrptRule | Where-Object {$_.DisplayName -eq "Xrose mesh $id"} | ForEach-Object {Remove-DnsClientNrptRule -Name $_.Name -Force}
     }
     $result.default_route_preserved=(DefaultRoutes) -eq $routes
     $result.dns_preserved=(OriginalDns) -eq $dns

@@ -1,13 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/xross-core", "crates/xross-app", "crates/xross-cli"]
+members = ["crates/xrose-core", "crates/xrose-app", "crates/xrose-cli"]
 exclude = [".probe", ".probe2"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/xross-app/xross"
 rust-version = "1.95"
 
 [workspace.dependencies]

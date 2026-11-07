@@ -1,8 +1,8 @@
-# Xross 架构与编译约定
+# Xrose 架构与编译约定
 
 ## 为什么是 AppModel
 
-若直接以某个 core 的 JSON 建模，第二个 core 会到处漏。Xross 的 `AppModel`
+若直接以某个 core 的 JSON 建模，第二个 core 会到处漏。Xrose 的 `AppModel`
 只描述用户意图：
 
 - `nodes`：协议 + 凭据 + TLS/传输，不含 core 字段名；
@@ -16,7 +16,7 @@
 
 ## 关键差异与处理
 
-| 能力 | Xray | sing-box | Xross 处理 |
+| 能力 | Xray | sing-box | Xrose 处理 |
 | --- | --- | --- | --- |
 | mixed 入站 | 无 | 有 | Xray 拆成 SOCKS + HTTP(port+1)，界面提示 |
 | 局域网认证与独立端口 | SOCKS 和 HTTP 分别配置账号 | mixed 入站配置账号 | 共用端口时本机也需认证；独立端口模式保留本机回环入口 |
@@ -69,10 +69,10 @@ Xray 自动路由通过 CIDR 差集排除用户与组网网段，DNS 劫持规�
 
 组网独立于 `CoreKind`：`mesh::MeshProfile` 表达网络身份、入口、出口选择、子网发布、远端网段和端口转发意图，
 `MeshController` 通过带版本和调用者鉴权的助手 IPC 管理会话。EasyTier 2.6.4
-静态库只在 Xross `--mesh-worker` 初始化；Tailscale 使用固定 sing-box 1.14.4
+静态库只在 Xrose `--mesh-worker` 初始化；Tailscale 使用固定 sing-box 1.14.4
 子进程及鉴权 gRPC。UI 只调用 AppService、读取 `UiSnapshot.mesh`。
 SQLite 的 `mesh_profiles` 全量加密；新增字段使用 serde 默认值，不改变数据库结构。出口网关凭据随组网配置保存且不进入快照；生成的本机 SOCKS 节点随代理配置保存，编辑组网时保持节点 ID 与出站组引用。
-“节点”页从已连接的组网快照读取出口。Tailscale 使用已批准的出口标志，EasyTier 使用 Xross 发布的签名组声明、IPv4 默认网段公告或用户指定的出口地址。切换到其他设备时，服务重新连接相应组网，等待目标设备就绪，再在同一事务中保存组网出口和手动出站组的选择。组网重连或保存失败时尝试恢复原连接。
+“节点”页从已连接的组网快照读取出口。Tailscale 使用已批准的出口标志，EasyTier 使用 Xrose 发布的签名组声明、IPv4 默认网段公告或用户指定的出口地址。切换到其他设备时，服务重新连接相应组网，等待目标设备就绪，再在同一事务中保存组网出口和手动出站组的选择。组网重连或保存失败时尝试恢复原连接。
 
 数据库 v7 为加密的 EasyTier 配置补齐原行为对应的高级设置，保留更新时间及未知字段。高级设置经脱敏快照送入编辑草稿，由组网协议传递至工作进程，在构建 EasyTier 实例前应用；线程模式也用于创建实际 Tokio 运行时。网络偏好可随配置同步，本机转发、入站和穿透策略保留在本机。
 
@@ -88,7 +88,7 @@ Tailscale 使用用户态 endpoint 和仅包含批准路由的专用 TUN，避�
 把控制服务器路由直接安装到系统；仅为当前 tailnet 后缀设置带归属记录的 DNS：Windows NRPT、macOS `/etc/resolver`、Linux systemd-resolved 按接口域名路由。
 Windows 的独立 Tailscale 组件关闭 `auto_detect_interface`，控制服务器连接使用系统路由，以支持已有代理 TUN 或 VPN。组网 TUN 仍仅接管指定网段。协议版本 7 要求更新提权助手，使工作进程使用修正后的配置。CLI 的 `mesh api-check` 等待登录链接、待审批或已连接状态后才报告成功。
 出口和发布子网不加入宿主机默认路由；来自 Tailscale 的流量仅允许访问用户发布的网段，发布出口时允许互联网目的地。Unix 工作进程使用独立进程组，停止时回收子进程。
-组网发现使用版本化 TCP 协议。服务仅向已连接网络的成员地址发送握手，EasyTier 监听本机虚拟地址，Tailscale 在用户态端点将本机地址的专用端口转交已预留的回环监听器。组网页展示经发现的 Xross 信息与后端公布的能力。共享由用户选择数据并生成限时随机密钥；请求使用挑战应答，数据包另行加密认证。接收端在内存中预览独立项目，确认时复查当前配置、依赖和运行中的组网，使用一个 SQLite 事务更新加密记录。发现协议、共享码和预览不写入数据库。
+组网发现使用版本化 TCP 协议。服务仅向已连接网络的成员地址发送握手，EasyTier 监听本机虚拟地址，Tailscale 在用户态端点将本机地址的专用端口转交已预留的回环监听器。组网页展示经发现的 Xrose 信息与后端公布的能力。共享由用户选择数据并生成限时随机密钥；请求使用挑战应答，数据包另行加密认证。接收端在内存中预览独立项目，确认时复查当前配置、依赖和运行中的组网，使用一个 SQLite 事务更新加密记录。发现协议、共享码和预览不写入数据库。
 
 详见 [异地组网边界与构建说明](MESH.md)。
 
@@ -194,7 +194,9 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
   材质，扩展客户区并回读 DWM 属性确认请求成功；Mica 根表面不再覆盖额外的 tint。
   不支持的材质退化为不透明面板。Linux 当前使用不透明背景。
 
-开发验证可在隔离的 `XROSS_HOME` 下设置 `XROSS_TRAY_PREVIEW=1`，启动后自动打开浮窗；
+发布时，在构建环境中将 `XROSE_GITHUB_REPOSITORY` 设为公开 GitHub 仓库的 `owner/repository`，即可启用关于页的项目链接与客户端版本检查。未配置时仍可检查内核更新。
+
+开发验证可在隔离的 `XROSE_HOME` 下设置 `XROSE_TRAY_PREVIEW=1`，启动后自动打开浮窗；
 debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开，用于检查隐藏后的复用路径。
 
 ## 安全边界
@@ -212,7 +214,7 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 - 组网预检及路由协调保留内核校验报告和每个网络的最近一次连接错误。代理内核拒绝变更时，根据发生错误的内核种类检查更新；独立的 Tailscale 组件仍按固定摘要验证。版本检查在后台读取配置所选可执行文件的实际版本，按内核种类保存结果。设置页与侧栏共用快照，网络请求失败不覆盖已发现的更新。
 - 提权助手的 Ping 回复携带应用版本和组网协议版本。旧助手仍可响应存活检查；组网连接会先验证其协议。更新助手会用当前可执行文件重新注册并启动服务；在同一次提权中请求启动，只有收到当前版本的回复才报告完成。安装/更新/卸载/启动通过 UAC（`ShellExecuteEx runas` 等待子进程）、
   `osascript ... with administrator privileges`、`pkexec` 完成，不提供 setuid 包装。
-- `--helper` 在 `xross-app`/`xross-cli` 的 `main` 最前面处理，早于数据库和 GUI；
+- `--helper` 在 `xrose-app`/`xrose-cli` 的 `main` 最前面处理，早于数据库和 GUI；
   helper 进程不会打开用户配置库。
 - 密钥文件 0600；数据库字段以 `enc:v1:` 前缀区分。
 - 代理快照用于崩溃恢复：启动时发现残留即还原，避免用户断网。
@@ -250,7 +252,7 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 组网支持 Windows、macOS、Linux；缺失配置和登录授权需求通过提示呈现。
 
 `AppService::toast()` 保留诊断事件，并在系统通知启用时投递到通知队列；GUI 初始化通知工作线程，无需依赖快照轮询。
-Windows 使用 WinRT toast 和 Xross 应用标识，macOS 使用 UserNotifications 授权与请求接口，
+Windows 使用 WinRT toast 和 Xrose 应用标识，macOS 使用 UserNotifications 授权与请求接口，
 Linux 使用桌面通知服务。系统通知默认关闭；启用后界面隐藏应用内通知，投递错误仅写日志，避免递归通知。
 事件记住产生时的通知通道，关闭开关不会将已投递的系统通知重新显示为应用内提示。30 秒内同内容去重。
 提权助手检查通过异步锁串行执行，已运行时不提示；需要启动或安装时才发通知。
@@ -264,7 +266,7 @@ VPN 参数和 PEM 内容保存在节点凭据中；导入器不会执行 `.ovpn`
 
 ## 路由规则交换
 
-`route/transfer.rs` 定义版本独立于数据库的 `xross-routing` v1 JSON：`rules`、`rule_groups`、`rule_sets`、用于跨配置解析出站组的 `outbound_names`。不交换节点、订阅、运行数据或默认路由设置。导入为规则及分组生成新 ID；再次导入会追加副本。同标签且定义相同的规则集复用，不同定义拒绝整批导入。规则集标签校验同时覆盖显式引用和隐式 Geo 引用；来源限无认证信息及查询参数的 HTTP(S) URL。
+`route/transfer.rs` 定义版本独立于数据库的 `xrose-routing` v1 JSON：`rules`、`rule_groups`、`rule_sets`、用于跨配置解析出站组的 `outbound_names`。不交换节点、订阅、运行数据或默认路由设置。导入为规则及分组生成新 ID；再次导入会追加副本。同标签且定义相同的规则集复用，不同定义拒绝整批导入。规则集标签校验同时覆盖显式引用和隐式 Geo 引用；来源限无认证信息及查询参数的 HTTP(S) URL。
 
 `route/transfer/omega.rs` 按 [SwitchyOmega 的列表解析顺序](https://github.com/FelisCatus/SwitchyOmega/blob/master/omega-pac/src/rule_list.coffee) 转换为同一意图模型。Conditions 保持原顺序，带结果的排除条件使用末尾默认动作；AutoProxy 将例外放在普通条件之前。文件内的默认规则保存在导入分组中，不修改全局默认出站。不能等价转换的浏览器条件计入预览。编译复用现有适配器，sing-box 用网络类型数组表达同时匹配 TCP 和 UDP。
 

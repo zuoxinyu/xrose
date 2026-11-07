@@ -1,6 +1,6 @@
 //! Work around upstream's workspace-relative Packet.lib search path.
 pub fn configure() {
-    println!("cargo:rerun-if-env-changed=XROSS_EASYTIER_SOURCE");
+    println!("cargo:rerun-if-env-changed=XROSE_EASYTIER_SOURCE");
     println!("cargo:rerun-if-env-changed=CARGO_HOME");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -19,7 +19,7 @@ pub fn configure() {
             .join(".cargo")
         });
     let mut candidates = Vec::new();
-    if let Some(root) = std::env::var_os("XROSS_EASYTIER_SOURCE") {
+    if let Some(root) = std::env::var_os("XROSE_EASYTIER_SOURCE") {
         candidates.push(std::path::PathBuf::from(root));
     }
     if let Ok(repos) = std::fs::read_dir(cargo_home.join("git/checkouts")) {
@@ -37,7 +37,7 @@ pub fn configure() {
             }
         }
     }
-    let native=candidates.into_iter().map(|r|r.join("easytier/third_party").join(arch)).find(|p|p.join("Packet.lib").is_file()).expect("Pinned EasyTier native libraries not found. Run cargo fetch --locked, or set XROSS_EASYTIER_SOURCE to the v2.6.4 source root.");
+    let native=candidates.into_iter().map(|r|r.join("easytier/third_party").join(arch)).find(|p|p.join("Packet.lib").is_file()).expect("Pinned EasyTier native libraries not found. Run cargo fetch --locked, or set XROSE_EASYTIER_SOURCE to the v2.6.4 source root.");
     println!("cargo:rustc-link-search=native={}", native.display());
     // Windows' normal adapter enumeration does not use Packet.dll. Delay loading
     // keeps the optional pnet fallback out of GUI startup; no Npcap DLL is shipped.

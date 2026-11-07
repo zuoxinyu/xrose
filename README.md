@@ -1,10 +1,12 @@
-# Xross
+# Xrose
 
 <p align="center">
-  <img src="crates/xross-app/assets/logo-mark.png" width="140" alt="Xross logo" />
+  <img src="crates/xrose-app/assets/logo-mark.png" width="140" alt="Xrose logo" />
 </p>
 
-Xross 是跨平台的 Xray / sing-box 桌面客户端，同时内置异地组网（EasyTier / Tailscale），使用 Rust 与 GPUI Kit 构建，支持 Windows、macOS 和 Linux。
+**Xrose** 是 [Project Xristina](docs/MILESTONE.M1.PROJECT-XRISTINA.md) 旗下的桌面客户端。Project Xristina 是规划中的自研网络内核项目。Xrose 目前支持 Xray 和 sing-box，集成 EasyTier 与 Tailscale 异地组网，使用 Rust 与 GPUI Kit 构建，可在 Windows、macOS 和 Linux 上运行。
+
+Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 **ex-rose**。这个名字致敬 X Japan 的歌曲《ROSE OF PAIN》。
 
 ![节点页面](docs/screenshots/nodes.png)
 
@@ -55,7 +57,7 @@ Xross 是跨平台的 Xray / sing-box 桌面客户端，同时内置异地组网
 
 支持按节点、程序名和主域名汇总。多个程序实例按名称合并，子域名合并至主域名。默认使用上下行堆叠柱状图，每页 10 项；可切换表格，每次显示 50 项。两种视图共用统计范围，切换不改变数据。上传、下载汇总覆盖所选区间的全部记录。
 
-「运行以来」表示本次 Xross 启动以来已开启统计的时段，内核重启不会清零。「日／周／月」使用采集时的本地自然日期，每周从周一开始，可通过周期按钮或日期跳转回溯。历史长期保存在本机数据库；卡片菜单的「清空统计」会在确认后删除全部历史和本次累计。
+「运行以来」表示本次 Xrose 启动以来已开启统计的时段，内核重启不会清零。「日／周／月」使用采集时的本地自然日期，每周从周一开始，可通过周期按钮或日期跳转回溯。历史长期保存在本机数据库；卡片菜单的「清空统计」会在确认后删除全部历史和本次累计。
 
 sing-box 提供三个统计维度；短连接或缺少元数据的部分可能显示为「未归因」「未知」或「无域名」。Xray 仅提供节点分类，进程和域名视图的区间合计仍包含其流量。Xray 节点计数可能包含协议开销及前置代理流量，节点相加可能与区间合计不同。统计不包含绕过内核的系统流量，也不作为计费依据。
 
@@ -63,7 +65,7 @@ sing-box 提供三个统计维度；短连接或缺少元数据的部分可能�
 
 ## 导入和导出路由
 
-打开「路由 → 路由规则 → 导入 / 导出」选择文件。导入前可查看规则、分组、规则集数量及转换提示，确认后追加到当前配置。运行中的内核需点击「应用配置」才会使用新规则。单条规则和整个分组可从各自的「⋯」菜单导出。Xross JSON 保留规则顺序、启用状态、动作和引用的规则集；只导出规则集时，文件包含来源与更新设置，不包含已下载的数据。要使用导入的规则集，在「添加规则」中选择「规则集」并填写标签。
+打开「路由 → 路由规则 → 导入 / 导出」选择文件。导入前可查看规则、分组、规则集数量及转换提示，确认后追加到当前配置。运行中的内核需点击「应用配置」才会使用新规则。单条规则和整个分组可从各自的「⋯」菜单导出。Xrose JSON 保留规则顺序、启用状态、动作和引用的规则集；只导出规则集时，文件包含来源与更新设置，不包含已下载的数据。要使用导入的规则集，在「添加规则」中选择「规则集」并填写标签。
 
 SwitchyOmega 请使用自动切换情景模式导出的 **Conditions 规则列表**，或 AutoProxy 列表（明文、Base64 均可）。导入后生成一个独立分组，排在已有自定义分组之后、未分组和预设规则之前。不带结果的列表将匹配项转为代理、例外转为直连，未命中时继续匹配原配置。带 `@with result` 的列表保留指定动作；末尾的 `* +情景模式` 会接管该分组之后的 TCP / UDP 流量，可在分组中禁用这条规则。
 
@@ -82,7 +84,7 @@ SwitchyOmega 请使用自动切换情景模式导出的 **Conditions 规则列�
 
 EasyTier 的新增和编辑窗口提供[高级设置](docs/MESH.md#easytier-高级设置)，可按网络调整 P2P 策略、KCP / QUIC、MTU、打洞与转发。
 
-成员列表显示已知的出口、子网、Tailscale SSH 和客户端信息。两台 Xross 连接同一组网后，可以选择要共享的节点、订阅、组网配置及自定义规则，并在接收端逐项预览、选择和合并。[发现与同步](docs/MESH.md#设备发现与配置同步)
+成员列表显示已知的出口、子网、Tailscale SSH 和客户端信息。两台 Xrose 连接同一组网后，可以选择要共享的节点、订阅、组网配置及自定义规则，并在接收端逐项预览、选择和合并。[发现与同步](docs/MESH.md#设备发现与配置同步)
 
 - **两种后端**：EasyTier 内置于应用；Tailscale 支持官方服务和自建控制服务器，使用浏览器授权登录。
 - **出口节点**：使用远端设备作为出口，或将本机发布为出口。
@@ -99,7 +101,7 @@ EasyTier 的新增和编辑窗口提供[高级设置](docs/MESH.md#easytier-高�
 要求：Rust 1.95+，Windows、macOS 或 Linux 桌面。Linux 需要 GTK3、`libxkbcommon` 与 `wayland-client`（或 X11）开发库。Windows 构建参见 [组网文档](docs/MESH.md)。
 
 ```bash
-cargo run -p xross-app
+cargo run -p xrose-app
 ```
 
 首次使用：
@@ -108,30 +110,30 @@ cargo run -p xross-app
 2. 在“设置 → Core 管理”下载 Xray 或 sing-box。
 3. 点击右上角“启动”。修改路由或 DNS 后，点击「立即应用并重载」，或在「设置 → Core」开启「热重载」自动应用。热重载默认关闭。开启后，应用也会在发现已安装的提权助手版本不匹配时更新助手，系统可能要求授权。
 
-使用 TUN 或组网时，按提示安装提权助手。升级 Xross 后，可在「设置 → 提权助手与环境检查」点击「更新助手」，载入当前版本。更新会中断由助手管理的连接；新助手会自动启动，版本确认后才显示完成。
+使用 TUN 或组网时，按提示安装提权助手。升级 Xrose 后，可在「设置 → 提权助手与环境检查」点击「更新助手」，载入当前版本。更新会中断由助手管理的连接；新助手会自动启动，版本确认后才显示完成。
 
-组网连接失败的原因会保留在对应的网络卡片上。若代理内核无法应用组网配置，Xross 会检查该内核是否有新版。侧栏「设置」出现「更新」时，可在设置中查看待更新的内核、应用或助手。更新代理内核后，请重新应用代理配置，再连接组网。
+组网连接失败的原因会保留在对应的网络卡片上。若代理内核无法应用组网配置，Xrose 会检查该内核是否有新版。侧栏「设置」出现「更新」时，可在设置中查看待更新的内核、应用或助手。更新代理内核后，请重新应用代理配置，再连接组网。
 
-使用独立数据目录：`XROSS_HOME=/tmp/xross-demo cargo run -p xross-app`。
+使用独立数据目录：`XROSE_HOME=/tmp/xrose-demo cargo run -p xrose-app`。
 
 ## CLI
 
-`xross-cli` 是无界面入口，可用于脚本和调试：
+`xrose-cli` 是无界面入口，可用于脚本和调试：
 
 ```bash
-xross-cli parse ./subscription.txt           # 解析订阅并列出节点
-xross-cli import ./sub.yaml                  # 导入订阅文件
-xross-cli route preview ./rules.sorl         # 预览 SwitchyOmega 转换结果
-xross-cli route convert ./rules.sorl -o ./rules.json  # 仅转换，不导入当前配置
-xross-cli route import ./rules.sorl          # 追加到当前配置
-xross-cli route export -o ./routing.json     # 导出规则、分组和规则集
-xross-cli compile --core sing-box -o c.json  # 编译配置
-xross-cli check --core sing-box              # 用真实 Core 校验
-xross-cli doctor                             # TUN / 端口 / 权限检查
-xross-cli mesh --help                        # 组网命令
+xrose-cli parse ./subscription.txt           # 解析订阅并列出节点
+xrose-cli import ./sub.yaml                  # 导入订阅文件
+xrose-cli route preview ./rules.sorl         # 预览 SwitchyOmega 转换结果
+xrose-cli route convert ./rules.sorl -o ./rules.json  # 仅转换，不导入当前配置
+xrose-cli route import ./rules.sorl          # 追加到当前配置
+xrose-cli route export -o ./routing.json     # 导出规则、分组和规则集
+xrose-cli compile --core sing-box -o c.json  # 编译配置
+xrose-cli check --core sing-box              # 用真实 Core 校验
+xrose-cli doctor                             # TUN / 端口 / 权限检查
+xrose-cli mesh --help                        # 组网命令
 ```
 
-其余子命令见 `xross-cli --help`。
+其余子命令见 `xrose-cli --help`。
 
 ## 文档
 

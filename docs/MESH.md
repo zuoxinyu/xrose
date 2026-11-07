@@ -2,9 +2,9 @@
 
 EasyTier 2.6.4 作为 Rust 库静态链接，源码提交固定为
 `8428a89d2dabc94c97d370ec607c6ca142473626`，保留上游默认 feature，
-不依赖外部 EasyTier 可执行文件。版本随 Xross 发布，`Cargo.lock`
+不依赖外部 EasyTier 可执行文件。版本随 Xrose 发布，`Cargo.lock`
 同时锁定其传递依赖。普通 GUI 仅持有加密配置及脱敏快照；提权助手启动当前
-Xross 可执行文件的私有 `--mesh-worker` 模式，工作进程独立运行 Tokio 和
+Xrose 可执行文件的私有 `--mesh-worker` 模式，工作进程独立运行 Tokio 和
 `Instance`。
 
 Tailscale 使用单独的 sing-box 1.14.4，组件下载与启动前均验证固定 SHA-256。
@@ -33,9 +33,9 @@ EasyTier 的上游构建脚本还会下载 VC-LTL/YY-Thunks 原生兼容库，�
 上游原生工件并审计其来源。静态库并不包含 Windows 内核驱动：连接前下载
 Wintun 0.14.1 官方签名分发包并校验官方 SHA-256，助手解压 DLL 和许可证到
 私有工作目录，仅由工作进程加载。EasyTier 的 TUN 依赖也会验证 DLL 签名。
-Xross 构建层修正上游 `Packet.lib` 的相对搜索路径，并延迟加载可选的 Packet.dll；
+Xrose 构建层修正上游 `Packet.lib` 的相对搜索路径，并延迟加载可选的 Packet.dll；
 不分发 Npcap DLL，不安装抓包驱动。常规接口枚举使用 Windows API；本轮不提供
-依赖抓包驱动的入口协议。若采用 Cargo vendor，可通过 `XROSS_EASYTIER_SOURCE`
+依赖抓包驱动的入口协议。若采用 Cargo vendor，可通过 `XROSE_EASYTIER_SOURCE`
 指定同一固定提交的源码根目录。
 
 ## 使用
@@ -47,10 +47,10 @@ Windows GUI 及由它安装的计划任务助手在后台运行，不弹出命�
 需要管理员授权时仍显示系统 UAC 提示。
 计划任务绑定安装用户 SID，使用 `InteractiveToken` 和 `HighestAvailable`，
 不以通用 Users 组作为运行身份。旧安装可通过重新安装助手更新启动项。
-安装器将助手复制到数据目录的 `helper/xross-helper.exe`，仅为该副本设置 High
+安装器将助手复制到数据目录的 `helper/xrose-helper.exe`，仅为该副本设置 High
 完整性标签，避免开发目录继承的 Medium 标签限制计划任务及工作进程；GUI 程序
 保持普通权限。权限检测同时检查管理员身份和 High 完整性。
-更新 Xross 后重新安装助手即可替换副本并更新启动项。
+更新 Xrose 后重新安装助手即可替换副本并更新启动项。
 EasyTier 需填写网络名称、密钥及入口节点地址；虚拟 IPv4 留空时自动分配。
 自动地址分配依赖入口连接和同网络设备发现。入口连接、认证或握手失败会报告对应原因；
 已连接入口但未取得地址时，检查同网络设备是否在线，或填写该网络内未占用的静态 IPv4。
@@ -62,8 +62,8 @@ Tailscale 连接时自动校验并补齐组件，也可先点击“安装 Tailsc
 如果卡片一直显示“正在获取登录链接”，请检查控制服务器地址和网络连接，再断开并重新连接。
 Windows 上的登录请求使用系统路由，可通过当前已连接的 VPN 访问控制服务器。网络受限时，需先建立能够访问控制服务器的连接。
 显示“等待管理员批准”时，使用官方服务的管理员可点击“打开设备列表”，在 Machines 页找到标有 Needs approval 的设备，在其菜单中选择 Approve。自建控制服务器由该服务器的管理员批准。批准后会自动完成连接，断开和重连会保留登录状态。
-独立 Tailscale 客户端与 Xross 使用相同地址空间，不能同时接管这些系统路由。
-只使用 Xross 时，应先断开独立客户端（`tailscale down`，保留身份）；Xross 会明确提示网段占用，
+独立 Tailscale 客户端与 Xrose 使用相同地址空间，不能同时接管这些系统路由。
+只使用 Xrose 时，应先断开独立客户端（`tailscale down`，保留身份）；Xrose 会明确提示网段占用，
 不会自动停止其他 VPN。macOS 冲突检查覆盖普通网卡及 utun 点对点网卡的 IPv4/IPv6 地址。
 连接按钮会等待后端启动结果；进入待登录状态时提示浏览器授权，启动失败时直接
 显示错误。Windows 首次创建虚拟网卡的 API 就绪等待上限为 30 秒。组件提前退出与
@@ -84,15 +84,15 @@ EasyTier 需显式填写入口；默认不使用或发布出口、不发布本�
 | 传输与代理 | TCP 加速选关闭、KCP 或 QUIC；允许接收 KCP / QUIC 代理；用户态 TCP/IP 栈；多线程；传输加密；MTU（400–1380，留空使用内置值） |
 | NAT 穿透与转发 | TCP / UDP / 对称 NAT 打洞；UPnP / NAT-PMP 端口映射；中继对端 RPC；系统转发；Windows 另有局域网 UDP 广播中继 |
 
-原有配置保持加密、绑定物理网卡和多线程，默认不使用 IPv6 传输、TCP 加速、自动端口映射、系统转发或广播中继。关闭传输加密需与对端一致；选择系统转发需自行配置宿主机转发和回程路由。IPv6 传输仅改变设备间的连接方式，虚拟子网与出口仍使用 IPv4。无 TUN、自动获取公网 IPv6、由 EasyTier 设置系统 DNS 未开放，以保留 Xross 的网卡生命周期、路由白名单及 DNS 清理机制。
+原有配置保持加密、绑定物理网卡和多线程，默认不使用 IPv6 传输、TCP 加速、自动端口映射、系统转发或广播中继。关闭传输加密需与对端一致；选择系统转发需自行配置宿主机转发和回程路由。IPv6 传输仅改变设备间的连接方式，虚拟子网与出口仍使用 IPv4。无 TUN、自动获取公网 IPv6、由 EasyTier 设置系统 DNS 未开放，以保留 Xrose 的网卡生命周期、路由白名单及 DNS 清理机制。
 
 ### 设备发现与配置同步
 
-网络卡片显示本机设备名。点击「设备列表」可收起或展开该网络的成员。每行设备右端的“⋯”提供设备操作。有地址时可选“探测设备”，包括离线设备。探测结果在该设备的标签区显示 6 秒。在线且已发现 Xross 的设备还可选“接收配置”，在弹窗中输入共享码并核对待导入项目。
+网络卡片显示本机设备名。点击「设备列表」可收起或展开该网络的成员。每行设备右端的“⋯”提供设备操作。有地址时可选“探测设备”，包括离线设备。探测结果在该设备的标签区显示 6 秒。在线且已发现 Xrose 的设备还可选“接收配置”，在弹窗中输入共享码并核对待导入项目。
 
-成员列表标出出口节点、子网路由、客户端类型与已知版本。EasyTier 成员提供版本和发布的网段。Tailscale 成员提供操作系统；公布 SSH 主机密钥时显示 “Tailscale SSH”。该标记表示设备提供此功能，实际登录仍受访问策略限制。当前 Tailscale 组件的成员接口未提供逐设备版本和网段。兼容的 Xross 对端通过发现握手补充应用版本、操作系统和配置中发布的子网，控制端批准状态以 Tailscale 为准。
+成员列表标出出口节点、子网路由、客户端类型与已知版本。EasyTier 成员提供版本和发布的网段。Tailscale 成员提供操作系统；公布 SSH 主机密钥时显示 “Tailscale SSH”。该标记表示设备提供此功能，实际登录仍受访问策略限制。当前 Tailscale 组件的成员接口未提供逐设备版本和网段。兼容的 Xrose 对端通过发现握手补充应用版本、操作系统和配置中发布的子网，控制端批准状态以 Tailscale 为准。
 
-1. 在两台设备上运行支持发现的 Xross，连接同一个 EasyTier 或 Tailscale 网络。旧版提权助手需在“设置”中更新。网络策略需允许成员之间访问 TCP 46973。成功发现后，成员行显示 Xross 版本。
+1. 在两台设备上运行支持发现的 Xrose，连接同一个 EasyTier 或 Tailscale 网络。旧版提权助手需在“设置”中更新。网络策略需允许成员之间访问 TCP 46973。成功发现后，成员行显示 Xrose 版本。
 2. 发送端打开网络卡片上的“⋯ → 共享配置”，在弹窗中勾选节点、节点订阅、组网配置或自定义规则，再核对要发送的具体项目。可以清空勾选后逐项选择。生成并复制共享码，私下交给接收者。共享包含所选数据必需的凭据与订阅地址。关闭弹窗后，共享码在十分钟有效期内仍可使用。重新打开「共享配置」可复制共享码或停止共享。
 3. 接收端打开发送设备行右侧的“⋯”，选择“接收配置”，在弹窗中输入共享码并预览。新增项目默认选中，相同项目跳过。勾选冲突项会采用发送端的配置。确认“合并所选项目”后写入本机；修改正在使用的代理配置后按现有流程应用。两台设备可以互换发送方与接收方。
 
@@ -102,37 +102,37 @@ EasyTier 需显式填写入口；默认不使用或发布出口、不发布本�
 
 在“组网”页连接网络后，打开“节点”页，选择手动出站组并点选在线的组网出口。首次选择时自动分配本地端口。每个组网配置同时使用一个远端出口；更换设备会短暂重连该组网，引用该组网出口的规则也会使用新设备。随后可在同一列表中切回普通代理。
 
-Tailscale 显示控制端已批准的出口。EasyTier 可发现通过新版 Xross 发布的出口、发布 IPv4 默认网段的设备，以及配置中已指定的出口。仅在原生 EasyTier 开启出口转发的设备，需要在组网配置中填写一次虚拟 IPv4。
+Tailscale 显示控制端已批准的出口。EasyTier 可发现通过新版 Xrose 发布的出口、发布 IPv4 默认网段的设备，以及配置中已指定的出口。仅在原生 EasyTier 开启出口转发的设备，需要在组网配置中填写一次虚拟 IPv4。
 
 - **远端子网**：填写要访问的远端 CIDR，逗号分隔；不接受默认路由。
-- **本机发布子网**：填写允许组网设备访问的本机可达 CIDR。EasyTier 使用内置转发；Tailscale 使用用户态 endpoint。无需由 Xross 修改系统 IP forwarding 开关。
+- **本机发布子网**：填写允许组网设备访问的本机可达 CIDR。EasyTier 使用内置转发；Tailscale 使用用户态 endpoint。无需由 Xrose 修改系统 IP forwarding 开关。
 - **出口节点**：EasyTier 填写出口设备的虚拟 IPv4；Tailscale 填写出口设备名或 IP。
 - **发布本机为出口节点**：允许其他设备将本机作为互联网出口。不能同时使用远端出口。
 - **出口出站端口**：填写未占用的 1024–65535 本地端口，例如 `19081`。保存后自动生成“网络名 · 出口”节点，可在出站组中选择或用于规则；组网须先连接。清空端口会移除生成的节点，修改配置保持出站组引用。出站仅监听 loopback，并要求随机认证凭据；组网退出后连接失败，不回退本机直连。全局使用出口时，将代理出站组切到该节点并启用代理 TUN。
 - **端口转发**：在组网页的「端口转发」卡片点击「添加转发」，在弹窗选择方向、所属网络和 TCP / UDP。已有规则通过行尾「⋯」编辑或删除，也可在编辑时切换方向。IPv6 地址使用方括号。
 - **本机 → 组网**：填写本地监听地址和端口，以及目标组网设备的 IP 与端口。仅供本机访问时监听 `127.0.0.1`，监听 `0.0.0.0` 会向可达的局域网设备开放该端口。
-- **组网 → 本机**：填写组网服务端口与本机可达的目标 IP 和端口。组网成员访问 `本机虚拟地址:服务端口`，请求转到目标服务。例如服务端口 `18080`、目标 `127.0.0.1:8080` 可共享本机 Web 服务；目标也可以是本机可达的局域网服务。无需发布整个子网。EasyTier 只绑定该网络的虚拟 IPv4；Tailscale 经本设备的虚拟 IPv4/IPv6 接收，仅放行已配置的协议端口。访问需满足组网访问策略及本机防火墙规则，Xross 不自动放宽防火墙。目标服务看到的是转发设备建立的连接。两种方向的规则均保存在本机，不参与配置同步。
+- **组网 → 本机**：填写组网服务端口与本机可达的目标 IP 和端口。组网成员访问 `本机虚拟地址:服务端口`，请求转到目标服务。例如服务端口 `18080`、目标 `127.0.0.1:8080` 可共享本机 Web 服务；目标也可以是本机可达的局域网服务。无需发布整个子网。EasyTier 只绑定该网络的虚拟 IPv4；Tailscale 经本设备的虚拟 IPv4/IPv6 接收，仅放行已配置的协议端口。访问需满足组网访问策略及本机防火墙规则，Xrose 不自动放宽防火墙。目标服务看到的是转发设备建立的连接。两种方向的规则均保存在本机，不参与配置同步。
 - 两种方向均可在已连接时增删和编辑，无需断开组网或重启代理；其他规则继续转发。删除规则会停止该规则的转发。仅修改目标时，已有 TCP 连接继续使用原目标，新连接使用新目标。断开组网会释放本地监听，下次连接时恢复已保存的规则。旧版提权助手需要先在「设置」中更新。
 
-Tailscale 的子网和出口发布需要控制台批准（或配置 autoApprovers），使用者需符合 tailnet 访问策略。Xross 不修改控制端策略。仅填写出口节点不会安装宿主机默认路由。
+Tailscale 的子网和出口发布需要控制台批准（或配置 autoApprovers），使用者需符合 tailnet 访问策略。Xrose 不修改控制端策略。仅填写出口节点不会安装宿主机默认路由。
 
 EasyTier 出口网关支持 IPv4 TCP/UDP。TCP/UDP 域名请求通过系统解析器解析为 IPv4 目标，代理核心也可依据自身 DNS 配置预解析。端口转发目标为 IP 地址。
 
 CLI 示例（所有测试都使用隔离目录）：
 
 ```powershell
-$env:XROSS_HOME = "$env:TEMP\xross-mesh-test"
-xross-cli mesh install
-xross-cli mesh check
-xross-cli mesh api-check
-xross-cli mesh save profile.json
-xross-cli mesh list
-xross-cli mesh connect <EasyTier-ID> <Tailscale-ID> --seconds 120
-xross-cli mesh status
-xross-cli mesh probe <ID> <设备IP>
-xross-cli mesh disconnect <ID>
-xross-cli mesh logout <ID>
-xross-cli mesh doctor
+$env:XROSE_HOME = "$env:TEMP\xrose-mesh-test"
+xrose-cli mesh install
+xrose-cli mesh check
+xrose-cli mesh api-check
+xrose-cli mesh save profile.json
+xrose-cli mesh list
+xrose-cli mesh connect <EasyTier-ID> <Tailscale-ID> --seconds 120
+xrose-cli mesh status
+xrose-cli mesh probe <ID> <设备IP>
+xrose-cli mesh disconnect <ID>
+xrose-cli mesh logout <ID>
+xrose-cli mesh doctor
 ```
 
 `save -` 从标准输入读取 JSON，密钥不得放进命令行。示例配置只使用假数据：
@@ -141,7 +141,7 @@ xross-cli mesh doctor
 {
   "name": "测试网络",
   "provider": "easy_tier",
-  "hostname": "xross-test",
+  "hostname": "xrose-test",
   "network_name": "example-network",
   "network_secret": "replace-in-private-file",
   "peers": ["tcp://192.0.2.1:11010"],
@@ -153,7 +153,7 @@ xross-cli mesh doctor
 Tailscale 配置仅需 `provider: "tailscale"`、名称及 hostname。`connect` 在前台保持
 会话；Ctrl+C、超时、GUI 退出或所有者进程崩溃会停止工作进程。关闭到托盘保持
 连接。跨进程的 status/disconnect/logout 仍需安装用户通过助手鉴权。
-隔离测试助手也必须以同一个 `XROSS_HOME` 启动，避免身份目录落入正式助手目录。
+隔离测试助手也必须以同一个 `XROSE_HOME` 启动，避免身份目录落入正式助手目录。
 
 ## 路由、DNS 与权限边界
 
@@ -175,7 +175,7 @@ TUN 使用专用地址 `10.255.253.1/30` 和 `fdfe:dcba:9877::1/126`（连接前
 
 Tailscale DNS 在 Windows/Linux 监听 `127.0.0.153:53`，macOS 监听 `127.0.0.1:53`。端口已占用时连接会失败，需先释放监听端口。DNS 只设置当前 tailnet 完整后缀，
 不改全局 DNS、不设置搜索后缀；代理内相同域名优先交给该解析器而非 fake-IP。
-DNS 操作先写归属记录，正常退出及助手下次启动只清理 Xross 对应规则。macOS 不覆盖其他程序已有的 resolver 文件；Linux 只修改当前组网接口的解析器和路由域。
+DNS 操作先写归属记录，正常退出及助手下次启动只清理 Xrose 对应规则。macOS 不覆盖其他程序已有的 resolver 文件；Linux 只修改当前组网接口的解析器和路由域。
 助手校验协议版本、命名管道对端 PID、进程 SID 和随机会话凭证；进程句柄避免
 PID 重用，Job Object 确保工作进程及其子进程随助手退出。Unix 使用内核对端 UID/PID 鉴权；工作进程独立进程组在停止或所有者退出时整体回收。
 Windows 管道显式设置同用户 ACL 和 Medium 完整性标签，允许普通权限 GUI
@@ -195,14 +195,14 @@ SQLite v3 的组网配置独立加密保存。普通快照不含网络密钥，�
 网络上改默认网关、全局 DNS、OpenWrt 服务或防火墙。没有隔离环境时该项待验证。
 
 `scripts/mesh-smoke-windows.ps1` 是独立于助手 Job Object 的有时限回收脚本。
-它只接受 TEMP 下的测试目录，通过随机 `XROSS_HELPER_SOCKET` 与正式助手隔离，
+它只接受 TEMP 下的测试目录，通过随机 `XROSE_HELPER_SOCKET` 与正式助手隔离，
 监测原有默认路由、DNS、管理端口和 HTTPS 连通性。`-ProbeAddresses` 限定探测
 目标，`-ProbeTcpPort` 允许对明确指定的业务端口验证 TCP，`-DnsName` 验证完整域名；
 `-CrashOwner` 在连通后结束测试所有者，并核对网卡和所属 NRPT 规则已清理。
 脚本需要 UAC 提权，不安装永久服务，也不修改路由器。
 
-`scripts/tun-smoke-windows.ps1` 为 `cargo run -p xross-cli --example tun_smoke`
-提供独立助手与回收监控；两者须使用同一 TEMP 测试目录和随机 `XROSS_HELPER_SOCKET`。
+`scripts/tun-smoke-windows.ps1` 为 `cargo run -p xrose-cli --example tun_smoke`
+提供独立助手与回收监控；两者须使用同一 TEMP 测试目录和随机 `XROSE_HELPER_SOCKET`。
 测试目录须预先登记 sing-box 核心，示例只创建 `auto_route=false`、`dns_mode=disabled`
 的受限网卡，验证助手代启、日志、两次启停；`--crash-owner` 验证客户端异常退出回收。
 结束后写入测试目录的 `finish.flag`，监控程序清理助手并输出 `guardian-result.json`。
@@ -215,7 +215,7 @@ SQLite v3 的组网配置独立加密保存。普通快照不含网络密钥，�
 - 官方 macOS sing-box 1.14.4 通过默认组网、远端出口、子网与出口发布、TCP/UDP 转发及代理共存配置检查。
 - 隔离组件通过 gRPC 版本、鉴权和状态订阅检查；未创建 TUN 或系统 DNS 规则。
 - 隔离 CLI 保存配置后，出口节点可编译为两种代理内核的带认证 SOCKS 出站；macOS 路由基线采集通过。
-- macOS 启动排查：断开独立 Tailscale 客户端后，Xross 完成设备授权、连接与在线设备探测；默认代理 TUN 同时运行。
+- macOS 启动排查：断开独立 Tailscale 客户端后，Xrose 完成设备授权、连接与在线设备探测；默认代理 TUN 同时运行。
 - macOS 隔离 EasyTier 验证：静态 IPv4 网卡启动通过；内置 2.6.4 与本机官方 2.4.5 无 TUN 测试端完成 TCP 握手、自动 IPv4 分配和网卡就绪，结束后清理测试进程和网卡。该结果不替代远端部署的认证及策略检查。
 - macOS 真实 EasyTier 入口重新填写网络名称与密钥后连接成功，在线设备 ICMP 探测通过；与 Tailscale 和代理 TUN 同时在线，无运行错误。
 - 回归测试覆盖握手错误脱敏、地址分配与网卡错误区分、macOS 点对点 IPv4 识别和 Tailscale 地址空间冲突提示。

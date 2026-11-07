@@ -30,7 +30,7 @@
 
 ### 构建与发布
 
-- [ ] CI：在 Windows / macOS / Linux 上构建，运行 `cargo test -p xross-core`，检查格式与 clippy。
+- [ ] CI：在 Windows / macOS / Linux 上构建，运行 `cargo test -p xrose-core`，检查格式与 clippy。
 - [ ] 打包：Windows 安装包、macOS `.app` / dmg、Linux AppImage / deb。
 
 ## 已知限制

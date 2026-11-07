@@ -1,0 +1,57 @@
+[package]
+name = "xrose-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+xrose-core = { path = "../xrose-core" }
+gpui-kit = "0.8.1"
+gpui-base = "0.8.1"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+smallvec = "1"
+env_logger = "0.11"
+parking_lot.workspace = true
+raw-window-handle.workspace = true
+
+[build-dependencies]
+embed-resource = "3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.25"
+objc = "0.2"
+block.workspace = true
+fs2.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+notify-rust.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winreg.workspace = true
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Shell",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni.workspace = true
+
+[lints.rust]
+# `objc`'s `msg_send!`/`class!`/`sel!` macros expand to
+# `cfg_attr(feature = "cargo-clippy", ...)`. The feature is not declared by
+# this crate, so test it as an expected value instead of silencing all
+# unexpected-cfg checking.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }

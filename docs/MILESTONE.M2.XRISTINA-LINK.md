@@ -3,13 +3,13 @@
 > [!IMPORTANT]
 > **里程碑定位（Project Xristina M2）**：在 M0（直连一等公民与可观测工作台，参见 [MILESTONE.M0.DIRECT-AS-FIRST-CLASS.md](MILESTONE.M0.DIRECT-AS-FIRST-CLASS.md)）与 M1（单网卡 Monolithic TUN 地基与直连守护，参见 [MILESTONE.M1.PROJECT-XRISTINA.md](MILESTONE.M1.PROJECT-XRISTINA.md)）奠定自研数据面之后，**M2 优先攻坚 Project Xristina 的核心灵魂——自研高性能、高隐蔽防探测协议 `Xristina Link`（代号 XLP）与独立极简服务端 `xristina-server`**。
 > 
-> 本里程碑跳过繁重且无差异化的第三方历史协议堆叠，优先完成 Xross 专属的端到端抗封锁通道与一键自建闭环，使用户在零第三方商业订阅、零外部 Go 核心（Xray / sing-box）依赖下即可享受最高规格的抗审查跨境连接。
+> 本里程碑跳过繁重且无差异化的第三方历史协议堆叠，优先完成 Xrose 专属的端到端抗封锁通道与一键自建闭环，使用户在零第三方商业订阅、零外部 Go 核心（Xray / sing-box）依赖下即可享受最高规格的抗审查跨境连接。
 
 ---
 
 ## 一、 战略承接：为什么优先落地自研协议而非通用兼容代理栈？
 
-在传统客户端开发路线中，团队通常耗费数月甚至一年手写实现 VLESS、Trojan、Shadowsocks-2022、VMess、Hysteria2 等十余种开源协议栈。但在 Xross 体系中，外部 `sing-box` 与 `Xray` 已能完美编排这些协议。直接在 M2 重复造轮子不仅边际收益极低，且开源通用协议因代码和状态机完全公开，在面对深度包检测（DPI）与主动探测时始终处于被动防御态势。
+在传统客户端开发路线中，团队通常耗费数月甚至一年手写实现 VLESS、Trojan、Shadowsocks-2022、VMess、Hysteria2 等十余种开源协议栈。但在 Xrose 体系中，外部 `sing-box` 与 `Xray` 已能完美编排这些协议。直接在 M2 重复造轮子不仅边际收益极低，且开源通用协议因代码和状态机完全公开，在面对深度包检测（DPI）与主动探测时始终处于被动防御态势。
 
 将 **Xristina Link 提升为紧随 M1 地基后的第一优先级代理里程碑（M2）**，具备压倒性的工程与产品优势：
 
@@ -18,7 +18,7 @@
 | **核心技术壁垒** | 无护城河，协议特征公开透明，极易被防火长城（GFW）与企业网 DPI 批量特征库针对封锁。 | **零公开特征对抗**：独创 RFC 9266 TLS 1.3 Exporter SPA 认证、内层握手形态塑形（Staged Morphing）与混合多载波（Poly-Carrier）。 |
 | **服务端闭环体验** | 用户需在 VPS 上折腾第三方复杂的面板、安装脚本与兼容配置，极易因回落（Fallback）配置失误暴露主动探测侧信道。 | **纯 Rust 极简单二进制 `xristina-server`**：内存 < 15MB，内置 ACME 证书与真实 Web 站点，提供「一键部署脚本 + 客户端扫码/URI 导入」全闭环。 |
 | **自研数据面磨砺** | 在复杂的第三方历史方言中调试单网卡，难以厘清协议层与 TUN 层的边界 Bug。 | **用纯净内生协议检验 Monolithic TUN**：全流程纯 Rust 零拷贝直通，直接奠定高吞吐（10Gbps+）与低延迟的黄金基线。 |
-| **演进时序收益** | 需等待全协议完成才具有独立代理价值，周期冗长。 | **M2 一经交付，Xross 即可脱离 sing-box/Xray 作为独立端到端加密代理客户端发布！** |
+| **演进时序收益** | 需等待全协议完成才具有独立代理价值，周期冗长。 | **M2 一经交付，Xrose 即可脱离 sing-box/Xray 作为独立端到端加密代理客户端发布！** |
 
 ### 里程碑交付时序与依赖全景
 
@@ -214,17 +214,17 @@ flowchart TD
 * **一键 VPS 部署与节点导出**：
   * 提供官方一行脚本：
     ```bash
-    curl -fsSL https://get.xross.network/server.sh | sudo bash -s -- --domain mynode.example.org
+    curl -fsSL https://get.xrose.example/server.sh | sudo bash -s -- --domain mynode.example.org
     ```
   * 脚本执行完成后，终端直接输出彩色的专属节点 URI 与二维码：
     ```text
     xlp://usr_a1b2c3d4@mynode.example.org:443?sni=mynode.example.org&mode=web&carrier=poly&name=Tokyo-01
     ```
 
-#### 2. 意图模型与核心库适配（`crates/xross-core`）
+#### 2. 意图模型与核心库适配（`crates/xrose-core`）
 * **涉及文件**：
-  * [crates/xross-core/src/model/node.rs](../crates/xross-core/src/model/node.rs)
-  * [crates/xross-core/src/service.rs](../crates/xross-core/src/service.rs)
+  * [crates/xrose-core/src/model/node.rs](../crates/xrose-core/src/model/node.rs)
+  * [crates/xrose-core/src/service.rs](../crates/xrose-core/src/service.rs)
 * **节点模型扩展**：
   ```rust
   #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -252,18 +252,18 @@ flowchart TD
       XristinaLink(XlpNodeConfig),
   }
   ```
-* 增强 `xross://` 与 `xlp://` 链接解析器，支持一键剪贴板导入。
+* 增强 `xrose://` 与 `xlp://` 链接解析器，支持一键剪贴板导入。
 
 #### 3. 桌面端 UI 与 CLI 命令适配
 * **涉及文件**：
-  * `crates/xross-app/src/ui/nodes.rs`
-  * `crates/xross-app/src/ui/menus.rs`
-  * [crates/xross-cli/src/main.rs](../crates/xross-cli/src/main.rs)
+  * `crates/xrose-app/src/ui/nodes.rs`
+  * `crates/xrose-app/src/ui/menus.rs`
+  * [crates/xrose-cli/src/main.rs](../crates/xrose-cli/src/main.rs)
 * **交互呈现**：
   * **节点列表高亮展示**：XLP 协议节点行带有专属紫青渐变或 Accent 高亮微标 `Xristina Link`；
   * **实时载波状态胶囊**：在节点详情中动态展示当前载波状态——`QUIC 主载波 (RTT: 48ms · 丢包: 0.1%)` 或 `TCP 轮转 (已传输: 12MB/50MB)`；若触发了载波故障迁移，出现微交互提醒并记录在连接日志中；
-  * **一键 VPS 部署集成**：在节点列表的「添加节点」弹窗中，除原有的「导入订阅」与「手动添加」外，提供「自建节点（SSH 一键部署）」向导，用户输入 VPS IP 与 SSH 凭据，Xross 后台自动化完成 `xristina-server` 安装并直接把新节点写入本地 `AppModel`！
-  * **CLI 增强**：新增 `xross-cli xlp ping <node-id>` 与 `xross-cli xlp deploy` 运维子命令。
+  * **一键 VPS 部署集成**：在节点列表的「添加节点」弹窗中，除原有的「导入订阅」与「手动添加」外，提供「自建节点（SSH 一键部署）」向导，用户输入 VPS IP 与 SSH 凭据，Xrose 后台自动化完成 `xristina-server` 安装并直接把新节点写入本地 `AppModel`！
+  * **CLI 增强**：新增 `xrose-cli xlp ping <node-id>` 与 `xrose-cli xlp deploy` 运维子命令。
 
 ---
 
@@ -273,10 +273,10 @@ flowchart TD
 | :--- | :--- | :--- |
 | **`xristina-link`** *(新建独立 Crate)* | `crates/xristina-link/src/protocol.rs`, `crypto.rs`, `morpher.rs`, `poly_carrier.rs`, `client.rs` | XLP 协议帧编解码、RFC 9266 TLS 1.3 Exporter 鉴权、前导形态塑形器、QUIC/TCP 双载波编排与无感热备迁移 |
 | **`xristina-server`** *(新建独立二进制)* | `crates/xristina-server/src/main.rs`, `web_server.rs`, `auth.rs`, `acme.rs`, `metrics.rs` | 独立极简服务端守护进程、内置 ACME 证书管理、内嵌 Web 站点防探测处理、多用户配额与 CLI 管理 |
-| **`xross-core` 模型与解析** | `crates/xross-core/src/model/node.rs`, `crates/xross-core/src/uri/xlp.rs` *(新增)* | 新增 `Protocol::XristinaLink` 与 `XlpNodeConfig`；支持 `xlp://` 与 `xristina://` URI 解析与导出 |
-| **`xross-core` 运行时适配** | `crates/xross-core/src/adapters/xristina.rs`, `crates/xross-core/src/service.rs` | 将 XLP 出站连接器挂载至 Xristina 引擎分流流水线；实现节点健康度探测与载波切换事件上报 |
-| **`xross-app` 桌面端 UI** | `crates/xross-app/src/ui/nodes.rs`, `crates/xross-app/src/ui/nodes/xlp_modal.rs` *(新增)* | XLP 节点卡片专属高亮徽标、实时双载波监控详情胶囊、添加节点中的「自建 VPS 一键部署」交互向导 |
-| **`xross-cli` 工具链** | [crates/xross-cli/src/main.rs](../crates/xross-cli/src/main.rs), `README.md`, [docs/ARCHITECTURE.md](ARCHITECTURE.md) | 新增 `xross-cli xlp ping` 协议连通性验证与自建部署子命令；同步架构全景与协议规范 |
+| **`xrose-core` 模型与解析** | `crates/xrose-core/src/model/node.rs`, `crates/xrose-core/src/uri/xlp.rs` *(新增)* | 新增 `Protocol::XristinaLink` 与 `XlpNodeConfig`；支持 `xlp://` 与 `xristina://` URI 解析与导出 |
+| **`xrose-core` 运行时适配** | `crates/xrose-core/src/adapters/xristina.rs`, `crates/xrose-core/src/service.rs` | 将 XLP 出站连接器挂载至 Xristina 引擎分流流水线；实现节点健康度探测与载波切换事件上报 |
+| **`xrose-app` 桌面端 UI** | `crates/xrose-app/src/ui/nodes.rs`, `crates/xrose-app/src/ui/nodes/xlp_modal.rs` *(新增)* | XLP 节点卡片专属高亮徽标、实时双载波监控详情胶囊、添加节点中的「自建 VPS 一键部署」交互向导 |
+| **`xrose-cli` 工具链** | [crates/xrose-cli/src/main.rs](../crates/xrose-cli/src/main.rs), `README.md`, [docs/ARCHITECTURE.md](ARCHITECTURE.md) | 新增 `xrose-cli xlp ping` 协议连通性验证与自建部署子命令；同步架构全景与协议规范 |
 
 ---
 

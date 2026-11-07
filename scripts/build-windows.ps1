@@ -24,7 +24,7 @@ try {
     switch ($Action) {
         'build' { cargo build --workspace --locked }
         'check' { cargo check --workspace --locked }
-        'test' { cargo test -p xross-core --locked -- --skip second_acquire_fails }
+        'test' { cargo test -p xrose-core --locked -- --skip second_acquire_fails }
     }
     if ($LASTEXITCODE -ne 0) { throw "cargo $Action failed" }
 } finally { Pop-Location }

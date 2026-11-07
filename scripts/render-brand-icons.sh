@@ -2,17 +2,17 @@
 # Export the bundled icons from the approved X + rose artwork.
 set -eu
 cd "$(dirname "$0")/.."
-art=docs/branding/xross.svg
-assets=crates/xross-app/assets
+art=docs/branding/xrose.svg
+assets=crates/xrose-app/assets
 render() { rsvg-convert -w "$1" -h "$1" -o "$assets/$2" "$art"; }
 render 900 logo-mark.png
 render 512 app-icon.png
 for size in 256 128 96 64; do
     render "$size" "app-icon-$size.png"
 done
-cp "$assets/app-icon-256.png" "$assets/icons/xross.png"
-cp "$assets/app-icon-128.png" "$assets/icons/xross-128.png"
-cp "$art" "$assets/icons/xross.svg"
+cp "$assets/app-icon-256.png" "$assets/icons/xrose.png"
+cp "$assets/app-icon-128.png" "$assets/icons/xrose-128.png"
+cp "$art" "$assets/icons/xrose.svg"
 
 # Optical weights for the 16–22 pt status glyph. The OS supplies the ink;
 # retain only the mark's coverage, with no background, tile, border or badge.

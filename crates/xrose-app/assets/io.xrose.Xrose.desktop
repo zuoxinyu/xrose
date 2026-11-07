@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Xrose
+GenericName=Proxy Client
+GenericName[zh_CN]=代理客户端
+Comment=Xray / sing-box desktop client
+Comment[zh_CN]=Xray / sing-box 桌面客户端
+Exec=xrose-app
+Icon=xrose
+Terminal=false
+Categories=Network;
+Keywords=proxy;xray;sing-box;vpn;代理;科学上网;
+StartupNotify=true
+StartupWMClass=io.xrose.Xrose

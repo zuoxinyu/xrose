@@ -1,22 +1,22 @@
 # AGENTS.md
 
-Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
+Xrose 是 Project Xristina 旗下的 Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。产品名固定写作 `Xrose`，仅首字母大写。
 产品文档与界面文案为中文，英文通过 `tr(lang, zh, en)` 提供。
 
 ## 常用命令
 
-- 构建 `cargo build --workspace`；运行 GUI `cargo run -p xross-app`
-- 测试 `cargo test -p xross-core`
-- 无界面验证优先用 `xross-cli`（`demo`、`seed-demo --home <dir>`、`check --core sing-box --home <dir>`，详见 `--help`）
-- 状态一律用 `XROSS_HOME=/tmp/xross-demo` 或 `--home` 隔离，不得触碰用户真实配置
-- 编译另有模拟数据的源码副本时，必须为副本单独设置 `CARGO_TARGET_DIR`，覆盖构建、测试与运行命令；不得复用主工作区的 `target` 或应用包。验证普通构建时，在新的空目录运行 `xross-cli mesh list --home <dir>`，结果应为 `[]`。
+- 构建 `cargo build --workspace`；运行 GUI `cargo run -p xrose-app`
+- 测试 `cargo test -p xrose-core`
+- 无界面验证优先用 `xrose-cli`（`demo`、`seed-demo --home <dir>`、`check --core sing-box --home <dir>`，详见 `--help`）
+- 状态一律用 `XROSE_HOME=/tmp/xrose-demo` 或 `--home` 隔离，不得触碰用户真实配置
+- 编译另有模拟数据的源码副本时，必须为副本单独设置 `CARGO_TARGET_DIR`，覆盖构建、测试与运行命令；不得复用主工作区的 `target` 或应用包。验证普通构建时，在新的空目录运行 `xrose-cli mesh list --home <dir>`，结果应为 `[]`。
 - 只格式化自己改动的文件（`rustfmt <file>`）；`cargo build --workspace` 无警告，新增警告视为回归
 
 ## 结构
 
-- `crates/xross-core`：非 UI 逻辑（模型、适配器、内核进程、订阅、组网、存储、系统集成、`service.rs`）
-- `crates/xross-app`：GPUI 界面（`ui/`）、托盘（`tray/`）
-- `crates/xross-cli`：无界面入口
+- `crates/xrose-core`：非 UI 逻辑（模型、适配器、内核进程、订阅、组网、存储、系统集成、`service.rs`）
+- `crates/xrose-app`：GPUI 界面（`ui/`）、托盘（`tray/`）
+- `crates/xrose-cli`：无界面入口
 
 ## 架构约束
 
@@ -53,13 +53,13 @@ Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
 
 - 托盘仅 macOS / Windows；其他平台 `available()` 必须为 false，不得强制为 true。
 - 修改 `Theme::change` / `Theme::sync_system_appearance` 的调用处后，需重新执行 `window_effects::make_surface_translucent`。
-- Windows：保留 `crates/xross-app/build.rs` 中的图标资源与主线程栈设置；已知失败测试 `second_acquire_fails` 可用 `-- --skip second_acquire_fails` 跳过。
+- Windows：保留 `crates/xrose-app/build.rs` 中的图标资源与主线程栈设置；已知失败测试 `second_acquire_fails` 可用 `-- --skip second_acquire_fails` 跳过。
 - Windows：GUI 进程完整性级别须不低于 shell，否则 `Shell_NotifyIconW` 失败；若工作区目录带 Low 完整性标签，用 `icacls <workspace> /setintegritylevel (OI)(CI)M` 恢复。
 - Windows：`build.rs` 将图标嵌入为资源 ID 1，并把主线程栈提升至 16 MiB，修改构建时两者都要保留。
-- `objc` 宏依赖 `crates/xross-app/Cargo.toml` 中 `[lints.rust]` 的 `cfg(feature = "cargo-clippy")` 条目；不得整体放行 `unexpected_cfgs`。
+- `objc` 宏依赖 `crates/xrose-app/Cargo.toml` 中 `[lints.rust]` 的 `cfg(feature = "cargo-clippy")` 条目；不得整体放行 `unexpected_cfgs`。
 - `vendor/block` 是通过 `[patch.crates-io]` 引入的 `block 0.1.6` 补丁版本，上游修复后移除。
-- 注册表、`networksetup`、GNOME/KDE 等平台代码主要在 Linux 上验证过；声称平台修复有效前，先运行 `xross-cli doctor` / `check`。
+- 注册表、`networksetup`、GNOME/KDE 等平台代码主要在 Linux 上验证过；声称平台修复有效前，先运行 `xrose-cli doctor` / `check`。
 
 ## 修改入口
 
-详见 `docs/ARCHITECTURE.md`。新增 UI 页面：在 `ui/` 新建文件，并在 `ui/mod.rs` 添加 `Page` 变体、`icon()`、`zh()`/`en()` 与 `page_content()` 分支。新增 CLI 子命令：`crates/xross-cli/src/main.rs`。能力映射变化时同步更新 `README.md` 与 `docs/ARCHITECTURE.md`。
+详见 `docs/ARCHITECTURE.md`。新增 UI 页面：在 `ui/` 新建文件，并在 `ui/mod.rs` 添加 `Page` 变体、`icon()`、`zh()`/`en()` 与 `page_content()` 分支。新增 CLI 子命令：`crates/xrose-cli/src/main.rs`。能力映射变化时同步更新 `README.md` 与 `docs/ARCHITECTURE.md`。

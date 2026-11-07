@@ -1,4 +1,4 @@
-# DESIGN.md — Xross UI 规范
+# DESIGN.md — Xrose UI 规范
 
 ---
 
@@ -15,7 +15,7 @@
 
 ## 1. 产品与气质
 
-Xross：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：节点、订阅、路由、DNS、组网、连接、测试、日志、设置。
+Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：节点、订阅、路由、DNS、组网、连接、测试、日志、设置。
 
 性质：**工具型、信息密集、低频配置 + 高频看状态**。
 
@@ -41,7 +41,7 @@ Xross：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 
 ### 3.1 颜色（取自当前实现）
 
-来源：`crates/xross-app/src/ui/theme.rs`（`Palette`、`interaction()`、`interaction_tint()`）与 `window_effects.rs::make_surface_translucent`（覆盖 gpui-kit 主题）。颜色以 HSL 定义，下列 hex 为换算值（±1）。未覆盖的 token 直接取 gpui-kit 0.8.1（gpui-component `default-theme.json`，neutral / Tailwind 色阶）。
+来源：`crates/xrose-app/src/ui/theme.rs`（`Palette`、`interaction()`、`interaction_tint()`）与 `window_effects.rs::make_surface_translucent`（覆盖 gpui-kit 主题）。颜色以 HSL 定义，下列 hex 为换算值（±1）。未覆盖的 token 直接取 gpui-kit 0.8.1（gpui-component `default-theme.json`，neutral / Tailwind 色阶）。
 
 ```css
 :root {
@@ -195,7 +195,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 ```
 ┌──────────┬──────────────────────────────────────────────┐
 │ ●●●      │         [ 节点 · 延迟 ▾｜启动 / 停止 ]        │ 标题栏 54px（drag region）
-│ Xross    ├──────────────────────────────────────────────┤
+│ Xrose    ├──────────────────────────────────────────────┤
 │ nav…     │  page（bg-app，padding 24，卡片纵向堆叠）      │
 │ 关于 v0.1│                                              │
 └──────────┴──────────────────────────────────────────────┘
@@ -567,14 +567,14 @@ new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-3, 'minute') //
 
 ## 13. 本轮验证记录（2026-11-05）
 
-使用独立 `XROSS_HOME`、虚构演示节点和独立测试应用实例，未访问用户真实配置。沿用现有配置 schema，不执行内核启动、系统代理或提权操作。
+使用独立 `XROSE_HOME`、虚构演示节点和独立测试应用实例，未访问用户真实配置。沿用现有配置 schema，不执行内核启动、系统代理或提权操作。
 
 ### 13.1 自动检查
 
 | 检查 | 结果 / 覆盖 |
 |---|---|
-| `cargo test -p xross-core` | 230 项通过；排序方向、首尾、同位、空列表 / 单项、失效 ID、分组校验、禁用状态、预设保留、存储失败回滚、存储后读取、分组顺序影响实际匹配优先级；DNS 识别与删除保护；归属地批量探测去重、并发限制、忙碌保护、空目标及结果更新 |
-| `cargo test -p xross-app` | 24 项通过；相对时间边界与英文复数、流量阈值、端口校验、折线图时间窗口、零值和小流量定位、拖放轴向与半区判定 |
+| `cargo test -p xrose-core` | 230 项通过；排序方向、首尾、同位、空列表 / 单项、失效 ID、分组校验、禁用状态、预设保留、存储失败回滚、存储后读取、分组顺序影响实际匹配优先级；DNS 识别与删除保护；归属地批量探测去重、并发限制、忙碌保护、空目标及结果更新 |
+| `cargo test -p xrose-app` | 24 项通过；相对时间边界与英文复数、流量阈值、端口校验、折线图时间窗口、零值和小流量定位、拖放轴向与半区判定 |
 | `cargo build --workspace` | 通过，无新增构建警告 |
 | `git diff --check` | 通过 |
 
@@ -593,7 +593,7 @@ macOS、1200×800 逻辑尺寸（截图为 2×），已检查浅色 / 英文及�
 | DNS | 预设选中正确，默认服务器为 Radio；Fake-IP 引用服务器的删除项禁用，并说明原因 |
 | 页面回归 | 检查节点、订阅、路由、DNS、连接、日志、设置、组网、测试、关于的主布局；连接未启动空状态、日志错误色和禁用按钮可辨认 |
 
-本轮截图（旧截图仅保留作历史参考）：
+以下截图记录各次验收时的界面，部分早于 Xrose 定名。当前产品外观见 [README 的节点页截图](../README.md)。
 
 - [节点，浅色英文](screenshots/nodes-light-en.jpg)
 - [设置，暗色中文](screenshots/settings-dark.jpg)
