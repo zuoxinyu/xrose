@@ -8,8 +8,8 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::*;
-use xross_core::core::LogEntry;
 use xross_core::core::logs::{LogFilter, LogSourceFilter};
+use xross_core::core::{LogEntry, LogStream};
 use xross_core::settings::LogLevel;
 
 use super::AppView;
@@ -393,6 +393,46 @@ fn log_time_in_timezone(timestamp: &str, timezone: &impl chrono::TimeZone) -> St
         .unwrap_or_else(|_| timestamp.to_owned())
 }
 
+/// Shortens the visible message while keeping the captured entry available for diagnostics.
+fn displayed_log_message(entry: &LogEntry) -> &str {
+    let message = entry.message.as_str();
+    if entry.stream == LogStream::App {
+        return message;
+    }
+    let has_offset = message.starts_with(['+', '-']);
+    let remainder = if has_offset {
+        // sing-box full timestamp, including the numeric UTC offset.
+        chrono::DateTime::parse_and_remainder(message, "%z %Y-%m-%d %H:%M:%S%.f")
+            .map(|(_, rest)| rest)
+    } else {
+        // Xray's Go logger uses slash-separated dates and optional microseconds.
+        chrono::NaiveDateTime::parse_and_remainder(message, "%Y/%m/%d %H:%M:%S%.f")
+            .map(|(_, rest)| rest)
+    };
+    let Some(body) = remainder.ok().and_then(|rest| rest.strip_prefix(' ')) else {
+        return message;
+    };
+    let body = body.trim_start();
+    if body.is_empty() {
+        return message;
+    }
+    if let Some((token, details)) = body.split_once(' ') {
+        let duplicate_level = if has_offset {
+            token.eq_ignore_ascii_case(entry.level.singbox())
+        } else {
+            token
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .is_some_and(|level| level.eq_ignore_ascii_case(entry.level.xray()))
+        };
+        let details = details.trim_start();
+        if duplicate_level && !details.is_empty() {
+            return details;
+        }
+    }
+    body
+}
+
 fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
     let entry = &row.entry;
     let key = &row.key;
@@ -451,7 +491,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
                 .whitespace_normal()
                 .child(SelectableText::new(
                     SharedString::from(format!("{key}-message")),
-                    entry.message.clone(),
+                    displayed_log_message(entry).to_owned(),
                 )),
         )
 }
@@ -510,6 +550,73 @@ mod tests {
                 message: format!("test log {unix_ms}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn core_display_compacts_timestamps_and_keeps_context() {
+        let mut entry = entries(0..1).pop().unwrap();
+        for (stream, level, raw, expected) in [
+            (
+                LogStream::Stderr,
+                LogLevel::Info,
+                "+0800 2026-01-02 12:34:56 INFO [42 0ms] inbound: accepted",
+                "[42 0ms] inbound: accepted",
+            ),
+            (
+                LogStream::Core,
+                LogLevel::Warn,
+                "-0530 2026-01-02 12:34:56 WARN [42 17ms] retry",
+                "[42 17ms] retry",
+            ),
+            (
+                LogStream::Stdout,
+                LogLevel::Warn,
+                "2026/01/02 12:34:56.123456 [Warning] [42] retry",
+                "[42] retry",
+            ),
+            (
+                LogStream::Stdout,
+                LogLevel::Info,
+                "2026/01/02 12:34:56 accepted example.test",
+                "accepted example.test",
+            ),
+            (
+                LogStream::Stderr,
+                LogLevel::Error,
+                "+0000 2026-01-02 12:34:56 FATAL failed",
+                "FATAL failed",
+            ),
+            (
+                LogStream::Stdout,
+                LogLevel::Error,
+                "2026/01/02 12:34:56 error while opening file",
+                "error while opening file",
+            ),
+        ] {
+            entry.stream = stream;
+            entry.level = level;
+            entry.message = raw.into();
+            assert_eq!(super::displayed_log_message(&entry), expected);
+        }
+    }
+
+    #[test]
+    fn display_preserves_app_messages_and_unrecognized_prefixes() {
+        let mut entry = entries(0..1).pop().unwrap();
+        for (stream, raw) in [
+            (LogStream::App, "+0800 2026-01-02 12:34:56 INFO scheduled"),
+            (
+                LogStream::Stderr,
+                "+0800 2026-02-30 12:34:56 INFO invalid date",
+            ),
+            (LogStream::Core, "2026/01/02 12:34:56"),
+            (LogStream::Core, "2026/01/02 12:34:56suffix"),
+            (LogStream::Stdout, "[42 17ms] event at 2026/01/02 12:34:56"),
+        ] {
+            entry.stream = stream;
+            entry.message = raw.into();
+            assert_eq!(super::displayed_log_message(&entry), raw);
+        }
     }
 
     #[test]
