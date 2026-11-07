@@ -525,6 +525,11 @@ impl MeshPeer {
         if !self.offers_exit || self.id.is_empty() {
             return None;
         }
+        self.dial_address(provider)
+    }
+
+    /// First usable device address supported by the provider's dialer.
+    pub fn dial_address(&self, provider: MeshProvider) -> Option<std::net::IpAddr> {
         self.addresses
             .iter()
             .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
@@ -682,6 +687,27 @@ mod tests {
         );
     }
     use super::*;
+    #[test]
+    fn ordinary_peer_forwarding_uses_the_first_address_supported_by_the_provider() {
+        let peer = MeshPeer {
+            addresses: vec!["invalid".into(), "2001:db8::5".into(), "192.0.2.5".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            peer.dial_address(MeshProvider::Tailscale),
+            Some("2001:db8::5".parse().unwrap())
+        );
+        assert_eq!(
+            peer.dial_address(MeshProvider::EasyTier),
+            Some("192.0.2.5".parse().unwrap())
+        );
+        assert!(
+            MeshPeer::default()
+                .dial_address(MeshProvider::Tailscale)
+                .is_none()
+        );
+    }
+
     #[test]
     fn exit_list_requires_connected_profile_capability_and_usable_address() {
         let profile = MeshProfile::default().summary();

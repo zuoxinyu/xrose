@@ -5,7 +5,7 @@ use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
 use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
-use xrose_core::mesh::{MeshPeer, MeshProvider, PortForward, ServiceForward};
+use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xrose_core::model::WorkMode;
 use xrose_core::route::transfer::ExportScope;
 use xrose_core::service::ToastLevel;
@@ -83,6 +83,7 @@ pub(super) enum Command {
     ShareMesh(String),
     ReceiveFromPeer(String, String),
     ProbePeer(String, String),
+    AddPeerForward(String, String),
     DeleteMesh(String),
     DeleteVersion(xrose_core::model::CoreKind, String),
 }
@@ -253,7 +254,7 @@ impl AppView {
                     ));
             }
             MenuTarget::MeshPeer(profile_id, peer_id) => {
-                let Some((_, peer)) = self.mesh_peer(&profile_id, &peer_id) else {
+                let Some((provider, peer)) = self.mesh_peer(&profile_id, &peer_id) else {
                     return menu;
                 };
                 if peer.online && peer.xrose.is_some() {
@@ -268,7 +269,13 @@ impl AppView {
                     &view,
                     tr(lang, "探测设备", "Probe device"),
                     !peer.addresses.is_empty() && !busy("mesh"),
-                    Command::ProbePeer(profile_id, peer_id),
+                    Command::ProbePeer(profile_id.clone(), peer_id.clone()),
+                ));
+                menu = menu.item(item(
+                    &view,
+                    tr(lang, "添加端口转发", "Add port forward"),
+                    !busy("mesh") && !busy("mesh-forward") && peer.dial_address(provider).is_some(),
+                    Command::AddPeerForward(profile_id, peer_id),
                 ));
             }
             MenuTarget::FrontProxy => {
@@ -889,6 +896,7 @@ impl AppView {
                 | Command::DeleteService(_, _)
                 | Command::ReceiveFromPeer(_, _)
                 | Command::ProbePeer(_, _)
+                | Command::AddPeerForward(_, _)
         ) && busy("core")
         {
             return;
@@ -1007,8 +1015,27 @@ impl AppView {
                 self.service.select_node(&group_id, &node_id);
                 self.refresh_header_location();
             }
-            Command::EditForward(id, old) => self.open_forward_editor(id, Some(old), window, cx),
-            Command::EditService(id, old) => self.open_service_editor(id, Some(old), window, cx),
+            Command::EditForward(id, old) => {
+                self.open_forward_editor(id, Some(ForwardRule::ToMesh(old)), None, window, cx)
+            }
+            Command::EditService(id, old) => {
+                self.open_forward_editor(id, Some(ForwardRule::ToHost(old)), None, window, cx)
+            }
+            Command::AddPeerForward(profile_id, peer_id) => {
+                if !busy("mesh")
+                    && !busy("mesh-forward")
+                    && self
+                        .snapshot
+                        .mesh
+                        .profiles
+                        .iter()
+                        .any(|p| p.id == profile_id)
+                    && let Some((provider, peer)) = self.mesh_peer(&profile_id, &peer_id)
+                    && let Some(ip) = peer.dial_address(provider)
+                {
+                    self.open_forward_editor(profile_id, None, Some(ip), window, cx);
+                }
+            }
             Command::DeleteService(id, old) => {
                 if let Err(e) = self.service.edit_mesh_service(&id, Some(&old), None) {
                     self.service.toast(ToastLevel::Error, e.to_string());

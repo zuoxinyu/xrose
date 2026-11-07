@@ -45,7 +45,7 @@ impl AppView {
             .disabled(busy || profiles.is_empty())
             .on_click(cx.listener(|this, _, window, cx| {
                 if let Some(profile) = this.snapshot.mesh.profiles.first() {
-                    this.open_forward_editor(profile.id.clone(), None, window, cx);
+                    this.open_forward_editor(profile.id.clone(), None, None, window, cx);
                 }
             }));
         let mut panel = card(p).child(
@@ -215,37 +215,16 @@ impl AppView {
     pub(in crate::ui) fn open_forward_editor(
         &mut self,
         profile_id: String,
-        original: Option<PortForward>,
+        original: Option<ForwardRule>,
+        target_ip: Option<std::net::IpAddr>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_forward_editor_kind(profile_id, original, false, window, cx);
-    }
-
-    pub(in crate::ui) fn open_service_editor(
-        &mut self,
-        profile_id: String,
-        original: Option<ServiceForward>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_forward_editor_kind(
-            profile_id,
-            original.as_ref().map(local_rule),
-            true,
-            window,
-            cx,
-        );
-    }
-
-    fn open_forward_editor_kind(
-        &mut self,
-        profile_id: String,
-        original: Option<PortForward>,
-        service: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        let (original, service) = match original {
+            Some(ForwardRule::ToMesh(rule)) => (Some(rule), false),
+            Some(ForwardRule::ToHost(rule)) => (Some(local_rule(&rule)), true),
+            None => (None, false),
+        };
         let listen = text_input(window, cx, if service { "8080" } else { "127.0.0.1:8080" });
         let target = text_input(window, cx, "192.0.2.2:80");
         if let Some(rule) = &original {
@@ -263,6 +242,12 @@ impl AppView {
             target.update(cx, |input, cx| {
                 input.set_value(rule.target.to_string(), window, cx)
             });
+        } else if let Some(ip) = target_ip {
+            let endpoint = match ip {
+                std::net::IpAddr::V4(ip) => format!("{ip}:"),
+                std::net::IpAddr::V6(ip) => format!("[{ip}]:"),
+            };
+            target.update(cx, |input, cx| input.set_value(endpoint, window, cx));
         }
         let protocol = original
             .as_ref()

@@ -200,21 +200,24 @@ impl AppView {
                                     ),
                             )),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr(
-                                "Xrose 是 Project Xristina 旗下的桌面客户端，当前支持 Xray 和 sing-box。Project Xristina 是规划中的网络内核项目。",
-                                "Xrose is the desktop client of Project Xristina, a planned network core. It currently supports Xray and sing-box.",
-                            )),
-                    )
-                    .child(
-                        div().text_xs().text_color(p.muted_fg).child(self.tr(
-                            "Xrose 正式读作 k'rose，与 Cross 谐音，口语也可读作 ex-rose。名称致敬 X Japan 的歌曲《ROSE OF PAIN》。",
-                            "The official pronunciation is k'rose, a play on “Cross”. In conversation, ex-rose is also used. The name pays tribute to “ROSE OF PAIN” by X Japan.",
-                        )),
-                    ),
+                    .children([
+                        self.tr(
+                            "Xrose 是 Project Xristina 旗下的跨平台桌面客户端。当前支持 Xray 和 sing-box 内核。",
+                            "Xrose is a cross-platform desktop client from Project Xristina. It currently supports the Xray and sing-box cores.",
+                        ),
+                        self.tr(
+                            "Xrose 正式读作 /k'ɹəʊz/，但你也可以读作 /ɛks-ɹəʊz/ 。",
+                            "Xrose is officially pronounced /k'ɹəʊz/, but you can also pronounce it /ɛks-ɹəʊz/.",
+                        ),
+                        self.tr(
+                            "Xrose 的命名致敬了 X Japan 的歌曲 《ROSE OF PAIN》。",
+                            "The name Xrose pays tribute to the X Japan song “ROSE OF PAIN”.",
+                        ),
+                        self.tr(
+                            "Xrose 的诞生要感谢 DeepSeek 构建的第一版 MVP，与 Gemini Argon 进行的头脑风暴和 GPT-6 Astra 的孜孜不倦。是的，Claude 不在此列。",
+                            "Xrose owes its beginnings to the first MVP built by DeepSeek, the brainstorming sessions with Gemini Argon, and the tireless efforts of GPT-6 Astra. Yes, Claude is not on that list.",
+                        ),
+                    ].map(|paragraph| div().text_xs().text_color(p.muted_fg).whitespace_normal().child(paragraph))),
             )
             // Open-source license card
             .child(
