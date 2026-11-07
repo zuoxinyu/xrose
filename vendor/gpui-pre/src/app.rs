@@ -1819,6 +1819,11 @@ impl App {
         self.platform.button_layout()
     }
 
+    /// Hides the system pointer until the next pointer movement.
+    pub fn hide_cursor_until_mouse_moves(&self) {
+        self.platform.hide_cursor_until_mouse_moves();
+    }
+
     /// Reads data from the platform clipboard.
     pub fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.platform.read_from_clipboard()

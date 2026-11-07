@@ -83,13 +83,14 @@ fn export_vmess(node: &Node) -> Option<String> {
         "port": node.port.to_string(),
         "id": uuid,
         "aid": node.credentials.alter_id.to_string(),
-        "scy": "auto",
+        "scy": node.credentials.method.as_deref().unwrap_or("auto"),
         "net": net,
         "type": kind,
         "host": host,
         "path": path,
         "tls": if node.tls.enabled || node.tls.reality.is_some() { "tls" } else { "" },
         "sni": node.tls.server_name.clone().unwrap_or_default(),
+        "insecure": if node.tls.insecure { "1" } else { "0" },
         "alpn": node.tls.alpn.join(","),
         "fp": node.tls.fingerprint.clone().unwrap_or_default()
     });
@@ -235,7 +236,11 @@ fn export_plain(node: &Node, scheme: &str) -> Option<String> {
         result.push('@');
     }
     result.push_str(&format_host(&node.server));
-    result.push_str(&format!(":{}#{}", node.port, percent_encode(&node.name)));
+    result.push_str(&format!(":{}", node.port));
+    if node.protocol == Protocol::Http {
+        result.push_str("?xrose=proxy");
+    }
+    result.push_str(&format!("#{}", percent_encode(&node.name)));
     Some(result)
 }
 

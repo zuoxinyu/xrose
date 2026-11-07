@@ -25,10 +25,6 @@ pub fn hide_main_window() {}
 
 pub fn show_main_window() {}
 
-pub fn main_window_minimized() -> bool {
-    false
-}
-
 pub fn setup_window() {}
 
 pub fn register_main_window(_window: &gpui_kit::Window) {}

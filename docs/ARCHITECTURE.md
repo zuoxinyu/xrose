@@ -185,8 +185,8 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 - TUN 开关通过 `AppService::set_tun_enabled` 持久化并同步模型，Core 运行时调用已有
   `apply_config` 校验/重启流程；停止时不启动 Core。两种内核均可启用，Core 忙时不接受切换。
 - 主窗口原生句柄在创建时记录，Windows 不再枚举同类窗口，macOS 不再对所有窗口隐藏/恢复。
-  `close_to_tray` / `minimize_to_tray` 在 Windows/macOS 隐藏主窗口；Linux 使用 GPUI 的
-  minimize/activate，保留任务栏入口，避免依赖 Wayland 不提供的隐藏/全局定位接口。
+  最小化及启动时最小化均使用系统原生窗口行为。手动开启 `close_to_tray` 时提示一次；
+  之后关闭窗口时，Windows/macOS 隐藏主窗口，Linux 使用 GPUI 的 minimize/activate 保留任务栏入口。
 - Linux D-Bus 注册与更新在专用线程执行，通过有界通道接收快照；只有注册成功且宿主在线时
   `available()` 为 true。没有托盘宿主或 Windows shell 拒绝注册时，关闭窗口直接退出。
 - `Settings.backdrop` 只描述外观偏好，不影响代理模型或 `config_dirty`。UI 按平台提供材质选项；
@@ -237,7 +237,7 @@ debug 构建的主窗口在控件聚焦时支持 Ctrl/Cmd+Shift+T 再次打开�
 | 默认延迟测试间隔 | 仅 Xray observatory 使用；sing-box 使用出站组自身间隔 |
 | 崩溃自动重启开关与重试次数 | 即时更新进程监控策略 |
 | 系统代理、PAC 开关与端口 | 由系统代理/PAC 流程应用，不重启内核 |
-| 隐私、语言、主题、材质、托盘显示、最小化/关闭行为、更新偏好 | 客户端处理，不重启内核 |
+| 隐私、语言、主题、材质、托盘显示、关闭窗口行为、更新偏好 | 客户端处理，不重启内核 |
 | 自启、启动时最小化、单实例、日志文件轮转限制 | 不重启内核；启动行为及日志文件限制按客户端生命周期生效 |
 | 其他内核的版本、路径、API/统计端口 | 不影响当前内核 |
 
@@ -263,6 +263,16 @@ OpenVPN / OpenConnect 的适配以 sing-box 1.14.4 的类型定义和官方客�
 VPN 参数和 PEM 内容保存在节点凭据中；导入器不会执行 `.ovpn` 指令或读取其引用的本地文件。
 配置编译与节点探测均生成用户态 endpoint，通用 TLS / v2ray transport 不叠加到 VPN。
 启动时将实际内核版本传入编译上下文，sing-box 1.14 以下跳过 VPN；纯 VPN 配置无法编译时给出升级提示。
+
+## 节点链接导入
+
+节点弹窗保留粘贴文本的换行，通过 `AppService::import_content` 与 CLI 共用订阅解析器。明文列表和整体 Base64 编码的列表均逐行导入，保留原顺序，跳过无法识别的行并报告数量。节点使用原有指纹去重。
+
+`subscription/links.rs` 识别 v2rayN 的 VMess JSON、标准 URI，以及 Shadowrocket 将 VMess / VLESS 地址和凭据整体编码的链接。备注、传输、TLS 和 Reality 参数转换为现有节点字段。VMess 显式加密方式保存在 `Credentials.method`，两个内核在该字段为空时使用 `auto`。格式参考 [v2rayN 导出实现](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib/Handler/Fmt) 与 [Shadowrocket 格式生成示例](https://github.com/cedar2025/Xboard/blob/master/app/Protocols/Shadowrocket.php)。
+
+节点及订阅页共用 `ui/qr`：页面粘贴、图片或文本文件拖放、屏幕取景都经 `AppService::import_shared_content` 导入。相同订阅地址只添加一次。macOS 和 Windows 另接收来源应用直接提供的图片或文本。Linux 文件拖放使用 GPUI 原生文件事件。
+
+扫描入口位于添加弹窗内。透明取景窗口先显示四角动画，随后在后台识别指针附近的区域，识别图像最长边为 1024 像素。macOS 使用 ScreenCaptureKit，Windows / Linux 使用 XCap。桌面切换及滚动使上次识别结果失效，后台结果按采集时的区域映射回屏幕坐标。节点预览沿用隐私模式。批量导出复用单节点分享链接编码器，按节点配置顺序以换行分隔。
 
 ## 路由规则交换
 

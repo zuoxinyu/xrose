@@ -7,8 +7,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Styled, div, px,
+    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Role,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 
 use super::theme::Palette;
@@ -122,6 +122,17 @@ pub fn more_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> 
         .h(px(ICON_BUTTON_SIZE))
         .accessibility_label(label.clone())
         .tooltip(label)
+}
+
+/// Inline outcomes remain visible in forms even when system notifications are enabled.
+pub(super) fn form_feedback(message: String, success: bool, p: &Palette) -> Stateful<Div> {
+    div()
+        .id("form-feedback")
+        .role(if success { Role::Status } else { Role::Alert })
+        .aria_label(message.clone())
+        .text_sm()
+        .text_color(if success { p.ok_text } else { p.danger_text })
+        .child(message)
 }
 
 pub fn empty_state(

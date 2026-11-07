@@ -487,7 +487,7 @@ new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-3, 'minute') //
 | 字体回退 | SF / PingFang | Segoe UI / Microsoft YaHei UI | system-ui |
 
 - 平台独有选项（`窗口材质`、`菜单栏显示网速`）：不支持的平台**隐藏**，不要显示后禁用。
-- 文案按平台取词：`最小化到托盘` → macOS 为 `最小化到菜单栏`。 `⚠K19`
+- 关闭窗口的设置在 macOS 上称为「关闭到菜单栏」，在有托盘的其他平台称为「关闭到系统托盘」。 `⚠K19`
 - 窗口材质选项的值要映射到各平台实际能力，不能把 macOS 词汇（毛玻璃）直接用于 Windows。
 
 ---

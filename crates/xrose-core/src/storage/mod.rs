@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -272,17 +272,21 @@ impl Store {
                 }
             }
         }
-        if version < 10 && settings_file.exists() {
+        if version < 11 && settings_file.exists() {
             // Settings live outside SQLite. Preserve unknown fields and encrypted values.
             let bytes = std::fs::read(settings_file)?;
-            if let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_slice(&bytes)
-                && !settings.contains_key("hot_reload")
-            {
-                settings.insert("hot_reload".into(), false.into());
-                crate::util::atomic_write_private(
-                    settings_file,
-                    &serde_json::to_vec_pretty(&settings)?,
-                )?;
+            if let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_slice(&bytes) {
+                let mut changed = settings.remove("minimize_to_tray").is_some();
+                if version < 10 && !settings.contains_key("hot_reload") {
+                    settings.insert("hot_reload".into(), false.into());
+                    changed = true;
+                }
+                if changed {
+                    crate::util::atomic_write_private(
+                        settings_file,
+                        &serde_json::to_vec_pretty(&settings)?,
+                    )?;
+                }
             }
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -869,6 +873,27 @@ mod tests {
             assert_eq!(migrated["hot_reload"], explicit.unwrap_or(false));
             assert_eq!(migrated["theme"], "dark");
             assert_eq!(migrated["extra"], legacy["extra"]);
+        }
+    }
+
+    #[test]
+    fn v11_removes_only_the_obsolete_minimize_preference() {
+        let (store, dir) = store();
+        let path = AppPaths::from_root(dir.path()).settings_file();
+        for enabled in [false, true] {
+            store
+                .conn
+                .lock()
+                .pragma_update(None, "user_version", 10)
+                .unwrap();
+            let expected = serde_json::json!({"close_to_tray": !enabled, "start_minimized": enabled, "extra": [1]});
+            let mut old = expected.clone();
+            old["minimize_to_tray"] = enabled.into();
+            std::fs::write(&path, old.to_string()).unwrap();
+            store.migrate(&path).unwrap();
+            let actual: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(actual, expected);
         }
     }
 

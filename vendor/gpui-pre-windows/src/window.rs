@@ -1142,7 +1142,7 @@ impl accesskit::ActionHandler for A11yActionHandler {
 }
 
 #[implement(IDropTarget)]
-struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>);
+struct WindowsDragDropHandler(pub Rc<WindowsWindowInner>, Cell<bool>);
 
 impl WindowsDragDropHandler {
     fn handle_drag_drop(&self, input: PlatformInput) {
@@ -1172,6 +1172,7 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 tymed: TYMED_HGLOBAL.0 as _,
             };
             let cursor_position = POINT { x: pt.x, y: pt.y };
+            self.1.set(false);
             if idata_obj.QueryGetData(&config as _) == S_OK {
                 *pdweffect = DROPEFFECT_COPY;
                 let Some(mut idata) = idata_obj.GetData(&config as _).log_err() else {
@@ -1202,6 +1203,9 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     paths: ExternalPaths(paths),
                 });
                 self.handle_drag_drop(input);
+            } else if crate::clipboard::content_format(idata_obj).is_some() {
+                self.1.set(true);
+                *pdweffect = DROPEFFECT_COPY;
             } else {
                 *pdweffect = DROPEFFECT_NONE;
             }
@@ -1273,13 +1277,23 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                 .log_err();
         }
         let scale_factor = self.0.state.scale_factor.get();
-        let input = PlatformInput::FileDrop(FileDropEvent::Submit {
-            position: logical_point(
-                cursor_position.x as f32,
-                cursor_position.y as f32,
-                scale_factor,
-            ),
-        });
+        let position = logical_point(
+            cursor_position.x as f32,
+            cursor_position.y as f32,
+            scale_factor,
+        );
+        let event = if self.1.replace(false) {
+            let Some(item) = crate::clipboard::dropped_content(idata_obj) else {
+                return Ok(());
+            };
+            FileDropEvent::SubmitContent {
+                position,
+                item: Arc::new(item),
+            }
+        } else {
+            FileDropEvent::Submit { position }
+        };
+        let input = PlatformInput::FileDrop(event);
         self.handle_drag_drop(input);
 
         Ok(())
@@ -1515,7 +1529,7 @@ fn get_module_handle() -> HMODULE {
 
 fn register_drag_drop(window: &Rc<WindowsWindowInner>) -> Result<()> {
     let window_handle = window.hwnd;
-    let handler = WindowsDragDropHandler(window.clone());
+    let handler = WindowsDragDropHandler(window.clone(), Cell::new(false));
     // The lifetime of `IDropTarget` is handled by Windows, it won't release until
     // we call `RevokeDragDrop`.
     // So, it's safe to drop it here.

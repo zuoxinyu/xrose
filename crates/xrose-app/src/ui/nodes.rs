@@ -14,7 +14,7 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{CoreKind, Node};
-use xrose_core::service::LatencyScope;
+use xrose_core::service::{LatencyScope, ToastLevel};
 use xrose_core::settings::Language;
 use xrose_core::storage::LatencyEntry;
 
@@ -57,6 +57,35 @@ impl Render for DraggedNode {
 }
 
 impl AppView {
+    fn copy_selected_links(&mut self, selected: &[String], cx: &mut Context<Self>) {
+        let links = self.service.export_links(selected);
+        let count = links.lines().count();
+        if count > 0 {
+            cx.write_to_clipboard(ClipboardItem::new_string(links));
+        }
+        let mut message = if self.lang() == Language::Zh {
+            format!("已复制 {count} 条分享链接")
+        } else {
+            format!("Copied {count} share links")
+        };
+        if count < selected.len() {
+            let skipped = selected.len() - count;
+            message.push_str(&format!(
+                " · {} {skipped}",
+                self.tr("无法导出", "Could not export")
+            ));
+        }
+        let level = if count == 0 {
+            ToastLevel::Error
+        } else if count < selected.len() {
+            ToastLevel::Warning
+        } else {
+            ToastLevel::Success
+        };
+        self.service.toast(level, message);
+        self.sync(cx);
+    }
+
     pub(crate) fn page_nodes(
         &mut self,
         window: &mut Window,
@@ -114,8 +143,8 @@ impl AppView {
                                     .text_sm()
                                     .child(pill("1", p.primary_fg, p.primary))
                                     .child(self.tr(
-                                        "添加订阅（推荐）或从剪贴板导入单个节点",
-                                        "Add a subscription (recommended) or import a node from the clipboard",
+                                        "添加节点订阅或粘贴一个或多个节点链接",
+                                        "Add a subscription or paste one or more node links",
                                     )),
                             )
                             .child(
@@ -152,10 +181,9 @@ impl AppView {
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
                                     .label(self.tr("添加订阅", "Add subscription"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.page = Page::Subscriptions;
-                                        this.show_subscription_form = true;
-                                        cx.notify();
+                                        this.open_subscription_dialog(window,cx);
                                     })),
                             )
                             .child(
@@ -534,14 +562,14 @@ impl AppView {
                     let all_ids: Vec<String> = display_nodes.iter().map(|n| n.id.clone()).collect();
                     let all_selected =
                         !all_ids.is_empty() && all_ids.iter().all(|id| batch_selected.contains(id));
-                    let selected_count = batch_selected.len();
-                    let selected_ids: Vec<String> = batch_selected.iter().cloned().collect();
+                    let selected_ids: Vec<String> = model.nodes.iter().filter(|n| batch_selected.contains(&n.id)).map(|n| n.id.clone()).collect();
+                    let selected_count = selected_ids.len();
 
                     d.child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
+                            .justify_between().flex_wrap().gap_2()
                             .px_3()
                             .py_2()
                             .rounded_md()
@@ -590,6 +618,18 @@ impl AppView {
                                     .flex()
                                     .items_center()
                                     .gap_2()
+                                    .flex_wrap()
+                                    .child({
+                                        let selected = selected_ids.clone();
+                                        Button::new("batch-export-links")
+                                            .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                            .disabled(selected_count == 0)
+                                            .label(self.tr("复制分享链接", "Copy share links"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.copy_selected_links(&selected, cx);
+                                            }))
+                                    })
                                     .child({
                                         let sel = selected_ids.clone();
                                         Button::new("batch-ping")
@@ -685,8 +725,8 @@ impl AppView {
                         &p,
                         if search_query.is_empty() {
                             self.tr(
-                                "还没有节点，点击右上角“+ 添加节点”或添加订阅",
-                                "No nodes yet — click '+ Add' above or add a subscription",
+                                "还没有节点。可粘贴节点链接或二维码，也可拖入图片文件。",
+                                "No nodes yet. Paste a share link or QR code, or drop an image file.",
                             )
                         } else {
                             self.tr("未找到匹配的节点", "No matching nodes found")
@@ -826,7 +866,7 @@ fn this_busy(busy: &[String], key: &str) -> bool {
 }
 
 /// Helper function to format and optionally mask host addresses for privacy.
-fn format_endpoint(endpoint: &str, hide: bool) -> String {
+pub(super) fn format_endpoint(endpoint: &str, hide: bool) -> String {
     if hide {
         if let Some((host, port)) = endpoint.rsplit_once(':') {
             if host.starts_with('[') && host.ends_with(']') {

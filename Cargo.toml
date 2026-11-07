@@ -44,6 +44,11 @@ url = "2"
 percent-encoding = "2"
 regex = "1"
 semver = "1"
+quircs = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "tiff", "webp"] }
+x11rb = { version = "0.13", features = ["shape", "xfixes", "xinput"] }
+xcap = "0.9.8"
+cc = "1"
 qrcode = { version = "0.14", default-features = false }
 interprocess = "2"
 bytes = "1"

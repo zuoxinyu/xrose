@@ -2,7 +2,6 @@ use super::menus::{self, MenuTarget};
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
@@ -29,6 +28,8 @@ impl AppView {
                         .flex()
                         .items_center()
                         .justify_between()
+                        .flex_wrap()
+                        .gap_2()
                         .child(section_title(
                             &p,
                             self.tr("订阅列表", "Subscription list"),
@@ -42,6 +43,7 @@ impl AppView {
                                 .flex()
                                 .items_center()
                                 .justify_end()
+                                .flex_wrap()
                                 .gap_2()
                                 .child(
                                     Button::new("refresh-all-subs")
@@ -57,58 +59,12 @@ impl AppView {
                                     Button::new("toggle-sub-form")
                                         .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
-                                        .icon(if self.show_subscription_form {
-                                            IconName::X
-                                        } else {
-                                            IconName::Plus
-                                        })
-                                        .label(if self.show_subscription_form {
-                                            self.tr("收起", "Close")
-                                        } else {
-                                            self.tr("添加订阅", "Add subscription")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_subscription_form = !this.show_subscription_form;
-                                            cx.notify();
-                                        })),
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("添加订阅","Add subscription"))
+                                        .on_click(cx.listener(|this,_,window,cx|this.open_subscription_dialog(window,cx))),
                                 ),
                         ),
                 )
-                .when(self.show_subscription_form, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().w(px(180.)).child(Input::new(&self.sub_name)))
-                            .child(div().flex_1().child(Input::new(&self.sub_url)))
-                            .child(
-                                Button::new("add-subscription")
-                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .primary()
-                                    .label(self.tr("添加", "Add"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        let name = this.sub_name.read(cx).value().to_string();
-                                        let url = this.sub_url.read(cx).value().to_string();
-                                        match this.service.add_subscription(name, url) {
-                                            Ok(_) => {
-                                                this.sub_url.update(cx, |input, cx| {
-                                                    input.set_value("", window, cx);
-                                                });
-                                                this.show_subscription_form = false;
-                                            }
-                                            Err(err) => {
-                                                this.service.toast(
-                                                    xrose_core::service::ToastLevel::Error,
-                                                    err.to_string(),
-                                                );
-                                            }
-                                        }
-                                        this.sync(cx);
-                                    })),
-                            ),
-                    )
-                })
                 .child(
                     div()
                         .text_xs()
@@ -123,7 +79,7 @@ impl AppView {
         if subscriptions.is_empty() {
             body = body.child(card(&p).child(empty_hint(
                 &p,
-                self.tr("还没有订阅，点击右上角添加", "No subscriptions yet"),
+                self.tr("还没有订阅。可粘贴订阅地址或二维码，也可拖入图片文件。", "No subscriptions yet. Paste a subscription URL or QR code, or drop an image file."),
             )));
         }
 

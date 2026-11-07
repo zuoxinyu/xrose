@@ -27,6 +27,46 @@ fn main() {
     easytier_native::configure();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={ICON_PNG}");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let path = "src/ui/qr/macos.m";
+        println!("cargo:rerun-if-changed={path}");
+        println!("cargo:rerun-if-changed=src/app_launch.c");
+        let mut native = cc::Build::new();
+        native
+            .file(path)
+            .file("src/app_launch.c")
+            .flag("-fobjc-arc")
+            .flag(format!(
+                "-mmacosx-version-min={}",
+                std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into())
+            ))
+            .compile("xrose_qr");
+        // Clang lowers @available to a compiler-rt helper when targeting older
+        // macOS versions. rustc links with -nodefaultlibs, including under LTO.
+        let output = native
+            .get_compiler()
+            .to_command()
+            .arg("-print-file-name=libclang_rt.osx.a")
+            .output()
+            .expect("query Clang runtime");
+        let runtime = PathBuf::from(
+            String::from_utf8(output.stdout)
+                .expect("Clang runtime path")
+                .trim(),
+        );
+        assert!(
+            output.status.success() && runtime.is_file(),
+            "macOS Clang runtime not found"
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            runtime.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        println!("cargo:rustc-link-lib=framework=ApplicationServices");
+        println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
         && std::env::var("PROFILE").as_deref() == Ok("debug")
     {
@@ -37,6 +77,11 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    println!("cargo:rerun-if-changed=src/ui/qr/windows.c");
+    cc::Build::new()
+        .file("src/ui/qr/windows.c")
+        .compile("xrose_scan_input");
+    println!("cargo:rustc-link-lib=comctl32");
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if env == "msvc" {
         println!("cargo:rustc-link-arg-bins=/STACK:{STACK_BYTES}");

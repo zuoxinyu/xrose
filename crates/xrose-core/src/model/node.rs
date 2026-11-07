@@ -692,7 +692,10 @@ impl NodeDraft {
             credentials.uuid = node.credentials.uuid;
             credentials.password = node.credentials.password;
             credentials.username = node.credentials.username;
-            credentials.method = node.credentials.method;
+            // VMess ciphers come from share links and are absent from the manual form.
+            if node.protocol != Protocol::Vmess {
+                credentials.method = node.credentials.method;
+            }
             credentials.flow = node.credentials.flow;
             credentials.wireguard = node.credentials.wireguard;
             credentials.openvpn = node.credentials.openvpn;

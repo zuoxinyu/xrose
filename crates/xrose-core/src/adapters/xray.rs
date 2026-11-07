@@ -721,7 +721,7 @@ fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
                         "users": [{
                             "id": uuid,
                             "alterId": cred.alter_id,
-                            "security": "auto",
+                            "security": cred.method.as_deref().unwrap_or("auto"),
                             "level": 0
                         }]
                     }]

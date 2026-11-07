@@ -6,34 +6,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
-use gpui_kit::{point, px, Bounds, Window};
+use gpui_kit::{Bounds, Window, point, px};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    ClientToScreen, CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, ClientToScreen, CreateBitmap, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteObject, GetDC, HGDIOBJ, ReleaseDC,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::Shell::{Shell_NotifyIconGetRect, NOTIFYICONIDENTIFIER};
 use windows_sys::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
+use windows_sys::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GetClientRect,
-    GetCursorPos, GetSystemMetrics, GetWindowRect, IsIconic, IsWindow, LoadCursorW, PeekMessageW,
-    PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, ShowWindow, HICON,
-    ICONINFO, IDC_ARROW, MSG, PM_NOREMOVE, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, WM_APP,
-    WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW,
-    WS_OVERLAPPED,
+    GetCursorPos, GetSystemMetrics, GetWindowRect, HICON, ICONINFO, IDC_ARROW, IsIconic, IsWindow,
+    LoadCursorW, MSG, PM_NOREMOVE, PeekMessageW, PostMessageW, RegisterClassW,
+    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    ShowWindow, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE,
+    WM_THEMECHANGED, WNDCLASSW, WS_OVERLAPPED,
 };
 
-use super::dashboard::{self, Dashboard};
 use super::TrayCommand as Command;
+use super::dashboard::{self, Dashboard};
 use xrose_core::AppService;
 
 const WM_TRAY: u32 = WM_APP + 1;
@@ -334,15 +334,6 @@ pub fn show_main_window() {
             SetForegroundWindow(hwnd);
         }
     }
-}
-
-pub fn main_window_minimized() -> bool {
-    main_hwnd()
-        .map(|hwnd| {
-            // SAFETY: hwnd belongs to this process.
-            unsafe { IsIconic(hwnd) != 0 }
-        })
-        .unwrap_or(false)
 }
 
 pub fn setup_window() {}
@@ -707,7 +698,7 @@ pub fn show_popup(window: &mut Window, bounds: Bounds<gpui_kit::Pixels>) {
 
 fn animations_enabled() -> bool {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS,
+        SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS, SystemParametersInfoW,
     };
     let (mut client, mut effects) = (0_i32, 0_i32);
     unsafe {
@@ -721,7 +712,7 @@ fn animations_enabled() -> bool {
 unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+            HWND_NOTOPMOST, IsWindowVisible, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
         };
         let mut current: RECT = std::mem::zeroed();
         let from = if IsWindowVisible(hwnd as HWND) != 0
@@ -763,7 +754,7 @@ unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
 unsafe fn animate_hide(owner: HWND, hwnd: usize) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            IsWindowVisible, SetWindowPos, HWND_NOTOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            HWND_NOTOPMOST, IsWindowVisible, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
         };
         let placement = {
             let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
@@ -817,7 +808,7 @@ unsafe fn start_flyout_timer(owner: HWND) -> bool {
 unsafe fn advance_flyout(owner: HWND) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
         };
         let frame = {
             let controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
@@ -854,7 +845,7 @@ unsafe fn advance_flyout(owner: HWND) {
 unsafe fn finish_flyout(owner: HWND, showing: bool) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            KillTimer, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOSIZE,
+            HWND_NOTOPMOST, HWND_TOPMOST, KillTimer, SWP_NOACTIVATE, SWP_NOSIZE, SetWindowPos,
         };
         KillTimer(owner, FLYOUT_TIMER);
         let target = {

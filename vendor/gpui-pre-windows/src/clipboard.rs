@@ -250,11 +250,15 @@ fn read_clipboard_metadata(text: &str) -> Option<String> {
 
 fn read_image(format: u32) -> Option<ClipboardEntry> {
     let locked = get_clipboard_data(format)?;
+    image_entry(format, locked.as_bytes())
+}
+
+fn image_entry(format: u32, data: &[u8]) -> Option<ClipboardEntry> {
     let (bytes, image_format) = if format == CF_DIB.0 as u32 {
-        (convert_dib_to_bmp(locked.as_bytes())?, ImageFormat::Bmp)
+        (convert_dib_to_bmp(data)?, ImageFormat::Bmp)
     } else {
         let image_format = *IMAGE_FORMATS_MAP.get(&format)?;
-        (locked.as_bytes().to_vec(), image_format)
+        (data.to_vec(), image_format)
     };
     let id = hash(&bytes);
     Some(ClipboardEntry::Image(Image {
@@ -262,6 +266,56 @@ fn read_image(format: u32) -> Option<ClipboardEntry> {
         bytes,
         id,
     }))
+}
+
+/// Inspect advertised formats without rendering delayed drag data on pointer moves.
+pub(crate) fn content_format(
+    obj: &windows::Win32::System::Com::IDataObject,
+) -> Option<windows::Win32::System::Com::FORMATETC> {
+    use windows::Win32::{Foundation::S_OK, System::Com::*};
+    [
+        *CLIPBOARD_PNG_FORMAT,
+        *CLIPBOARD_JPG_FORMAT,
+        CF_DIB.0 as u32,
+        CF_UNICODETEXT.0 as u32,
+    ]
+    .into_iter()
+    .map(|format| FORMATETC {
+        cfFormat: format as u16,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as _,
+    })
+    .find(|fmt| unsafe { obj.QueryGetData(fmt) == S_OK })
+}
+
+pub(crate) fn dropped_content(
+    obj: &windows::Win32::System::Com::IDataObject,
+) -> Option<ClipboardItem> {
+    let fmt = content_format(obj)?;
+    let mut medium = unsafe { obj.GetData(&fmt).ok()? };
+    let item = (|| {
+        let data = LockedGlobal::lock(unsafe { medium.u.hGlobal })?;
+        if data.size > 32 << 20 {
+            return None;
+        }
+        if fmt.cfFormat == CF_UNICODETEXT.0 {
+            let words: Vec<u16> = data
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .take_while(|w| *w != 0)
+                .collect();
+            Some(ClipboardItem::new_string(String::from_utf16(&words).ok()?))
+        } else {
+            Some(ClipboardItem {
+                entries: vec![image_entry(fmt.cfFormat as u32, data.as_bytes())?],
+            })
+        }
+    })();
+    unsafe { windows::Win32::System::Ole::ReleaseStgMedium(&mut medium) };
+    item
 }
 
 fn read_files() -> Option<ClipboardEntry> {
@@ -290,14 +344,17 @@ fn convert_dib_to_bmp(dib: &[u8]) -> Option<Vec<u8>> {
             1u32 << bit_count
         } else {
             colors_used
-        }) * 4
+        })
+        .checked_mul(4)?
     } else if compression == 3 {
         12 // BI_BITFIELDS
     } else {
         0
     };
 
-    let pixel_offset = 14 + header_size + color_table_size;
+    let pixel_offset = 14u32
+        .checked_add(header_size)?
+        .checked_add(color_table_size)?;
     let file_size = 14 + dib.len() as u32;
 
     let mut bmp = Vec::with_capacity(file_size as usize);

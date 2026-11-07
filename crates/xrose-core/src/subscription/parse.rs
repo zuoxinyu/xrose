@@ -129,8 +129,8 @@ pub fn parse_share_links(content: &str) -> ParsedSubscription {
         ..Default::default()
     };
     let mut unparsed = 0usize;
-    for line in content.lines() {
-        let line = line.trim();
+    for line in content.split(['\r', '\n']) {
+        let line = line.trim().trim_start_matches('\u{feff}').trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with("//") {
             continue;
         }
@@ -857,6 +857,25 @@ mod tests {
         let parsed = parse_subscription(&encoded);
         assert_eq!(parsed.format, SourceFormat::Base64);
         assert_eq!(parsed.nodes.len(), 2);
+    }
+
+    #[test]
+    fn mixed_clipboard_exports_preserve_order_and_skip_invalid_lines() {
+        let v2rayn = "vless://00000000-0000-4000-8000-000000000001@node.example:443#First";
+        let body = crate::util::encode_base64(
+            b"auto:00000000-0000-4000-8000-000000000002@other.example:443",
+        );
+        let rocket = format!("shadowrocket://add/vmess://{body}?remarks=Second");
+        let content = format!("\u{feff}{v2rayn}\r\n\r\n# comment\rbroken\r\n{rocket}\n");
+        for input in [
+            content.clone(),
+            crate::util::encode_base64(content.as_bytes()),
+        ] {
+            let parsed = parse_subscription(&input);
+            let names: Vec<_> = parsed.nodes.iter().map(|n| n.name.as_str()).collect();
+            assert_eq!(names, ["First", "Second"]);
+            assert_eq!(parsed.warnings, ["1 行无法解析，已跳过"]);
+        }
     }
 
     #[test]

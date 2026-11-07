@@ -98,7 +98,7 @@ EasyTier 的新增和编辑窗口提供[高级设置](docs/MESH.md#easytier-高�
 
 ## 快速开始
 
-要求：Rust 1.95+，Windows、macOS 或 Linux 桌面。Linux 需要 GTK3、`libxkbcommon` 与 `wayland-client`（或 X11）开发库。Windows 构建参见 [组网文档](docs/MESH.md)。
+要求：Rust 1.95+，Windows、macOS 或 Linux 桌面。Linux 需要 GTK3、`libxkbcommon` 与 `wayland-client`（或 X11）开发库；屏幕捕获还需 Clang、PipeWire、XCB、XRandR、D-Bus、GBM 和 EGL 开发库。Windows 构建参见 [组网文档](docs/MESH.md)。
 
 ```bash
 cargo run -p xrose-app
@@ -106,7 +106,9 @@ cargo run -p xrose-app
 
 首次使用：
 
-1. 在“订阅”页添加订阅链接，或在“节点”页导入分享链接、手动添加节点。
+1. 在「节点」或「订阅」页直接粘贴链接或二维码图片（macOS 用 **⌘V**，Windows / Linux 用 **Ctrl+V**），也可把二维码图片文件或文本文件拖入页面。可识别 v2rayN、Shadowrocket 导出的单条链接、每行一条的批量链接及整体 Base64 编码的节点列表；HTTP(S) 地址会添加为节点订阅。输入框内的粘贴仍用于编辑文本。
+   若二维码显示在其他窗口，打开「添加节点」或「添加订阅」弹窗，点击「扫描屏幕二维码」。移动取景框对准二维码，四角变绿后，核对节点名称、协议和服务器地址，再点击导入。扫描时可切换应用、滚动页面，按 **Esc** 或右键退出。macOS 首次使用需要允许屏幕录制。
+   批量导出时，在「节点 → 更多操作 → 批量管理」勾选节点，点击「复制分享链接」。每行一个链接，可直接粘贴导入。
 2. 在“设置 → Core 管理”下载 Xray 或 sing-box。
 3. 点击右上角“启动”。修改路由或 DNS 后，点击「立即应用并重载」，或在「设置 → Core」开启「热重载」自动应用。热重载默认关闭。开启后，应用也会在发现已安装的提权助手版本不匹配时更新助手，系统可能要求授权。
 

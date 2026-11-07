@@ -4,9 +4,9 @@
 //! minimal native launcher; the dashboard always renders in GPUI.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::mpsc::{SyncSender, sync_channel};
 
-use gpui_kit::{point, px, Window, WindowAppearance};
+use gpui_kit::{Window, WindowAppearance, point, px};
 use ksni::blocking::TrayMethods;
 use parking_lot::Mutex;
 use xrose_core::AppService;
@@ -162,9 +162,6 @@ pub fn register_main_window(_window: &Window) {}
 // Wayland toplevel. The main loop uses those operations for this backend.
 pub fn hide_main_window() {}
 pub fn show_main_window() {}
-pub fn main_window_minimized() -> bool {
-    false
-}
 pub fn setup_window() {}
 pub fn pointer_on_icon() -> bool {
     false

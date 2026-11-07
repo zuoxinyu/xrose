@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    .qr-pattern {
+      background-image:
+        radial-gradient(currentColor 1px, transparent 1px),
+        linear-gradient(90deg, currentColor 2px, transparent 2px),
+        linear-gradient(currentColor 2px, transparent 2px);
+      background-size: 6px 6px, 14px 14px, 14px 14px;
+    }
+    .reticle-transition {
+      transition: left 160ms cubic-bezier(0.2, 0.9, 0.2, 1),
+                  top 160ms cubic-bezier(0.2, 0.9, 0.2, 1),
+                  width 160ms cubic-bezier(0.2, 0.9, 0.2, 1),
+                  height 160ms cubic-bezier(0.2, 0.9, 0.2, 1),
+                  border-radius 160ms ease;
+    }
+  </style>
+</head>
+<body class="bg-transparent text-[var(--foreground)] antialiased p-2 select-none">
+  <div class="bg-[var(--card)] text-[var(--foreground)] border border-[var(--border)] rounded-xl p-3.5 shadow-sm flex flex-col gap-2.5">
+    <!-- Top Controls -->
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div class="inline-flex p-0.5 rounded-lg bg-[var(--background)] border border-[var(--border)]" role="radiogroup">
+        <button id="btn-viewfinder" onclick="setMode('viewfinder')" class="px-2.5 py-1 text-xs font-medium rounded-md transition-colors">
+          ① 光学取景器
+        </button>
+        <button id="btn-radar" onclick="setMode('radar')" class="px-2.5 py-1 text-xs font-medium rounded-md transition-colors">
+          ② 全屏自动雷达
+        </button>
+        <button id="btn-loupe" onclick="setMode('loupe')" class="px-2.5 py-1 text-xs font-medium rounded-md transition-colors">
+          ③ 磁吸探照灯
+        </button>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button id="btn-single-toggle" onclick="toggleSingleQr()" class="hidden px-2.5 py-1 text-xs rounded-md border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] hover:text-[var(--foreground)] transition-colors">
+          当前：多码场景 (3)
+        </button>
+        <div id="size-controls" class="flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
+          <span>框尺寸</span>
+          <button onclick="adjustBox(-24)" class="w-6 h-6 rounded border border-[var(--border)] bg-[var(--background)] hover:text-[var(--foreground)]">−</button>
+          <span id="box-size-label" class="font-mono w-9 text-center text-[var(--foreground)]">136</span>
+          <button onclick="adjustBox(24)" class="w-6 h-6 rounded border border-[var(--border)] bg-[var(--background)] hover:text-[var(--foreground)]">+</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Simulated Desktop Stage -->
+    <div id="stage" class="relative h-[284px] w-full rounded-lg border border-[var(--border)] bg-[var(--background)] overflow-hidden">
+      <!-- Simulated Window 1: Browser with tiny QR -->
+      <div id="win-tiny" class="absolute left-4 top-4 w-48 rounded-lg border border-[var(--border)] bg-[var(--card)] p-2.5 shadow-sm">
+        <div class="flex items-center gap-1.5 mb-2">
+          <span class="w-2 h-2 rounded-full bg-red-400/70"></span>
+          <span class="w-2 h-2 rounded-full bg-amber-400/70"></span>
+          <span class="w-2 h-2 rounded-full bg-emerald-400/70"></span>
+          <span class="text-xs text-[var(--muted-foreground)] ml-1 truncate">订阅面板 · 极小码</span>
+        </div>
+        <div class="flex items-center gap-2.5">
+          <div data-qr-id="0" data-label="Sub · 主力订阅" class="qr-target relative w-11 h-11 shrink-0 p-1 rounded bg-white text-neutral-900 border border-neutral-300 flex items-center justify-center">
+            <div class="w-full h-full qr-pattern relative">
+              <span class="absolute top-0 left-0 w-2.5 h-2.5 border-2 border-neutral-900 bg-white"></span>
+              <span class="absolute top-0 right-0 w-2.5 h-2.5 border-2 border-neutral-900 bg-white"></span>
+              <span class="absolute bottom-0 left-0 w-2.5 h-2.5 border-2 border-neutral-900 bg-white"></span>
+            </div>
+          </div>
+          <div class="text-xs text-[var(--muted-foreground)] leading-snug">
+            44×44 px 小码<br/>无需放大也能解
+          </div>
+        </div>
+      </div>
+
+      <!-- Simulated Window 2: Large Modal QR -->
+      <div id="win-large" class="absolute left-[226px] top-6 w-52 rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 shadow-sm flex flex-col items-center">
+        <div class="text-xs font-medium mb-2 self-start flex items-center justify-between w-full">
+          <span>节点分享 · 大尺寸码</span>
+          <span class="text-xs text-[var(--muted-foreground)] font-mono">112px</span>
+        </div>
+        <div data-qr-id="1" data-label="VLESS · Tokyo-01" class="qr-target relative w-28 h-28 p-2 rounded bg-white text-neutral-900 border border-neutral-300">
+          <div class="w-full h-full qr-pattern relative">
+            <span class="absolute top-0 left-0 w-5 h-5 border-[3px] border-neutral-900 bg-white"></span>
+            <span class="absolute top-0 right-0 w-5 h-5 border-[3px] border-neutral-900 bg-white"></span>
+            <span class="absolute bottom-0 left-0 w-5 h-5 border-[3px] border-neutral-900 bg-white"></span>
+          </div>
+        </div>
+        <div class="text-xs text-[var(--muted-foreground)] mt-2">默认小框装不下？滚轮调框或雷达直扫</div>
+      </div>
+
+      <!-- Simulated Window 3: Dark Terminal Inverted QR -->
+      <div id="win-dark" class="absolute right-4 bottom-4 w-52 rounded-lg border border-neutral-700 bg-neutral-900 text-neutral-100 p-2.5 shadow-sm">
+        <div class="text-xs text-neutral-400 font-mono mb-1.5">$ qrencode -t UTF8 (反色码)</div>
+        <div class="flex items-center gap-2.5">
+          <div data-qr-id="2" data-label="Hysteria2 · HK-03" class="qr-target relative w-16 h-16 shrink-0 p-1.5 rounded bg-neutral-950 text-cyan-300 border border-neutral-700">
+            <div class="w-full h-full qr-pattern relative">
+              <span class="absolute top-0 left-0 w-3.5 h-3.5 border-2 border-cyan-300 bg-neutral-950"></span>
+              <span class="absolute top-0 right-0 w-3.5 h-3.5 border-2 border-cyan-300 bg-neutral-950"></span>
+              <span class="absolute bottom-0 left-0 w-3.5 h-3.5 border-2 border-cyan-300 bg-neutral-950"></span>
+            </div>
+          </div>
+          <div class="text-xs text-neutral-400 leading-snug">
+            暗色反相二维码<br/>二次反相重试通吃
+          </div>
+        </div>
+      </div>
+
+      <!-- Dim Backdrop for Radar Mode -->
+      <div id="radar-backdrop" class="hidden absolute inset-0 bg-black/40 pointer-events-none transition-opacity"></div>
+
+      <!-- Dynamic Overlay Layer -->
+      <div id="overlay-layer" class="absolute inset-0 pointer-events-none"></div>
+
+      <!-- Mode 1: Draggable Hollow Viewfinder -->
+      <div id="viewfinder" class="absolute cursor-move" style="left: 36px; top: 124px; width: 136px; height: 136px;">
+        <!-- Subtle hollow glass border -->
+        <div class="w-full h-full rounded-lg border border-cyan-500/40 bg-cyan-500/[0.03] shadow-sm relative">
+          <div class="absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded-full bg-neutral-900/85 text-white text-xs font-medium shadow">
+            <span id="vf-pill">拖动取景 · 滚轮调大小</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Snapping Reticle (shared by Viewfinder & Loupe & Radar single-lock) -->
+      <div id="reticle" class="reticle-transition absolute pointer-events-none" style="left: 36px; top: 124px; width: 136px; height: 136px;">
+        <span class="ret-corner absolute top-0 left-0 w-4 h-4 border-t-[2.5px] border-l-[2.5px] rounded-tl border-cyan-500"></span>
+        <span class="ret-corner absolute top-0 right-0 w-4 h-4 border-t-[2.5px] border-r-[2.5px] rounded-tr border-cyan-500"></span>
+        <span class="ret-corner absolute bottom-0 left-0 w-4 h-4 border-b-[2.5px] border-l-[2.5px] rounded-bl border-cyan-500"></span>
+        <span class="ret-corner absolute bottom-0 right-0 w-4 h-4 border-b-[2.5px] border-r-[2.5px] rounded-br border-cyan-500"></span>
+      </div>
+    </div>
+
+    <!-- Bottom Feedback Bar -->
+    <div class="flex items-center justify-between gap-2 text-xs">
+      <div id="status-text" class="text-[var(--muted-foreground)] truncate">
+        提示：按住取景框拖向任意二维码，或在框上滚动鼠标滚轮调整尺寸。
+      </div>
+      <div id="toast-badge" class="shrink-0 px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-medium opacity-0 transition-opacity">
+        已导入
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentMode = 'viewfinder';
+    let singleQrScene = false;
+    let vfState = { x: 36, y: 124, size: 136, dragging: false, startX: 0, startY: 0 };
+
+    const stage = document.getElementById('stage');
+    const vf = document.getElementById('viewfinder');
+    const reticle = document.getElementById('reticle');
+    const vfPill = document.getElementById('vf-pill');
+    const overlayLayer = document.getElementById('overlay-layer');
+    const radarBackdrop = document.getElementById('radar-backdrop');
+    const statusText = document.getElementById('status-text');
+    const toastBadge = document.getElementById('toast-badge');
+    const boxSizeLabel = document.getElementById('box-size-label');
+
+    function getQrRects() {
+      const stageRect = stage.getBoundingClientRect();
+      return Array.from(document.querySelectorAll('.qr-target'))
+        .filter(el => el.offsetParent !== null)
+        .map(el => {
+          const r = el.getBoundingClientRect();
+          return {
+            id: el.dataset.qrId,
+            label: el.dataset.label,
+            x: r.left - stageRect.left,
+            y: r.top - stageRect.top,
+            w: r.width,
+            h: r.height,
+            cx: r.left - stageRect.left + r.width / 2,
+            cy: r.top - stageRect.top + r.height / 2
+          };
+        });
+    }
+
+    function setReticleColor(locked) {
+      document.querySelectorAll('.ret-corner').forEach(el => {
+        el.classList.toggle('border-cyan-500', !locked);
+        el.classList.toggle('border-emerald-500', locked);
+      });
+    }
+
+    function flashToast(msg) {
+      toastBadge.textContent = '✓ ' + msg;
+      toastBadge.classList.remove('opacity-0');
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => toastBadge.classList.add('opacity-0'), 2000);
+    }
+
+    function updateViewfinder() {
+      vf.style.left = vfState.x + 'px';
+      vf.style.top = vfState.y + 'px';
+      vf.style.width = vfState.size + 'px';
+      vf.style.height = vfState.size + 'px';
+      boxSizeLabel.textContent = Math.round(vfState.size);
+
+      // 1.2x tolerance pad around viewfinder
+      const pad = vfState.size * 0.12;
+      const vx1 = vfState.x - pad, vy1 = vfState.y - pad;
+      const vx2 = vfState.x + vfState.size + pad, vy2 = vfState.y + vfState.size + pad;
+
+      const hits = getQrRects().filter(q =>
+        q.x >= vx1 && q.y >= vy1 && (q.x + q.w) <= vx2 && (q.y + q.h) <= vy2
+      );
+
+      if (hits.length > 0) {
+        const target = hits[0];
+        reticle.style.left = (target.x - 4) + 'px';
+        reticle.style.top = (target.y - 4) + 'px';
+        reticle.style.width = (target.w + 8) + 'px';
+        reticle.style.height = (target.h + 8) + 'px';
+        setReticleColor(true);
+        vfPill.textContent = '已对焦：' + target.label + '（点击导入）';
+        flashToast('识别到 ' + target.label);
+      } else {
+        reticle.style.left = vfState.x + 'px';
+        reticle.style.top = vfState.y + 'px';
+        reticle.style.width = vfState.size + 'px';
+        reticle.style.height = vfState.size + 'px';
+        setReticleColor(false);
+        vfPill.textContent = '拖动取景 · 滚轮调大小';
+      }
+    }
+
+    function adjustBox(delta) {
+      if (currentMode !== 'viewfinder') return;
+      const center = { x: vfState.x + vfState.size / 2, y: vfState.y + vfState.size / 2 };
+      vfState.size = Math.max(72, Math.min(216, vfState.size + delta));
+      vfState.x = Math.max(4, Math.min(stage.clientWidth - vfState.size - 4, center.x - vfState.size / 2));
+      vfState.y = Math.max(4, Math.min(stage.clientHeight - vfState.size - 4, center.y - vfState.size / 2));
+      updateViewfinder();
+    }
+
+    // Viewfinder drag & wheel
+    vf.addEventListener('pointerdown', e => {
+      if (currentMode !== 'viewfinder') return;
+      vfState.dragging = true;
+      vfState.startX = e.clientX - vfState.x;
+      vfState.startY = e.clientY - vfState.y;
+      vf.setPointerCapture(e.pointerId);
+    });
+    vf.addEventListener('pointermove', e => {
+      if (!vfState.dragging) return;
+      vfState.x = Math.max(4, Math.min(stage.clientWidth - vfState.size - 4, e.clientX - vfState.startX));
+      vfState.y = Math.max(4, Math.min(stage.clientHeight - vfState.size - 4, e.clientY - vfState.startY));
+      updateViewfinder();
+    });
+    vf.addEventListener('pointerup', () => { vfState.dragging = false; });
+    stage.addEventListener('wheel', e => {
+      if (currentMode !== 'viewfinder') return;
+      e.preventDefault();
+      adjustBox(e.deltaY < 0 ? 18 : -18);
+    }, { passive: false });
+
+    // Loupe mouse tracking
+    stage.addEventListener('pointermove', e => {
+      if (currentMode !== 'loupe') return;
+      const sr = stage.getBoundingClientRect();
+      const mx = e.clientX - sr.left;
+      const my = e.clientY - sr.top;
+      const qrs = getQrRects();
+      let nearest = null, minDist = 82;
+      qrs.forEach(q => {
+        const d = Math.hypot(mx - q.cx, my - q.cy);
+        if (d < minDist) { minDist = d; nearest = q; }
+      });
+
+      if (nearest) {
+        reticle.style.left = (nearest.x - 5) + 'px';
+        reticle.style.top = (nearest.y - 5) + 'px';
+        reticle.style.width = (nearest.w + 10) + 'px';
+        reticle.style.height = (nearest.h + 10) + 'px';
+        reticle.style.borderRadius = '8px';
+        setReticleColor(true);
+        statusText.textContent = '磁吸锁定：' + nearest.label + ' — 单击即可导入（自动适配码尺寸）';
+      } else {
+        const s = 92;
+        reticle.style.left = (mx - s / 2) + 'px';
+        reticle.style.top = (my - s / 2) + 'px';
+        reticle.style.width = s + 'px';
+        reticle.style.height = s + 'px';
+        reticle.style.borderRadius = '9999px';
+        setReticleColor(false);
+        statusText.textContent = '移动鼠标探索桌面：靠近二维码 80px 内会产生磁吸牵引并自动变径贴合。';
+      }
+    });
+
+    stage.addEventListener('click', e => {
+      if (currentMode !== 'loupe') return;
+      const sr = stage.getBoundingClientRect();
+      const mx = e.clientX - sr.left, my = e.clientY - sr.top;
+      const hit = getQrRects().find(q => Math.hypot(mx - q.cx, my - q.cy) < 82);
+      if (hit) flashToast('已导入 ' + hit.label);
+    });
+
+    function renderRadar() {
+      overlayLayer.innerHTML = '';
+      const qrs = getQrRects();
+      if (qrs.length === 1) {
+        reticle.classList.remove('hidden');
+        // Fly from center to the single QR
+        reticle.style.left = (stage.clientWidth / 2 - 70) + 'px';
+        reticle.style.top = (stage.clientHeight / 2 - 70) + 'px';
+        reticle.style.width = '140px';
+        reticle.style.height = '140px';
+        setReticleColor(false);
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            const q = qrs[0];
+            reticle.style.left = (q.x - 6) + 'px';
+            reticle.style.top = (q.y - 6) + 'px';
+            reticle.style.width = (q.w + 12) + 'px';
+            reticle.style.height = (q.h + 12) + 'px';
+            setReticleColor(true);
+            flashToast('单码自动锁定导入：' + q.label);
+          }, 60);
+        });
+        statusText.textContent = '单码场景：无需任何拖拽或缩放，对焦框自动飞向唯一二维码完成导入！';
+        return;
+      }
+
+      reticle.classList.add('hidden');
+      qrs.forEach(q => {
+        const btn = document.createElement('button');
+        btn.className = 'pointer-events-auto absolute rounded-lg ring-2 ring-cyan-400 bg-cyan-400/10 hover:bg-emerald-400/20 hover:ring-emerald-400 transition-all group';
+        btn.style.left = (q.x - 5) + 'px';
+        btn.style.top = (q.y - 5) + 'px';
+        btn.style.width = (q.w + 10) + 'px';
+        btn.style.height = (q.h + 10) + 'px';
+        btn.innerHTML = `<span class="absolute -bottom-6 left-1/2 -translate-x-1/2 whitespace-nowrap px-2 py-0.5 rounded-full bg-neutral-900 text-white text-xs shadow group-hover:bg-emerald-600">${q.label}</span>`;
+        btn.onclick = () => flashToast('已导入 ' + q.label);
+        overlayLayer.appendChild(btn);
+      });
+
+      const batchBtn = document.createElement('button');
+      batchBtn.className = 'pointer-events-auto absolute top-2.5 right-3 px-3 py-1 rounded-full bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium shadow-md transition-colors';
+      batchBtn.textContent = `全部导入 (${qrs.length})`;
+      batchBtn.onclick = () => flashToast(`已批量导入全部 ${qrs.length} 项配置`);
+      overlayLayer.appendChild(batchBtn);
+
+      statusText.textContent = '多码场景：全屏快照一次检出 3 个不同尺寸/反色二维码，点击任意高亮码或右上角批量导入。';
+    }
+
+    function toggleSingleQr() {
+      singleQrScene = !singleQrScene;
+      document.getElementById('win-tiny').classList.toggle('hidden', singleQrScene);
+      document.getElementById('win-dark').classList.toggle('hidden', singleQrScene);
+      document.getElementById('btn-single-toggle').textContent = singleQrScene ? '当前：单码场景 (1)' : '当前：多码场景 (3)';
+      if (currentMode === 'radar') renderRadar();
+    }
+
+    function setMode(mode) {
+      currentMode = mode;
+      ['viewfinder', 'radar', 'loupe'].forEach(m => {
+        const b = document.getElementById('btn-' + m);
+        const active = m === mode;
+        b.className = active
+          ? 'px-2.5 py-1 text-xs font-medium rounded-md bg-cyan-500/15 text-cyan-600 dark:text-cyan-300 ring-1 ring-inset ring-cyan-500/50'
+          : 'px-2.5 py-1 text-xs font-medium rounded-md text-[var(--muted-foreground)] hover:text-[var(--foreground)]';
+      });
+
+      // Reset scene visibility when leaving radar
+      if (mode !== 'radar' && singleQrScene) {
+        singleQrScene = false;
+        document.getElementById('win-tiny').classList.remove('hidden');
+        document.getElementById('win-dark').classList.remove('hidden');
+        document.getElementById('btn-single-toggle').textContent = '当前：多码场景 (3)';
+      }
+
+      document.getElementById('size-controls').classList.toggle('hidden', mode !== 'viewfinder');
+      document.getElementById('btn-single-toggle').classList.toggle('hidden', mode !== 'radar');
+      vf.classList.toggle('hidden', mode !== 'viewfinder');
+      radarBackdrop.classList.toggle('hidden', mode !== 'radar');
+      overlayLayer.innerHTML = '';
+      reticle.classList.remove('hidden');
+      reticle.style.borderRadius = '0px';
+      stage.style.cursor = mode === 'loupe' ? 'none' : 'default';
+
+      if (mode === 'viewfinder') {
+        statusText.textContent = '提示：按住取景框拖向任意二维码（大码装不下时用滚轮或 +/− 调框），观察四角自动吸附。';
+        updateViewfinder();
+      } else if (mode === 'radar') {
+        renderRadar();
+      } else if (mode === 'loupe') {
+        statusText.textContent = '将鼠标移入桌面画布：光标化身探照灯，靠近任意大小二维码自动磁吸贴合。';
+      }
+    }
+
+    setMode('viewfinder');
+  </script>
+</body>
+</html>

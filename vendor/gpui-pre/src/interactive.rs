@@ -768,6 +768,13 @@ pub enum FileDropEvent {
         /// The position of the mouse relative to the window.
         position: Point<Pixels>,
     },
+    /// Native image or text representations resolved only after a drop.
+    SubmitContent {
+        /// Drop location relative to the window.
+        position: Point<Pixels>,
+        /// The dropped content, independent of the system clipboard.
+        item: std::sync::Arc<crate::ClipboardItem>,
+    },
     /// The files have been dropped onto the window.
     Submit {
         /// The position of the mouse relative to the window.

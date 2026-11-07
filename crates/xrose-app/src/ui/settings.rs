@@ -763,30 +763,6 @@ impl AppView {
             .when(crate::tray::available(), |d| {
                 d.child(setting_row(
                     &p,
-                    self.tr("最小化", "Minimize"),
-                    "",
-                    toggle(
-                        "minimize-to-tray",
-                        self.tr(
-                            if cfg!(target_os = "macos") {
-                                "最小化到菜单栏"
-                            } else {
-                                "最小化到系统托盘"
-                            },
-                            if cfg!(target_os = "macos") {
-                                "Minimize to menu bar"
-                            } else {
-                                "Minimize to system tray"
-                            },
-                        ),
-                        settings.minimize_to_tray,
-                    )
-                    .on_change(cx.listener(|this, checked, _, cx| {
-                        this.modify_settings(cx, |s| s.minimize_to_tray = *checked)
-                    })),
-                ))
-                .child(setting_row(
-                    &p,
                     self.tr("关闭窗口", "Close window"),
                     "",
                     toggle(
@@ -806,7 +782,16 @@ impl AppView {
                         settings.close_to_tray,
                     )
                     .on_change(cx.listener(|this, checked, _, cx| {
-                        this.modify_settings(cx, |s| s.close_to_tray = *checked)
+                        let was_enabled = this.service.settings().close_to_tray;
+                        this.modify_settings(cx, |s| s.close_to_tray = *checked);
+                        if !was_enabled && this.snapshot.settings.close_to_tray {
+                            let message = if cfg!(target_os = "macos") {
+                                this.tr("关闭窗口后，Xrose 将继续运行。可从菜单栏重新打开主窗口。", "Xrose will keep running when you close the window. Reopen it from the menu bar.")
+                            } else {
+                                this.tr("关闭窗口后，Xrose 将继续运行。可从系统托盘重新打开主窗口。", "Xrose will keep running when you close the window. Reopen it from the system tray.")
+                            };
+                            this.service.toast(xrose_core::service::ToastLevel::Info, message);
+                        }
                     })),
                 ))
                 .child(setting_row(
@@ -857,7 +842,10 @@ impl AppView {
         let core_check = updates.cores.get(settings.core.as_str());
         let app_updates_available = self.service.project_repository().is_some();
         let startup_check_text = if app_updates_available {
-            self.tr("启动时检查应用和当前内核", "Check the app and selected core at startup")
+            self.tr(
+                "启动时检查应用和当前内核",
+                "Check the app and selected core at startup",
+            )
         } else {
             self.tr("启动时检查当前内核", "Check the selected core at startup")
         };

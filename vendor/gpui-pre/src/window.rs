@@ -5727,6 +5727,23 @@ impl Window {
                         modifiers: Modifiers::default(),
                     })
                 }
+                FileDropEvent::SubmitContent { position, item } => {
+                    self.mouse_position = position;
+                    cx.activate(true);
+                    cx.active_drag = Some(AnyDrag {
+                        value: item,
+                        view: cx.new(|_| crate::ExternalPaths(Default::default())).into(),
+                        cursor_offset: position,
+                        cursor_style: None,
+                        external_payload_source: None,
+                    });
+                    PlatformInput::MouseUp(MouseUpEvent {
+                        button: MouseButton::Left,
+                        position,
+                        modifiers: Modifiers::default(),
+                        click_count: 1,
+                    })
+                }
                 FileDropEvent::Submit { position } => {
                     cx.activate(true);
                     self.mouse_position = position;

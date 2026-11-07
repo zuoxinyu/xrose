@@ -1,13 +1,13 @@
 //! AppKit status item; the dashboard itself is the shared GPUI flyout.
 
 use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cocoa::appkit::{NSApplication, NSStatusBar, NSVariableStatusItemLength};
-use cocoa::base::{id, nil, BOOL, YES};
+use cocoa::base::{BOOL, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
-use gpui_kit::{point, px, Window};
+use gpui_kit::{Window, point, px};
 use objc::declare::ClassDecl;
 use objc::runtime::{Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
@@ -368,15 +368,6 @@ pub fn show_main_window() {
     }
 }
 
-pub fn main_window_minimized() -> bool {
-    let window = MAIN_WINDOW.load(Ordering::Relaxed) as id;
-    window != nil
-        && unsafe {
-            let mini: BOOL = msg_send![window, isMiniaturized];
-            mini == YES
-        }
-}
-
 unsafe fn icon_frame() -> Option<NSRect> {
     let item = STATUS_ITEM.load(Ordering::Relaxed) as id;
     if item == nil {
@@ -473,9 +464,7 @@ pub fn setup_macos_window() {
         let count: usize = msg_send![windows, count];
         for i in 0..count {
             let win: id = msg_send![windows, objectAtIndex: i];
-            let win_class: id = msg_send![win, className];
-            let is_gpui: BOOL = msg_send![win_class, isEqualToString: string("GPUIWindow")];
-            if is_gpui == YES && win as usize == MAIN_WINDOW.load(Ordering::Relaxed) {
+            if win as usize == MAIN_WINDOW.load(Ordering::Relaxed) {
                 let mask: usize = msg_send![win, styleMask];
                 let full_size_mask: usize = 1 << 15; // NSWindowStyleMaskFullSizeContentView
                 let _: () = msg_send![win, setStyleMask: mask | full_size_mask];

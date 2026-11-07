@@ -54,6 +54,29 @@ pub enum ToastLevel {
     Error,
 }
 
+/// Summary of a direct import, including successful parts of a mixed batch.
+#[derive(Default)]
+pub struct SharedImport {
+    pub nodes: usize,
+    pub subscriptions: usize,
+    pub duplicates: usize,
+    pub unreadable: bool,
+    pub errors: Vec<String>,
+}
+
+pub enum SharePreview {
+    Node {
+        name: String,
+        protocol: &'static str,
+        endpoint: String,
+        count: usize,
+    },
+    Subscription {
+        host: String,
+    },
+    Unsupported,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toast {
     pub id: u64,
@@ -1016,9 +1039,14 @@ impl AppService {
         name: impl Into<String>,
         url: impl Into<String>,
     ) -> Result<String> {
-        let url = url.into();
-        if url.trim().is_empty() {
+        let url = url.into().trim().to_owned();
+        if url.is_empty() {
             return Err(Error::other("订阅地址不能为空"));
+        }
+        if !url::Url::parse(&url)
+            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+        {
+            return Err(Error::other("请输入有效的 HTTP 或 HTTPS 订阅地址"));
         }
         let name = name.into();
         let mut subscription = Subscription::new(
@@ -1029,9 +1057,15 @@ impl AppService {
             },
             url,
         );
-        subscription.sort = self.inner.subs.read().len() as i64;
-        self.inner.store.save_subscription(&subscription)?;
-        self.inner.subs.write().push(subscription.clone());
+        {
+            let mut subs = self.inner.subs.write();
+            if subs.iter().any(|item| item.url == subscription.url) {
+                return Err(Error::other("此订阅地址已添加"));
+            }
+            subscription.sort = subs.len() as i64;
+            self.inner.store.save_subscription(&subscription)?;
+            subs.push(subscription.clone());
+        }
         let id = subscription.id.clone();
         self.refresh_subscription(&id);
         Ok(id)
@@ -1122,7 +1156,13 @@ impl AppService {
                             parsed.warnings.push(format!("订阅标题：{title}"));
                         }
                     }
-                    let added = service.merge_parsed(&subscription.id, &parsed);
+                    let added = match service.merge_parsed(&subscription.id, &parsed) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            service.toast(ToastLevel::Error, format!("保存订阅节点失败：{error}"));
+                            return;
+                        }
+                    };
                     let mut updated = subscription.clone();
                     updated.last_user_agent = Some(user_agent);
                     updated.etag = response.etag;
@@ -1199,62 +1239,116 @@ impl AppService {
         &self,
         subscription_id: &str,
         parsed: &crate::subscription::ParsedSubscription,
-    ) -> usize {
-        let mut model = self.inner.model.write();
-        let before: BTreeSet<String> = model.nodes.iter().map(|n| n.id.clone()).collect();
-        let mut incoming: Vec<Node> = parsed.nodes.clone();
-        for node in &mut incoming {
-            node.subscription_id = Some(subscription_id.to_string());
-            node.source = crate::model::NodeSource::Subscription;
-        }
-        let added = model.add_nodes(incoming);
-        if added == 0 {
-            return 0;
-        }
-        let new_nodes: Vec<(String, String)> = model
-            .nodes
-            .iter()
-            .filter(|n| !before.contains(&n.id))
-            .filter(|n| n.subscription_id.as_deref() == Some(subscription_id))
-            .map(|n| (n.name.clone(), n.id.clone()))
-            .collect();
-        for group in &parsed.groups {
-            let members: Vec<String> = group
-                .members
+    ) -> Result<usize> {
+        let mut added = 0;
+        self.commit_model_change(|model| {
+            let before: BTreeSet<String> = model.nodes.iter().map(|n| n.id.clone()).collect();
+            let mut incoming: Vec<Node> = parsed.nodes.clone();
+            for node in &mut incoming {
+                node.subscription_id = Some(subscription_id.to_string());
+                node.source = crate::model::NodeSource::Subscription;
+            }
+            added = model.add_nodes(incoming);
+            if added == 0 {
+                return Ok(false);
+            }
+            let new_nodes: Vec<(String, String)> = model
+                .nodes
                 .iter()
-                .filter_map(|name| {
-                    new_nodes
-                        .iter()
-                        .find(|(node_name, _)| node_name == name)
-                        .map(|(_, id)| id.clone())
-                })
+                .filter(|n| !before.contains(&n.id))
+                .filter(|n| n.subscription_id.as_deref() == Some(subscription_id))
+                .map(|n| (n.name.clone(), n.id.clone()))
                 .collect();
-            if members.is_empty() {
-                continue;
-            }
-            if let Some(existing) = model.groups.iter_mut().find(|g| g.name == group.name) {
-                existing.kind = group.kind;
-                existing.enabled = true;
-                for member in members {
-                    if !existing.members.contains(&member) {
-                        existing.members.push(member);
-                    }
+            for group in &parsed.groups {
+                let members: Vec<String> = group
+                    .members
+                    .iter()
+                    .filter_map(|name| {
+                        new_nodes
+                            .iter()
+                            .find(|(node_name, _)| node_name == name)
+                            .map(|(_, id)| id.clone())
+                    })
+                    .collect();
+                if members.is_empty() {
+                    continue;
                 }
-                existing.repair();
+                if let Some(existing) = model.groups.iter_mut().find(|g| g.name == group.name) {
+                    existing.kind = group.kind;
+                    existing.enabled = true;
+                    for member in members {
+                        if !existing.members.contains(&member) {
+                            existing.members.push(member);
+                        }
+                    }
+                    existing.repair();
+                } else {
+                    let mut new_group =
+                        crate::model::OutboundGroup::new(group.name.clone(), group.kind);
+                    new_group.members = members;
+                    new_group.selected = new_group.members.first().cloned();
+                    model.groups.push(new_group);
+                }
+            }
+            model.updated_at = now_unix();
+            Ok(true)
+        })?;
+        if added > 0 {
+            self.refresh_doctor();
+        }
+        Ok(added)
+    }
+
+    /// Inspect the same formats as direct import without persisting anything or resolving a hostname.
+    pub fn preview_shared_content(content: &str) -> SharePreview {
+        let (urls, nodes) = split_shared_content(content);
+        let parsed = parse_subscription(&nodes);
+        if let Some(node) = parsed.nodes.first() {
+            return SharePreview::Node {
+                name: node.name.clone(),
+                protocol: node.protocol.display_name(),
+                endpoint: node.endpoint(),
+                count: parsed.nodes.len(),
+            };
+        }
+        match urls.first() {
+            Some(url) => SharePreview::Subscription {
+                host: pretty_host(url),
+            },
+            None => SharePreview::Unsupported,
+        }
+    }
+
+    /// Routes shared text from a clipboard, dropped file, or QR code.
+    pub fn import_shared_content(&self, content: &str) -> SharedImport {
+        let (urls, nodes) = split_shared_content(content);
+        let mut result = SharedImport::default();
+        for url in urls {
+            if self.inner.subs.read().iter().any(|sub| sub.url == url) {
+                result.duplicates += 1;
             } else {
-                let mut new_group =
-                    crate::model::OutboundGroup::new(group.name.clone(), group.kind);
-                new_group.members = members;
-                new_group.selected = new_group.members.first().cloned();
-                model.groups.push(new_group);
+                match self.add_subscription("", url) {
+                    Ok(_) => result.subscriptions += 1,
+                    Err(err) => result.errors.push(err.to_string()),
+                }
             }
         }
-        model.updated_at = now_unix();
-        drop(model);
-        let _ = self.persist_model();
-        self.refresh_doctor();
-        self.mark_dirty();
-        added
+        if !nodes.trim().is_empty() {
+            let parsed = parse_subscription(&nodes);
+            result.unreadable = parsed.is_empty() || !parsed.warnings.is_empty();
+            if !parsed.is_empty() {
+                match self.merge_parsed(PASTED_SOURCE, &parsed) {
+                    Ok(count) => {
+                        result.nodes = count;
+                        result.duplicates += parsed.nodes.len() - count;
+                    }
+                    Err(err) => result.errors.push(err.to_string()),
+                }
+            }
+        } else if result.subscriptions + result.duplicates == 0 && result.errors.is_empty() {
+            result.unreadable = true;
+        }
+        result
     }
 
     /// Imports share links / Clash YAML / SIP008 / sing-box JSON pasted by the user.
@@ -1267,7 +1361,13 @@ impl AppService {
             );
             return 0;
         }
-        let added = self.merge_parsed(PASTED_SOURCE, &parsed);
+        let added = match self.merge_parsed(PASTED_SOURCE, &parsed) {
+            Ok(count) => count,
+            Err(error) => {
+                self.toast(ToastLevel::Error, format!("保存节点失败：{error}"));
+                return 0;
+            }
+        };
         self.toast(
             ToastLevel::Success,
             format!("已导入 {} 个节点（{}）", added, parsed.format.label()),
@@ -1285,8 +1385,7 @@ impl AppService {
         let core = self.inner.settings.read().core;
         let node = draft.into_node(core)?;
         let fingerprint = node.fingerprint();
-        {
-            let mut model = self.inner.model.write();
+        self.commit_model_change(|model| {
             if model.nodes.iter().any(|n| n.fingerprint() == fingerprint) {
                 return Err(Error::other(
                     "已存在相同节点（协议 / 地址 / 端口 / 凭据一致）",
@@ -1295,10 +1394,9 @@ impl AppService {
             if model.add_nodes([node.clone()]) == 0 {
                 return Err(Error::other("节点未加入配置（可能已存在）"));
             }
-        }
-        self.persist_model()?;
+            Ok(true)
+        })?;
         self.refresh_doctor();
-        self.mark_dirty();
         self.toast(
             ToastLevel::Success,
             format!("已添加节点“{}”（{}:{}）", node.name, node.server, node.port),
@@ -1484,9 +1582,11 @@ impl AppService {
 
     pub fn export_links(&self, node_ids: &[String]) -> String {
         let model = self.inner.model.read();
+        let by_id: std::collections::HashMap<_, _> =
+            model.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
         node_ids
             .iter()
-            .filter_map(|id| model.node(id))
+            .filter_map(|id| by_id.get(id.as_str()).copied())
             .filter_map(crate::subscription::node_to_share_link)
             .collect::<Vec<_>>()
             .join("\n")
@@ -4291,6 +4391,38 @@ pub enum LatencyScope {
     Group(String),
 }
 
+/// Only split lists of links. Preserve structured documents and wrapped Base64 verbatim.
+fn split_shared_content(content: &str) -> (Vec<&str>, std::borrow::Cow<'_, str>) {
+    let is_subscription = |line: &str| {
+        !line.contains(char::is_whitespace)
+            && !crate::subscription::links::is_http_proxy_link(line)
+            && (line
+                .get(..7)
+                .is_some_and(|s| s.eq_ignore_ascii_case("http://"))
+                || line
+                    .get(..8)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("https://")))
+            && url::Url::parse(line).is_ok_and(|url| url.host().is_some())
+    };
+    let urls: Vec<_> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_subscription(line))
+        .collect();
+    if urls.is_empty()
+        || content.trim_start().starts_with(['{', '['])
+        || content.contains("proxies:")
+    {
+        return (Vec::new(), content.into());
+    }
+    let rest = content
+        .lines()
+        .filter(|line| !is_subscription(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (urls, rest.into())
+}
+
 fn pretty_host(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
@@ -4300,6 +4432,80 @@ fn pretty_host(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_import_reports_failed_storage_and_leaves_the_node_retryable() {
+        let (service, _dir) = service();
+        let db = rusqlite::Connection::open(service.paths().database()).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_import BEFORE UPDATE ON profiles BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").unwrap();
+        let link = "socks://retry.example:1080#Retry";
+        let report = service.import_shared_content(link);
+        assert_eq!(report.nodes, 0);
+        assert!(!report.errors.is_empty());
+        assert!(service.model().nodes.is_empty());
+        db.execute_batch("DROP TRIGGER reject_import;").unwrap();
+        assert_eq!(service.import_shared_content(link).nodes, 1);
+    }
+
+    #[test]
+    fn selected_share_links_round_trip_in_requested_order_including_http_proxies() {
+        let (service, _dir) = service();
+        service.import_shared_content("http://proxy.example:8080?xrose=proxy#HTTP\nsocks://proxy.example:1080#SOCKS\nsocks://extra.example:1080#Extra");
+        let model = service.model();
+        let links = service.export_links(&[model.nodes[1].id.clone(), model.nodes[0].id.clone()]);
+        assert_eq!(links.lines().count(), 2);
+        let (urls, nodes) = super::split_shared_content(&links);
+        assert!(urls.is_empty());
+        let parsed = crate::subscription::parse_subscription(&nodes);
+        assert_eq!(
+            parsed
+                .nodes
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>(),
+            ["SOCKS", "HTTP"]
+        );
+        assert!(matches!(
+            super::AppService::preview_shared_content(links.lines().last().unwrap()),
+            super::SharePreview::Node {
+                name,
+                protocol: "HTTP",
+                endpoint,
+                count: 1,
+            } if name == "HTTP" && endpoint == "proxy.example:8080"
+        ));
+    }
+
+    #[test]
+    fn direct_import_separates_subscription_urls_without_splitting_documents() {
+        let node = "socks://node.example:1080#Demo";
+        let url = "https://feed.example/test";
+        let mixed = format!("{node}\r\n{url}");
+        let (subs, rest) = super::split_shared_content(&mixed);
+        assert_eq!(subs, [url]);
+        assert_eq!(rest, node);
+        let yaml = "proxies:\n  # https://feed.example/test";
+        assert_eq!(super::split_shared_content(yaml).1, yaml);
+        assert!(super::split_shared_content("https:// bad").0.is_empty());
+    }
+
+    #[test]
+    fn mixed_paste_keeps_existing_subscription_and_deduplicates_nodes() {
+        let (service, _dir) = service();
+        let url = "https://feed.example/test";
+        service
+            .inner
+            .subs
+            .write()
+            .push(crate::subscription::Subscription::new("Fixture", url));
+        let content = format!("{url}\nsocks://node.example:1080#Fixture");
+        service.import_shared_content(&content);
+        service.import_shared_content(&content);
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.subscriptions.len(), 1);
+        assert_eq!(snapshot.model.nodes.len(), 1);
+        assert_eq!(snapshot.model.nodes[0].name, "Fixture");
+    }
+
     #[test]
     fn failed_start_preflight_clears_busy_and_is_retryable_without_downloading() {
         let (service, _dir) = service();
@@ -5671,7 +5877,7 @@ proxy-groups:
         service.inner.subs.write().push(subscription.clone());
         let content = "vless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A\nvless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A";
         let parsed = parse_subscription(content);
-        let added = service.merge_parsed(&subscription.id, &parsed);
+        let added = service.merge_parsed(&subscription.id, &parsed).unwrap();
         assert_eq!(added, 1);
         assert_eq!(
             service

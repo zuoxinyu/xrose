@@ -8,6 +8,7 @@ mod menus;
 mod mesh;
 mod mesh_sync;
 mod nodes;
+mod qr;
 mod route_drag;
 mod route_transfer;
 mod routing;
@@ -23,7 +24,7 @@ use std::time::Duration;
 use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Icon};
@@ -156,6 +157,9 @@ fn text_input(
 }
 
 pub struct AppView {
+    scan_pending: bool,
+    import_editor_epoch: u64,
+    import_busy: bool,
     traffic_ui: traffic_statistics::TrafficUi,
     mesh_form: mesh::MeshForm,
     forward_editor: Option<mesh::ForwardEditor>,
@@ -189,7 +193,7 @@ pub struct AppView {
     pub(crate) batch_selected: std::collections::HashSet<String>,
     pub(crate) sub_name: Entity<InputState>,
     pub(crate) sub_url: Entity<InputState>,
-    pub(crate) import_input: Entity<InputState>,
+    pub(crate) import_input: Entity<TextareaState>,
     pub(crate) log_search: Entity<InputState>,
     log_list: logs::LogListState,
     log_filter: LogFilter,
@@ -247,11 +251,14 @@ impl AppView {
             cx,
             "https://example.com/api/v1/client/subscribe?token=...",
         );
-        let import_input = text_input(
-            window,
-            cx,
-            "粘贴 vmess:// / vless:// / trojan:// / ss:// 链接",
-        );
+        let import_input = cx.new(|cx| TextareaState::new(window, cx).rows(4));
+        cx.subscribe(&import_input, |this, _, event, cx| {
+            if this.show_import_box && matches!(event, InputEvent::Change) {
+                this.manual_error = None;
+                cx.notify();
+            }
+        })
+        .detach();
         let node_search = text_input(window, cx, "按名称或地址过滤节点…");
         let log_search = text_input(window, cx, "搜索日志…");
         let rule_name = text_input(window, cx, "规则名称");
@@ -330,6 +337,9 @@ impl AppView {
             page: initial_page,
             service,
             focus_handle: cx.focus_handle(),
+            scan_pending: false,
+            import_editor_epoch: 0,
+            import_busy: false,
             node_search,
             show_import_box: false,
             show_manual_form,
@@ -392,6 +402,7 @@ impl AppView {
             matcher_kind: MatcherKind::Suffix,
             rule_action: RouteActionKind::Proxy,
         };
+        view.init_import(window, cx);
         view.refresh_header_location();
         view.localize_inputs(window, cx);
         if show_manual_form {
@@ -411,6 +422,10 @@ impl AppView {
     }
 
     fn localize_inputs(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = self.tr("粘贴节点链接，每行一条", "Paste node links, one per line");
+        self.import_input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder, window, cx)
+        });
         for (input, placeholder) in [
             (
                 &self.node_search,
@@ -420,13 +435,6 @@ impl AppView {
             (
                 &self.connection_search,
                 self.tr("过滤域名、IP 或进程…", "Filter domain, IP or process…"),
-            ),
-            (
-                &self.import_input,
-                self.tr(
-                    "粘贴 vmess:// / vless:// / trojan:// / ss:// 链接",
-                    "Paste vmess:// / vless:// / trojan:// / ss:// links",
-                ),
             ),
             (
                 &self.sub_name,
@@ -1245,11 +1253,27 @@ impl Drop for AppView {
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        #[cfg(target_os = "macos")]
+        qr::enable_drop(self.accepts_import(window, cx));
+        let import_page = matches!(self.page, Page::Nodes | Page::Subscriptions);
         div()
             .track_focus(&self.focus_handle)
+            .when(import_page, |el| {
+                el.on_drop(cx.listener(Self::drop_files))
+                    .on_drop(cx.listener(Self::drop_content))
+            })
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let mods = event.keystroke.modifiers;
                 let key = event.keystroke.key.as_str();
+                if key == "v"
+                    && !mods.alt
+                    && !mods.shift
+                    && (mods.platform || mods.control)
+                    && this.paste_import(window, cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 if key == "escape" && cx.stop_active_drag(window) {
                     this.active_route_drag = None;
                     this.route_drag_epoch += 1;

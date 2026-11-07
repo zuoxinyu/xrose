@@ -658,6 +658,7 @@ impl AppView {
                             Ok(draft) => draft,
                             Err(err) => {
                                 this.manual_error = Some(err);
+                                window.refresh();
                                 cx.notify();
                                 return;
                             }
@@ -675,6 +676,7 @@ impl AppView {
                             }
                             Err(err) => {
                                 this.manual_error = Some(err.to_string());
+                                window.refresh();
                                 cx.notify();
                             }
                         }
@@ -686,7 +688,7 @@ impl AppView {
             .gap_2()
             .w_full()
             .when_some(self.manual_error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(p.danger).child(error))
+                d.child(super::widgets::form_feedback(error, false, &p))
             })
             .child(actions)
     }

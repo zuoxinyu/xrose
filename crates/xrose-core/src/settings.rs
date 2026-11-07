@@ -158,8 +158,6 @@ pub struct Settings {
     pub startup_easytier: Option<String>,
     pub system_notifications: bool,
     pub start_minimized: bool,
-    /// Minimizing the window hides it into the tray instead of the taskbar.
-    pub minimize_to_tray: bool,
     /// Closing the window hides it into the tray instead of quitting.
     pub close_to_tray: bool,
     pub single_instance: bool,
@@ -215,7 +213,6 @@ impl Default for Settings {
             startup_easytier: None,
             system_notifications: false,
             start_minimized: false,
-            minimize_to_tray: true,
             close_to_tray: true,
             single_instance: true,
             log_level: LogLevel::Info,
@@ -510,7 +507,6 @@ mod tests {
         new.backdrop = BackdropStyle::Opaque;
         new.privacy_mode = !old.privacy_mode;
         new.show_tray_speed = !old.show_tray_speed;
-        new.minimize_to_tray = !old.minimize_to_tray;
         new.close_to_tray = !old.close_to_tray;
         new.autostart = !old.autostart;
         new.start_minimized = !old.start_minimized;

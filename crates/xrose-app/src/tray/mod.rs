@@ -51,12 +51,8 @@ pub fn register_main_window(window: &Window) {
     backend::register_main_window(window);
 }
 
-use xrose_core::service::ToastLevel;
 use xrose_core::AppService;
 
-/// The window is currently hidden in the tray. Kept here (not in a backend)
-/// so `main.rs` avoids re-hiding/re-toasting on every tick.
-static HIDDEN: AtomicBool = AtomicBool::new(false);
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
 pub struct TrayManager {
@@ -102,44 +98,12 @@ pub fn available() -> bool {
     backend::available()
 }
 
-/// Hides the main window into the tray. Returns true when this call actually
-/// hid it (used to toast only once).
-pub fn hide_main_window() -> bool {
-    if HIDDEN.swap(true, Ordering::SeqCst) {
-        return false;
-    }
+pub fn hide_main_window() {
     backend::hide_main_window();
-    true
 }
 
 pub fn show_main_window() {
-    HIDDEN.store(false, Ordering::SeqCst);
     backend::show_main_window();
-}
-
-pub fn window_hidden() -> bool {
-    HIDDEN.load(Ordering::SeqCst)
-}
-
-pub fn main_window_minimized() -> bool {
-    backend::main_window_minimized()
-}
-
-/// Called from the 200 ms loop: turns a native minimize into "hide in tray"
-/// when the user asked for it.
-pub fn watch_minimize(service: &AppService) {
-    if !available() || window_hidden() {
-        return;
-    }
-    if !service.settings().minimize_to_tray {
-        return;
-    }
-    if main_window_minimized() && hide_main_window() {
-        service.toast(
-            ToastLevel::Info,
-            "已最小化到托盘：单击图标打开浮窗，可显示主窗口或退出",
-        );
-    }
 }
 
 /// Marks the quit path so `on_window_should_close` does not hide instead of

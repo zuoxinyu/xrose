@@ -16,12 +16,30 @@ use std::sync::Arc;
 use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::*;
 use xrose_core::AppService;
-use xrose_core::service::ToastLevel;
 use xrose_core::settings::ThemeMode;
 use xrose_core::system::SingleInstance;
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = std::env::args_os().skip(1);
+    #[cfg(target_os = "macos")]
+    let args = {
+        let mut args = args.peekable();
+        // Launch Services starts GUI applications in a different working directory.
+        if args
+            .next_if(|arg| arg == "--xrose-launch-directory")
+            .is_some()
+        {
+            let Some(dir) = args.next() else {
+                std::process::exit(1)
+            };
+            if let Err(error) = std::env::set_current_dir(dir) {
+                eprintln!("无法恢复启动目录：{error}");
+                std::process::exit(1);
+            }
+        }
+        args
+    };
+    let args: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
     // Privilege-helper entry points must run before the database/GUI starts.
     match xrose_core::system::privilege::helper_main(&args) {
         Ok(true) => return,
@@ -96,7 +114,6 @@ fn main() {
             if cfg!(debug_assertions) && std::env::var_os("XROSE_TRAY_PREVIEW").is_some() {
                 tray::queue_command(tray::TrayCommand::TogglePopup);
             }
-            let hide_on_start = start_minimized;
             window_effects::make_surface_translucent(cx);
             let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
             let window_icon = image::load_from_memory(include_bytes!("../assets/app-icon-256.png"))
@@ -145,10 +162,6 @@ fn main() {
                             #[cfg(not(target_os = "linux"))]
                             let _ = window;
                             tray::hide_main_window();
-                            close_service.toast(
-                                ToastLevel::Info,
-                                "已最小化到托盘：单击图标打开浮窗，可显示主窗口或退出",
-                            );
                             false
                         } else {
                             tray::request_quit();
@@ -168,7 +181,9 @@ fn main() {
                     let view = view.downgrade();
                     cx.spawn(async move |cx| {
                         let mut macos_configured = false;
-                        let mut hide_on_start = hide_on_start;
+                        if start_minimized {
+                            let _ = main_window.update(cx, |_, window, _| window.minimize_window());
+                        }
                         let mut backdrop = service_for_loop.settings().backdrop;
                         loop {
                             tokio::select! {
@@ -178,13 +193,6 @@ fn main() {
                             if !macos_configured {
                                 tray::setup_platform_window();
                                 macos_configured = true;
-                            }
-                            if hide_on_start && tray::available() {
-                                hide_on_start = false;
-                                tray::hide_main_window();
-                                #[cfg(target_os = "linux")]
-                                let _ =
-                                    main_window.update(cx, |_, window, _| window.minimize_window());
                             }
                             let new_backdrop = service_for_loop.settings().backdrop;
                             if backdrop != new_backdrop {
@@ -216,7 +224,6 @@ fn main() {
                                     }
                                 }
                             }
-                            tray::watch_minimize(&service_for_loop);
                             if view.update(cx, |view, cx| view.tick(cx)).is_err() {
                                 break;
                             }

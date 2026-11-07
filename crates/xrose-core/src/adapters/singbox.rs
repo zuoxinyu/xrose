@@ -644,7 +644,7 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
                 "server": node.server,
                 "server_port": node.port,
                 "uuid": uuid,
-                "security": "auto",
+                "security": node.credentials.method.as_deref().unwrap_or("auto"),
                 "alter_id": node.credentials.alter_id,
                 "packet_encoding": "xudp"
             })

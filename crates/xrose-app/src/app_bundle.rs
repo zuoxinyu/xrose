@@ -1,8 +1,9 @@
 //! Supply a real application identity when launched by Cargo or as a standalone binary.
 //! The helper entry point bypasses this module. Packaged applications are never modified.
 
+use std::ffi::{CString, c_char};
 use std::fs::{self, OpenOptions};
-use std::os::unix::{fs::MetadataExt, process::CommandExt};
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,15 +12,23 @@ use cocoa::foundation::{NSAutoreleasePool, NSString};
 use fs2::FileExt;
 use objc::{class, msg_send, sel, sel_impl};
 
+unsafe extern "C" {
+    fn xrose_owns_app_identity() -> bool;
+    fn xrose_exec_bundle(executable: *const c_char);
+}
+
 #[link(name = "CoreServices", kind = "framework")]
 unsafe extern "C" {
     fn LSRegisterURL(url: *const std::ffi::c_void, update: u8) -> i32;
 }
 
-/// Re-exec preserves Cargo's terminal, process ID, arguments, environment and exit status.
+/// Start the GUI with its own macOS privacy identity.
 pub fn ensure(fallback_directory: &Path) -> anyhow::Result<()> {
     let executable = std::env::current_exe()?;
     if let Some(bundle) = bundle_root(&executable) {
+        if !unsafe { xrose_owns_app_identity() } {
+            return launch(&bundle);
+        }
         return register(&bundle);
     }
     // Keep application identity independent of profiles. Launch Services does not
@@ -43,7 +52,18 @@ pub fn ensure(fallback_directory: &Path) -> anyhow::Result<()> {
     let bundle = prepare_bundle(&directory, &executable)?;
     // Never carry the preparation lock across exec (or hold it for the GUI lifetime).
     drop(lock);
-    Err(Command::new(bundle.join("Contents/MacOS/xrose-app"))
+    launch(&bundle)
+}
+
+fn launch(bundle: &Path) -> anyhow::Result<()> {
+    let executable = bundle.join("Contents/MacOS/xrose-app");
+    let path = CString::new(executable.as_os_str().as_bytes())?;
+    unsafe { xrose_exec_bundle(path.as_ptr()) };
+    Err(Command::new("/usr/bin/open")
+        .args(["-n", "-W", "-a"])
+        .arg(bundle)
+        .args(["--args", "--xrose-launch-directory"])
+        .arg(std::env::current_dir()?)
         .args(std::env::args_os().skip(1))
         .exec()
         .into())
