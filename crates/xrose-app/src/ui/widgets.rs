@@ -241,6 +241,18 @@ impl ChoiceGroup {
         self
     }
 }
+// The first child is the indicator canvas. Measure the radios relative to it so
+// moving the window or scrolling a parent does not start a new transition.
+fn choice_bounds(
+    layout: &ScrollHandle,
+    selected: Option<usize>,
+) -> Option<gpui_kit::Bounds<Pixels>> {
+    let origin = layout.bounds_for_item(0)?.origin;
+    let mut bounds = layout.bounds_for_item(selected? + 1)?;
+    bounds.origin -= origin;
+    Some(bounds)
+}
+
 impl gpui_kit::RenderOnce for ChoiceGroup {
     fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
         let p = super::theme::palette(cx);
@@ -257,11 +269,31 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .collect();
         let key_handles = handles.clone();
         let key_handler = self.handler.clone();
-        let selected = self.selected;
+        let selected = self.selected.filter(|&index| index < count);
         let cards = self.cards;
         let disabled = self.disabled;
+        let layout = match &self.scroll {
+            Some((handle, _)) => handle.clone(),
+            None => window
+                .use_keyed_state((self.id.clone(), "choice-layout"), cx, |_, _| {
+                    ScrollHandle::new()
+                })
+                .read(cx)
+                .clone(),
+        };
+        let measured = choice_bounds(&layout, selected);
+        let animated = measured.map(|target| {
+            gpui_base::motion::transition(
+                ElementId::from((self.id.clone(), "choice-indicator")),
+                target,
+                gpui_base::motion::Transition::new(std::time::Duration::from_millis(150)),
+                window,
+                cx,
+            )
+        });
         let mut group = gpui_base::RadioGroup::new(self.id.clone())
             .axis(gpui_kit::Axis::Horizontal)
+            .relative()
             .flex()
             .flex_wrap()
             .items_center()
@@ -272,12 +304,37 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .border_color(p.border)
             .bg(p.bg)
             .opacity(if disabled { DISABLED_OPACITY } else { 1. })
-            .when_some(self.scroll.as_ref(), |group, (handle, height)| {
-                group
-                    .max_h(*height)
-                    .overflow_y_scroll()
-                    .track_scroll(handle)
+            .track_scroll(&layout)
+            .when_some(self.scroll.as_ref(), |group, (_, height)| {
+                group.max_h(*height).overflow_y_scroll()
             })
+            .child(
+                gpui_kit::canvas(
+                    |_, _, _| (),
+                    move |canvas, _, window, _| {
+                        if let Some(actual) = choice_bounds(&layout, selected) {
+                            let mut indicator = if Some(actual) == measured {
+                                animated.unwrap_or(actual)
+                            } else {
+                                // Layout was first measured or changed during this frame.
+                                window.request_animation_frame();
+                                actual
+                            };
+                            indicator.origin += canvas.origin;
+                            window.paint_quad(gpui_kit::quad(
+                                indicator,
+                                px(3.),
+                                p.accent,
+                                px(1.),
+                                p.primary,
+                                Default::default(),
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .on_key_down(move |event, window, cx| {
                 if disabled || count == 0 {
                     return;
@@ -292,7 +349,7 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                 if let Some(next) = next.filter(|n| *n < count) {
                     key_handles[next].focus(window, cx);
                     if let Some((scroll, _)) = &self.scroll {
-                        scroll.scroll_to_item(next);
+                        scroll.scroll_to_item(next + 1);
                     }
                     if let Some(handler) = &key_handler {
                         handler(&next, window, cx);
@@ -339,20 +396,15 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     // Subtract the track's 1px border and 2px padding from its 6px radius.
                     .rounded_sm()
                     .border_1()
-                    .border_color(if checked || focused {
+                    .border_color(if focused && !checked {
                         p.primary
                     } else {
                         p.border.opacity(0.)
                     })
-                    .bg(if checked { p.accent } else { p.bg })
                     .text_sm()
                     .text_color(if checked { p.primary } else { p.muted_fg })
-                    .hover(move |s| {
-                        if disabled {
-                            s
-                        } else {
-                            s.bg(if checked { p.accent } else { p.panel_alt })
-                        }
+                    .when(!disabled && !checked, |option| {
+                        option.hover(move |s| s.bg(p.panel_alt))
                     })
                     .child(div().min_w_0().truncate().child(label)),
             );

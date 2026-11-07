@@ -314,6 +314,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 /* Option card */
 .opt[aria-checked=true] { border-color:var(--accent); background:var(--accent-soft); }
 ```
+- ChoiceGroup 的选中框在切换时用 150 ms 滑至目标项，同时适配目标宽度。首次显示和启用减少动态效果时直接就位。
 - Option card **必须有一项处于选中**，否则要显式提供"自定义"项（DNS 预设当前无选中 `⚠K02`）。
 - **模式开关与视图过滤不得并排同款**：`手动 / 自动`（改变代理行为）不得与 `平铺 / 订阅`、`顺序 / 延迟`（只改视图）使用相同外观并混在一排。`⚠K03`
 
