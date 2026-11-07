@@ -36,6 +36,7 @@ pub struct Dashboard {
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
     pub running: bool,
+    #[cfg(target_os = "macos")]
     pub show_speed: bool,
     pub easytier: DashboardMeshStatus,
     pub tailscale: DashboardMeshStatus,
@@ -192,6 +193,7 @@ pub fn build(service: &AppService) -> Dashboard {
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
         nodes,
         running,
+        #[cfg(target_os = "macos")]
         show_speed: snapshot.settings.show_tray_speed,
         easytier,
         tailscale,

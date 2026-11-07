@@ -93,6 +93,7 @@ fn command_ok(program: &str, args: &[&str]) -> bool {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run(program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)

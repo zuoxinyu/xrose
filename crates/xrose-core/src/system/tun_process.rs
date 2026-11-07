@@ -41,6 +41,7 @@ pub struct Reply {
 struct Running {
     owner_pid: u32,
     child: std::process::Child,
+    #[cfg(unix)]
     data_dir: PathBuf,
     tun_addresses: Vec<String>,
     lines: Arc<Mutex<std::collections::VecDeque<(bool, String)>>>,
@@ -138,9 +139,14 @@ pub fn stop_all() {
     }
 }
 
+#[cfg(not(unix))]
+fn resolve_paths(_: &std::path::Path, _: &std::path::Path) -> AppPaths {
+    AppPaths::discover()
+}
+
+#[cfg(unix)]
 fn resolve_paths(binary: &std::path::Path, config: &std::path::Path) -> AppPaths {
     let mut paths = AppPaths::discover();
-    #[cfg(unix)]
     if !binary.starts_with(&paths.data_dir) {
         use std::os::unix::fs::MetadataExt;
         let allowed = super::privilege::allowed_uid();
@@ -290,6 +296,7 @@ pub fn dispatch(request: &Request) -> Result<Reply> {
                 Running {
                     owner_pid: request.owner_pid,
                     child,
+                    #[cfg(unix)]
                     data_dir: paths.data_dir.clone(),
                     tun_addresses,
                     lines,
@@ -634,6 +641,7 @@ mod tests {
                 tun_addresses: vec![],
                 owner_pid: owner_child.id(),
                 child,
+                #[cfg(unix)]
                 data_dir: std::env::temp_dir(),
                 lines: Default::default(),
                 readers: vec![],

@@ -2,9 +2,10 @@
 // messages retain their original coordinates, modifiers and high-resolution delta.
 #define WIN32_LEAN_AND_MEAN
 #include <stdbool.h>
-#include <commctrl.h>
 #include <stdlib.h>
+// Common controls depend on the Win32 types declared by windows.h.
 #include <windows.h>
+#include <commctrl.h>
 #include <windowsx.h>
 
 typedef struct {

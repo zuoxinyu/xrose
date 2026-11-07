@@ -228,19 +228,13 @@ mod tests {
     use super::*;
     #[test]
     fn login_entry_keeps_portable_home_and_uses_login_mode() {
-        let args = login_arguments(
-            Path::new("/Apps/Xrose App"),
-            Some(Path::new("/tmp/profile space")),
-        );
-        assert_eq!(
-            args,
-            [
-                "/Apps/Xrose App",
-                "--autostart",
-                "--home",
-                "/tmp/profile space"
-            ]
-        );
+        let home = if cfg!(windows) {
+            "C:/Xrose Demo/profile space"
+        } else {
+            "/tmp/profile space"
+        };
+        let args = login_arguments(Path::new("/Apps/Xrose App"), Some(Path::new(home)));
+        assert_eq!(args, ["/Apps/Xrose App", "--autostart", "--home", home]);
         assert_eq!(desktop_quote("/tmp/100% app"), "\"/tmp/100%% app\"");
         assert_eq!(
             windows_quote("C:\\path with space\\"),

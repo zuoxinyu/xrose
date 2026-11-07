@@ -32,9 +32,6 @@ pub fn setup_window_icon(window: cocoa::base::id) {
     macos::setup_window_icon(window);
 }
 
-#[cfg(not(target_os = "macos"))]
-pub fn setup_window_icon() {}
-
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::c_void;
