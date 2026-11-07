@@ -19,6 +19,7 @@ use super::PopupAnchor;
 use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
 use crate::ui::theme::{SEMANTIC_ALPHA, palette};
+use crate::ui::traffic_label;
 
 #[derive(Default)]
 pub struct PopupManager {
@@ -738,23 +739,26 @@ impl Render for PopupView {
                         div().flex().gap_3().children(
                             [
                                 (
-                                    tr(lang, "↓ 下载", "↓ Download"),
+                                    IconName::ArrowDown,
+                                    tr(lang, "下载", "Download"),
                                     format_speed(d.down_speed),
                                     p.data_down,
                                 ),
                                 (
-                                    tr(lang, "↑ 上传", "↑ Upload"),
+                                    IconName::ArrowUp,
+                                    tr(lang, "上传", "Upload"),
                                     format_speed(d.up_speed),
                                     p.data_up,
                                 ),
                                 (
-                                    tr(lang, "∑ 累计流量", "∑ Total traffic"),
+                                    IconName::Sigma,
+                                    tr(lang, "累计流量", "Total traffic"),
                                     d.total.clone(),
                                     p.fg,
                                 ),
                             ]
                             .into_iter()
-                            .map(|(label, value, color)| {
+                            .map(|(icon, label, value, color)| {
                                 div()
                                     .flex_1()
                                     .min_w(px(0.))
@@ -762,10 +766,9 @@ impl Render for PopupView {
                                     .flex_col()
                                     .gap_1()
                                     .child(
-                                        div()
+                                        traffic_label(icon, label)
                                             .text_size(px(11.))
-                                            .text_color(p.muted_fg)
-                                            .child(label),
+                                            .text_color(p.muted_fg),
                                     )
                                     .child(
                                         div()

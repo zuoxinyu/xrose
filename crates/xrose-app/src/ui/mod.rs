@@ -150,6 +150,30 @@ fn tr(lang: Language, zh: &'static str, en: &'static str) -> SharedString {
     crate::i18n::tr(lang, zh, en)
 }
 
+pub(crate) fn traffic_label(icon: IconName, label: SharedString) -> Div {
+    let slot = px(12.);
+    // In the 24-unit SVGs, the arrows span 16 units including the stroke, and sigma spans 18.
+    let size = if matches!(icon, IconName::Sigma) {
+        slot * (16. / 18.)
+    } else {
+        slot
+    };
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .size(slot)
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Icon::new(icon).size(size)),
+        )
+        .child(label)
+}
+
 fn text_input(
     window: &mut Window,
     cx: &mut Context<AppView>,
@@ -709,14 +733,6 @@ impl AppView {
     fn sidebar_traffic(&self, cx: &App) -> impl IntoElement {
         let p = palette(cx);
         let running = self.snapshot.process.phase.is_alive();
-        let traffic_label = |symbol: &'static str, label: SharedString| {
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(div().w(px(12.)).flex_shrink_0().text_center().child(symbol))
-                .child(label)
-        };
         div()
             .id("sidebar-traffic")
             .flex()
@@ -729,13 +745,13 @@ impl AppView {
             .children(
                 [
                     (
-                        "↓",
+                        IconName::ArrowDown,
                         self.tr("下行", "Download"),
                         self.snapshot.runtime.down_speed,
                         p.data_down,
                     ),
                     (
-                        "↑",
+                        IconName::ArrowUp,
                         self.tr("上行", "Upload"),
                         self.snapshot.runtime.up_speed,
                         p.data_up,
@@ -764,7 +780,7 @@ impl AppView {
                     .justify_between()
                     .gap_2()
                     .text_color(p.muted_fg)
-                    .child(traffic_label("∑", self.tr("累计", "Total")))
+                    .child(traffic_label(IconName::Sigma, self.tr("累计", "Total")))
                     .child(xrose_core::util::format_bytes(
                         self.snapshot
                             .runtime
@@ -1178,14 +1194,12 @@ impl AppView {
                     .text_color(p.muted_fg)
                     .child(self.tr("近 60 秒", "Last 60 seconds"))
                     .child(
-                        div()
-                            .text_color(p.data_down)
-                            .child(self.tr("↓ 下行 · 实线", "↓ Download · solid")),
+                        traffic_label(IconName::ArrowDown, self.tr("下行 · 实线", "Download · solid"))
+                            .text_color(p.data_down),
                     )
                     .child(
-                        div()
-                            .text_color(p.data_up)
-                            .child(self.tr("↑ 上行 · 虚线", "↑ Upload · dashed")),
+                        traffic_label(IconName::ArrowUp, self.tr("上行 · 虚线", "Upload · dashed"))
+                            .text_color(p.data_up),
                     )
                     .child(format!(
                         "{} {}",
