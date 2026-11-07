@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use gpui_base::{Disableable, SelectableText};
+use gpui_base::{Disableable, Scrollbar, ScrollbarMode, SelectableText};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -22,8 +22,13 @@ pub(super) struct LogListState {
     rows: Rc<Vec<LogRow>>,
     filter: LogFilter,
     query: String,
+    newest_first: bool,
 }
 
+// One line plus row padding. Wrapped rows replace this estimate as they are measured.
+const LOG_ROW_HEIGHT_HINT: Pixels = px(22.);
+
+#[derive(Clone)]
 struct LogRow {
     key: SharedString,
     entry: LogEntry,
@@ -44,27 +49,45 @@ impl LogListState {
             rows: Rc::new(Vec::new()),
             filter: LogFilter::default(),
             query: String::new(),
+            newest_first: true,
         }
+    }
+
+    fn toggle_order(&mut self) {
+        self.newest_first = !self.newest_first;
+        Rc::make_mut(&mut self.rows).reverse();
+        self.reset_at_latest(self.rows.len());
+    }
+
+    fn reset_at_latest(&self, count: usize) {
+        self.list
+            .reset_with_uniform_height(count, LOG_ROW_HEIGHT_HINT);
+        self.list.set_follow_mode(if self.newest_first {
+            FollowMode::Normal
+        } else {
+            FollowMode::Tail
+        });
     }
 
     fn update(&mut self, logs: Vec<LogEntry>, filter: &LogFilter, query: String) {
         let filter_changed = &self.filter != filter || self.query != query;
         if !filter_changed
             && self.rows.len() == logs.len()
-            && self
-                .rows
-                .iter()
-                .rev()
-                .zip(&logs)
-                .all(|(row, entry)| same_entry(&row.entry, entry))
+            && logs.iter().enumerate().all(|(i, entry)| {
+                let index = if self.newest_first {
+                    logs.len() - 1 - i
+                } else {
+                    i
+                };
+                same_entry(&self.rows[index].entry, entry)
+            })
         {
             return;
         }
 
         let mut occurrences = HashMap::new();
-        let rows: Vec<_> = logs
+        let mut rows: Vec<_> = logs
             .into_iter()
-            .rev()
             .map(|entry| {
                 let mut hasher = DefaultHasher::new();
                 (
@@ -82,10 +105,13 @@ impl LogListState {
                 LogRow { key, entry }
             })
             .collect();
+        if self.newest_first {
+            rows.reverse();
+        }
 
         if filter_changed {
             self.filter.clone_from(filter);
-            self.list.reset(rows.len());
+            self.reset_at_latest(rows.len());
         } else {
             // Keep measurements and the reading position of unchanged rows.
             let top = self.list.logical_scroll_top();
@@ -101,11 +127,16 @@ impl LogListState {
                 .zip(rows[prefix..].iter().rev())
                 .take_while(|(a, b)| same_entry(&a.entry, &b.entry))
                 .count();
-            self.list.splice(
-                prefix..self.rows.len() - suffix,
-                rows.len() - prefix - suffix,
-            );
-            if top == ListOffset::default() {
+            let inserted = rows.len() - prefix - suffix;
+            self.list.splice(prefix..self.rows.len() - suffix, inserted);
+            if inserted > 0 {
+                self.list
+                    .clone()
+                    .with_uniform_item_height(LOG_ROW_HEIGHT_HINT);
+            }
+            if self.list.is_following_tail() {
+                self.list.scroll_to_end();
+            } else if self.newest_first && top == ListOffset::default() {
                 self.list.scroll_to(ListOffset::default());
             } else if let Some(anchor) = self.rows.get(top.item_ix) {
                 if let Some(item_ix) = rows.iter().position(|row| row.key == anchor.key) {
@@ -252,9 +283,46 @@ impl AppView {
                                 })),
                         )
                         .child(
-                            div()
-                                .flex_shrink_0()
-                                .child(self.tr("最新日志在前", "Newest first")),
+                            Button::new("logs-scroll-top")
+                                .ghost()
+                                .icon(IconName::ArrowUpToLine)
+                                .tooltip(self.tr("滚动到顶部", "Scroll to top"))
+                                .accessibility_label(self.tr("滚动到顶部", "Scroll to top"))
+                                .disabled(rows.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.log_list.list.scroll_to(ListOffset::default());
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("logs-scroll-bottom")
+                                .ghost()
+                                .icon(IconName::ArrowDownToLine)
+                                .tooltip(self.tr("滚动到底部", "Scroll to bottom"))
+                                .accessibility_label(self.tr("滚动到底部", "Scroll to bottom"))
+                                .disabled(rows.is_empty())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if this.log_list.newest_first {
+                                        this.log_list.list.scroll_to_end();
+                                    } else {
+                                        this.log_list.list.set_follow_mode(FollowMode::Tail);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("logs-order")
+                                .ghost()
+                                .label(if self.log_list.newest_first {
+                                    self.tr("最新日志在前", "Newest first")
+                                } else {
+                                    self.tr("最新日志在尾", "Newest last")
+                                })
+                                .tooltip(self.tr("切换日志顺序", "Reverse log order"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.log_list.toggle_order();
+                                    cx.notify();
+                                })),
                         ),
                 ),
         );
@@ -285,12 +353,25 @@ impl AppView {
         } else {
             // A bounded viewport is required: an outer scrolling Div would lay
             // out all 400 rows, including their selectable text, on every poll.
+            let viewport = gpui_kit::list(self.log_list.list.clone(), move |index, _, _| {
+                log_row(&rows[index], p).into_any_element()
+            })
+            .flex_1()
+            .w_full();
             list = list.child(
-                gpui_kit::list(self.log_list.list.clone(), move |index, _, _| {
-                    log_row(&rows[index], p).into_any_element()
-                })
-                .flex_1()
-                .w_full(),
+                div()
+                    .relative()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(viewport)
+                    .child(
+                        Scrollbar::vertical(&self.log_list.list)
+                            .id("logs-scrollbar")
+                            .mode(ScrollbarMode::Scrolling)
+                            .viewport_from_layout(),
+                    ),
             );
         }
 
@@ -681,6 +762,36 @@ mod tests {
         state.update(Vec::new(), &filter, "test".into());
         assert!(state.rows.is_empty());
         assert_eq!(state.list.item_count(), 0);
+        assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
+    }
+
+    #[test]
+    fn newest_last_follows_appends_until_the_reader_scrolls_away() {
+        let mut state = LogListState::new();
+        let filter = LogFilter::default();
+        state.update(entries(0..400), &filter, String::new());
+        let latest = state.rows[0].key.clone();
+        state.toggle_order();
+        assert_eq!(state.rows.last().unwrap().key, latest);
+        state.update(entries(1..401), &filter, String::new());
+        assert_eq!(state.rows.last().unwrap().entry.unix_ms, 400);
+        assert!(state.list.is_following_tail());
+
+        state.list.scroll_to(ListOffset {
+            item_ix: 12,
+            offset_in_item: px(3.),
+        });
+        let anchor = state.rows[12].key.clone();
+        state.update(entries(2..402), &filter, String::new());
+        let top = state.list.logical_scroll_top();
+        assert_eq!(state.rows[top.item_ix].key, anchor);
+        assert_eq!(top.offset_in_item, px(3.));
+        assert!(!state.list.is_following_tail());
+
+        state.update(entries(2..402), &filter, "test".into());
+        assert!(state.list.is_following_tail());
+        state.toggle_order();
+        assert_eq!(state.rows[0].entry.unix_ms, 401);
         assert_eq!(state.list.logical_scroll_top(), ListOffset::default());
     }
 
