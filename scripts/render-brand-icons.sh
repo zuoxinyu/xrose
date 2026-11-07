@@ -12,6 +12,7 @@ for size in 256 128 96 64; do
 done
 cp "$assets/app-icon-256.png" "$assets/icons/xross.png"
 cp "$assets/app-icon-128.png" "$assets/icons/xross-128.png"
+cp "$art" "$assets/icons/xross.svg"
 
 # Optical weights for the 16–22 pt status glyph. The OS supplies the ink;
 # retain only the mark's coverage, with no background, tile, border or badge.
