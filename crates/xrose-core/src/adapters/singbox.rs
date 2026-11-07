@@ -151,6 +151,9 @@ impl CoreAdapter for SingBoxAdapter {
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
         let mut warnings = Vec::new();
+        let mut effective = super::compilation_model(model, &mut warnings);
+        let model = &effective;
+        let direct = model.work_mode == crate::model::WorkMode::Direct;
         let mut inbounds = Vec::new();
         let mut compiled_inbounds = Vec::new();
 
@@ -291,7 +294,7 @@ impl CoreAdapter for SingBoxAdapter {
                 ));
             }
         }
-        if outbounds.is_empty() && endpoints.is_empty() {
+        if !direct && outbounds.is_empty() && endpoints.is_empty() {
             return Err(Error::config(
                 if model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn()) {
                     "没有可编译的出站节点；请检查 VPN 凭据并使用 sing-box 1.14.0 或更新版本"
@@ -312,24 +315,25 @@ impl CoreAdapter for SingBoxAdapter {
             .chain(endpoints.iter())
             .filter_map(|o| o["tag"].as_str().map(str::to_owned))
             .collect();
-        let mut resolved_model = model.clone();
-        for group in &mut resolved_model.groups {
+        let nodes = &effective.nodes;
+        for group in &mut effective.groups {
             group.members.retain(|id| {
-                model
-                    .node(id)
+                nodes
+                    .iter()
+                    .find(|n| &n.id == id)
                     .is_some_and(|n| valid_tags.contains(&n.outbound_tag()))
             });
             group.repair();
         }
-        resolved_model.groups.retain(|g| !g.members.is_empty());
-        if resolved_model
+        effective.groups.retain(|g| !g.members.is_empty());
+        if effective
             .default_group
             .as_ref()
-            .is_some_and(|id| resolved_model.group(id).is_none())
+            .is_some_and(|id| effective.group(id).is_none())
         {
-            resolved_model.default_group = resolved_model.groups.first().map(|g| g.id.clone());
+            effective.default_group = effective.groups.first().map(|g| g.id.clone());
         }
-        let model = &resolved_model;
+        let model = &effective;
 
         let default_group =
             proxy_group_tag(model, &model.routing.final_action).unwrap_or_else(|| "direct".into());
@@ -393,40 +397,32 @@ impl CoreAdapter for SingBoxAdapter {
         }
 
         // --- rule sets ---------------------------------------------------
-        let mut rule_set_tags: Vec<String> = Vec::new();
-        for rule in model.routing.effective_rules() {
-            rule_set_tags.extend(rule.matchers.rule_sets.iter().cloned());
-            for geosite in &rule.matchers.geosites {
-                rule_set_tags.push(format!("geosite-{geosite}"));
-            }
-            for geoip in &rule.matchers.geoips {
-                rule_set_tags.push(format!("geoip-{geoip}"));
-            }
-        }
-        if model.dns.enabled {
-            for server in &model.dns.servers {
-                let sets = split_dns_domains(&server.domains);
-                for geosite in sets.geosites {
-                    rule_set_tags.push(format!("geosite-{geosite}"));
-                }
-                for tag in sets.rule_sets {
-                    rule_set_tags.push(tag);
-                }
-            }
-        }
-        rule_set_tags.push("geosite-cn".into());
-        rule_set_tags.push("geoip-cn".into());
-        rule_set_tags.sort();
-        rule_set_tags.dedup();
-
+        let rule_set_tags = super::rule_set_tags(model, model.work_mode);
         let rule_sets_json =
             build_rule_sets(model, &rule_set_tags, ctx, &default_group, &mut warnings);
 
         // --- route -------------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
-        if !ctx.mesh.dns.is_empty() {
-            // MagicDNS returns real addresses before the ordinary fake-IP rules.
-            rules.push(json!({"domain_suffix":ctx.mesh.dns.iter().map(|d| &d.suffix).collect::<Vec<_>>(),"action":"resolve","server":"xrose-mesh-dns-0"}));
+        let mesh_dns: Vec<_> = ctx
+            .mesh
+            .dns
+            .iter()
+            .enumerate()
+            .map(|(index, resolver)| {
+                let mut tag = format!("xrose-mesh-dns-{index}");
+                while model.dns.servers.iter().any(|s| s.tag == tag) {
+                    tag.push('-');
+                }
+                (resolver, tag)
+            })
+            .collect();
+        if !mesh_dns.is_empty() {
+            // Each mesh resolves its own suffix before ordinary fake-IP rules.
+            for (resolver, tag) in &mesh_dns {
+                rules.push(
+                    json!({"domain_suffix":[resolver.suffix],"action":"resolve","server":tag}),
+                );
+            }
             rules.push(json!({"ip_cidr":["127.0.0.153/32"],"action":"route","outbound":"direct"}));
         }
         for (index, route) in ctx.mesh.routes.iter().enumerate() {
@@ -434,23 +430,48 @@ impl CoreAdapter for SingBoxAdapter {
             outbounds.push(json!({"type":"direct","tag":tag,"bind_interface":route.interface}));
             rules.push(json!({"ip_cidr":[route.cidr],"action":"route","outbound":tag}));
         }
+        rules.push(json!({"action": "sniff"}));
         if model.dns.enabled {
             rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
         }
-        rules.push(json!({"action": "sniff"}));
         if model.routing.bypass_lan {
             rules.push(json!({"ip_is_private": true, "outbound": "direct"}));
         }
         if model.routing.bypass_china_ips {
             rules.push(json!({"rule_set": ["geoip-cn"], "outbound": "direct"}));
         }
-        for rule in model.routing.effective_rules() {
+        let mut resolve_direct = direct && model.dns.enabled;
+        for rule in model.routing.rules_for_mode(model.work_mode) {
             if let Some(value) = singbox_rule(model, rule, &mut warnings) {
+                if resolve_direct {
+                    let m = &rule.matchers;
+                    if !m.ip_cidrs.is_empty()
+                        || !m.geoips.is_empty()
+                        || m.rule_sets.iter().any(|tag| !tag.starts_with("geosite-"))
+                    {
+                        // IP firewall rules need real destination addresses even on Mixed.
+                        rules.push(json!({"action": "resolve"}));
+                        resolve_direct = false;
+                    } else if rule.action.kind != crate::model::RouteActionKind::Block {
+                        // Resolve only a flow about to be forwarded. Later process/domain
+                        // blocks can still reject other flows before any resolver sees them.
+                        let mut resolve = value.clone();
+                        resolve.as_object_mut().unwrap().remove("outbound");
+                        resolve["action"] = json!("resolve");
+                        rules.push(resolve);
+                    }
+                }
                 rules.push(value);
             }
         }
 
-        let mut final_tag = default_group.clone();
+        let mut final_tag = action_tag(CoreKind::SingBox, model, &model.routing.final_action)
+            .unwrap_or_else(|| "direct".into());
+        if resolve_direct && final_tag != "block" {
+            // Outbound bootstrap DNS bypasses the ordinary DNS policy. Resolve
+            // client destinations through the configured Hosts and split rules first.
+            rules.push(json!({"action": "resolve"}));
+        }
         if final_tag == "block" {
             rules.push(json!({"action": "reject"}));
             final_tag = "direct".into();
@@ -462,21 +483,6 @@ impl CoreAdapter for SingBoxAdapter {
             // Populate connection process metadata even without process rules.
             "find_process": cfg!(any(target_os = "linux", target_os = "windows", target_os = "macos"))
         });
-        if model.dns.enabled {
-            // sing-box 1.12+ requires an explicit resolver for outbound server
-            // domains; otherwise startup stops with a deprecation error.
-            let local_tag = model
-                .dns
-                .servers
-                .iter()
-                .find(|s| {
-                    matches!(s.address.trim(), "system" | "local")
-                        || (s.tag == "local" && s.server_type == crate::model::DnsServerType::Udp)
-                })
-                .map(|s| s.tag.clone())
-                .unwrap_or_else(|| "local".to_string());
-            route["default_domain_resolver"] = json!(local_tag);
-        }
         if !rule_sets_json.is_empty() {
             route["rule_set"] = json!(rule_sets_json);
         }
@@ -484,9 +490,9 @@ impl CoreAdapter for SingBoxAdapter {
         // --- DNS ---------------------------------------------------------
         let mut dns_section = Value::Null;
         if model.dns.enabled {
-            let (dns, dns_warnings) = build_dns(model, ctx, &default_group)?;
+            let (dns, bootstrap_tag) = build_dns(model, &default_group, &mut warnings);
             dns_section = dns;
-            warnings.extend(dns_warnings);
+            route["default_domain_resolver"] = json!(bootstrap_tag);
             let mut vpn_rules = Vec::new();
             for node in model.nodes.iter().filter(|n| {
                 n.enabled && n.protocol.is_vpn() && valid_tags.contains(&n.outbound_tag())
@@ -516,6 +522,8 @@ impl CoreAdapter for SingBoxAdapter {
             }
             vpn_rules.extend(dns_section["rules"].as_array_mut().unwrap().drain(..));
             dns_section["rules"] = json!(vpn_rules);
+        } else if !ctx.mesh.dns.is_empty() {
+            route["default_domain_resolver"] = json!("local");
         }
 
         // --- assemble ----------------------------------------------------
@@ -532,8 +540,7 @@ impl CoreAdapter for SingBoxAdapter {
                 || json!({"servers":[{"type":"local","tag":"local"}],"final":"local"}),
             );
             let mut mesh_rules = Vec::new();
-            for (index, resolver) in ctx.mesh.dns.iter().enumerate() {
-                let tag = format!("xrose-mesh-dns-{index}");
+            for (resolver, tag) in &mesh_dns {
                 dns["servers"].as_array_mut().unwrap().push(
                     json!({"type":"udp","tag":tag,"server":resolver.address,"server_port":53}),
                 );
@@ -913,7 +920,7 @@ fn transport_json(node: &Node) -> Option<Value> {
 
 fn build_rule_sets(
     model: &AppModel,
-    tags: &[String],
+    tags: &std::collections::BTreeSet<String>,
     ctx: &CompileContext,
     default_group: &str,
     warnings: &mut Vec<String>,
@@ -1031,7 +1038,7 @@ fn singbox_rule(
 }
 
 fn resolve_detour(model: &AppModel, raw: &str, default_group: &str) -> Option<String> {
-    match raw {
+    match raw.trim() {
         "proxy" | "default" => Some(default_group.to_string()),
         "direct" => Some("direct".into()),
         other => {
@@ -1150,33 +1157,43 @@ fn dns_server_object(server: &crate::model::DnsServer, local_tag: &str) -> Optio
     Some(Value::Object(object))
 }
 
-fn build_dns(
-    model: &AppModel,
-    _ctx: &CompileContext,
-    default_group: &str,
-) -> Result<(Value, Vec<String>)> {
-    let mut warnings = Vec::new();
+fn build_dns(model: &AppModel, default_group: &str, warnings: &mut Vec<String>) -> (Value, String) {
     let mut servers: Vec<Value> = Vec::new();
     let mut rules: Vec<Value> = Vec::new();
     let fake_enabled = model.dns.fake_ip;
 
-    let local_tag = model
-        .dns
-        .servers
-        .iter()
-        .find(|s| {
-            matches!(s.address.trim(), "system" | "local")
-                || s.server_type == crate::model::DnsServerType::Udp && s.tag == "local"
-        })
-        .map(|s| s.tag.clone())
-        .unwrap_or_else(|| "local".to_string());
-    let local_present = model
-        .dns
-        .servers
-        .iter()
-        .any(|s| s.tag == local_tag && !s.is_fakeip());
+    // Bootstrap proxy endpoints and encrypted resolver hostnames without cycles.
+    let local = model.dns.servers.iter().find(|s| {
+        !s.requires_proxy()
+            && matches!(
+                s.server_type,
+                crate::model::DnsServerType::Udp | crate::model::DnsServerType::Tcp
+            )
+            && (matches!(s.address.trim(), "system" | "local")
+                || s.tag == "local"
+                    && split_server_address(&s.address, 53)
+                        .0
+                        .parse::<std::net::IpAddr>()
+                        .is_ok())
+    });
+    let local_tag = local.map(|s| s.tag.clone()).unwrap_or_else(|| {
+        let mut tag = String::from("local");
+        while model.dns.servers.iter().any(|s| s.tag == tag) {
+            tag.push('-');
+        }
+        tag
+    });
 
+    let mut fake_tag = String::from("fakeip");
     if fake_enabled {
+        while model
+            .dns
+            .servers
+            .iter()
+            .any(|s| !s.is_fakeip() && s.tag == fake_tag)
+        {
+            fake_tag.push('-');
+        }
         let range = if model.dns.fake_ip_range.trim().is_empty() {
             "198.18.0.0/15"
         } else {
@@ -1184,7 +1201,7 @@ fn build_dns(
         };
         servers.push(json!({
             "type": "fakeip",
-            "tag": "fakeip",
+            "tag": fake_tag,
             "inet4_range": range,
             "inet6_range": "fc00::/18"
         }));
@@ -1218,7 +1235,7 @@ fn build_dns(
         servers.push(entry);
     }
 
-    if !local_present {
+    if local.is_none() {
         servers.push(json!({"type": "local", "tag": local_tag}));
     }
 
@@ -1234,18 +1251,28 @@ fn build_dns(
         }));
     }
 
-    // Hosts / predefined answers.
+    // A hosts resolver handles A and AAAA independently, including NODATA.
     if !model.dns.hosts.is_empty() {
-        warnings.push("hosts 使用 sing-box 1.12+ 的 dns predefined 动作".into());
+        let mut tag = "xrose-hosts".to_string();
+        while servers.iter().any(|server| server["tag"] == tag) {
+            tag.push('-');
+        }
+        let mut hosts = std::collections::BTreeMap::new();
         for (domain, addresses) in &model.dns.hosts {
-            if addresses.is_empty() {
-                continue;
+            let valid: Vec<std::net::IpAddr> =
+                addresses.iter().filter_map(|v| v.parse().ok()).collect();
+            if valid.len() != addresses.len() {
+                warnings.push(format!(
+                    "Hosts 中「{domain}」的无效 IP 地址已跳过，请检查地址"
+                ));
             }
-            rules.push(json!({
-                "domain": [domain],
-                "action": "predefined",
-                "answer": addresses
-            }));
+            if !valid.is_empty() && !domain.is_empty() {
+                hosts.insert(domain, valid);
+            }
+        }
+        if !hosts.is_empty() {
+            rules.insert(0, json!({"domain": hosts.keys().collect::<Vec<_>>(), "action":"route", "server": tag}));
+            servers.push(json!({"type": "hosts", "tag": tag, "predefined": hosts}));
         }
     }
 
@@ -1273,21 +1300,25 @@ fn build_dns(
             .detour
             .as_deref()
             .and_then(|d| resolve_detour(model, d, default_group))
-            .map(|d| d == default_group)
+            .map(|d| d != "direct" && d == default_group)
             .unwrap_or(false);
         let target = if fake_enabled && goes_through_proxy {
-            "fakeip"
+            &fake_tag
         } else {
             server.tag.as_str()
         };
         rules.push(dns_server_rule(&sets, target));
     }
 
-    let mut final_tag = model
+    if fake_enabled && model.work_mode == crate::model::WorkMode::Direct {
+        rules.push(json!({"query_type": ["A", "AAAA"], "action": "route", "server": fake_tag}));
+    }
+
+    let final_tag = model
         .dns
         .final_server
         .as_ref()
-        .filter(|tag| !tag.is_empty() && tag.as_str() != "fakeip")
+        .filter(|tag| !tag.is_empty())
         .filter(|tag| {
             model
                 .dns
@@ -1298,9 +1329,6 @@ fn build_dns(
         })
         .cloned()
         .unwrap_or_else(|| local_tag.clone());
-    if final_tag == "fakeip" {
-        final_tag = local_tag.clone();
-    }
 
     let dns = json!({
         "servers": servers,
@@ -1308,7 +1336,7 @@ fn build_dns(
         "final": final_tag,
         "strategy": strategy
     });
-    Ok((dns, warnings))
+    (dns, local_tag)
 }
 
 #[cfg(test)]
@@ -1579,7 +1607,12 @@ mod tests {
     use crate::settings::Settings;
 
     fn sample() -> (AppModel, Settings, CompileContext) {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            work_mode: crate::model::WorkMode::Proxy,
+            dns: crate::model::DnsConfig::default(),
+            ..Default::default()
+        };
+        model.apply_preset(crate::model::RoutePreset::BypassMainland);
         let mut node = Node::new("n", Protocol::Vless, "example.com", 443);
         node.credentials.uuid = Some("11111111-2222-3333-4444-555555555555".into());
         node.tls.enabled = true;
@@ -1778,7 +1811,10 @@ mod tests {
 
     #[test]
     fn rejects_missing_nodes() {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            work_mode: crate::model::WorkMode::Proxy,
+            ..Default::default()
+        };
         model.nodes.clear();
         let settings = Settings::default();
         let ctx = CompileContext::new(

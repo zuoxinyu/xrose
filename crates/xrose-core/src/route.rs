@@ -21,6 +21,7 @@ pub struct ConnectionInfo {
     pub source_port: Option<u16>,
     pub network: Option<Network>,
     pub process_name: Option<String>,
+    pub process_path: Option<String>,
     pub inbound_tag: Option<String>,
     pub protocol: Option<String>,
 }
@@ -43,20 +44,39 @@ pub struct RulePreview {
 }
 
 pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
-    for rule in model.routing.effective_rules() {
-        match matches_rule(&rule.matchers, info) {
+    evaluate_with(model, info, |_| None)
+}
+
+pub(crate) fn evaluate_with(
+    model: &AppModel,
+    info: &ConnectionInfo,
+    cached_match: impl Fn(&RouteRule) -> Option<bool>,
+) -> RulePreview {
+    for rule in model.routing.rules_for_mode(model.work_mode) {
+        if model.work_mode == crate::model::WorkMode::Direct && rule.matchers.is_empty() {
+            continue;
+        }
+        let state = match matches_rule(&rule.matchers, info) {
+            MatchState::NeedsCore => match cached_match(rule) {
+                Some(true) => MatchState::Matched,
+                Some(false) => MatchState::NotMatched,
+                None => MatchState::NeedsCore,
+            },
+            state => state,
+        };
+        match state {
             MatchState::Matched => {
                 return RulePreview {
                     rule: Some(rule.clone()),
-                    action: rule.action.clone(),
-                    explanation: format!("命中规则“{}”", rule.name),
+                    action: effective_action(model, &rule.action),
+                    explanation: rule_explanation(model, rule),
                     needs_core: false,
                 };
             }
             MatchState::NeedsCore => {
                 return RulePreview {
                     rule: Some(rule.clone()),
-                    action: rule.action.clone(),
+                    action: effective_action(model, &rule.action),
                     explanation: format!(
                         "规则“{}”依赖 geo/rule-set 数据，需要在 core 内运行才能确定",
                         rule.name
@@ -69,10 +89,28 @@ pub fn evaluate(model: &AppModel, info: &ConnectionInfo) -> RulePreview {
     }
     RulePreview {
         rule: None,
-        action: model.routing.final_action.clone(),
+        action: effective_action(model, &model.routing.final_action),
         explanation: "未命中任何规则，使用默认出站".into(),
         needs_core: false,
     }
+}
+
+pub(crate) fn effective_action(model: &AppModel, action: &RouteAction) -> RouteAction {
+    if model.work_mode == crate::model::WorkMode::Direct && action.kind == RouteActionKind::Proxy {
+        RouteAction::direct()
+    } else {
+        action.clone()
+    }
+}
+
+fn rule_explanation(model: &AppModel, rule: &RouteRule) -> String {
+    let group = model
+        .routing
+        .rule_groups
+        .iter()
+        .find(|g| g.enabled && g.rules.iter().any(|r| r.id == rule.id))
+        .map_or("未分组 / 预设", |g| g.name.as_str());
+    format!("命中规则“{}”（分组：{group}）", rule.name)
 }
 
 pub fn action_label(model: &AppModel, action: &RouteAction) -> String {
@@ -202,7 +240,11 @@ pub fn matches_rule(matchers: &Matchers, info: &ConnectionInfo) -> MatchState {
         }
     }
     if !matchers.process_paths.is_empty() {
-        let Some(process) = info.process_name.as_deref() else {
+        let Some(process) = info
+            .process_path
+            .as_deref()
+            .or(info.process_name.as_deref())
+        else {
             return MatchState::NotMatched;
         };
         if !matchers

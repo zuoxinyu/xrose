@@ -128,6 +128,11 @@ pub(crate) fn diagnose_for_process(
         let endpoint = match host.parse::<IpAddr>() {
             Ok(ip) => SocketAddr::new(ip, port),
             Err(_) => {
+                let host = if settings.privacy_mode {
+                    "•••"
+                } else {
+                    host
+                };
                 return DoctorCheck::warn(
                     &name,
                     format!(
@@ -159,7 +164,14 @@ pub(crate) fn diagnose_for_process(
                 "HTTP"
             };
             checks.push(port_check(
-                format!("{label} {}", inbound.tag),
+                format!(
+                    "{label} {}",
+                    if settings.privacy_mode {
+                        inbound.kind.as_str()
+                    } else {
+                        &inbound.tag
+                    }
+                ),
                 inbound.listen_address(),
                 port,
                 localize(lang, "启动可能失败", "the core may fail to start"),

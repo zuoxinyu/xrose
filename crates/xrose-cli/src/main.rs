@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use xrose_core::AppService;
 use xrose_core::adapters::{self, CompileContext};
-use xrose_core::model::{CoreKind, Node, NodeDraft, Protocol, TransportKind};
+use xrose_core::model::{CoreKind, Node, NodeDraft, Protocol, TransportKind, WorkMode};
 use xrose_core::paths::AppPaths;
 use xrose_core::subscription::parse_subscription;
 use xrose_core::system;
@@ -22,6 +22,7 @@ fn main() {
         }
     }
     let result = match args.first().map(String::as_str) {
+        Some("mode") => mode(&args[1..]),
         Some("compile") => compile(&args[1..]),
         Some("check") => check(&args[1..]),
         Some("parse") => parse(&args[1..]),
@@ -58,6 +59,7 @@ fn usage() {
         r#"xrose-cli — headless Xrose utilities
 
 用法 / Usage:
+  xrose-cli mode [direct|proxy] [--home DIR]   查看或切换工作模式
   xrose-cli compile [--core xray|sing-box] [-o config.json] [--home DIR]
   xrose-cli check   [--core xray|sing-box] [--home DIR]
   xrose-cli route preview|import <file|-> [--home DIR]   预览或追加路由规则与规则集
@@ -80,7 +82,7 @@ fn usage() {
   xrose-cli helper update           使用当前版本更新并启动提权助手
   xrose-cli helper uninstall        卸载提权助手
   xrose-cli helper run              前台运行助手（需要 root/管理员）
-  xrose-cli doctor                  输出 TUN/端口/权限检查
+  xrose-cli doctor                  输出网卡、路由、系统 DNS/代理、监听归属与提权助手诊断
   xrose-cli seed-demo               写入演示节点/订阅/规则（用于截图或试用）
   xrose-cli core install --core xray --path <bin> --version 1.8.24
   xrose-cli core use --core xray --version 1.8.24
@@ -196,7 +198,9 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
             runtime
                 .block_on(mesh::tailscale::check_api(&paths))
                 .map_err(|e| e.to_string())?;
-            println!("Tailscale gRPC 版本、鉴权、状态订阅及登录准备验证通过（未创建网卡或 DNS 规则）");
+            println!(
+                "Tailscale gRPC 版本、鉴权、状态订阅及登录准备验证通过（未创建网卡或 DNS 规则）"
+            );
         }
         "check" => {
             runtime
@@ -388,6 +392,40 @@ fn service(home: Option<PathBuf>) -> Result<AppService, String> {
         eprintln!("[debug] service ready");
     }
     service
+}
+
+fn mode(args: &[String]) -> Result<(), String> {
+    let mut home = None;
+    let mut requested = None;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        match arg {
+            "--home" if home.is_none() => {
+                home = Some(PathBuf::from(
+                    args.next()
+                        .filter(|p| !p.starts_with('-'))
+                        .ok_or("--home 缺少目录")?,
+                ));
+            }
+            "direct" | "proxy" if requested.is_none() => requested = Some(arg),
+            _ => return Err("用法：xrose-cli mode [direct|proxy] [--home DIR]".into()),
+        }
+    }
+    let service = service(home)?;
+    match requested {
+        Some("direct") => service.select_direct_mode(),
+        Some("proxy") => service.select_proxy_mode(),
+        _ => Ok(()),
+    }
+    .map_err(|err| err.to_string())?;
+    println!(
+        "{}",
+        match service.model().work_mode {
+            WorkMode::Direct => "direct",
+            WorkMode::Proxy => "proxy",
+        }
+    );
+    Ok(())
 }
 
 fn compile(args: &[String]) -> Result<(), String> {
@@ -821,17 +859,18 @@ fn doctor(args: &[String]) -> Result<(), String> {
         println!("[{tag}] {}：{}", check.name, check.detail);
     }
     println!(
-        "系统代理后端：{}，提权：{}，助手：{}",
-        service.platform_proxy_backend(),
-        system::privilege::is_elevated(),
-        system::privilege::helper_available()
+        "{}",
+        service.collect_network_report().text(settings.privacy_mode)
     );
     Ok(())
 }
 
 fn demo() -> Result<(), String> {
     use xrose_core::model::AppModel;
-    let mut model = AppModel::default();
+    let mut model = AppModel {
+        work_mode: WorkMode::Proxy,
+        ..Default::default()
+    };
     let mut node = Node::new("Demo VLESS", Protocol::Vless, "example.com", 443);
     node.credentials.uuid = Some("11111111-2222-3333-4444-555555555555".into());
     node.tls.enabled = true;
@@ -873,6 +912,7 @@ hysteria2://hy2pass@de.example.com:8443?sni=de.example.com&insecure=1&obfs=salam
 tuic://11111111-2222-3333-4444-555555555555:tuicpass@kr.example.com:443?congestion_control=bbr&sni=kr.example.com#🇰🇷 首尔 TUIC
 "#;
     let added = service.import_content(content);
+    service.select_proxy_mode().map_err(|e| e.to_string())?;
     let settings = service.settings();
     let mut subscription = xrose_core::subscription::Subscription::new(
         "Demo Airport",
@@ -914,7 +954,8 @@ fn core_command(args: &[String]) -> Result<(), String> {
     match sub {
         Some("install") => {
             let (core, _, home, _) = parse_args(&args[1..]);
-            let core = core.unwrap_or(CoreKind::Xray);
+            let service = service(home)?;
+            let core = core.unwrap_or(service.settings().core);
             let path = args
                 .iter()
                 .position(|a| a == "--path")
@@ -927,7 +968,6 @@ fn core_command(args: &[String]) -> Result<(), String> {
                 .and_then(|i| args.get(i + 1))
                 .cloned()
                 .unwrap_or_else(|| "custom".into());
-            let service = service(home)?;
             service.adopt_binary(core, &version, &path);
             println!(
                 "已登记 {} {} -> {}",
@@ -1087,6 +1127,9 @@ fn trace_link(args: &[String]) -> Result<(), String> {
         };
         while last_printed < session.steps.len() {
             let step = &session.steps[last_printed];
+            if !step.status.is_done() {
+                break;
+            }
             let status = match step.status {
                 xrose_core::trace::TraceStatus::Pending => "pending",
                 xrose_core::trace::TraceStatus::Active => "active",

@@ -343,6 +343,18 @@ impl RoutingConfig {
             .filter(|r| r.enabled)
     }
 
+    /// Direct mode keeps the firewall and light-weight matchers. Proxy-only
+    /// geo assets must never become a prerequisite for starting the monitor.
+    pub fn rules_for_mode(&self, mode: super::WorkMode) -> impl Iterator<Item = &RouteRule> {
+        self.effective_rules().filter(move |r| {
+            mode == super::WorkMode::Proxy
+                || r.action.kind == RouteActionKind::Block
+                || (r.matchers.geosites.is_empty()
+                    && r.matchers.geoips.is_empty()
+                    && r.matchers.rule_sets.is_empty())
+        })
+    }
+
     pub fn all_rules_mut(&mut self) -> impl Iterator<Item = &mut RouteRule> {
         self.rule_groups
             .iter_mut()

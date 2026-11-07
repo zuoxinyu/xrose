@@ -311,7 +311,9 @@ impl CoreManager {
     ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
         let mut detected_version = None;
-        if core == CoreKind::SingBox && model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn())
+        if model.work_mode == crate::model::WorkMode::Proxy
+            && core == CoreKind::SingBox
+            && model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn())
         {
             let (status, output) = crate::core::process::run_capture(
                 &binary,
@@ -595,6 +597,13 @@ impl CoreManager {
             .unwrap_or_default()
     }
 
+    pub(crate) fn applied_work_mode(&self) -> Option<crate::model::WorkMode> {
+        self.applied
+            .lock()
+            .as_ref()
+            .map(|applied| applied.model.work_mode)
+    }
+
     /// Read the actual running configuration, never the pending editor state.
     pub(crate) fn statistics_context(&self) -> Option<(AppModel, Settings, Vec<String>)> {
         self.applied.lock().as_ref().map(|a| {
@@ -606,7 +615,24 @@ impl CoreManager {
         })
     }
 
-    pub(crate) fn managed_probe_model(&self) -> Option<AppModel> {
+    /// Select the same applied listener as the probe transport, including the
+    /// separate HTTP and SOCKS listeners generated for an Xray mixed inbound.
+    pub(crate) fn trace_context(
+        &self,
+        kind: &str,
+    ) -> Option<(AppModel, Settings, Option<crate::adapters::CompiledInbound>)> {
+        self.applied.lock().as_ref().map(|a| {
+            let inbound = a
+                .compiled
+                .inbounds
+                .iter()
+                .find(|i| i.kind == kind || (kind != "tun" && i.kind == "mixed"))
+                .cloned();
+            (a.model.clone(), a.settings.clone(), inbound)
+        })
+    }
+
+    pub(crate) fn applied_model(&self) -> Option<AppModel> {
         self.applied.lock().as_ref().map(|a| a.model.clone())
     }
 

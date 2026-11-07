@@ -11,7 +11,7 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::AppService;
-use xrose_core::model::RoutePreset;
+use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
 use xrose_core::settings::{Language, ThemeMode};
 use xrose_core::util::format_speed;
 
@@ -353,22 +353,25 @@ impl PopupView {
     }
 
     fn select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(group_id) = self.dashboard.group_id.clone() else {
+        if self.dashboard.busy_core {
+            return;
+        }
+        let Some(node) = self.dashboard.nodes.get(index) else {
             return;
         };
-        let Some(node) = self.dashboard.nodes.get(index) else {
+        let action = if node.id == DIRECT_VIRTUAL_NODE_ID {
+            TrayAction::SelectMode(WorkMode::Direct)
+        } else if let Some(group_id) = self.dashboard.group_id.clone() {
+            TrayAction::SelectNode {
+                group_id,
+                node_id: node.id.clone(),
+            }
+        } else {
             return;
         };
         self.selected = index;
         window.focus(&self.focus, cx);
-        self.action(
-            TrayAction::SelectNode {
-                group_id,
-                node_id: node.id.clone(),
-            },
-            window,
-            cx,
-        );
+        self.action(action, window, cx);
     }
 }
 
@@ -407,11 +410,16 @@ impl Render for PopupView {
                     } else {
                         gpui_kit::hsla(0., 0., 0., 0.)
                     })
-                    .when(d.group_id.is_some() && !d.busy_core, |row| {
-                        row.hover(|s| s.bg(p.accent)).cursor_pointer().on_click(
-                            cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
-                        )
-                    })
+                    .when(
+                        (node.id == DIRECT_VIRTUAL_NODE_ID || d.group_id.is_some()) && !d.busy_core,
+                        |row| {
+                            row.hover(|s| s.bg(p.accent))
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.select(index, window, cx)
+                                }))
+                        },
+                    )
                     .child(
                         div()
                             .w(px(16.))
@@ -432,7 +440,7 @@ impl Render for PopupView {
                             .flex_shrink_0()
                             .text_size(px(11.))
                             .text_color(delay_color)
-                            .child(delay),
+                            .when(node.id != DIRECT_VIRTUAL_NODE_ID, |cell| cell.child(delay)),
                     )
             })
             .collect::<Vec<_>>();
@@ -805,7 +813,7 @@ impl Render for PopupView {
                                     .flex_shrink_0()
                                     .text_size(px(11.))
                                     .text_color(p.muted_fg)
-                                    .child(format!("{}", d.nodes.len())),
+                                    .child(format!("{}", d.nodes.len().saturating_sub(1))),
                             ),
                     )
                     .child(
@@ -816,12 +824,21 @@ impl Render for PopupView {
                             .min_h(px(0.))
                             .overflow_y_scroll()
                             .children(node_rows)
-                            .when(d.nodes.is_empty(), |s| {
-                                s.child(div().py_4().text_xs().text_color(p.muted_fg).child(tr(
-                                    lang,
-                                    "暂无节点，请在主窗口添加",
-                                    "Add nodes in the main window",
-                                )))
+                            .when(d.direct && d.automatic_group, |s| {
+                                s.child(
+                                    Button::new("tray-resume-auto")
+                                        .compact()
+                                        .ghost()
+                                        .disabled(d.busy_core)
+                                        .label(tr(lang, "恢复自动代理", "Resume automatic proxy"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.action(
+                                                TrayAction::SelectMode(WorkMode::Proxy),
+                                                window,
+                                                cx,
+                                            )
+                                        })),
+                                )
                             }),
                     ),
             )
@@ -832,11 +849,23 @@ impl Render for PopupView {
                     .gap_3()
                     .flex_shrink_0()
                     .px_1()
-                    .child(div().flex_1().min_w(px(0.)).truncate().text_xs().child(tr(
-                        lang,
-                        "路由模式",
-                        "Routing mode",
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_xs()
+                            .when(d.direct, |label| label.text_color(p.muted_fg))
+                            .child(if d.direct {
+                                tr(
+                                    lang,
+                                    "本机直连 · 代理分流停用",
+                                    "Direct · Proxy routing off",
+                                )
+                            } else {
+                                tr(lang, "路由模式", "Routing mode")
+                            }),
+                    )
                     .child(
                         div()
                             .w(px(match lang {
@@ -852,7 +881,7 @@ impl Render for PopupView {
                                     .h_full()
                                     .menu_width(px(160.))
                                     .menu_max_h(px(190.))
-                                    .disabled(d.busy_core)
+                                    .disabled(d.busy_core || d.direct)
                                     .accessibility_label(tr(lang, "路由模式", "Routing mode")),
                             ),
                     ),

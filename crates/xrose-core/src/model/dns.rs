@@ -97,6 +97,13 @@ impl DnsServer {
             DnsServerType::FakeIp => "fakeip".into(),
         }
     }
+    /// Explicit node and group detours cannot be reached in direct mode.
+    pub fn requires_proxy(&self) -> bool {
+        self.detour
+            .as_deref()
+            .is_some_and(|d| !matches!(d.trim(), "" | "direct"))
+    }
+
     pub fn is_fakeip(&self) -> bool {
         self.server_type == DnsServerType::FakeIp || self.address.trim() == "fakeip"
     }

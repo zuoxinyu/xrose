@@ -63,15 +63,23 @@ impl ClashConnection {
     }
 
     pub fn process_name(&self) -> String {
-        if !self.metadata.process.is_empty() {
-            return self.metadata.process.clone();
+        self.process_basename().to_owned()
+    }
+
+    fn process_basename(&self) -> &str {
+        crate::flow::process_basename(&self.metadata.process, &self.metadata.process_path)
+    }
+}
+
+impl<'a> From<&'a ClashConnection> for crate::flow::FlowObservation<'a> {
+    fn from(connection: &'a ClashConnection) -> Self {
+        Self {
+            id: &connection.id,
+            start: &connection.start,
+            process: connection.process_basename(),
+            upload: connection.upload,
+            download: connection.download,
         }
-        self.metadata
-            .process_path
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or_default()
-            .to_string()
     }
 }
 

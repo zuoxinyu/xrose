@@ -2,16 +2,16 @@
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::diagnostics::{
     ConnectionFilterKind, DiagnosticRuleKind, DiagnosticTarget, connection_test_target,
 };
-use xrose_core::model::{CoreKind, RouteAction, RouteActionKind};
+use xrose_core::flow::{ConnectionMetrics, ConnectionSort, ProcessLiveTraffic};
+use xrose_core::model::{CoreKind, RouteAction, RouteActionKind, WorkMode};
 use xrose_core::runtime::ClashConnection;
 use xrose_core::service::ToastLevel;
 use xrose_core::trace::{TracePhase, TraceSession, TraceStatus, TraceStepKind};
@@ -21,52 +21,104 @@ use super::menus::{self, MenuTarget};
 use super::theme::{Palette, palette};
 use super::widgets::*;
 use super::{AppView, Page};
-use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 
 const CONNECTIONS_PAGE_STEP: usize = 50;
 
+enum MonitorRow<'a> {
+    Connection(&'a ClashConnection, bool, Option<ConnectionMetrics>),
+    Process(&'a ProcessLiveTraffic),
+}
+
 impl AppView {
+    pub(super) fn connection_search_placeholder(&self) -> SharedString {
+        if self.show_live_processes && !self.show_recorded_connections {
+            self.tr("过滤进程名…", "Filter process name…")
+        } else {
+            self.tr("过滤域名、IP 或进程…", "Filter domain, IP or process…")
+        }
+    }
+
     pub(crate) fn page_connections(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let supported = self.snapshot.settings.core == CoreKind::SingBox;
+        let supported = self
+            .snapshot
+            .process
+            .core
+            .unwrap_or(self.snapshot.settings.core)
+            == CoreKind::SingBox;
         let running = self.snapshot.process.phase.is_alive();
-        let query = self.connection_search.read(cx).value().to_string();
+        let query = self.connection_search.read(cx).value().trim().to_string();
         let filter = self.connection_filter;
         let limit = self.connections_limit.max(CONNECTIONS_PAGE_STEP);
 
-        // Filter by reference first and only clone the visible slice to keep
-        // 400 ms refreshes fast even with 2,000 recorded connections.
-        let (total, count, visible): (usize, usize, Vec<(ClashConnection, bool)>) =
-            if self.show_recorded_connections {
-                let all = &self.snapshot.recording.connections;
-                let total = all.len();
-                let mut count = 0usize;
-                let mut visible = Vec::with_capacity(limit.min(total));
-                for entry in all.iter().rev() {
-                    if filter.matches(&entry.connection, &query) {
-                        if count < limit {
-                            visible.push((entry.connection.clone(), entry.closed_at.is_some()));
-                        }
-                        count += 1;
-                    }
-                }
-                (total, count, visible)
+        let processes = !self.show_recorded_connections && self.show_live_processes;
+        let live = &self.snapshot.runtime.live_traffic;
+        let matches = |c: &ClashConnection| {
+            if query.is_empty() {
+                true
+            } else if filter == ConnectionFilterKind::Process
+                && self.exact_process_filter.as_ref() == Some(&query)
+            {
+                c.process_name() == query
             } else {
-                let all = &self.snapshot.runtime.connections;
-                let total = all.len();
-                let mut count = 0usize;
-                let mut visible = Vec::with_capacity(limit.min(total));
-                for conn in all.iter() {
-                    if filter.matches(conn, &query) {
-                        if count < limit {
-                            visible.push((conn.clone(), false));
-                        }
-                        count += 1;
-                    }
-                }
-                (total, count, visible)
+                filter.matches(c, &query)
+            }
+        };
+        let (total, rows): (usize, Box<dyn Iterator<Item = MonitorRow<'_>> + '_>) = if self
+            .show_recorded_connections
+        {
+            let all = &self.snapshot.recording.connections;
+            (
+                all.len(),
+                Box::new(
+                    all.iter()
+                        .rev()
+                        .filter(|r| matches(&r.connection))
+                        .map(|r| {
+                            MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
+                        }),
+                ),
+            )
+        } else if processes {
+            let text = query.trim().to_lowercase();
+            (
+                live.processes.len(),
+                Box::new(
+                    live.processes
+                        .iter()
+                        .filter(move |p| {
+                            text.is_empty() || p.process_name.to_lowercase().contains(&text)
+                        })
+                        .map(MonitorRow::Process),
+                ),
+            )
+        } else {
+            let all = &self.snapshot.runtime.connections;
+            (
+                all.len(),
+                Box::new(
+                    live.ordered(self.connection_sort)
+                        .iter()
+                        .filter_map(|&index| {
+                            let c = all.get(index)?;
+                            matches(c).then(|| {
+                                MonitorRow::Connection(c, false, live.metrics.get(index).copied())
+                            })
+                        }),
+                ),
+            )
+        };
+        let (visible, count) = {
+            let mut rows = rows;
+            let visible: Vec<_> = rows.by_ref().take(limit).collect();
+            let count = if query.is_empty() {
+                total
+            } else {
+                visible.len() + rows.count()
             };
-
+            (visible, count)
+        };
         let recording_active = self.snapshot.recording.active;
         let recording_started = self.snapshot.recording.started_at.is_some();
         let recorded_conn_len = self.snapshot.recording.connections.len();
@@ -79,6 +131,53 @@ impl AppView {
             .iter()
             .any(|key| key == "recording-export");
         let active_conn_len = self.snapshot.runtime.connections.len();
+
+        let view_choice = ChoiceGroup::new(
+            "live-connection-view",
+            vec![
+                self.tr("连接明细", "Connection details"),
+                self.tr("活跃进程", "Active processes"),
+            ],
+            usize::from(processes),
+        )
+        .disabled(self.show_recorded_connections)
+        .on_change(cx.listener(|this, index, window, cx| {
+            this.show_live_processes = *index == 1;
+            this.connection_filter = ConnectionFilterKind::All;
+            this.exact_process_filter = None;
+            let placeholder = this.connection_search_placeholder();
+            this.connection_search.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx);
+                input.set_value("", window, cx);
+            });
+            this.connections_limit = CONNECTIONS_PAGE_STEP;
+            cx.notify();
+        }));
+        let sort_choice = ChoiceGroup::new(
+            "connection-sort",
+            vec![
+                self.tr("最新建立", "Newest"),
+                self.tr("实时速率", "Speed"),
+                self.tr("累计流量", "Total traffic"),
+            ],
+            match self.connection_sort {
+                ConnectionSort::Newest => 0,
+                ConnectionSort::Speed => 1,
+                ConnectionSort::Total => 2,
+            },
+        )
+        .on_change(cx.listener(|this, index, _, cx| {
+            this.connection_sort = [
+                ConnectionSort::Newest,
+                ConnectionSort::Speed,
+                ConnectionSort::Total,
+            ][*index];
+            this.connections_limit = CONNECTIONS_PAGE_STEP;
+            cx.notify();
+        }));
+        let limited_capture = running
+            && self.snapshot.model.work_mode == WorkMode::Direct
+            && !self.snapshot.settings.tun_enabled;
 
         let header = card(&p)
             .child(
@@ -161,12 +260,15 @@ impl AppView {
                             ],
                             usize::from(self.show_recorded_connections),
                         )
-                        .on_change(cx.listener(|this, index, _, cx| {
+                        .on_change(cx.listener(|this, index, window, cx| {
                             this.show_recorded_connections = *index == 1;
+                            let placeholder = this.connection_search_placeholder();
+                            this.connection_search.update(cx, |input, cx| input.set_placeholder(placeholder, window, cx));
                             this.connections_limit = CONNECTIONS_PAGE_STEP;
                             cx.notify();
                         })),
                     )
+                    .child(view_choice)
                     .child(pill(
                         format!("{active_conn_len} {}", self.tr("活动连接", "active")),
                         p.primary,
@@ -188,7 +290,7 @@ impl AppView {
                     .items_center()
                     .gap_2()
                     .flex_wrap()
-                    .child(
+                    .when(!processes, |d| d.child(
                         ChoiceGroup::new(
                             "connection-filter",
                             vec![
@@ -208,6 +310,7 @@ impl AppView {
                             .unwrap_or(0),
                         )
                         .on_change(cx.listener(|this, index, _, cx| {
+                            this.exact_process_filter = None;
                             this.connection_filter = [
                                 ConnectionFilterKind::All,
                                 ConnectionFilterKind::Domain,
@@ -217,7 +320,7 @@ impl AppView {
                             this.connections_limit = CONNECTIONS_PAGE_STEP;
                             cx.notify();
                         })),
-                    )
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -237,6 +340,27 @@ impl AppView {
                             })),
                     ),
             )
+            .when(!self.show_recorded_connections && !processes && supported, |d| {
+                d.child(div().flex().items_center().gap_2()
+                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr("排序", "Sort by")))
+                    .child(sort_choice))
+            })
+            .when(limited_capture, |d| {
+                let hint = self.tr(
+                    "当前仅捕获系统代理流量；开启 TUN 模式可监控本机全部进程连接",
+                    "Only local proxy traffic is visible. Enable TUN to monitor connections from all processes.",
+                );
+                let enable = Button::new("connections-enable-tun")
+                    .compact().ghost().label(self.tr("开启 TUN", "Enable TUN"))
+                    .disabled(self.snapshot.busy.iter().any(|b| b == "core"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.service.set_tun_enabled(true);
+                        this.sync(cx);
+                    }));
+                d.child(div().flex().items_center().justify_between().gap_2().flex_wrap()
+                    .child(div().text_xs().text_color(p.muted_fg).child(hint))
+                    .child(enable))
+            })
             .when(recording_started, |d| {
                 d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
                     "仅保留本次会话的连接与测试信息，不采集正文。",
@@ -328,8 +452,13 @@ impl AppView {
                 }),
             )
         }
-        for (connection, closed) in visible {
-            rows = rows.child(self.connection_row(connection, closed, &p, cx));
+        for row in visible {
+            rows = match row {
+                MonitorRow::Connection(connection, closed, metrics) => {
+                    rows.child(self.connection_row(connection.clone(), closed, metrics, &p, cx))
+                }
+                MonitorRow::Process(process) => rows.child(self.live_process_row(process, &p, cx)),
+            };
         }
         if count > shown || limit > CONNECTIONS_PAGE_STEP {
             rows = rows.child(
@@ -448,7 +577,11 @@ impl AppView {
             .gap_4()
             .w_full()
             .child(inspector)
-            .child(self.trace_card(cx));
+            .child(self.trace_card(cx))
+            .child(self.dns_comparison_card(cx))
+            .child(self.system_report_card(cx))
+            .child(self.stun_diagnostic_card(cx))
+            .child(self.settings_helper_card(cx));
 
         let traces = self.snapshot.recording.traces.clone();
         if !traces.is_empty() {
@@ -499,6 +632,7 @@ impl AppView {
         &self,
         connection: ClashConnection,
         closed: bool,
+        metrics: Option<ConnectionMetrics>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -507,22 +641,17 @@ impl AppView {
             .as_ref()
             .is_some_and(|c| c.id == connection.id && c.start == connection.start);
         let id = connection.id.clone();
+        let rule_menu = MenuTarget::ConnectionRules(DiagnosticTarget::from_connection(&connection));
         let inspect = connection.clone();
         let test = connection.clone();
-        let can_test = connection_test_target(&connection).is_some();
+        let test_target = connection_test_target(&connection);
         let process = connection.process_name();
-        let hover_group = SharedString::from(format!("conn-group-{id}"));
         let row_hover_bg = p.panel_alt.opacity(0.45);
-        let btn_hover_bg = p.panel_alt;
-        let muted = p.muted_fg;
-        let fg = p.fg;
-        let primary = p.primary;
-        let inspect_tip = self.tr("链路 / 规则", "Path / rule").to_string();
-        let test_tip = self.tr("测试目标", "Test target").to_string();
+        let inspect_tip = self.tr("连接透视", "Inspect connection");
+        let test_tip = self.tr("测试目标", "Test target");
 
         div()
             .id(SharedString::from(format!("conn-{id}")))
-            .group(hover_group.clone())
             .flex()
             .flex_col()
             .gap_2()
@@ -570,14 +699,21 @@ impl AppView {
                     )
                     .child(
                         div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap_1()
                             .flex_shrink_0()
+                            .font_family(cx.theme().mono_font_family.clone())
                             .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(format!(
+                            .when_some(metrics, |d, m| {
+                                d.child(rate_pair(m.up_speed, m.down_speed, p))
+                            })
+                            .child(div().text_color(p.muted_fg).child(format!(
                                 "↓{} ↑{}",
                                 format_bytes(connection.download),
                                 format_bytes(connection.upload)
-                            )),
+                            ))),
                     )
                     .child(
                         div()
@@ -586,107 +722,61 @@ impl AppView {
                             .gap_1()
                             .flex_shrink_0()
                             .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .opacity(if selected { 1. } else { 0. })
-                                    .group_hover(hover_group.clone(), |s| s.opacity(1.))
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("inspect-{id}")))
-                                            .w(px(26.))
-                                            .h(px(26.))
-                                            .rounded_md()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .text_color(if selected {
-                                                primary
-                                            } else {
-                                                muted.opacity(0.75)
-                                            })
-                                            .hover(move |s| s.bg(btn_hover_bg).text_color(fg))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(inspect_tip.clone()).build(window, cx)
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.selected_connection = Some(inspect.clone());
-                                                this.page = Page::Diagnostics;
-                                                cx.notify();
-                                            }))
-                                            .child(Icon::new(IconName::Route).with_size(px(14.))),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("test-{id}")))
-                                            .w(px(26.))
-                                            .h(px(26.))
-                                            .rounded_md()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .when(can_test, |d| {
-                                                d.cursor_pointer()
-                                                    .text_color(muted.opacity(0.75))
-                                                    .hover(move |s| {
-                                                        s.bg(btn_hover_bg).text_color(fg)
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            if let Some(target) =
-                                                                connection_test_target(&test)
-                                                            {
-                                                                this.trace_input.update(
-                                                                    cx,
-                                                                    |input, cx| {
-                                                                        input.set_value(
-                                                                            target.clone(),
-                                                                            window,
-                                                                            cx,
-                                                                        )
-                                                                    },
-                                                                );
-                                                                this.selected_connection =
-                                                                    Some(test.clone());
-                                                                this.page = Page::Diagnostics;
-                                                                this.run_trace(&target, cx);
-                                                            }
-                                                        },
-                                                    ))
-                                            })
-                                            .when(!can_test, |d| d.text_color(muted.opacity(0.3)))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(test_tip.clone()).build(window, cx)
-                                            })
-                                            .child(Icon::new(IconName::Radar).with_size(px(14.))),
-                                    ),
+                                Button::new(SharedString::from(format!("inspect-{id}")))
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::Route)
+                                    .tooltip(inspect_tip.clone())
+                                    .accessibility_label(inspect_tip)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_connection = Some(inspect.clone());
+                                        this.page = Page::Diagnostics;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("test-{id}")))
+                                    .compact()
+                                    .ghost()
+                                    .icon(IconName::Radar)
+                                    .tooltip(test_tip.clone())
+                                    .accessibility_label(test_tip)
+                                    .disabled(test_target.is_none())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(target) = &test_target {
+                                            this.trace_input.update(cx, |input, cx| {
+                                                input.set_value(target.clone(), window, cx)
+                                            });
+                                            this.selected_connection = Some(test.clone());
+                                            this.page = Page::Diagnostics;
+                                            this.run_trace(target, cx);
+                                        }
+                                    })),
+                            )
+                            .child(
+                                more_button(
+                                    SharedString::from(format!("connection-rules-{id}")),
+                                    self.tr("防火墙规则", "Firewall rules"),
+                                )
+                                .dropdown_menu(menus::builder(
+                                    cx.entity().downgrade(),
+                                    rule_menu.clone(),
+                                )),
                             )
                             .when(!closed && !self.show_recorded_connections, |d| {
-                                let danger = p.danger;
-                                let tip = self.tr("断开此连接", "Close connection").to_string();
                                 d.child(
-                                    div()
-                                        .id(SharedString::from(format!("kill-{id}")))
-                                        .w(px(26.))
-                                        .h(px(26.))
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .text_color(danger.opacity(0.65))
-                                        .hover(move |s| {
-                                            s.bg(danger.opacity(0.14)).text_color(danger)
-                                        })
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(tip.clone()).build(window, cx)
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, _| {
-                                            this.service.kill_connection(&id)
-                                        }))
-                                        .child(Icon::new(IconName::Unplug).with_size(px(14.))),
+                                    danger_icon_button(
+                                        SharedString::from(format!("close-{id}")),
+                                        IconName::Unplug,
+                                        self.tr("断开此连接", "Close connection"),
+                                        cx,
+                                    )
+                                    .disabled(
+                                        self.snapshot.busy.iter().any(|b| b == "connection-close"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, _| this.service.close_connection(&id),
+                                    )),
                                 )
                             }),
                     ),
@@ -724,7 +814,115 @@ impl AppView {
                                 ),
                                 self.connection_chain(&connection)
                             )),
-                    ),
+                    )
+                    .when_some(metrics, |d, m| {
+                        d.child(div().text_xs().text_color(p.muted_fg).child(format!(
+                            "{} {} s",
+                            self.tr("持续", "Duration"),
+                            m.duration_secs
+                        )))
+                    }),
+            )
+            .context_menu(menus::builder(cx.entity().downgrade(), rule_menu))
+    }
+
+    fn live_process_row(
+        &self,
+        process: &ProcessLiveTraffic,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let name = &process.process_name;
+        let filter = name.clone();
+        let target = DiagnosticTarget {
+            process: name.clone(),
+            ..Default::default()
+        };
+        let label: SharedString = if name.is_empty() {
+            self.tr("进程未提供", "Process unavailable")
+        } else {
+            name.clone().into()
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .flex_wrap()
+            .p_3()
+            .rounded_lg()
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.border)
+            .child(
+                div().flex().items_center().flex_1().min_w(px(0.)).child(
+                    Button::new(SharedString::from(format!("process-details-{name}")))
+                        .compact()
+                        .ghost()
+                        .label(label)
+                        .disabled(name.is_empty())
+                        .tooltip(self.tr("查看此进程的连接", "View process connections"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_live_processes = false;
+                            this.connection_filter = ConnectionFilterKind::Process;
+                            this.exact_process_filter = Some(filter.clone());
+                            let placeholder = this.connection_search_placeholder();
+                            this.connection_search.update(cx, |input, cx| {
+                                input.set_placeholder(placeholder, window, cx);
+                                input.set_value(filter.clone(), window, cx);
+                            });
+                            this.connections_limit = CONNECTIONS_PAGE_STEP;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                "{} {}",
+                process.active_connections,
+                if process.active_connections == 1 {
+                    self.tr("个活动连接", "active connection")
+                } else {
+                    self.tr("个活动连接", "active connections")
+                }
+            )))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .gap_1()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_xs()
+                    .child(rate_pair(process.up_speed, process.down_speed, p))
+                    .child(div().text_color(p.muted_fg).child(format!(
+                        "↓{} ↑{}",
+                        format_bytes(process.down_total),
+                        format_bytes(process.up_total)
+                    ))),
+            )
+            .child(
+                Button::new(SharedString::from(format!("process-block-{name}")))
+                    .compact()
+                    .ghost()
+                    .label(self.tr("阻止联网", "Block process"))
+                    .disabled(
+                        name.is_empty()
+                            || self
+                                .snapshot
+                                .busy
+                                .iter()
+                                .any(|k| k == "firewall-rule" || k == "core"),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_command(
+                            menus::Command::BlockConnection(
+                                target.clone(),
+                                DiagnosticRuleKind::Process,
+                            ),
+                            false,
+                            window,
+                            cx,
+                        )
+                    })),
             )
     }
 
@@ -1040,6 +1238,26 @@ impl AppView {
                     .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))))
                     .when_some(trace.error.as_ref().filter(|error| focused.is_none_or(|step| step.detail != **error)), |d, error| d.child(div().text_sm().text_color(p.danger).child(error.clone())))
                     .child(div().text_xs().text_color(if trace.success == Some(false) { p.danger } else { p.muted_fg }).child(trace.summary.clone().unwrap_or_default()))
+                    .when_some(trace.blocked_rule_id.as_ref(), |d, id| {
+                        let enabled = self.snapshot.model.routing.effective_rules().any(|rule| &rule.id == id);
+                        let rule_id = id.clone();
+                        let group = self.snapshot.model.routing.rule_groups.iter()
+                            .find(|g| g.rules.iter().any(|r| r.id == *id)).map(|g| g.id.clone());
+                        d.child(div().flex().gap_2().flex_wrap()
+                            .child(Button::new("trace-open-hit").compact().ghost()
+                                .label(self.tr("查看拦截规则","View blocking rule"))
+                                .on_click(cx.listener(move |this,_,_,cx|{
+                                    this.rule_group_id = group.clone();
+                                    this.page = Page::Routing;
+                                    this.sync(cx);
+                                })))
+                            .child(Button::new("trace-disable-hit").compact().disabled(!enabled)
+                                .label(self.tr("停用此规则","Disable this rule"))
+                                .on_click(cx.listener(move |this,_,_,cx|{
+                                    this.service.set_rule_enabled(&rule_id,false);
+                                    this.sync(cx);
+                                }))))
+                    })
                     .child(self.diagnostic_rule_bar(DiagnosticTarget::from_trace(trace), "trace", cx))
             })
     }
@@ -1340,6 +1558,22 @@ fn chip(
         })
         .text_color(if selected { p.primary } else { p.muted_fg })
         .child(label.into())
+}
+
+fn rate_pair(up: u64, down: u64, p: &Palette) -> Div {
+    div()
+        .flex()
+        .gap_2()
+        .child(
+            div()
+                .text_color(if down > 0 { p.data_down } else { p.muted_fg })
+                .child(format!("↓{}/s", format_bytes(down))),
+        )
+        .child(
+            div()
+                .text_color(if up > 0 { p.data_up } else { p.muted_fg })
+                .child(format!("↑{}/s", format_bytes(up))),
+        )
 }
 
 fn status_color(status: TraceStatus, p: &Palette) -> Hsla {

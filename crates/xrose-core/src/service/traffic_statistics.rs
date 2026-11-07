@@ -252,8 +252,7 @@ impl AppService {
         self.flush_statistics_locked().await;
     }
 
-    /// One polling path updates live monitoring and persistent statistics. Manual
-    /// refresh only updates live metadata, so it cannot double-count traffic.
+    /// Serialize manual refreshes and monitor ticks against the same counter baselines.
     pub(super) async fn poll_traffic_statistics(&self) {
         let _guard = self.inner.statistics.operation.lock().await;
         let state = self.inner.core.state();
@@ -283,7 +282,7 @@ impl AppService {
                         stats::today(),
                         at(),
                     );
-                    self.update_connections(response.connections);
+                    self.update_connections(Some(epoch.clone()), response.connections);
                     true
                 }
                 _ => false,

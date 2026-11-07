@@ -2,6 +2,8 @@
 //! window backdrops.
 
 pub mod autostart;
+pub mod nat;
+pub mod net_diag;
 pub mod pac;
 pub(crate) mod port_owner;
 pub mod privilege;
@@ -11,10 +13,10 @@ pub mod tun;
 pub mod tun_process;
 pub mod window_effects;
 
-pub use pac::{build_pac, PacServer, PacServerInfo};
-pub use proxy::{detect_backend, ProxyBackend, ProxyManager, ProxySnapshot};
+pub use pac::{PacServer, PacServerInfo, build_pac};
+pub use proxy::{ProxyBackend, ProxyManager, ProxySnapshot, detect_backend};
 pub use single_instance::SingleInstance;
-pub use tun::{diagnose as diagnose_tun, CheckLevel, DoctorCheck};
+pub use tun::{CheckLevel, DoctorCheck, diagnose as diagnose_tun};
 
 /// Human readable platform description for the About screen.
 pub fn platform_label() -> String {

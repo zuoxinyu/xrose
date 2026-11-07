@@ -524,16 +524,7 @@ fn node_entity(model: &AppModel, tag: &str) -> Option<TrafficEntity> {
 
 /// Some kernels append account metadata to the path; never retain that suffix.
 fn process_name(process: &str, path: &str) -> String {
-    let source = if process.is_empty() { path } else { process };
-    let source = source
-        .rsplit_once(" (")
-        .filter(|(_, suffix)| suffix.ends_with(')'))
-        .map(|(name, _)| name)
-        .unwrap_or(source);
-    let name = source.rsplit(['/', '\\']).next().unwrap_or_default().trim();
-    if name.chars().all(|c| c.is_ascii_digit()) {
-        return String::new();
-    }
+    let name = crate::flow::process_basename(process, path);
     #[cfg(windows)]
     return name.to_lowercase();
     #[cfg(not(windows))]

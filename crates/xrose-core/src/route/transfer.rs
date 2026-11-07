@@ -180,8 +180,10 @@ pub(crate) fn listed_rule_sets(model: &AppModel) -> Vec<RuleSet> {
         .cloned()
         .map(|s| (s.tag.clone(), s))
         .collect();
-    for set in crate::adapters::required_rule_sets(model) {
-        sets.insert(set.tag.clone(), set);
+    for tag in crate::adapters::rule_set_tags(model, crate::model::WorkMode::Proxy) {
+        if let Some(set) = crate::adapters::resolve_rule_set(model, &tag) {
+            sets.insert(tag, set);
+        }
     }
     sets.into_values().collect()
 }
@@ -387,7 +389,10 @@ mod tests {
 
     #[test]
     fn conditions_preserve_order_notes_exceptions_and_default() {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            work_mode: crate::model::WorkMode::Proxy,
+            ..Default::default()
+        };
         let via = OutboundGroup::new("Work", GroupKind::Selector);
         model.groups.push(via.clone());
         let text = "\u{feff}[SwitchyOmega Conditions]\r\n@with result\r\n; comment\r\n@note Exact\r\napi.example.org +Work\r\n!private.example.org\r\n*.example.org +proxy\r\nUrlWildcard: https://outside.example/* +proxy\r\n* +direct";
@@ -420,7 +425,10 @@ mod tests {
     fn autoproxy_plain_and_base64_prioritize_exceptions_without_broadening_urls() {
         let src = "[AutoProxy 0.2.9]\n! comment\n||example.org\n@@||safe.example.org\n|https://other.example/path\nkeyword\n/regex/";
         for text in [src.to_owned(), crate::util::encode_base64(src.as_bytes())] {
-            let mut model = AppModel::default();
+            let mut model = AppModel {
+                work_mode: crate::model::WorkMode::Proxy,
+                ..Default::default()
+            };
             let plan = prepare(&text, &model).unwrap();
             assert_eq!(
                 plan.summary
@@ -439,7 +447,10 @@ mod tests {
 
     #[test]
     fn wildcard_alternatives_ip_and_incompatible_conditions() {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            work_mode: crate::model::WorkMode::Proxy,
+            ..Default::default()
+        };
         let text = "[SwitchyOmega Conditions]\n@with results\nHost: **.example.org|api?.example.net +proxy\nIp: 192.0.2.0/24 +proxy\nHR: ^edge[0-9]+$ +proxy\nHostRegex: (?<=a)b +proxy\nUrlRegex: .* +proxy\n* +direct";
         let plan = prepare(text, &model).unwrap();
         assert_eq!(

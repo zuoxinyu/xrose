@@ -33,6 +33,7 @@ pub(super) struct TrafficUi {
     pub expanded: bool,
     display: TrafficDisplayMode,
     query: TrafficQuery,
+    dimension_chosen: bool,
     page: usize,
     table_limit: usize,
     date_input: Entity<InputState>,
@@ -55,6 +56,7 @@ impl TrafficUi {
             expanded: false,
             display: TrafficDisplayMode::Bar,
             query: TrafficQuery::default(),
+            dimension_chosen: false,
             page: 0,
             table_limit: TABLE_PAGE_SIZE,
             date_input: text_input(window, cx, "yyyy-MM-dd"),
@@ -125,6 +127,22 @@ impl AppView {
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.traffic_ui.expanded = !this.traffic_ui.expanded;
                             if this.traffic_ui.expanded {
+                                if !this.traffic_ui.dimension_chosen {
+                                    let core = this
+                                        .snapshot
+                                        .process
+                                        .core
+                                        .unwrap_or(this.snapshot.settings.core);
+                                    this.traffic_ui.query.dimension =
+                                        if core.capabilities().clash_connections
+                                            && this.snapshot.model.work_mode
+                                                == xrose_core::model::WorkMode::Direct
+                                        {
+                                            TrafficDimension::Process
+                                        } else {
+                                            TrafficDimension::Node
+                                        };
+                                }
                                 this.refresh_statistics(false, cx);
                             }
                             cx.notify();
@@ -192,6 +210,7 @@ impl AppView {
                         },
                     )
                     .on_change(cx.listener(|this, index, _, cx| {
+                        this.traffic_ui.dimension_chosen = true;
                         this.traffic_ui.query.dimension = [
                             TrafficDimension::Node,
                             TrafficDimension::Process,
@@ -441,7 +460,7 @@ impl AppView {
                     row.entity.label.clone()
                 }
             }
-            TrafficEntityKind::Direct => self.tr("直连", "Direct").to_string(),
+            TrafficEntityKind::Direct => self.tr("本机直连", "Direct").to_string(),
             TrafficEntityKind::Unknown => self.tr("未知", "Unknown").to_string(),
             TrafficEntityKind::NoDomain => self.tr("无域名", "No domain").to_string(),
             TrafficEntityKind::Unattributed => self.tr("未归因", "Unattributed").to_string(),

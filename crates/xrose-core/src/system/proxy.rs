@@ -10,7 +10,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{io_context, Error, Result};
+use crate::error::{Error, Result, io_context};
 use crate::util::{atomic_write_json, now_unix};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -355,6 +355,8 @@ fn macos_apply(host: &str, port: u16, pac_url: Option<&str>) -> Result<()> {
                 );
             }
             None => {
+                // A previous PAC selection must no longer bypass the local monitor.
+                run("networksetup", &["-setautoproxystate", &service, "off"])?;
                 run("networksetup", &["-setwebproxy", &service, host, &port])?;
                 run(
                     "networksetup",
@@ -474,7 +476,7 @@ mod windows_impl {
 
     pub fn refresh() {
         use windows_sys::Win32::Networking::WinInet::{
-            InternetSetOptionW, INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED,
+            INTERNET_OPTION_REFRESH, INTERNET_OPTION_SETTINGS_CHANGED, InternetSetOptionW,
         };
         unsafe {
             InternetSetOptionW(
@@ -512,7 +514,10 @@ mod windows_impl {
             }
             None => {
                 write("ProxyServer", &format!("{host}:{port}"))?;
-                write("ProxyOverride", "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>")?;
+                write(
+                    "ProxyOverride",
+                    "localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>",
+                )?;
                 write("ProxyEnable", "1")?;
                 let key = "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
                 use winreg::RegKey;
@@ -566,7 +571,7 @@ impl ProxyManager {
             .and_then(|b| serde_json::from_slice(&b).ok())
     }
 
-    fn capture(&self) -> Result<BTreeMap<String, String>> {
+    pub(super) fn capture(&self) -> Result<BTreeMap<String, String>> {
         match self.backend {
             ProxyBackend::Gnome => {
                 #[cfg(target_os = "linux")]

@@ -14,11 +14,7 @@ const MODES: [SwitchMode; 4] = [
 
 impl AppView {
     pub(in crate::ui) fn outbound_group_label(&self, group: &OutboundGroup) -> SharedString {
-        match (group.id.as_str(), group.name.as_str()) {
-            ("proxy", "代理") => self.tr("代理", "Proxy"),
-            ("auto", "自动选择") => self.tr("自动选择", "Auto select"),
-            _ => group.name.clone().into(),
-        }
+        crate::i18n::outbound_group_label(self.lang(), group)
     }
 
     pub(in crate::ui) fn open_node_switch_dialog(

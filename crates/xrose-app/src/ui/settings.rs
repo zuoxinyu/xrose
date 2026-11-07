@@ -1034,7 +1034,7 @@ impl AppView {
                 )
     }
 
-    fn settings_helper_card(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn settings_helper_card(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let platform = self.snapshot.platform.clone();
         let doctor = self.snapshot.doctor.clone();
@@ -1098,7 +1098,7 @@ impl AppView {
                 )
                 .child({
                     let mut items: Vec<String> = vec![platform.helper_detail.clone()];
-                    if let Some(path) = &platform.helper_path {
+                    if let Some(path) = platform.helper_path.as_ref().filter(|_| !self.snapshot.settings.privacy_mode) {
                         items.push(format!("{}: {path}", self.tr("可执行文件", "Executable")));
                     }
                     if !platform.elevated {
@@ -1159,7 +1159,7 @@ impl AppView {
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
                                     .label(self.tr("安装并启动", "Install & start"))
-                                    .loading(helper_busy)
+                                    .loading(helper_busy).disabled(helper_busy)
                                     .on_click(cx.listener(|this, _, _, _| {
                                         this.service.install_helper();
                                     })),
@@ -1175,7 +1175,7 @@ impl AppView {
                                         .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .primary()
                                         .label(self.tr("启动", "Start"))
-                                        .loading(helper_busy)
+                                        .loading(helper_busy).disabled(helper_busy)
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.service.start_helper();
                                         })),
@@ -1187,7 +1187,7 @@ impl AppView {
                                 Button::new("restart-helper")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .label(self.tr("重启", "Restart"))
-                                    .loading(helper_busy)
+                                    .loading(helper_busy).disabled(helper_busy)
                                     .on_click(cx.listener(|this, _, _, _| {
                                         this.service.restart_helper();
                                     })),
@@ -1197,9 +1197,9 @@ impl AppView {
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .danger()
                                     .label(self.tr("卸载", "Uninstall"))
-                                    .loading(helper_busy)
-                                    .on_click(cx.listener(|this, _, _, _| {
-                                        this.service.uninstall_helper();
+                                    .loading(helper_busy).disabled(helper_busy)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.run_command(super::menus::Command::UninstallHelper, false, window, cx);
                                     })),
                             )
                         })
@@ -1219,7 +1219,7 @@ impl AppView {
                                 Button::new("update-helper")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .label(self.tr("更新助手", "Update helper"))
-                                    .loading(helper_busy)
+                                    .loading(helper_busy).disabled(helper_busy)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.service.update_helper();
                                         this.sync(cx);
@@ -1255,7 +1255,7 @@ impl AppView {
                         format!(
                             "{}：{}",
                             self.tr("日志目录", "Log dir"),
-                            platform.log_dir
+                            if self.snapshot.settings.privacy_mode { "•••".into() } else { platform.log_dir.clone() }
                         ),
                     ];
                     div()

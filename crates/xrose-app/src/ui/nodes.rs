@@ -1,3 +1,4 @@
+mod direct_entry;
 mod mesh_exits;
 mod outbound_groups;
 mod switching;
@@ -125,74 +126,32 @@ impl AppView {
                                 &p,
                                 self.tr("欢迎使用 Xrose", "Welcome to Xrose"),
                                 self.tr(
-                                    "三步开始：添加订阅或导入节点 → 下载 Core → 启动",
-                                    "Three steps: add a subscription or import a node → install a core → start",
+                                    "下载 sing-box 并点击「启动」，即可查看流量、连接和网络诊断。如需代理，可添加订阅、粘贴节点链接或二维码，或拖入二维码图片。",
+                                    "Install sing-box and click Start to view traffic, connections and network diagnostics. To use a proxy, add a subscription, paste node links or a QR code, or drop a QR image.",
                                 ),
                             )),
                     )
                     .child(
                         div()
                             .flex()
-                            .flex_col()
                             .gap_2()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(pill("1", p.primary_fg, p.primary))
-                                    .child(self.tr(
-                                        "添加节点订阅或粘贴一个或多个节点链接",
-                                        "Add a subscription or paste one or more node links",
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(pill("2", p.primary_fg, p.primary))
-                                    .child(self.tr(
-                                        "在设置 → Core 下载 xray / sing-box（有校验文件时自动验证 SHA-256）",
-                                        "Install xray / sing-box in Settings → Core (SHA-256 verified when published)",
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .text_sm()
-                                    .child(pill("3", p.primary_fg, p.primary))
-                                    .child(self.tr(
-                                        "点击右上角“启动”，需要时再应用配置",
-                                        "Click Start in the top-right, then apply config when needed",
-                                    )),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new("wizard-subscription")
-                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .primary()
-                                    .label(self.tr("添加订阅", "Add subscription"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.page = Page::Subscriptions;
-                                        this.open_subscription_dialog(window,cx);
-                                    })),
-                            )
                             .child(
                                 Button::new("wizard-install")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                    .primary()
                                     .label(self.tr("下载 Core", "Install core"))
                                     .on_click(cx.listener(|this, _, _, _| {
                                         let core = this.snapshot.settings.core;
                                         this.service.install_core_update(core);
+                                    })),
+                            )
+                            .child(
+                                Button::new("wizard-subscription")
+                                    .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                    .label(self.tr("添加订阅", "Add subscription"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.page = Page::Subscriptions;
+                                        this.open_subscription_dialog(window,cx);
                                     })),
                             )
                             .child(
@@ -562,14 +521,21 @@ impl AppView {
                     let all_ids: Vec<String> = display_nodes.iter().map(|n| n.id.clone()).collect();
                     let all_selected =
                         !all_ids.is_empty() && all_ids.iter().all(|id| batch_selected.contains(id));
-                    let selected_ids: Vec<String> = model.nodes.iter().filter(|n| batch_selected.contains(&n.id)).map(|n| n.id.clone()).collect();
+                    let selected_ids: Vec<String> = model
+                        .nodes
+                        .iter()
+                        .filter(|n| batch_selected.contains(&n.id))
+                        .map(|n| n.id.clone())
+                        .collect();
                     let selected_count = selected_ids.len();
 
                     d.child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between().flex_wrap().gap_2()
+                            .justify_between()
+                            .flex_wrap()
+                            .gap_2()
                             .px_3()
                             .py_2()
                             .rounded_md()
@@ -706,6 +672,12 @@ impl AppView {
                 .when(!self.hide_traffic_chart, |d| {
                     d.child(self.traffic_chart(&p))
                 })
+                .child(self.direct_entry(
+                    &p,
+                    auto_mode && model.has_usable_default_group(self.snapshot.settings.core),
+                    core_busy,
+                    cx,
+                ))
                 .when(exit_busy, |d| {
                     d.child(
                         div()
@@ -720,17 +692,10 @@ impl AppView {
                             )),
                     )
                 })
-                .when(shown == 0, |d| {
+                .when(shown == 0 && !search_query.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,
-                        if search_query.is_empty() {
-                            self.tr(
-                                "还没有节点。可粘贴节点链接或二维码，也可拖入图片文件。",
-                                "No nodes yet. Paste a share link or QR code, or drop an image file.",
-                            )
-                        } else {
-                            self.tr("未找到匹配的节点", "No matching nodes found")
-                        },
+                        self.tr("未找到匹配的节点", "No matching nodes found"),
                     ))
                 })
                 // Node list: either Grouped by Subscription or Flat List.

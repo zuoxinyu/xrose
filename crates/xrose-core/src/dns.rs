@@ -1,6 +1,8 @@
 //! DNS presets and validation. DNS is the most error-prone part of a proxy
 //! config, so both compile-time validation and one-click templates live here.
 
+pub mod probe;
+
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DnsConfig, DnsServer, DnsServerType};

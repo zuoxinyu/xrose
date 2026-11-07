@@ -4,7 +4,7 @@
 pub mod singbox;
 pub mod xray;
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use crate::core::process::run_capture;
 use crate::error::Result;
 use crate::model::{
     AppModel, CoreKind, DnsServer, Matchers, RouteAction, RouteActionKind, RuleSet, RuleSetFormat,
+    WorkMode,
 };
 use crate::settings::LogLevel;
 use crate::settings::Settings;
@@ -60,13 +61,19 @@ pub(crate) fn resolve_rule_set(model: &AppModel, tag: &str) -> Option<RuleSet> {
 
 /// Includes implicit route/DNS references so manual retries match startup.
 pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
-    let mut sets = BTreeMap::new();
+    rule_set_tags(model, model.work_mode)
+        .into_iter()
+        .filter_map(|tag| resolve_rule_set(model, &tag))
+        .collect()
+}
+
+/// Use Proxy when listing all editable rules, including inactive proxy intent.
+pub(crate) fn rule_set_tags(model: &AppModel, mode: WorkMode) -> BTreeSet<String> {
+    let mut tags = BTreeSet::new();
     let mut add = |tag: &str| {
-        if let Some(set) = resolve_rule_set(model, tag) {
-            sets.entry(tag.to_string()).or_insert(set);
-        }
+        tags.insert(tag.to_owned());
     };
-    for rule in model.routing.effective_rules() {
+    for rule in model.routing.rules_for_mode(mode) {
         for tag in &rule.matchers.rule_sets {
             add(tag);
         }
@@ -79,6 +86,9 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
     }
     if model.dns.enabled {
         for server in &model.dns.servers {
+            if mode == WorkMode::Direct && (server.requires_proxy() || server.is_fakeip()) {
+                continue;
+            }
             let split = split_dns_domains(&server.domains);
             for name in split.geosites {
                 add(&format!("geosite-{name}"));
@@ -88,10 +98,55 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
             }
         }
     }
-    for tag in ["geosite-cn", "geoip-cn"] {
-        add(tag);
+    if mode == WorkMode::Proxy {
+        for tag in ["geosite-cn", "geoip-cn"] {
+            add(tag);
+        }
     }
-    sets.into_values().collect()
+    tags
+}
+
+/// Reduce saved user intent to the node and resolver graph for this run.
+fn compilation_model(model: &AppModel, warnings: &mut Vec<String>) -> AppModel {
+    let mut effective = model.clone();
+    if effective.work_mode == WorkMode::Direct {
+        effective.nodes.clear();
+        effective.groups.clear();
+        effective.default_group = None;
+        effective.front_proxy = None;
+        effective.routing.bypass_lan = false;
+        effective.routing.bypass_china_ips = false;
+        if effective.dns.enabled {
+            effective.dns.servers.retain(|server| {
+                if server.requires_proxy() {
+                    warnings.push(format!(
+                        "直连模式下已跳过依赖代理出站的 DNS 服务器「{}」，改用本地/直连 DNS",
+                        server.tag
+                    ));
+                    false
+                } else {
+                    true
+                }
+            });
+            if effective.dns.final_server.as_ref().is_none_or(|tag| {
+                !effective
+                    .dns
+                    .servers
+                    .iter()
+                    .any(|s| &s.tag == tag && !s.is_fakeip())
+            }) {
+                // Reuse an unscoped direct upstream when the saved default was
+                // removed. Scoped private resolvers never become a public fallback.
+                effective.dns.final_server = effective
+                    .dns
+                    .servers
+                    .iter()
+                    .find(|s| !s.is_fakeip() && s.domains.is_empty())
+                    .map(|s| s.tag.clone());
+            }
+        }
+    }
+    effective
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +418,7 @@ pub fn action_tag(core: CoreKind, model: &AppModel, action: &RouteAction) -> Opt
     match action.kind {
         RouteActionKind::Direct => Some("direct".into()),
         RouteActionKind::Block => Some("block".into()),
+        RouteActionKind::Proxy if model.work_mode == WorkMode::Direct => Some("direct".into()),
         RouteActionKind::Proxy => {
             if core == CoreKind::Xray {
                 // Manual and client-managed groups route directly to the selected node.
@@ -399,6 +455,11 @@ pub fn xray_dns_address(server: &DnsServer, warnings: &mut Vec<String>) -> Optio
         return None;
     }
     match server.server_type {
+        DnsServerType::Udp | DnsServerType::Tcp
+            if matches!(server.address.trim(), "local" | "system" | "localhost") =>
+        {
+            Some("localhost".into())
+        }
         DnsServerType::Udp => Some(server.address.clone()),
         DnsServerType::Tcp => Some(format!("tcp://{}", server.address)),
         DnsServerType::Https => Some(server.display_address()),
@@ -489,4 +550,291 @@ pub fn parse_geosite_name(value: &str) -> String {
 
 pub fn parse_geoip_name(value: &str) -> String {
     format!("geoip-{}", value.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Node, Protocol, RoutePreset, RouteRule, RouteRuleGroup};
+    use serde_json::json;
+
+    #[test]
+    fn zero_node_monitor_keeps_firewall_mesh_and_direct_dns_in_both_cores() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let mut ctx =
+            CompileContext::new(&settings, dir.path().join("data"), dir.path().join("run"));
+        ctx.mesh.routes.push(crate::mesh::coexist::MeshRoute {
+            cidr: "192.0.2.0/24".into(),
+            interface: "mesh-test".into(),
+        });
+        ctx.mesh.dns.push(crate::mesh::coexist::MeshDns {
+            suffix: "mesh.example".into(),
+            address: "192.0.2.53".into(),
+        });
+        let mut model = AppModel::default();
+        assert!(required_rule_sets(&model).is_empty());
+        assert!(
+            SingBoxAdapter
+                .compile(&model, &settings, &ctx)
+                .unwrap()
+                .json["route"]["rule_set"]
+                .is_null()
+        );
+        model.dns.fake_ip = true;
+        model.apply_preset(RoutePreset::GfwList);
+        model.routing.rule_groups.push(RouteRuleGroup {
+            rules: vec![RouteRule::new(
+                "firewall",
+                Matchers {
+                    process_names: vec!["fixture".into()],
+                    ..Default::default()
+                },
+                RouteAction::block(),
+            )],
+            ..Default::default()
+        });
+        model.routing.rules.push(RouteRule::new(
+            "default route",
+            Matchers {
+                domains: vec!["proxy.example".into()],
+                ..Default::default()
+            },
+            RouteAction::proxy(),
+        ));
+        model.front_proxy = Some("missing".into());
+        model
+            .dns
+            .hosts
+            .insert("hosts.example".into(), vec!["192.0.2.12".into()]);
+        let mut remote = DnsServer::https("remote", "192.0.2.20");
+        remote.detour = Some("group-private".into());
+        remote.domains = vec!["geosite:private-only".into()];
+        let mut encrypted = DnsServer::https("secure", "192.0.2.21");
+        encrypted.detour = Some("direct".into());
+        encrypted.domains = vec!["geosite:service".into()];
+        model.dns.servers = vec![remote, encrypted];
+        model.dns.final_server = Some("secure".into());
+        let required: BTreeSet<_> = required_rule_sets(&model)
+            .into_iter()
+            .map(|set| set.tag)
+            .collect();
+        assert_eq!(
+            required,
+            BTreeSet::from(["geosite-category-ads-all".into(), "geosite-service".into()])
+        );
+        for core in CoreKind::all() {
+            let compiled = adapter_for(core).compile(&model, &settings, &ctx).unwrap();
+            assert_eq!(compiled.default_outbound, "direct");
+            assert!(compiled.managed_groups.is_empty());
+            assert!(
+                compiled
+                    .warnings
+                    .iter()
+                    .any(|s| s.contains("已跳过依赖代理出站的 DNS 服务器「remote」"))
+            );
+            let config = &compiled.json;
+            assert!(!config.to_string().contains("private-only"));
+            assert!(!config.to_string().contains("192.0.2.20"));
+            assert!(config.to_string().contains("192.0.2.21"));
+            assert!(config.to_string().contains("hosts.example"));
+            assert!(config.to_string().contains("mesh.example"));
+            assert!(
+                config["outbounds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|o| o["tag"] == "xrose-mesh-0")
+            );
+            if core == CoreKind::SingBox {
+                assert_eq!(config["outbounds"].as_array().unwrap().len(), 2);
+                let rules = config["route"]["rules"].as_array().unwrap();
+                let block = rules
+                    .iter()
+                    .position(|r| r["process_name"] == json!(["fixture"]))
+                    .unwrap();
+                assert_eq!(rules[block]["action"], "reject");
+                let forward = rules
+                    .iter()
+                    .position(|r| {
+                        r["outbound"] == "direct" && r["domain"] == json!(["proxy.example"])
+                    })
+                    .unwrap();
+                assert!(block < forward - 1);
+                assert_eq!(
+                    rules[forward - 1],
+                    json!({"domain":["proxy.example"], "action":"resolve"})
+                );
+                assert_eq!(rules.last().unwrap(), &json!({"action":"resolve"}));
+                assert!(config["dns"]["rules"].as_array().unwrap().iter().any(|r| r["server"] == "fakeip" && r["query_type"] == json!(["A", "AAAA"])));
+                assert_eq!(config["dns"]["final"], "secure");
+            } else {
+                assert_eq!(config["outbounds"].as_array().unwrap().len(), 4);
+                let rules = config["routing"]["rules"].as_array().unwrap();
+                assert!(
+                    rules
+                        .iter()
+                        .any(|r| r["process"] == json!(["fixture"]) && r["outboundTag"] == "block")
+                );
+                assert!(
+                    rules
+                        .iter()
+                        .any(|r| r["domain"] == json!(["full:proxy.example"])
+                            && r["outboundTag"] == "direct")
+                );
+                assert!(
+                    compiled
+                        .warnings
+                        .iter()
+                        .any(|w| w.contains("Xray 不支持连接列表"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_resolver_fallbacks_remain_scoped_without_tun_recursion() {
+        let settings = Settings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = CompileContext::new(&settings, dir.path().into(), dir.path().into());
+        let mut model = AppModel::default();
+        let mut scoped = DnsServer::udp("xrose-mesh-dns-0", "192.0.2.10");
+        scoped.domains = vec!["domain:private.example".into()];
+        model.dns.servers = vec![scoped.clone()];
+        model.dns.final_server = None;
+        model.inbounds.push(crate::model::Inbound::new(
+            "fixture-tun",
+            crate::model::InboundKind::Tun,
+            0,
+        ));
+        let config = XrayAdapter.compile(&model, &settings, &ctx).unwrap().json;
+        assert_eq!(config["dns"]["servers"][0]["skipFallback"], true);
+        assert_eq!(config["dns"]["servers"][1]["address"], "localhost");
+        assert!(
+            config["inbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["tag"] == "fixture-tun")
+                .unwrap()["settings"]["dns"]
+                .is_null()
+        );
+        assert!(
+            config["routing"]["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["outboundTag"] == "dns-out")
+                .all(|r| r["inboundTag"]
+                    .as_array()
+                    .expect("scope DNS interception to proxy inbounds")
+                    .iter()
+                    .all(|tag| tag != "fixture-tun"))
+        );
+
+        model
+            .dns
+            .servers
+            .push(DnsServer::https("fakeip", "192.0.2.20"));
+        model.dns.fake_ip = true;
+        ctx.mesh.dns.push(crate::mesh::coexist::MeshDns {
+            suffix: "mesh.example".into(),
+            address: "127.0.0.153".into(),
+        });
+        let config = SingBoxAdapter
+            .compile(&model, &settings, &ctx)
+            .unwrap()
+            .json;
+        let dns = &config["dns"];
+        assert_eq!(dns["final"], "fakeip"); // the real, unscoped resolver
+        let servers = dns["servers"].as_array().unwrap();
+        let tags: BTreeSet<_> = servers.iter().map(|s| s["tag"].as_str().unwrap()).collect();
+        assert_eq!(tags.len(), servers.len());
+        let mesh_tag = &config["route"]["rules"][0]["server"];
+        assert_ne!(mesh_tag, "xrose-mesh-dns-0");
+        assert_eq!(dns["rules"][0]["server"], *mesh_tag);
+        assert!(
+            servers
+                .iter()
+                .any(|s| s["tag"] == "fakeip" && s["type"] == "https")
+        );
+        assert!(
+            servers
+                .iter()
+                .any(|s| s["tag"] != "fakeip" && s["type"] == "fakeip")
+        );
+
+        model.dns.enabled = false;
+        let config = SingBoxAdapter
+            .compile(&model, &settings, &ctx)
+            .unwrap()
+            .json;
+        assert_eq!(config["dns"]["final"], "local");
+        assert_eq!(config["route"]["default_domain_resolver"], "local");
+        assert_eq!(config["dns"]["servers"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn direct_skips_proxy_nodes_and_falls_back_to_system_dns() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let ctx = CompileContext::new(&settings, dir.path().into(), dir.path().into());
+        let mut model = AppModel::default();
+        model.add_nodes([Node::new("proxy", Protocol::Http, "proxy.example", 8080)]);
+        let mut upstream = DnsServer::https("remote", "192.0.2.22");
+        upstream.detour = Some("proxy".into());
+        model.dns.servers = vec![upstream];
+        model.dns.final_server = Some("remote".into());
+        let original = model.clone();
+        for core in CoreKind::all() {
+            let compiled = adapter_for(core).compile(&model, &settings, &ctx).unwrap();
+            assert!(!compiled.json.to_string().contains("proxy.example"));
+            let dns = &compiled.json["dns"];
+            if core == CoreKind::SingBox {
+                assert_eq!(dns["final"], "local");
+                assert!(
+                    dns["servers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|s| s["tag"] == "local" && s["type"] == "local")
+                );
+            } else {
+                assert_eq!(dns["servers"], json!([{"address":"localhost"}]));
+            }
+        }
+        assert_eq!(model, original);
+        // A direct DoH with the reserved-looking name "local" still needs a distinct bootstrap.
+        model
+            .dns
+            .servers
+            .push(DnsServer::https("local", "resolver.example"));
+        let config = SingBoxAdapter
+            .compile(&model, &settings, &ctx)
+            .unwrap()
+            .json;
+        let dns = &config["dns"];
+        assert_eq!(dns["final"], "local");
+        let encrypted = dns["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["tag"] == "local")
+            .unwrap();
+        assert_eq!(encrypted["type"], "https");
+        assert_ne!(encrypted["domain_resolver"], "local");
+        assert_eq!(
+            config["route"]["default_domain_resolver"],
+            encrypted["domain_resolver"]
+        );
+        model.work_mode = WorkMode::Proxy;
+        assert!(
+            SingBoxAdapter
+                .compile(&model, &settings, &ctx)
+                .unwrap()
+                .json
+                .to_string()
+                .contains("proxy.example")
+        );
+    }
 }

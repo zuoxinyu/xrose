@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -98,12 +98,14 @@ impl Store {
         Ok(Arc::new(store))
     }
 
-    fn backup_before_migration(&self, version: i64) -> Result<()> {
+    fn backup_before_migration(&self, conn: &Connection, version: i64) -> Result<()> {
         std::fs::create_dir_all(&self.backup_dir).map_err(|e| io_context(&self.backup_dir, e))?;
-        let target = self
-            .backup_dir
-            .join(format!("xrose-v{version}-{}.db", now_unix()));
-        std::fs::copy(&self.db_path, &target).map_err(|e| io_context(&target, e))?;
+        let target = self.backup_dir.join(format!(
+            "xrose-v{version}-{}.db",
+            crate::util::new_id("backup")
+        ));
+        // Include committed WAL frames and produce a self-contained SQLite snapshot.
+        conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
         Ok(())
     }
 
@@ -116,7 +118,7 @@ impl Store {
             return Ok(());
         }
         if version > 0 && self.db_path.exists() {
-            let _ = self.backup_before_migration(version);
+            self.backup_before_migration(&conn, version)?;
         }
         let tx = conn.transaction()?;
         if version < 1 {
@@ -285,6 +287,28 @@ impl Store {
                     crate::util::atomic_write_private(
                         settings_file,
                         &serde_json::to_vec_pretty(&settings)?,
+                    )?;
+                }
+            }
+        }
+        if version < 12 {
+            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, payload) in rows {
+                let mut model = serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                if migrate_work_mode(&mut model)? {
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("配置加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE profiles SET model = ?1 WHERE id = ?2",
+                        params![encrypted, id],
                     )?;
                 }
             }
@@ -635,7 +659,8 @@ impl Store {
             return Err(Error::other(format!("不支持的备份格式：{}", bundle.format)));
         }
         let mut imported = 0;
-        for profile in bundle.profiles {
+        for mut profile in bundle.profiles {
+            migrate_work_mode(&mut profile.model_json)?;
             let model: AppModel = serde_json::from_value(profile.model_json)?;
             let id = if self.load_profile(&profile.id)?.is_some() {
                 crate::util::new_id("profile")
@@ -656,6 +681,25 @@ impl Store {
         }
         Ok(imported)
     }
+}
+
+/// Retain existing choices and preserve unknown fields in older profiles.
+fn migrate_work_mode(model: &mut serde_json::Value) -> Result<bool> {
+    let object = model
+        .as_object_mut()
+        .ok_or_else(|| Error::config("配置格式无效，请从备份恢复"))?;
+    if object.contains_key("work_mode") {
+        return Ok(false);
+    }
+    let has_nodes = object
+        .get("nodes")
+        .and_then(|n| n.as_array())
+        .is_some_and(|n| !n.is_empty());
+    object.insert(
+        "work_mode".into(),
+        if has_nodes { "proxy" } else { "direct" }.into(),
+    );
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -849,6 +893,82 @@ mod tests {
         let actual: serde_json::Value =
             serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
         assert_eq!(actual, profile);
+    }
+
+    #[test]
+    fn legacy_work_mode_migration_preserves_encrypted_profiles_and_the_backup() {
+        for version in [9, 10, 11] {
+            let (store, dir) = store();
+            let paths = AppPaths::from_root(dir.path());
+            let mut original = serde_json::to_value(AppModel::default()).unwrap();
+            original.as_object_mut().unwrap().remove("work_mode");
+            original["future"] = serde_json::json!({"nested": [1, 2]});
+            let mut proxy = original.clone();
+            proxy["nodes"] = serde_json::json!([crate::model::Node::new(
+                "fixture",
+                crate::model::Protocol::Http,
+                "192.0.2.1",
+                8080
+            )]);
+            let mut explicit = proxy.clone();
+            explicit["work_mode"] = "direct".into();
+            let profiles = [
+                ("empty", original, "direct"),
+                ("populated", proxy, "proxy"),
+                ("explicit", explicit, "direct"),
+            ];
+            let conn = store.conn.lock();
+            for (id, value, _) in &profiles {
+                let payload = store.secrets.encrypt(&value.to_string());
+                conn.execute(
+                    "INSERT INTO profiles VALUES (?1, 'fixture', ?2, 1, 2)",
+                    params![id, payload],
+                )
+                .unwrap();
+            }
+            conn.pragma_update(None, "user_version", version).unwrap();
+            drop(conn);
+            drop(store);
+
+            let reopened = Store::open(&paths).unwrap();
+            let backups: Vec<_> = std::fs::read_dir(paths.backup_dir())
+                .unwrap()
+                .flatten()
+                .collect();
+            assert_eq!(backups.len(), 1);
+            let backup = Connection::open(backups[0].path()).unwrap();
+            for (id, mut value, mode) in profiles {
+                let saved: String = backup
+                    .query_row("SELECT model FROM profiles WHERE id=?1", [id], |r| r.get(0))
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        &reopened.secrets.decrypt(&saved).unwrap()
+                    )
+                    .unwrap(),
+                    value
+                );
+                value["work_mode"] = mode.into();
+                let (payload, updated): (String, i64) = reopened
+                    .conn
+                    .lock()
+                    .query_row(
+                        "SELECT model, updated_at FROM profiles WHERE id=?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                assert!(SecretBox::is_encrypted(&payload));
+                assert_eq!(updated, 2);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(
+                        &reopened.secrets.decrypt(&payload).unwrap()
+                    )
+                    .unwrap(),
+                    value
+                );
+            }
+        }
     }
 
     #[test]

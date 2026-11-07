@@ -274,7 +274,10 @@ impl AppService {
         let (Some(core), Some(binary), Some(model)) = (
             process.core,
             process.binary.as_deref(),
-            self.inner.core.managed_probe_model(),
+            self.inner
+                .core
+                .applied_model()
+                .filter(|m| m.work_mode == crate::model::WorkMode::Proxy),
         ) else {
             return Ok(None);
         };

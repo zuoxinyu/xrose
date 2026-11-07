@@ -1,7 +1,7 @@
 //! Content and service actions shared by every platform's GPUI tray flyout.
 
 use xrose_core::AppService;
-use xrose_core::model::RoutePreset;
+use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
 use xrose_core::service::LatencyScope;
 use xrose_core::settings::Language;
 use xrose_core::util::{format_bytes, format_speed};
@@ -31,6 +31,8 @@ pub struct Dashboard {
     #[allow(dead_code)]
     pub traffic_line: Option<String>,
     pub group_id: Option<String>,
+    pub direct: bool,
+    pub automatic_group: bool,
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
     pub running: bool,
@@ -64,28 +66,36 @@ pub fn build(service: &AppService) -> Dashboard {
     let active_node = snapshot
         .selected_node(group.as_ref().map(|group| group.id.as_str()))
         .map(|node| node.id.clone());
-    let nodes = model
-        .nodes
-        .iter()
-        .filter(|node| {
-            node.enabled
-                && group
-                    .as_ref()
-                    .is_some_and(|group| group.members.contains(&node.id))
-        })
-        .map(|node| {
-            let delay = snapshot
-                .latency
-                .get(&node.id)
-                .and_then(|entry| entry.delay_ms);
-            DashboardNode {
-                id: node.id.clone(),
-                label: node.name.clone(),
-                delay_ms: delay,
-                active: active_node.as_deref() == Some(node.id.as_str()),
-            }
-        })
-        .collect();
+    let direct = model.work_mode == WorkMode::Direct;
+    let mut nodes = vec![DashboardNode {
+        id: DIRECT_VIRTUAL_NODE_ID.into(),
+        label: tr(language, "本机直连", "Direct").into(),
+        delay_ms: None,
+        active: direct,
+    }];
+    nodes.extend(
+        model
+            .nodes
+            .iter()
+            .filter(|node| {
+                node.usable_with(snapshot.settings.core)
+                    && group
+                        .as_ref()
+                        .is_some_and(|group| group.members.contains(&node.id))
+            })
+            .map(|node| {
+                let delay = snapshot
+                    .latency
+                    .get(&node.id)
+                    .and_then(|entry| entry.delay_ms);
+                DashboardNode {
+                    id: node.id.clone(),
+                    label: node.name.clone(),
+                    delay_ms: delay,
+                    active: active_node.as_deref() == Some(node.id.as_str()),
+                }
+            }),
+    );
     let et_net = snapshot
         .mesh
         .networks
@@ -170,12 +180,15 @@ pub fn build(service: &AppService) -> Dashboard {
         language,
         status_line,
         traffic_line,
+        direct,
+        automatic_group: group.as_ref().is_some_and(|g| !g.manually_selectable())
+            && model.has_usable_default_group(snapshot.settings.core),
         group_id: group
             .as_ref()
             .filter(|g| g.enabled && g.manually_selectable())
             .map(|g| g.id.clone()),
         group_name: group
-            .map(|group| group.name)
+            .map(|group| crate::i18n::outbound_group_label(language, &group).to_string())
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
         nodes,
         running,
@@ -208,6 +221,7 @@ pub fn build(service: &AppService) -> Dashboard {
 pub enum TrayAction {
     ToggleCore,
     TestAll,
+    SelectMode(WorkMode),
     SelectNode { group_id: String, node_id: String },
     ToggleSystemProxy,
     ToggleTun,
@@ -230,6 +244,15 @@ pub enum TrayCommand {
 pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand> {
     match action {
         TrayAction::ToggleCore => service.toggle_core(),
+        TrayAction::SelectMode(mode) => {
+            let result = match mode {
+                WorkMode::Direct => service.select_direct_mode(),
+                WorkMode::Proxy => service.select_proxy_mode(),
+            };
+            if let Err(error) = result {
+                service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
+            }
+        }
         TrayAction::TestAll => service.test_latency(LatencyScope::All),
         TrayAction::SelectNode { group_id, node_id } => {
             service.select_node(&group_id, &node_id);

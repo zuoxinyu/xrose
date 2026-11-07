@@ -7,12 +7,14 @@ mod manual_node;
 mod menus;
 mod mesh;
 mod mesh_sync;
+mod network_diagnostics;
 mod nodes;
 mod qr;
 mod route_drag;
 mod route_transfer;
 mod routing;
 mod settings;
+mod stun_diagnostics;
 mod subscriptions;
 pub(crate) mod theme;
 mod title_controls;
@@ -225,6 +227,9 @@ pub struct AppView {
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connection_filter: ConnectionFilterKind,
     pub(crate) show_recorded_connections: bool,
+    show_live_processes: bool,
+    connection_sort: xrose_core::flow::ConnectionSort,
+    exact_process_filter: Option<String>,
     pub(crate) connections_limit: usize,
     pub(crate) selected_connection: Option<xrose_core::runtime::ClashConnection>,
     pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
@@ -388,6 +393,9 @@ impl AppView {
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
             connection_filter: ConnectionFilterKind::All,
             show_recorded_connections: false,
+            show_live_processes: false,
+            connection_sort: Default::default(),
+            exact_process_filter: None,
             connections_limit: 50,
             selected_connection: None,
             diagnostic_rule_kind: DiagnosticRuleKind::Domain,
@@ -434,7 +442,7 @@ impl AppView {
             (&self.log_search, self.tr("搜索日志…", "Search logs…")),
             (
                 &self.connection_search,
-                self.tr("过滤域名、IP 或进程…", "Filter domain, IP or process…"),
+                self.connection_search_placeholder(),
             ),
             (
                 &self.sub_name,
@@ -779,6 +787,7 @@ impl AppView {
             (IconName::Play, self.tr("启动", "Start"))
         };
         let node = self.snapshot.selected_node(None);
+        let direct = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Direct;
         let node_name = node
             .map(|n| {
                 if self.hide_ips && !n.server.is_empty() {
@@ -787,7 +796,14 @@ impl AppView {
                     n.name.clone()
                 }
             })
-            .unwrap_or_else(|| self.tr("选择节点", "Select node").to_string());
+            .unwrap_or_else(|| {
+                if direct {
+                    self.tr("本机直连", "Direct")
+                } else {
+                    self.tr("选择节点", "Select node")
+                }
+                .to_string()
+            });
         let state_label = match self.snapshot.process.phase {
             xrose_core::core::ProcessPhase::Stopped => self.tr("已停止", "Stopped"),
             xrose_core::core::ProcessPhase::Starting => self.tr("启动中", "Starting"),
@@ -877,10 +893,14 @@ impl AppView {
                             .rounded_tl(px(theme::STATUS_END_RADIUS))
                             .rounded_bl(px(theme::STATUS_END_RADIUS))
                             .disabled(core_busy)
-                            .accessibility_label(format!(
-                                "{}: {node_name}, {node_delay}",
-                                self.tr("切换节点", "Switch node")
-                            ))
+                            .accessibility_label(if direct {
+                                node_name.clone()
+                            } else {
+                                format!(
+                                    "{}: {node_name}, {node_delay}",
+                                    self.tr("切换节点", "Switch node")
+                                )
+                            })
                             .tooltip(node_tip)
                             .child(
                                 div()

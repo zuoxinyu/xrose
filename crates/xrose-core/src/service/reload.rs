@@ -200,6 +200,24 @@ exec sleep 90
             .unwrap();
         service.start_core();
         wait(|| !service.is_busy("core") && service.process_state().pid.is_some());
+        // An explicit selection reloads even with automatic reload disabled.
+        let direct_pid = service.process_state().pid;
+        let node_id = service.model().nodes[0].id.clone();
+        service.select_node("proxy", &node_id);
+        wait(|| {
+            !service.is_busy("core")
+                && service.inner.core.applied_work_mode() == Some(WorkMode::Proxy)
+        });
+        assert_ne!(service.process_state().pid, direct_pid);
+        service.select_direct_mode().unwrap();
+        wait(|| {
+            !service.is_busy("core")
+                && service.inner.core.applied_work_mode() == Some(WorkMode::Direct)
+        });
+        assert_eq!(
+            service.model().group("proxy").unwrap().selected.as_deref(),
+            Some(node_id.as_str())
+        );
         let original_pid = service.process_state().pid;
         let mut settings = service.settings();
         settings.mixed_port = 17442;

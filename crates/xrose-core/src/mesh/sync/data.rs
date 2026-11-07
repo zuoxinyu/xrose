@@ -157,6 +157,7 @@ impl Bundle {
             ]
             .into_iter()
             .flat_map(crate::model::preset_rules)
+            .chain(crate::model::starter_rules())
             .collect::<Vec<_>>();
             let defaults = crate::model::route::default_rule_sets();
             items.extend(
@@ -264,7 +265,8 @@ impl Bundle {
                     portable_mesh(p).validate()?;
                 }
                 Item::Node(n)
-                    if n.id.starts_with("mesh-exit-")
+                    if n.id == crate::model::DIRECT_VIRTUAL_NODE_ID
+                        || n.id.starts_with("mesh-exit-")
                         || n.tags.iter().any(|t| t == "mesh-exit")
                         || n.server.trim().is_empty()
                         || n.port == 0 =>

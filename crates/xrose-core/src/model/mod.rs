@@ -30,8 +30,8 @@ pub(crate) fn default_true() -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CoreKind {
-    #[default]
     Xray,
+    #[default]
     SingBox,
 }
 
@@ -123,10 +123,23 @@ pub struct Capabilities {
     pub process_rules: bool,
 }
 
+/// Reserved UI identity. The local monitor is never a stored proxy node.
+pub const DIRECT_VIRTUAL_NODE_ID: &str = "__xrose_direct__";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkMode {
+    #[default]
+    Direct,
+    Proxy,
+}
+
 /// The editable state. Everything the compiler needs is here; secrets are
 /// stored encrypted by [`crate::storage`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppModel {
+    #[serde(default)]
+    pub work_mode: WorkMode,
     #[serde(default = "default_profile_name")]
     pub name: String,
     #[serde(default)]
@@ -153,9 +166,22 @@ fn default_profile_name() -> String {
     "默认配置".into()
 }
 
+/// Keep the initial direct monitor free of downloadable assets. Explicit
+/// preset selection still installs all its rules, including ad blocking.
+pub(crate) fn starter_rules() -> Vec<RouteRule> {
+    let mut rules = preset_rules(RoutePreset::BypassMainland);
+    for rule in &mut rules {
+        if rule.action.kind == RouteActionKind::Block {
+            rule.enabled = false;
+        }
+    }
+    rules
+}
+
 impl Default for AppModel {
     fn default() -> Self {
         let mut model = Self {
+            work_mode: WorkMode::Direct,
             name: default_profile_name(),
             nodes: Vec::new(),
             groups: Vec::new(),
@@ -167,7 +193,9 @@ impl Default for AppModel {
             updated_at: now_unix(),
         };
         model.ensure_default_groups();
-        model.apply_preset(RoutePreset::BypassMainland);
+        model.routing.rules = starter_rules();
+        model.routing.bypass_china_ips = true;
+        crate::dns::apply_preset(&mut model.dns, crate::dns::DnsPreset::System);
         model
     }
 }
@@ -231,6 +259,17 @@ impl AppModel {
         self.default_group
             .clone()
             .or_else(|| self.groups.iter().find(|g| g.enabled).map(|g| g.id.clone()))
+    }
+
+    pub fn has_usable_default_group(&self, core: CoreKind) -> bool {
+        self.default_group_id()
+            .and_then(|id| self.group(&id))
+            .is_some_and(|g| {
+                g.enabled
+                    && g.members
+                        .iter()
+                        .any(|id| self.node(id).is_some_and(|n| n.usable_with(core)))
+            })
     }
 
     /// Checks every stored reference, including disabled rules.
@@ -300,6 +339,9 @@ impl AppModel {
             self.nodes.iter().map(|n| n.fingerprint()).collect();
         let mut added = 0;
         for mut node in incoming {
+            if node.id == DIRECT_VIRTUAL_NODE_ID {
+                continue;
+            }
             let fp = node.fingerprint();
             if !seen.insert(fp) {
                 continue;
@@ -438,23 +480,25 @@ impl AppModel {
     /// Issues that should block starting a core; shown verbatim in the UI.
     pub fn validate(&self, core: CoreKind) -> Vec<String> {
         let mut issues = Vec::new();
-        if self.nodes.iter().all(|n| !n.usable_with(core)) {
-            issues.push(format!(
-                "没有可用于 {} 的节点（检查协议支持或节点是否被禁用）",
-                core.display_name()
-            ));
-        }
-        for group in &self.groups {
-            if !group.enabled {
-                continue;
+        if self.work_mode == WorkMode::Proxy {
+            if self.nodes.iter().all(|n| !n.usable_with(core)) {
+                issues.push(format!(
+                    "没有可用于 {} 的节点（检查协议支持或节点是否被禁用）",
+                    core.display_name()
+                ));
             }
-            if group.members.is_empty() && group.kind != GroupKind::Selector {
-                issues.push(format!("出站组“{}”没有任何成员", group.name));
+            for group in &self.groups {
+                if !group.enabled {
+                    continue;
+                }
+                if group.members.is_empty() && group.kind != GroupKind::Selector {
+                    issues.push(format!("出站组“{}”没有任何成员", group.name));
+                }
             }
-        }
-        if let Some(gid) = &self.default_group {
-            if self.group(gid).is_none() {
-                issues.push("默认代理组不存在".into());
+            if let Some(gid) = &self.default_group {
+                if self.group(gid).is_none() {
+                    issues.push("默认代理组不存在".into());
+                }
             }
         }
         for inbound in &self.inbounds {
@@ -469,6 +513,9 @@ impl AppModel {
             }
         }
         for (idx, server) in self.dns.servers.iter().enumerate() {
+            if self.work_mode == WorkMode::Direct && server.requires_proxy() {
+                continue;
+            }
             if server.tag.trim().is_empty() {
                 issues.push(format!("DNS 服务器 #{} 缺少 tag", idx + 1));
             }
@@ -476,10 +523,11 @@ impl AppModel {
                 issues.push(format!("DNS 服务器“{}”缺少地址", server.tag));
             }
         }
-        if self.dns.enabled && self.dns.servers.is_empty() {
+        if self.work_mode == WorkMode::Proxy && self.dns.enabled && self.dns.servers.is_empty() {
             issues.push("DNS 已启用但没有配置服务器".into());
         }
-        if self.routing.effective_rules().next().is_none()
+        if self.work_mode == WorkMode::Proxy
+            && self.routing.effective_rules().next().is_none()
             && self.routing.final_action.kind == RouteActionKind::Proxy
             && self.groups.iter().all(|g| g.members.is_empty())
         {
@@ -613,7 +661,12 @@ mod tests {
         assert_eq!(model.groups[0].switch_mode(), SwitchMode::Off);
         assert!(model.default_group.is_some());
         assert!(!model.inbounds.is_empty());
-        // Empty model legitimately reports "no nodes".
+        assert_eq!(CoreKind::default(), CoreKind::SingBox);
+        assert_eq!(crate::Settings::default().core, CoreKind::SingBox);
+        assert_eq!(model.work_mode, WorkMode::Direct);
+        assert!(model.validate(CoreKind::SingBox).is_empty());
+        let mut model = model;
+        model.work_mode = WorkMode::Proxy;
         assert!(
             model
                 .validate(CoreKind::SingBox)

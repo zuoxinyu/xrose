@@ -141,6 +141,8 @@ impl MeshController {
             return Err(Error::config("请选择包含此出口节点的已启用手动出站组"));
         }
         next.select_node(group_id, &node_id);
+        next.work_mode = crate::model::WorkMode::Proxy;
+        next.updated_at = crate::util::now_unix();
         self.store
             .save_mesh_exit_selection(&profile, &next, active_profile_id)?;
         *model = next;
@@ -595,6 +597,7 @@ mod tests {
         assert_eq!(model.nodes.len(), 2);
         assert_eq!(store.mesh_profiles().unwrap()[0], next);
         let saved = store.load_profile(&active).unwrap().unwrap().model;
+        assert_eq!(saved.work_mode, crate::model::WorkMode::Proxy);
         assert_eq!(saved.group("proxy").unwrap().active_node(), Some(&gateway));
         assert_eq!(saved.node(&gateway).unwrap().port, 19081);
         assert!(model.select_node("proxy", &ordinary.id));

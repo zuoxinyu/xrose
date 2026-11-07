@@ -186,7 +186,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            core: CoreKind::SingBox,
+            core: CoreKind::default(),
             language: Language::Zh,
             theme: ThemeMode::System,
             backdrop: BackdropStyle::Auto,

@@ -240,3 +240,134 @@ mod tests {
         );
     }
 }
+
+/// A read-only snapshot for both TCP listeners and bound UDP sockets. Commands
+/// run on the diagnostics worker and never request elevated privileges.
+#[derive(Clone, Debug)]
+pub(super) struct Owner {
+    pub proto: &'static str,
+    pub addr: SocketAddr,
+    pub pid: u32,
+    pub name: String,
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn visible_owners() -> Vec<Owner> {
+    let mut owners = Vec::new();
+    for proto in ["tcp", "udp"] {
+        let mut cmd = std::process::Command::new("/usr/sbin/lsof");
+        cmd.args(["-nP", "-i"]).arg(proto);
+        if proto == "tcp" {
+            cmd.arg("-sTCP:LISTEN");
+        }
+        let Ok(result) = cmd.arg("-Fpctn").output() else {
+            continue;
+        };
+        let (mut pid, mut process, mut v6) = (0, "", false);
+        let fields = String::from_utf8_lossy(&result.stdout);
+        for line in fields.lines() {
+            if let Some(p) = line.strip_prefix('p') {
+                pid = p.parse().unwrap_or(0);
+                process = "";
+            } else if let Some(c) = line.strip_prefix('c') {
+                process = c;
+            } else if let Some(t) = line.strip_prefix('t') {
+                v6 = t == "IPv6";
+            } else if let Some(endpoint) = line.strip_prefix('n') {
+                let endpoint = endpoint.split("->").next().unwrap_or(endpoint);
+                let addr = endpoint.parse().ok().or_else(|| {
+                    let port = endpoint.strip_prefix("*:")?.parse().ok()?;
+                    Some(if v6 {
+                        SocketAddr::from(([0; 16], port))
+                    } else {
+                        SocketAddr::from(([0; 4], port))
+                    })
+                });
+                if let Some(addr) = addr {
+                    owners.push(Owner {
+                        proto,
+                        addr,
+                        pid,
+                        name: process.into(),
+                    });
+                }
+            }
+        }
+    }
+    owners
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn visible_owners() -> Vec<Owner> {
+    let mut owners = Vec::new();
+    let Ok(result) = std::process::Command::new("ss")
+        .args(["-H", "-lntup"])
+        .output()
+    else {
+        return owners;
+    };
+    let re = regex::Regex::new(r#"\("([^"]+)",pid=(\d+)"#).expect("valid ss pattern");
+    for line in String::from_utf8_lossy(&result.stdout).lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let proto = match fields.first() {
+            Some(&"tcp") => "tcp",
+            Some(&"udp") => "udp",
+            _ => continue,
+        };
+        let Some(addr) = fields
+            .get(4)
+            .and_then(|s| s.replace("*:", "[::]:").parse().ok())
+        else {
+            continue;
+        };
+        for caps in re.captures_iter(line) {
+            if let Ok(pid) = caps[2].parse() {
+                owners.push(Owner {
+                    proto,
+                    addr,
+                    pid,
+                    name: caps[1].into(),
+                });
+            }
+        }
+    }
+    owners
+}
+
+#[cfg(windows)]
+pub(super) fn visible_owners() -> Vec<Owner> {
+    let script = r#"$ErrorActionPreference='SilentlyContinue'
+$p=@{}; Get-Process | ForEach-Object { $p[$_.Id]=$_.ProcessName }
+Get-NetTCPConnection -State Listen | ForEach-Object { 'tcp|{0}|{1}|{2}|{3}' -f $_.LocalAddress,$_.LocalPort,$_.OwningProcess,$p[[int]$_.OwningProcess] }
+Get-NetUDPEndpoint | ForEach-Object { 'udp|{0}|{1}|{2}|{3}' -f $_.LocalAddress,$_.LocalPort,$_.OwningProcess,$p[[int]$_.OwningProcess] }"#;
+    let Ok(out) = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(5, '|');
+            let proto = match parts.next()? {
+                "tcp" => "tcp",
+                "udp" => "udp",
+                _ => return None,
+            };
+            let ip = parts.next()?.split('%').next()?.parse().ok()?;
+            let addr = SocketAddr::new(ip, parts.next()?.parse().ok()?);
+            Some(Owner {
+                proto,
+                addr,
+                pid: parts.next()?.parse().ok()?,
+                name: parts.next()?.trim().into(),
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+pub(super) fn visible_owners() -> Vec<Owner> {
+    Vec::new()
+}

@@ -11,6 +11,17 @@ pub fn tr(lang: Language, zh: &'static str, en: &'static str) -> SharedString {
     })
 }
 
+pub fn outbound_group_label(
+    lang: Language,
+    group: &xrose_core::model::OutboundGroup,
+) -> SharedString {
+    match (group.id.as_str(), group.name.as_str()) {
+        ("proxy", "代理") => tr(lang, "代理", "Proxy"),
+        ("auto", "自动选择") => tr(lang, "自动选择", "Auto select"),
+        _ => group.name.clone().into(),
+    }
+}
+
 /// Relative dates for the two supported locales, without mixed-language suffixes.
 pub fn relative_time(lang: Language, seconds: i64) -> String {
     let seconds = seconds.max(0);

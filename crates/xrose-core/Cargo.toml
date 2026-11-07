@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+netdev.workspace = true
+hickory-proto.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

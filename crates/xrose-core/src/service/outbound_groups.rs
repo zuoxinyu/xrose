@@ -185,6 +185,7 @@ mod tests {
         let ids = (first.id.clone(), second.id.clone());
         service
             .commit_model_change(|model| {
+                model.work_mode = crate::model::WorkMode::Proxy;
                 model.add_nodes([first, second]);
                 Ok(true)
             })

@@ -4,6 +4,7 @@
 mod mesh_discovery;
 mod mesh_exit;
 pub mod mesh_sync;
+mod network_diagnostics;
 mod node_switch;
 mod outbound_groups;
 mod reload;
@@ -26,7 +27,7 @@ use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarg
 use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
 use crate::model::{
-    AppModel, CoreKind, InboundKind, Node, NodeDraft, Placement, RoutePreset, RouteRule,
+    AppModel, CoreKind, InboundKind, Node, NodeDraft, Placement, RoutePreset, RouteRule, WorkMode,
 };
 use crate::paths::AppPaths;
 use crate::runtime::location::{self, NodeLocation};
@@ -138,7 +139,9 @@ pub struct CoreUpdateStatus {
 pub struct RuntimeView {
     #[serde(default)]
     pub managed_nodes: BTreeMap<String, String>,
-    pub connections: Vec<ClashConnection>,
+    pub connections: Arc<Vec<ClashConnection>>,
+    #[serde(default)]
+    pub live_traffic: Arc<crate::flow::LiveTraffic>,
     pub proxies: BTreeMap<String, ClashProxy>,
     pub up_total: u64,
     pub down_total: u64,
@@ -181,6 +184,12 @@ pub struct UiSnapshot {
     pub busy: Vec<String>,
     pub platform: PlatformInfo,
     pub doctor: Vec<DoctorCheck>,
+    #[serde(skip)]
+    pub network_report: Option<Arc<system::net_diag::NetworkReport>>,
+    #[serde(skip)]
+    pub dns_comparison: Option<Arc<dns::probe::Comparison>>,
+    #[serde(default)]
+    pub nat_probe: Option<system::nat::NatProbe>,
     pub updates: UpdateStatus,
     pub system_proxy_active: bool,
     pub pac_url: Option<String>,
@@ -225,6 +234,9 @@ impl UiSnapshot {
 
     /// Resolve the same group as the node list, including live automatic choices.
     pub fn selected_node(&self, group_id: Option<&str>) -> Option<&Node> {
+        if self.model.work_mode == WorkMode::Direct {
+            return None;
+        }
         let group = group_id.and_then(|id| self.model.group(id)).or_else(|| {
             self.model
                 .default_group_id()
@@ -270,6 +282,18 @@ impl UiSnapshot {
     }
 }
 
+#[derive(Default)]
+struct ConnectionState {
+    rows: Arc<Vec<ClashConnection>>,
+    live: Arc<crate::flow::LiveTraffic>,
+}
+
+impl ConnectionState {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 struct Inner {
     mesh_sync: mesh_sync::SyncState,
     mesh: crate::mesh::controller::MeshController,
@@ -285,7 +309,11 @@ struct Inner {
     active_profile: RwLock<Option<String>>,
     traffic: Mutex<TrafficHistory>,
     statistics: traffic_statistics::StatisticsState,
-    connections: RwLock<Vec<ClashConnection>>,
+    connections: RwLock<ConnectionState>,
+    rate_tracker: Mutex<(
+        Option<crate::traffic_statistics::CoreEpoch>,
+        crate::flow::FlowRateTracker,
+    )>,
     proxies: RwLock<BTreeMap<String, ClashProxy>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
     downloads: RwLock<BTreeMap<String, crate::runtime::probe::DownloadResult>>,
@@ -302,6 +330,9 @@ struct Inner {
     helper_update_attempted: AtomicBool,
     updates: Mutex<UpdateStatus>,
     doctor: RwLock<Vec<DoctorCheck>>,
+    network_report: RwLock<Option<Arc<system::net_diag::NetworkReport>>>,
+    dns_comparison: RwLock<Option<Arc<dns::probe::Comparison>>>,
+    nat_probe: RwLock<Option<system::nat::NatProbe>>,
     doctor_generation: AtomicU64,
     recovery_note: RwLock<Option<String>>,
     helper: RwLock<HelperStatus>,
@@ -401,7 +432,8 @@ impl AppService {
             profiles: RwLock::new(profiles),
             active_profile: RwLock::new(active_profile),
             traffic: Mutex::new(TrafficHistory::new(180)),
-            connections: RwLock::new(Vec::new()),
+            connections: Default::default(),
+            rate_tracker: Default::default(),
             proxies: RwLock::new(BTreeMap::new()),
             latency: RwLock::new(latency),
             downloads: RwLock::new(BTreeMap::new()),
@@ -418,6 +450,9 @@ impl AppService {
             helper_update_attempted: AtomicBool::new(false),
             updates: Mutex::new(UpdateStatus::default()),
             doctor: RwLock::new(Vec::new()),
+            network_report: RwLock::new(None),
+            dns_comparison: RwLock::new(None),
+            nat_probe: RwLock::new(None),
             doctor_generation: AtomicU64::new(0),
             recovery_note: RwLock::new(None),
             helper: RwLock::new(privilege::initial_status()),
@@ -529,13 +564,18 @@ impl AppService {
         let doctor = self.inner.doctor.read().clone();
         let validation = self.inner.validation.read().clone();
         let helper = self.inner.helper.read().clone();
+        let (connections, live_traffic) = {
+            let state = self.inner.connections.read();
+            (state.rows.clone(), state.live.clone())
+        };
         let runtime = RuntimeView {
             managed_nodes: if process.phase.is_alive() {
                 self.inner.core.managed_selections()
             } else {
                 Default::default()
             },
-            connections: self.inner.connections.read().clone(),
+            connections,
+            live_traffic,
             proxies: self.inner.proxies.read().clone(),
             up_total,
             down_total,
@@ -547,6 +587,12 @@ impl AppService {
         let updates = self.inner.updates.lock().clone();
         let system_proxy_active = settings.system_proxy;
         UiSnapshot {
+            nat_probe: self
+                .inner
+                .nat_probe
+                .read()
+                .as_ref()
+                .map(|result| result.visible(settings.privacy_mode)),
             mesh_sync: self.sync_view(),
             mesh_connection_errors: self.inner.mesh_connection_errors.read().clone(),
             mesh,
@@ -590,6 +636,8 @@ impl AppService {
                 data_dir: self.inner.paths.data_dir.display().to_string(),
             },
             doctor,
+            network_report: self.inner.network_report.read().clone(),
+            dns_comparison: self.inner.dns_comparison.read().clone(),
             updates,
             system_proxy_active,
             pac_url,
@@ -1457,38 +1505,99 @@ impl AppService {
         }
     }
 
+    pub fn select_direct_mode(&self) -> Result<()> {
+        self.select_work_mode(WorkMode::Direct)
+    }
+
+    pub fn select_proxy_mode(&self) -> Result<()> {
+        self.select_work_mode(WorkMode::Proxy)
+    }
+
+    fn select_work_mode(&self, mode: WorkMode) -> Result<()> {
+        if self.is_busy("core") || self.is_busy("mesh-exit") {
+            return Err(Error::other("内核忙，请稍后重试"));
+        }
+        let core = self.settings().core;
+        let changed = self.commit_model_change(|model| {
+            if mode == WorkMode::Proxy && !model.has_usable_default_group(core) {
+                return Err(Error::config(
+                    "请先在默认出站组添加或启用当前内核支持的节点",
+                ));
+            }
+            if mode == model.work_mode {
+                return Ok(false);
+            }
+            model.work_mode = mode;
+            model.updated_at = now_unix();
+            Ok(true)
+        })?;
+        if changed {
+            if self.is_running() {
+                self.apply_config();
+            } else {
+                self.notify_work_mode(mode);
+            }
+        }
+        Ok(())
+    }
+
+    fn notify_work_mode(&self, mode: WorkMode) {
+        use crate::settings::Language;
+        let message = match (mode, self.inner.settings.read().language) {
+            (WorkMode::Direct, Language::Zh) => "已切换至本机直连",
+            (WorkMode::Direct, Language::En) => "Switched to Direct",
+            (WorkMode::Proxy, Language::Zh) => "已切换至代理模式",
+            (WorkMode::Proxy, Language::En) => "Switched to proxy mode",
+        };
+        self.toast(ToastLevel::Success, message);
+    }
+
     pub fn select_node(&self, group_id: &str, node_id: &str) {
-        if self.is_busy("mesh-exit") {
+        if self.is_busy("core") || self.is_busy("mesh-exit") {
             return;
         }
-        let group_tag;
-        {
-            let mut model = self.inner.model.write();
-            if self.is_busy("core")
-                || !model
-                    .group(group_id)
-                    .is_some_and(|g| g.enabled && g.manually_selectable())
-                || !model
-                    .node(node_id)
-                    .is_some_and(|n| n.usable_with(self.inner.settings.read().core))
-                || !model.select_node(group_id, node_id)
-            {
-                return;
-            }
-            let Some(group) = model.group(group_id) else {
+        let settings = self.settings();
+        let (node, group_tag, mode_changed) = {
+            let mut current = self.inner.model.write();
+            let Some(group) = current.group(group_id).filter(|g| {
+                g.enabled && g.manually_selectable() && g.members.iter().any(|id| id == node_id)
+            }) else {
                 return;
             };
-            group_tag = group.tag();
-        }
-        let _ = self.persist_model();
-        let node = self.inner.model.read().node(node_id).cloned();
-        let Some(node) = node else { return };
+            let Some(node) = current
+                .node(node_id)
+                .filter(|n| n.usable_with(settings.core))
+            else {
+                return;
+            };
+            let mode_changed = current.work_mode == WorkMode::Direct;
+            let selection = (node.clone(), group.tag(), mode_changed);
+            let mut next = current.clone();
+            if !next.select_node(group_id, node_id) && !mode_changed {
+                return;
+            }
+            next.work_mode = WorkMode::Proxy;
+            next.updated_at = now_unix();
+            match self.inner.store.save_active_profile(&next) {
+                Ok(profile) => {
+                    *current = next;
+                    *self.inner.active_profile.write() = Some(profile);
+                }
+                Err(error) => {
+                    self.toast(ToastLevel::Error, format!("保存节点选择失败：{error}"));
+                    return;
+                }
+            }
+            selection
+        };
 
         if !self.is_running() {
             return;
         }
-        let settings = self.inner.settings.read().clone();
-        if settings.core == CoreKind::SingBox {
+        if mode_changed {
+            self.mark_dirty();
+            self.apply_config();
+        } else if settings.core == CoreKind::SingBox {
             // sing-box's selector supports instant switching through Clash API.
             let client = ClashClient::new(settings.api_port, "");
             let tag = node.outbound_tag();
@@ -2279,6 +2388,7 @@ impl AppService {
                 service.set_busy("core", false);
                 return;
             }
+            let previous_mode = service.inner.core.applied_work_mode();
             let result = if was_running {
                 service
                     .inner
@@ -2312,7 +2422,11 @@ impl AppService {
                         if service.inner.settings.read().system_proxy {
                             service.enable_system_proxy();
                         }
-                        service.toast(ToastLevel::Success, "配置已应用，内核已重载");
+                        if previous_mode.is_some_and(|mode| mode != model.work_mode) {
+                            service.notify_work_mode(model.work_mode);
+                        } else {
+                            service.toast(ToastLevel::Success, "配置已应用，内核已重载");
+                        }
                     } else if !was_running && ok {
                         service.finish_config_apply(&model, &settings);
                         service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
@@ -2954,61 +3068,87 @@ impl AppService {
         let service = self.clone();
         self.spawn(async move {
             let settings = service.inner.settings.read().clone();
-            let compiled_http_port = service
-                .inner
-                .compiled
-                .read()
-                .as_ref()
-                .map(|c| c.http_port())
-                .unwrap_or(settings.mixed_port);
-            let pac_url = if settings.pac_enabled {
-                let model = service.inner.model.read().clone();
-                let mut direct_domains = Vec::new();
-                let mut direct_cidrs = vec![
-                    "10.0.0.0/8".to_string(),
-                    "172.16.0.0/12".to_string(),
-                    "192.168.0.0/16".to_string(),
-                ];
-                for rule in model.routing.effective_rules() {
-                    if rule.action.kind == crate::model::RouteActionKind::Direct {
-                        direct_domains.extend(rule.matchers.domains.iter().cloned());
-                        direct_domains.extend(rule.matchers.domain_suffixes.iter().cloned());
-                        direct_cidrs.extend(rule.matchers.ip_cidrs.iter().cloned());
-                    }
-                }
-                let pac = system::build_pac(
-                    "127.0.0.1",
-                    compiled_http_port,
-                    &direct_domains,
-                    &direct_cidrs,
-                );
-                let mut running = service.inner.pac.lock();
-                let plan = service.inner.core.mesh_plan();
-                if let Some(server) = running
-                    .as_mut()
-                    .filter(|s| s.info.port == settings.pac_port)
-                {
-                    server.update_script(pac, &plan);
-                    Some(server.info.url.clone())
-                } else {
-                    match PacServer::start(pac, settings.pac_port) {
-                        Ok(server) => {
-                            server.update_mesh(&plan);
-                            let url = server.info.url.clone();
-                            *running = Some(server);
-                            Some(url)
-                        }
-                        Err(err) => {
-                            service.toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
-                            None
-                        }
-                    }
-                }
+            let applied = service.inner.core.applied_model();
+            let tun_enabled = if applied.is_some() {
+                service.inner.core.native_tun_active()
             } else {
-                None
+                settings.tun_enabled
             };
+            let model = applied.unwrap_or_else(|| service.model());
+            let running_proxy = service.inner.core.active_proxy("http");
+            if service.is_running() && running_proxy.is_none() {
+                service.toast(
+                    ToastLevel::Error,
+                    "请先启用 HTTP 或 Mixed 入站，再开启系统代理",
+                );
+                service.set_busy("proxy", false);
+                return;
+            }
+            let compiled_http_port = running_proxy
+                .as_ref()
+                .map(|p| p.port)
+                .or_else(|| {
+                    service
+                        .inner
+                        .compiled
+                        .read()
+                        .as_ref()
+                        .map(|c| c.http_port())
+                })
+                .unwrap_or(settings.mixed_port);
+            let proxy_host = running_proxy
+                .as_ref()
+                .map_or("127.0.0.1", |p| p.host.as_str());
+            let pac_url =
+                if system::pac::use_pac(settings.pac_enabled, model.work_mode, tun_enabled) {
+                    let mut direct_domains = Vec::new();
+                    let mut direct_cidrs = vec![
+                        "10.0.0.0/8".to_string(),
+                        "172.16.0.0/12".to_string(),
+                        "192.168.0.0/16".to_string(),
+                    ];
+                    for rule in model.routing.effective_rules() {
+                        if rule.action.kind == crate::model::RouteActionKind::Direct {
+                            direct_domains.extend(rule.matchers.domains.iter().cloned());
+                            direct_domains.extend(rule.matchers.domain_suffixes.iter().cloned());
+                            direct_cidrs.extend(rule.matchers.ip_cidrs.iter().cloned());
+                        }
+                    }
+                    let pac = system::build_pac(
+                        proxy_host,
+                        compiled_http_port,
+                        &direct_domains,
+                        &direct_cidrs,
+                    );
+                    let mut running = service.inner.pac.lock();
+                    let plan = service.inner.core.mesh_plan();
+                    if let Some(server) = running
+                        .as_mut()
+                        .filter(|s| s.info.port == settings.pac_port)
+                    {
+                        server.update_script(pac, &plan);
+                        Some(server.info.url.clone())
+                    } else {
+                        match PacServer::start(pac, settings.pac_port) {
+                            Ok(server) => {
+                                server.update_mesh(&plan);
+                                let url = server.info.url.clone();
+                                *running = Some(server);
+                                Some(url)
+                            }
+                            Err(err) => {
+                                service
+                                    .toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    *service.inner.pac.lock() = None;
+                    None
+                };
             let result = service.inner.proxy.lock().apply(
-                "127.0.0.1",
+                proxy_host,
                 compiled_http_port,
                 pac_url.as_deref(),
             );
@@ -3020,7 +3160,7 @@ impl AppService {
                     let _ = service.save_settings(&settings);
                     service.toast(
                         ToastLevel::Success,
-                        format!("系统代理已开启（127.0.0.1:{compiled_http_port}）"),
+                        format!("系统代理已开启（{proxy_host}:{compiled_http_port}）"),
                     );
                 }
                 Err(err) => {
@@ -3184,7 +3324,11 @@ impl AppService {
                 }
             }
             service.set_busy("helper", false);
-            service.refresh_doctor();
+            if service.inner.network_report.read().is_some() {
+                service.refresh_network_report();
+            } else {
+                service.refresh_doctor();
+            }
         });
     }
 
@@ -3568,7 +3712,7 @@ impl AppService {
         }
         let now = now_unix();
         recording.start(now);
-        recording.observe(&connections, now);
+        recording.observe(&connections.rows, now);
         self.toast(
             ToastLevel::Info,
             "已开始录制连接元数据和测试结果；不采集请求正文",
@@ -3613,17 +3757,81 @@ impl AppService {
         });
     }
 
-    fn update_connections(&self, connections: Vec<ClashConnection>) {
+    fn update_connections(
+        &self,
+        epoch: Option<crate::traffic_statistics::CoreEpoch>,
+        connections: Vec<ClashConnection>,
+    ) {
+        // Aggregate and rank off the snapshot lock: rendering only clones two Arcs.
+        let live = {
+            let mut tracking = self.inner.rate_tracker.lock();
+            let (previous_epoch, tracker) = &mut *tracking;
+            if *previous_epoch != epoch {
+                *tracker = Default::default();
+                *previous_epoch = epoch.clone();
+            }
+            tracker.observe(
+                connections.iter().map(crate::flow::FlowObservation::from),
+                std::time::Instant::now(),
+                chrono::Utc::now(),
+            )
+        };
+        if epoch != crate::traffic_statistics::CoreEpoch::from_state(&self.process_state()) {
+            return;
+        }
         let mut current = self.inner.connections.write();
         self.inner
             .recording
             .lock()
             .observe(&connections, now_unix());
-        *current = connections;
+        *current = ConnectionState {
+            rows: Arc::new(connections),
+            live: Arc::new(live),
+        };
     }
 
     /// Insert an exact diagnostic override before broader preset rules.
     pub fn add_diagnostic_rule(
+        &self,
+        target: &DiagnosticTarget,
+        kind: DiagnosticRuleKind,
+        action: crate::model::RouteAction,
+    ) -> Result<()> {
+        self.save_diagnostic_rule(target, kind, action)?;
+        self.toast(
+            ToastLevel::Success,
+            "规则已置顶保存，点击应用配置后重新测试",
+        );
+        Ok(())
+    }
+
+    /// Firewall shortcuts apply the saved rule immediately to the running core.
+    pub fn block_connection_target(&self, target: DiagnosticTarget, kind: DiagnosticRuleKind) {
+        if !self.inner.busy.write().insert("firewall-rule".into()) {
+            return;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            let writer = service.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                writer.save_diagnostic_rule(&target, kind, crate::model::RouteAction::block())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => {
+                    service.toast(ToastLevel::Success, "阻止联网规则已保存");
+                    if service.is_running() {
+                        service.apply_config();
+                    }
+                }
+                Ok(Err(err)) => service.toast(ToastLevel::Error, err.to_string()),
+                Err(_) => service.toast(ToastLevel::Error, "未能保存规则，请重试"),
+            }
+            service.set_busy("firewall-rule", false);
+        });
+    }
+
+    fn save_diagnostic_rule(
         &self,
         target: &DiagnosticTarget,
         kind: DiagnosticRuleKind,
@@ -3678,82 +3886,80 @@ impl AppService {
         let profile = self.inner.store.save_active_profile(&next)?;
         *self.inner.active_profile.write() = Some(profile);
         *model = next;
+        drop(model);
         self.mark_dirty();
-        self.toast(
-            ToastLevel::Success,
-            "规则已置顶保存，点击应用配置后重新测试",
-        );
         Ok(())
     }
 
     pub fn refresh_connections(&self) {
-        let settings = self.inner.settings.read().clone();
-        if !self.is_running() || settings.core != CoreKind::SingBox {
+        if !self.is_running() || !self.inner.busy.write().insert("connections-refresh".into()) {
             return;
         }
         let service = self.clone();
         self.spawn(async move {
-            let client = ClashClient::new(settings.api_port, "");
-            match client.connections().await {
-                Ok(response) => {
-                    service
-                        .inner
-                        .traffic
-                        .lock()
-                        .sample(response.upload_total, response.download_total);
-                    service.update_connections(response.connections);
-                }
-                Err(err) => service.inner.core.logs().push(
-                    LogStream::App,
-                    LogLevel::Warn,
-                    format!("读取连接列表失败：{err}"),
-                ),
-            }
+            service.poll_traffic_statistics().await;
+            service.set_busy("connections-refresh", false);
         });
+    }
+
+    pub fn close_connection(&self, id: &str) {
+        if !id.is_empty() {
+            self.close_live_connections(Some(id.to_owned()));
+        }
+    }
+
+    pub fn close_all_connections(&self) {
+        self.close_live_connections(None);
     }
 
     pub fn kill_connection(&self, id: &str) {
-        let settings = self.inner.settings.read().clone();
-        if settings.core != CoreKind::SingBox {
-            self.toast(ToastLevel::Warning, "当前 core 不支持断开单个连接");
-            return;
-        }
-        let id = id.to_string();
-        let service = self.clone();
-        self.spawn(async move {
-            let client = ClashClient::new(settings.api_port, "");
-            match client.close_connection(&id).await {
-                Ok(()) => {
-                    service.toast(ToastLevel::Info, "连接已断开");
-                    service.inner.connections.write().retain(|c| c.id != id);
-                    let connections = service.inner.connections.read().clone();
-                    service
-                        .inner
-                        .recording
-                        .lock()
-                        .observe(&connections, now_unix());
-                }
-                Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
-            }
-        });
+        self.close_connection(id);
     }
 
     pub fn kill_all_connections(&self) {
-        let settings = self.inner.settings.read().clone();
-        if settings.core != CoreKind::SingBox {
-            self.toast(ToastLevel::Warning, "当前 core 不支持断开连接");
+        self.close_all_connections();
+    }
+
+    fn close_live_connections(&self, id: Option<String>) {
+        let epoch = crate::traffic_statistics::CoreEpoch::from_state(&self.process_state());
+        if epoch
+            .as_ref()
+            .is_none_or(|epoch| epoch.core != CoreKind::SingBox)
+        {
+            self.toast(ToastLevel::Warning, "请先启动支持连接管理的 sing-box 内核");
+            return;
+        }
+        let key = "connection-close";
+        if !self.inner.busy.write().insert(key.into()) {
             return;
         }
         let service = self.clone();
         self.spawn(async move {
-            let client = ClashClient::new(settings.api_port, "");
-            match client.close_all_connections().await {
-                Ok(()) => {
-                    service.update_connections(Vec::new());
-                    service.toast(ToastLevel::Info, "所有连接已断开");
+            let result = async {
+                let (_, settings, _) = service.inner.core.statistics_context()?;
+                if epoch
+                    != crate::traffic_statistics::CoreEpoch::from_state(&service.process_state())
+                {
+                    return None;
                 }
-                Err(err) => service.toast(ToastLevel::Warning, format!("断开连接失败：{err}")),
+                let client = ClashClient::new(settings.api_port, "");
+                Some(match id {
+                    Some(id) => client.close_connection(&id).await,
+                    None => client.close_all_connections().await,
+                })
             }
+            .await;
+            match result {
+                Some(Ok(())) => {
+                    service.toast(ToastLevel::Info, "所选连接已断开");
+                    service.poll_traffic_statistics().await;
+                }
+                Some(Err(err)) => {
+                    service.toast(ToastLevel::Warning, format!("断开连接失败：{err}"))
+                }
+                None => service.toast(ToastLevel::Info, "内核状态已改变，请刷新连接后重试"),
+            }
+            service.set_busy(key, false);
         });
     }
 
@@ -4152,7 +4358,7 @@ impl AppService {
                 last_phase = state.phase;
                 last_pid = state.pid;
                 if !state.phase.is_alive() {
-                    service.update_connections(Vec::new());
+                    service.update_connections(None, Vec::new());
                     service.flush_traffic_statistics().await;
                     tick += 1;
                     continue;
@@ -4378,6 +4584,18 @@ impl AppService {
         });
     }
 
+    pub fn probe_nat(&self) {
+        if !self.inner.busy.write().insert("stun".into()) {
+            return;
+        }
+        let service = self.clone();
+        self.spawn(async move {
+            let result = system::nat::probe().await;
+            *service.inner.nat_probe.write() = Some(result);
+            service.set_busy("stun", false);
+        });
+    }
+
     pub fn platform_proxy_backend(&self) -> String {
         self.inner.proxy.lock().backend().label().to_string()
     }
@@ -4509,6 +4727,7 @@ mod tests {
     #[test]
     fn failed_start_preflight_clears_busy_and_is_retryable_without_downloading() {
         let (service, _dir) = service();
+        service.inner.model.write().work_mode = WorkMode::Proxy;
         for _ in 0..2 {
             service.start_core();
             service.inner.rt.block_on(async {
@@ -4631,6 +4850,7 @@ mod tests {
     #[test]
     fn dns_deletion_checks_references_without_mutating_on_error() {
         let (service, _dir) = service();
+        service.set_dns_preset(crate::dns::DnsPreset::SplitFakeIp);
         let before = service.model();
         assert!(service.delete_dns_server("local").is_err());
         assert!(service.delete_dns_server("fakeip").is_err());
@@ -4876,12 +5096,14 @@ mod tests {
     fn startup_actions_run_once_on_manual_launch_and_preserve_proxy_mode() {
         let (service, _dir) = service();
         let mut settings = service.settings();
+        settings.check_app_updates = false;
         settings.startup_proxy = true;
         settings.startup_tailscale = Some("missing-fixture".into());
         settings.tun_enabled = true;
         settings.system_proxy = false;
         service.update_settings(settings);
-        // An empty profile fails compilation before binary download or helper access.
+        service.inner.model.write().work_mode = WorkMode::Proxy;
+        // An empty proxy profile fails before binary download or helper access.
         service.run_startup_actions();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -5569,6 +5791,33 @@ proxy-groups:
     }
 
     #[test]
+    fn selecting_direct_and_the_previous_node_preserves_proxy_intent() {
+        let (service, _dir) = service();
+        assert!(service.select_proxy_mode().is_err());
+        let node = Node::new("Example", Protocol::Socks, "example.org", 1080);
+        service.inner.model.write().add_nodes([node.clone()]);
+        let initial = service.model();
+        service.select_proxy_mode().unwrap();
+        assert_eq!(service.snapshot().selected_node(None).unwrap().id, node.id);
+        service.select_direct_mode().unwrap();
+        assert!(service.snapshot().selected_node(None).is_none());
+        let direct = service.model();
+        assert_eq!(direct.work_mode, WorkMode::Direct);
+        assert_eq!(direct.routing, initial.routing);
+        assert_eq!(direct.default_group, initial.default_group);
+        assert_eq!(direct.groups, initial.groups);
+        assert_eq!(direct.nodes, initial.nodes);
+        service.select_node("proxy", "missing");
+        assert_eq!(service.model().work_mode, WorkMode::Direct);
+        service.select_node("proxy", &node.id);
+        let profile_id = service.store().active_profile_id().unwrap();
+        let saved = service.store().load_profile(&profile_id).unwrap().unwrap();
+        assert_eq!(saved.model.work_mode, WorkMode::Proxy);
+        assert_eq!(saved.model.groups, initial.groups);
+        assert!(!service.is_running());
+    }
+
+    #[test]
     fn node_order_survives_profile_reload() {
         let (service, _dir) = service();
         service.import_content("vless://11111111-2222-3333-4444-555555555555@a.example.com:443#A\nvless://11111111-2222-3333-4444-555555555555@b.example.com:443#B");
@@ -5587,6 +5836,7 @@ proxy-groups:
         use crate::model::{FallbackScope, NodeSwitchPolicy, SwitchMode};
         let (service, _dir) = service();
         let mut model = service.model();
+        model.work_mode = WorkMode::Proxy;
         let a = Node::new("A", Protocol::Socks, "a.example", 1080);
         let b = Node::new("B", Protocol::Socks, "b.example", 1080);
         model.add_nodes([a.clone(), b.clone()]);
@@ -5642,6 +5892,7 @@ proxy-groups:
         let mut auto = OutboundGroup::new("自动", GroupKind::UrlTest);
         auto.members = manual.members.clone();
         auto.selected = Some(b.id.clone());
+        snapshot.model.work_mode = WorkMode::Proxy;
         snapshot.model.nodes = vec![a.clone(), b.clone()];
         snapshot.model.groups = vec![manual.clone(), auto.clone()];
         snapshot.model.default_group = Some(manual.id.clone());

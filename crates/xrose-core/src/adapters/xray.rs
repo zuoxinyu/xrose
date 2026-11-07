@@ -36,7 +36,27 @@ impl CoreAdapter for XrayAdapter {
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
         let mut warnings = Vec::new();
-        if settings.traffic_statistics_enabled {
+        let mut effective = super::compilation_model(model, &mut warnings);
+        let model = &effective;
+        let direct = model.work_mode == crate::model::WorkMode::Direct;
+        // Xray's OS resolver would query its own TUN DNS if the virtual NIC
+        // became the system nameserver. Leave physical DNS in place in this case.
+        let preserve_os_dns = direct
+            && model.dns.enabled
+            && (model.dns.final_server.is_none()
+                || model.dns.servers.iter().any(|s| {
+                    (model.dns.final_server.as_ref() == Some(&s.tag) || !s.domains.is_empty())
+                        && matches!(
+                            s.server_type,
+                            crate::model::DnsServerType::Udp | crate::model::DnsServerType::Tcp
+                        )
+                        && matches!(s.address.trim(), "system" | "local" | "localhost")
+                }));
+        if direct {
+            warnings.push(
+                "Xray 不支持连接列表及进程/域名流量分类；如需完整网络监控请切换至 sing-box".into(),
+            );
+        } else if settings.traffic_statistics_enabled {
             warnings.push("Xray 不提供进程和域名流量分类；仅记录节点流量与总量".into());
         }
         let mut compiled_inbounds = Vec::new();
@@ -98,7 +118,12 @@ impl CoreAdapter for XrayAdapter {
                     });
                 }
                 InboundKind::Tun => {
-                    inbounds.push(tun_inbound(inbound, ctx, model.dns.enabled, &mut warnings)?);
+                    let mut tun = inbound.clone();
+                    if preserve_os_dns && tun.tun.dns_hijack {
+                        tun.tun.dns_hijack = false;
+                        warnings.push("直连模式使用系统 DNS；Xray TUN 保留系统 DNS 设置以避免解析回环，代理入站仍使用配置的 DNS".into());
+                    }
+                    inbounds.push(tun_inbound(&tun, ctx, model.dns.enabled, &mut warnings)?);
                     compiled_inbounds.push(CompiledInbound {
                         listen: inbound.listen_address().into(),
                         tag: inbound.tag.clone(),
@@ -170,18 +195,17 @@ impl CoreAdapter for XrayAdapter {
                 ));
             }
         }
-        if !outbounds
-            .iter()
-            .any(|o| o["protocol"] != "blackhole" && o["protocol"] != "dns")
+        if !direct
+            && !outbounds
+                .iter()
+                .any(|o| o["protocol"] != "blackhole" && o["protocol"] != "dns")
         {
             return Err(Error::config("没有可编译的出站节点"));
         }
         outbounds.push(json!({"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIP"}}));
         outbounds.push(json!({"tag": "block", "protocol": "blackhole", "settings": {}}));
         if model.dns.enabled {
-            outbounds.push(
-                json!({"tag": "dns-out", "protocol": "dns", "settings": {"address": "8.8.8.8"}}),
-            );
+            outbounds.push(json!({"tag": "dns-out", "protocol": "dns", "settings": {}}));
         }
 
         // Resolve group selections against successfully compiled nodes only.
@@ -189,24 +213,25 @@ impl CoreAdapter for XrayAdapter {
             .iter()
             .filter_map(|o| o["tag"].as_str().map(str::to_owned))
             .collect();
-        let mut resolved_model = model.clone();
-        for group in &mut resolved_model.groups {
+        let nodes = &effective.nodes;
+        for group in &mut effective.groups {
             group.members.retain(|id| {
-                model
-                    .node(id)
+                nodes
+                    .iter()
+                    .find(|n| &n.id == id)
                     .is_some_and(|n| valid_tags.contains(&n.outbound_tag()))
             });
             group.repair();
         }
-        resolved_model.groups.retain(|g| !g.members.is_empty());
-        if resolved_model
+        effective.groups.retain(|g| !g.members.is_empty());
+        if effective
             .default_group
             .as_ref()
-            .is_some_and(|id| resolved_model.group(id).is_none())
+            .is_some_and(|id| effective.group(id).is_none())
         {
-            resolved_model.default_group = resolved_model.groups.first().map(|g| g.id.clone());
+            effective.default_group = effective.groups.first().map(|g| g.id.clone());
         }
-        let model = &resolved_model;
+        let model = &effective;
 
         // --- Groups / balancers -----------------------------------------
         let mut balancers = Vec::new();
@@ -248,8 +273,10 @@ impl CoreAdapter for XrayAdapter {
         // --- Routing -----------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
         rules.push(json!({"type": "field", "inboundTag": ["api-in"], "outboundTag": "api"}));
-        if !ctx.mesh.routes.is_empty() {
-            rules.push(json!({"type":"field","ip":ctx.mesh.routes.iter().map(|r| &r.cidr).collect::<Vec<_>>(),"outboundTag":"direct"}));
+        for (index, route) in ctx.mesh.routes.iter().enumerate() {
+            let tag = format!("xrose-mesh-{index}");
+            outbounds.push(json!({"tag":tag,"protocol":"freedom","settings":{},"streamSettings":{"sockopt":{"interface":route.interface}}}));
+            rules.push(json!({"type":"field","ip":[route.cidr],"outboundTag":tag}));
         }
         if !ctx.mesh.dns.is_empty() {
             rules.push(json!({"type":"field","domain":ctx.mesh.dns.iter().map(|d|format!("domain:{}",d.suffix)).collect::<Vec<_>>(),"outboundTag":"direct"}));
@@ -261,13 +288,19 @@ impl CoreAdapter for XrayAdapter {
             .filter(|i| i.enabled && i.kind == InboundKind::Tun && i.tun.dns_hijack)
             .map(|i| &i.tag)
             .collect();
-        if !tun_dns_tags.is_empty() && model.dns.enabled {
+        if !preserve_os_dns && !tun_dns_tags.is_empty() && model.dns.enabled {
             rules.push(json!({"type":"field", "inboundTag":tun_dns_tags, "network":"tcp,udp", "port":"53", "outboundTag":"dns-out"}));
         }
         if model.dns.enabled {
-            rules.push(
-                json!({"type": "field", "network": "udp", "port": "53", "outboundTag": "dns-out"}),
-            );
+            // Never intercept the resolver's own upstream requests.
+            let tags: Vec<_> = compiled_inbounds
+                .iter()
+                .filter(|i| i.kind != "tun")
+                .map(|i| &i.tag)
+                .collect();
+            if !tags.is_empty() {
+                rules.push(json!({"type":"field","network":"tcp,udp","inboundTag":tags,"port":"53","outboundTag":"dns-out"}));
+            }
         }
         if model.routing.bypass_lan {
             rules.push(json!({
@@ -283,7 +316,7 @@ impl CoreAdapter for XrayAdapter {
                 "outboundTag": "direct"
             }));
         }
-        for rule in model.routing.effective_rules() {
+        for rule in model.routing.rules_for_mode(model.work_mode) {
             if let Some(value) = xray_rule(model, rule, &mut warnings) {
                 rules.push(value);
             }
@@ -295,8 +328,14 @@ impl CoreAdapter for XrayAdapter {
             json!({"type": "field", "network": "tcp,udp", (target_field(&final_tag)): final_tag}),
         );
 
+        // Resolve a domain only when an address matcher actually needs it.
+        let domain_strategy = if direct && model.dns.enabled {
+            "IPOnDemand"
+        } else {
+            xray_domain_strategy(model.routing.domain_strategy)
+        };
         let mut routing = json!({
-            "domainStrategy": xray_domain_strategy(model.routing.domain_strategy),
+            "domainStrategy": domain_strategy,
             "rules": rules
         });
         if !balancers.is_empty() {
@@ -347,9 +386,12 @@ impl CoreAdapter for XrayAdapter {
 
         if model.dns.enabled {
             let mut dns_servers = Vec::new();
+            let mut backups = Vec::new();
+            let mut final_address = String::from("localhost");
             for server in &model.dns.servers {
                 if let Some(address) = xray_dns_address(server, &mut warnings) {
-                    let address = if !tun_dns_tags.is_empty()
+                    let address = if !direct
+                        && !tun_dns_tags.is_empty()
                         && matches!(address.as_str(), "localhost" | "system" | "local")
                     {
                         warnings.push("TUN DNS 已将系统解析器替换为 1.1.1.1，避免 DNS 回环".into());
@@ -357,6 +399,10 @@ impl CoreAdapter for XrayAdapter {
                     } else {
                         address
                     };
+                    let is_final = model.dns.final_server.as_ref() == Some(&server.tag);
+                    if is_final {
+                        final_address = address.clone();
+                    }
                     let mut entry = json!({"address": address});
                     if !server.domains.is_empty() {
                         entry["domains"] = json!(
@@ -378,29 +424,33 @@ impl CoreAdapter for XrayAdapter {
                                 .collect::<Vec<_>>()
                         );
                     }
-                    dns_servers.push(entry);
+                    if direct && server.domains.is_empty() {
+                        if !is_final
+                            && !preserve_os_dns
+                            && !tun_dns_tags.is_empty()
+                            && address == "localhost"
+                        {
+                            warnings.push(
+                                "Xray TUN 已跳过系统 DNS 备用服务器，以免 DNS 查询回环".into(),
+                            );
+                        } else if !is_final {
+                            backups.push(entry);
+                        }
+                    } else {
+                        if direct {
+                            entry["skipFallback"] = json!(true);
+                        }
+                        dns_servers.push(entry);
+                    }
                 }
             }
-            // Xray uses the last server as the fallback.
-            let final_address = model
-                .dns
-                .final_server
-                .as_ref()
-                .and_then(|tag| model.dns.servers.iter().find(|s| &s.tag == tag))
-                .and_then(|s| xray_dns_address(s, &mut warnings))
-                .or_else(|| Some("localhost".into()))
-                .map(|address| {
-                    if !tun_dns_tags.is_empty()
-                        && matches!(address.as_str(), "localhost" | "system" | "local")
-                    {
-                        "1.1.1.1".into()
-                    } else {
-                        address
-                    }
-                });
-            if let Some(address) = final_address {
-                dns_servers.push(json!({"address": address}));
+            if !direct && !tun_dns_tags.is_empty() && final_address == "localhost" {
+                final_address = "1.1.1.1".into();
             }
+            // Scoped servers are only consulted for matching domains. The
+            // chosen final is first among unscoped fallbacks, ahead of backups.
+            dns_servers.push(json!({"address": final_address}));
+            dns_servers.extend(backups);
             let mut dns = json!({
                 "servers": dns_servers,
                 "queryStrategy": xray_query_strategy(model.routing.domain_strategy)
@@ -1279,7 +1329,12 @@ mod tests {
     use crate::settings::Settings;
 
     fn sample() -> (AppModel, Settings, CompileContext) {
-        let mut model = AppModel::default();
+        let mut model = AppModel {
+            work_mode: crate::model::WorkMode::Proxy,
+            dns: crate::model::DnsConfig::default(),
+            ..Default::default()
+        };
+        model.apply_preset(crate::model::RoutePreset::BypassMainland);
         let mut node = crate::model::Node::new("n", Protocol::Vless, "example.com", 443);
         node.credentials.uuid = Some("11111111-2222-3333-4444-555555555555".into());
         node.tls.enabled = true;

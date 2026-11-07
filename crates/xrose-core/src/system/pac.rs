@@ -129,6 +129,12 @@ fn serve(mut stream: TcpStream, body: &str) {
     let _ = stream.flush();
 }
 
+/// Without TUN, every proxied request must enter the direct monitor for
+/// statistics and firewall enforcement, including PAC bypass destinations.
+pub(crate) fn use_pac(enabled: bool, mode: crate::model::WorkMode, tun_enabled: bool) -> bool {
+    enabled && (mode == crate::model::WorkMode::Proxy || tun_enabled)
+}
+
 /// Generates a PAC file. Direct domains are matched as suffixes; everything
 /// else goes through the proxy. GeoIP routing is intentionally not attempted in
 /// PAC (browsers cannot evaluate it) — use TUN or the core's routing instead.
@@ -206,6 +212,15 @@ fn direct_rules(direct_domains: &[String], direct_cidrs: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_capture_uses_a_manual_proxy_without_tun() {
+        use crate::model::WorkMode;
+        assert!(!super::use_pac(true, WorkMode::Direct, false));
+        assert!(super::use_pac(true, WorkMode::Direct, true));
+        assert!(super::use_pac(true, WorkMode::Proxy, false));
+        assert!(!super::use_pac(false, WorkMode::Proxy, true));
+    }
+
     use super::*;
 
     #[test]

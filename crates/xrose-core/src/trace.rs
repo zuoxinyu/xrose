@@ -228,6 +228,8 @@ pub struct TraceSession {
     pub node_name: Option<String>,
     pub group_name: Option<String>,
     pub rule: Option<String>,
+    #[serde(default)]
+    pub blocked_rule_id: Option<String>,
 }
 
 impl TraceSession {
@@ -268,6 +270,7 @@ impl TraceSession {
             node_name: None,
             group_name: None,
             rule: None,
+            blocked_rule_id: None,
         }
     }
 
@@ -340,10 +343,17 @@ pub async fn run(service: AppService, mut session: TraceSession) {
 
 async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(), String> {
     let target = parse_target(&session.target)?;
-    let model = service.model();
-    let settings = service.settings();
-    let compiled = service.compiled_config();
+    let core = service.core();
     let running = service.is_running();
+    let inbound_kind = match target.protocol {
+        TraceProtocol::Http | TraceProtocol::Https => "http",
+        TraceProtocol::Icmp => "tun",
+        _ => "socks",
+    };
+    let (model, settings, active_inbound) = running
+        .then(|| core.trace_context(inbound_kind))
+        .flatten()
+        .unwrap_or_else(|| (service.model(), service.settings(), None));
     let id = session.id;
     let overall = Instant::now();
 
@@ -366,7 +376,11 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     );
 
     // Inbound ----------------------------------------------------------
-    let inbound = pick_inbound(&model, compiled.as_ref(), running);
+    let inbound = match active_inbound.as_ref() {
+        Some(i) => (true, format!("{} · {} :{}", i.kind, i.tag, i.port)),
+        None if !running => (false, "内核未运行 · 无活动入站".into()),
+        None => (false, format!("没有启用的 {inbound_kind} 入站")),
+    };
     session.activate(TraceStepKind::Inbound, inbound.1.clone());
     publish(service, session)?;
     sleep(100).await;
@@ -387,6 +401,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     publish(service, session)?;
     let host_ip = target.host.parse::<IpAddr>().ok();
     let mut resolved_ip = host_ip;
+    let mut dns_failure = None;
     if let Some(ip) = host_ip {
         session.resolved_ips = vec![ip.to_string()];
         session.set(
@@ -461,7 +476,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                     Some(dns_started.elapsed().as_millis() as u64),
                 );
                 if !running {
-                    return Err(msg);
+                    dns_failure = Some(msg);
                 }
             }
             Err(_) => {
@@ -481,7 +496,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                     Some(5000),
                 );
                 if !running {
-                    return Err(msg);
+                    dns_failure = Some(msg);
                 }
             }
         }
@@ -494,16 +509,60 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     } else {
         crate::model::Network::Tcp
     };
+    let process = std::env::current_exe().ok();
+    let protocol = match target.protocol {
+        TraceProtocol::Http => Some("http"),
+        TraceProtocol::Https => Some("tls"),
+        TraceProtocol::Udp if target.port == 53 => Some("dns"),
+        _ => None,
+    };
     let info = ConnectionInfo {
         domain: Some(target.host.clone()),
         destination_ip: resolved_ip,
         destination_port: Some(target.port),
-        network: Some(network),
+        network: (target.protocol != TraceProtocol::Icmp).then_some(network),
+        process_name: process
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned()),
+        process_path: process.map(|p| p.to_string_lossy().into_owned()),
+        protocol: protocol.map(str::to_owned),
+        inbound_tag: active_inbound.as_ref().map(|i| i.tag.clone()),
         ..Default::default()
     };
-    let preview = route::evaluate(&model, &info);
+    let plan = core.mesh_plan();
+    let mesh = info.destination_ip.and_then(|ip| {
+        plan.routes
+            .iter()
+            .find(|route| route::cidr_contains(&route.cidr, ip))
+    });
+    let mut preview = explain_route(&model, &info, mesh);
+    if preview.needs_core
+        && model.work_mode == crate::model::WorkMode::Direct
+        && settings.core == CoreKind::SingBox
+    {
+        // The installed binary can inspect a cached rule set without running the core.
+        // A missing cache or incompatible binary must remain an unknown decision.
+        if let Ok(binary) = core.resolve_binary(CoreKind::SingBox, &settings) {
+            let dir = service.paths().rule_sets_dir();
+            let mut matches = std::collections::BTreeMap::new();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            while let Some(rule) = preview.rule.as_ref().filter(|_| preview.needs_core) {
+                let Ok(Some(hit)) = tokio::time::timeout_at(
+                    deadline,
+                    cached_set_match(&binary, &dir, &model, &rule.matchers, &info),
+                )
+                .await
+                else {
+                    break;
+                };
+                matches.insert(rule.id.clone(), hit);
+                preview = route::evaluate_with(&model, &info, |r| matches.get(&r.id).copied());
+            }
+        }
+    }
     let effective_action = if preview.needs_core {
-        model.routing.final_action.clone()
+        route::effective_action(&model, &model.routing.final_action)
     } else {
         preview.action.clone()
     };
@@ -517,7 +576,10 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 .default_group_id()
                 .and_then(|gid| model.group(&gid).cloned())
         });
-    if let Some(group) = &group {
+    if let Some(group) = group
+        .as_ref()
+        .filter(|_| effective_action.kind == RouteActionKind::Proxy)
+    {
         session.group_name = Some(group.name.clone());
         if let Some(node_id) = group.active_node() {
             session.node_name = model.node(node_id).map(|n| n.name.clone());
@@ -537,7 +599,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         if preview.needs_core {
             TraceStatus::Warn
         } else if effective_action.kind == RouteActionKind::Block {
-            TraceStatus::Warn
+            TraceStatus::Error
         } else {
             TraceStatus::Ok
         },
@@ -545,7 +607,10 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         None,
     );
 
-    if !running && !preview.needs_core && effective_action.kind == RouteActionKind::Block {
+    if !preview.needs_core
+        && effective_action.kind == RouteActionKind::Block
+        && (!running || model.work_mode == crate::model::WorkMode::Direct)
+    {
         session.set(
             TraceStepKind::Outbound,
             TraceStatus::Skipped,
@@ -558,18 +623,8 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             "请求被路由规则拦截",
             None,
         );
-        session.phase = TracePhase::Done;
-        session.success = Some(true);
-        session.summary = Some(format!(
-            "{} 被规则“{}”阻止，未发起网络连接",
-            target.display(),
-            preview
-                .rule
-                .as_ref()
-                .map(|r| r.name.as_str())
-                .unwrap_or("阻止")
-        ));
-        session.finished_at = Some(now_unix());
+        session.blocked_rule_id = preview.rule.as_ref().map(|rule| rule.id.clone());
+        session.finish_failure(format!("{} · 已阻止", preview.explanation));
         publish(service, session)?;
         service.logs().push(
             crate::core::logs::LogStream::App,
@@ -580,10 +635,22 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     }
     publish(service, session)?;
 
+    if let Some(failure) = dns_failure {
+        return Err(failure);
+    }
+    if !running && preview.needs_core && model.work_mode == crate::model::WorkMode::Direct {
+        return Err(format!(
+            "无法确认拦截规则“{}”，请下载对应规则集后重试",
+            session.rule.as_deref().unwrap_or("")
+        ));
+    }
+
     // Outbound ---------------------------------------------------------
     let direct = effective_action.kind == RouteActionKind::Direct;
-    let outbound_label = if direct {
-        "direct（直连，不经过节点）".to_string()
+    let outbound_label = if let Some(route) = mesh {
+        format!("组网接口 {} · {}", route.interface, route.cidr)
+    } else if direct {
+        "本机直连".to_string()
     } else {
         match (&session.group_name, &session.node_name) {
             (Some(group), Some(node)) => format!("{group} → {node}"),
@@ -598,7 +665,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         session.set(
             TraceStepKind::Outbound,
             TraceStatus::Skipped,
-            "core 未运行：按配置预览出站，实际请求将由本机直连",
+            format!("{outbound_label} · 内核未运行，本次请求由本机发出"),
             None,
         );
         session.set(
@@ -609,7 +676,6 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         );
     }
 
-    let core = service.core();
     let http = core.active_proxy("http");
     let socks = core.active_proxy("socks");
     // A running core must evaluate its own applied rules, including direct and
@@ -648,7 +714,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 );
             }
             let http_proxy = if use_proxy { http.as_ref() } else { None };
-            http_test(service, &target, http_proxy).await
+            http_test(&settings, &target, http_proxy).await
         }
         TraceProtocol::Tcp => {
             if use_proxy {
@@ -748,7 +814,16 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                             .find(|group| group.tag() == *tag)
                             .map(|group| group.name.clone())
                     })
-                    .unwrap_or_else(|| tag.clone())
+                    .unwrap_or_else(|| match tag.as_str() {
+                        "direct" => "本机直连".into(),
+                        tag => tag
+                            .strip_prefix("xrose-mesh-")
+                            .and_then(|index| plan.routes.get(index.parse::<usize>().ok()?))
+                            .map_or_else(
+                                || tag.to_owned(),
+                                |r| format!("组网接口 {}", r.interface),
+                            ),
+                    })
             })
             .collect::<Vec<_>>()
             .join(" → ");
@@ -866,6 +941,85 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     Ok(())
 }
 
+/// Use sing-box's own rule-set decoder and matcher. Only a bounded status
+/// prefix is needed, even when one matching rule contains thousands of domains.
+async fn cached_set_match(
+    binary: &std::path::Path,
+    dir: &std::path::Path,
+    model: &AppModel,
+    matchers: &crate::model::Matchers,
+    info: &ConnectionInfo,
+) -> Option<bool> {
+    let mut targets = Vec::new();
+    if let Some(domain) = &info.domain {
+        targets.push(domain.clone());
+    }
+    if let Some(ip) = info.destination_ip {
+        let ip = ip.to_string();
+        if !targets.contains(&ip) {
+            targets.push(ip);
+        }
+    }
+    let tags = matchers
+        .rule_sets
+        .iter()
+        .cloned()
+        .chain(matchers.geosites.iter().map(|s| format!("geosite-{s}")))
+        .chain(matchers.geoips.iter().map(|s| format!("geoip-{s}")));
+    let mut complete = !targets.is_empty();
+    for tag in tags {
+        let Some(set) = crate::adapters::resolve_rule_set(model, &tag) else {
+            complete = false;
+            continue;
+        };
+        if tag.contains(['/', '\\']) {
+            return None;
+        }
+        let path = dir.join(format!("{tag}.srs"));
+        if !path.is_file() {
+            complete = false;
+            continue;
+        }
+        for target in &targets {
+            use std::process::Stdio;
+            let mut child = tokio::process::Command::new(binary)
+                .args(["rule-set", "match", "--format", set.format.as_str(), "--"])
+                .arg(&path)
+                .arg(target)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .ok()?;
+            let mut prefix = [0; 12];
+            let mut stderr = child.stderr.take()?;
+            if stderr.read_exact(&mut prefix).await.is_ok() && &prefix == b"match rules." {
+                return Some(true);
+            }
+            drop(stderr);
+            complete &= child.wait().await.ok()?.success();
+        }
+    }
+    complete.then_some(false)
+}
+
+fn explain_route(
+    model: &AppModel,
+    info: &ConnectionInfo,
+    mesh: Option<&crate::mesh::coexist::MeshRoute>,
+) -> route::RulePreview {
+    if let Some(mesh) = mesh {
+        return route::RulePreview {
+            rule: None,
+            action: crate::model::RouteAction::direct(),
+            explanation: format!("命中组网网段 {} → {}", mesh.cidr, mesh.interface),
+            needs_core: false,
+        };
+    }
+    route::evaluate(model, info)
+}
+
 fn publish(service: &AppService, session: &TraceSession) -> Result<(), String> {
     if !service.is_trace_current(session.id) {
         return Err("cancelled".into());
@@ -878,88 +1032,16 @@ async fn sleep(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
 }
 
-fn pick_inbound(
-    model: &AppModel,
-    compiled: Option<&crate::adapters::CompiledConfig>,
-    running: bool,
-) -> (bool, String) {
-    if !running {
-        return (false, "core 未运行 · 无活动入站".into());
-    }
-    if let Some(compiled) = compiled {
-        if let Some(inbound) = compiled
-            .inbounds
-            .iter()
-            .find(|i| matches!(i.kind.as_str(), "mixed" | "socks" | "http"))
-        {
-            return (
-                true,
-                format!(
-                    "{} · {} :{} · {}",
-                    inbound.kind,
-                    inbound.tag,
-                    inbound.port,
-                    if inbound.allow_lan {
-                        "allow LAN"
-                    } else {
-                        "local"
-                    }
-                ),
-            );
-        }
-        if let Some(inbound) = compiled.inbounds.iter().find(|i| i.kind == "tun") {
-            return (
-                true,
-                format!("TUN 入站 {} · auto_route/strict_route", inbound.tag),
-            );
-        }
-    }
-    let inbound = model.inbounds.iter().find(|i| {
-        i.enabled
-            && matches!(
-                i.kind,
-                crate::model::InboundKind::Mixed
-                    | crate::model::InboundKind::Socks
-                    | crate::model::InboundKind::Http
-            )
-    });
-    match inbound {
-        Some(inbound) => (
-            true,
-            format!(
-                "{} · {} :{}",
-                inbound.kind.as_str(),
-                inbound.tag,
-                inbound.port
-            ),
-        ),
-        None => (false, "没有启用的本地代理入站".into()),
-    }
-}
-
 fn choose_dns_server<'a>(model: &'a AppModel, host: &str) -> Option<&'a DnsServer> {
     let lower = host.to_ascii_lowercase();
-    for server in model.dns.servers.iter().filter(|s| !s.is_fakeip()) {
-        if server
-            .domains
-            .iter()
-            .any(|rule| domain_rule_matches(rule, &lower))
-        {
-            return Some(server);
-        }
-    }
-    model
-        .dns
-        .final_server
-        .as_ref()
-        .and_then(|tag| {
-            model
-                .dns
-                .servers
-                .iter()
-                .find(|s| &s.tag == tag && !s.is_fakeip())
-        })
-        .or_else(|| model.dns.servers.iter().find(|s| !s.is_fakeip()))
+    let eligible = |s: &&DnsServer| {
+        !s.is_fakeip() && (model.work_mode != crate::model::WorkMode::Direct || !s.requires_proxy())
+    };
+    let servers = || model.dns.servers.iter().filter(eligible);
+    servers()
+        .find(|s| s.domains.iter().any(|r| domain_rule_matches(r, &lower)))
+        .or_else(|| servers().find(|s| Some(&s.tag) == model.dns.final_server.as_ref()))
+        .or_else(|| servers().next())
 }
 
 fn domain_rule_matches(rule: &str, host: &str) -> bool {
@@ -1019,7 +1101,7 @@ struct RemoteResult {
 }
 
 async fn http_test(
-    service: &AppService,
+    settings: &Settings,
     target: &TraceTarget,
     proxy: Option<&crate::updates::LocalProxy>,
 ) -> RemoteResult {
@@ -1063,8 +1145,8 @@ async fn http_test(
             };
         }
     };
-    let excluded = if proxy.is_some() && service.settings().core == CoreKind::SingBox {
-        ClashClient::new(service.settings().api_port, "")
+    let excluded = if proxy.is_some() && settings.core == CoreKind::SingBox {
+        ClashClient::new(settings.api_port, "")
             .connections()
             .await
             .ok()
@@ -1074,9 +1156,9 @@ async fn http_test(
         std::collections::BTreeSet::new()
     };
     let observe = async {
-        if proxy.is_some() && service.settings().core == CoreKind::SingBox {
+        if proxy.is_some() && settings.core == CoreKind::SingBox {
             poll_clash(
-                service.settings().api_port,
+                settings.api_port,
                 &target.host,
                 target.port,
                 1800,
@@ -1726,6 +1808,48 @@ fn matches_probe_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_trace_identifies_firewall_group_and_prioritized_mesh_route() {
+        use crate::model::{Matchers, RouteAction, RouteRule, RouteRuleGroup};
+        let mut model = AppModel::default();
+        model.routing.rules.clear();
+        let info = ConnectionInfo {
+            domain: Some("blocked.example.org".into()),
+            destination_ip: Some("192.0.2.15".parse().unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            explain_route(&model, &info, None).action,
+            RouteAction::direct()
+        );
+        let rule = RouteRule::new(
+            "Block example",
+            Matchers {
+                domains: vec!["blocked.example.org".into()],
+                ..Default::default()
+            },
+            RouteAction::block(),
+        );
+        model.routing.rule_groups.push(RouteRuleGroup {
+            name: "Example group".into(),
+            rules: vec![rule.clone()],
+            ..Default::default()
+        });
+        let blocked = explain_route(&model, &info, None);
+        assert_eq!(blocked.action, RouteAction::block());
+        assert!(
+            blocked.explanation.contains(&rule.name)
+                && blocked.explanation.contains("Example group")
+        );
+        let mesh = crate::mesh::coexist::MeshRoute {
+            cidr: "192.0.2.0/24".into(),
+            interface: "mesh-test".into(),
+        };
+        let preview = explain_route(&model, &info, Some(&mesh));
+        assert_eq!(preview.action, RouteAction::direct());
+        assert!(preview.explanation.contains("mesh-test"));
+    }
 
     #[test]
     fn probe_metadata_requires_matching_host_port_and_source() {

@@ -4,7 +4,9 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
+use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{MeshPeer, MeshProvider, PortForward, ServiceForward};
+use xrose_core::model::WorkMode;
 use xrose_core::route::transfer::ExportScope;
 use xrose_core::service::ToastLevel;
 
@@ -27,6 +29,7 @@ pub(super) enum MenuTarget {
     Dns(String),
     Host(String),
     Connections,
+    ConnectionRules(DiagnosticTarget),
     TrafficStatistics,
 }
 
@@ -35,6 +38,7 @@ pub(super) enum Command {
     ImportRoute,
     ExportRoute(ExportScope),
     SelectNode(String, String),
+    SelectWorkMode(WorkMode),
     SetDefaultOutbound(String),
     ManageOutboundGroups,
     EditOutboundGroup(String),
@@ -63,7 +67,9 @@ pub(super) enum Command {
     DeleteDns(String),
     DeleteHost(String),
     RefreshConnections,
+    BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
     CloseConnections,
+    UninstallHelper,
     ClearRecording,
     ClearTrafficStatistics,
     ClearLogs,
@@ -364,6 +370,18 @@ impl AppView {
                 }
             }
             MenuTarget::NodeSelector => {
+                let direct = self.snapshot.model.work_mode == WorkMode::Direct;
+                menu = menu
+                    .item(
+                        add(
+                            "本机直连",
+                            "Direct",
+                            !busy("core"),
+                            Command::SelectWorkMode(WorkMode::Direct),
+                        )
+                        .checked(direct),
+                    )
+                    .separator();
                 let group = self
                     .snapshot
                     .model
@@ -373,12 +391,26 @@ impl AppView {
                     return menu.label(tr(lang, "请先添加节点", "Add a node first"));
                 };
                 let automatic = !group.manually_selectable();
-                if automatic {
-                    menu = menu.label(tr(
-                        lang,
-                        "此出站组自动选择节点",
-                        "This group selects nodes automatically",
-                    ));
+                if automatic
+                    && self
+                        .snapshot
+                        .model
+                        .has_usable_default_group(self.snapshot.settings.core)
+                {
+                    let label = format!(
+                        "{} ({})",
+                        tr(lang, "自动选择", "Automatic"),
+                        self.outbound_group_label(group)
+                    );
+                    menu = menu.item(
+                        item(
+                            &view,
+                            label.into(),
+                            !busy("core"),
+                            Command::SelectWorkMode(WorkMode::Proxy),
+                        )
+                        .checked(!direct),
+                    );
                 }
                 let selected = self.snapshot.selected_node(Some(&group.id));
                 for id in &group.members {
@@ -697,21 +729,42 @@ impl AppView {
                     Command::ClearTrafficStatistics,
                 ));
             }
+            MenuTarget::ConnectionRules(target) => {
+                for (kind, zh, en) in [
+                    (DiagnosticRuleKind::Domain, "阻止此域名", "Block domain"),
+                    (DiagnosticRuleKind::Process, "阻止此进程", "Block process"),
+                    (DiagnosticRuleKind::Ip, "阻止此 IP", "Block IP"),
+                ] {
+                    menu = menu.item(add(
+                        zh,
+                        en,
+                        !self.snapshot.busy.iter().any(|k| k == "firewall-rule")
+                            && !target.value(kind).is_empty(),
+                        Command::BlockConnection(target.clone(), kind),
+                    ));
+                }
+            }
             MenuTarget::Connections => {
                 let available = self.snapshot.process.phase.is_alive()
-                    && self.snapshot.settings.core.capabilities().clash_connections;
+                    && self
+                        .snapshot
+                        .process
+                        .core
+                        .is_some_and(|core| core.capabilities().clash_connections);
                 menu = menu
                     .item(add(
                         "刷新",
                         "Refresh",
-                        available,
+                        available && !self.service.is_busy("connections-refresh"),
                         Command::RefreshConnections,
                     ))
                     .separator()
                     .item(add(
                         "全部断开",
                         "Close all connections",
-                        available && !self.snapshot.runtime.connections.is_empty(),
+                        available
+                            && !self.snapshot.runtime.connections.is_empty()
+                            && !self.service.is_busy("connection-close"),
                         Command::CloseConnections,
                     ))
                     .item(add(
@@ -758,6 +811,7 @@ impl AppView {
                     g.enabled && g.manually_selectable() && g.members.contains(node_id)
                 }) && self.snapshot.model.node(node_id).is_some_and(|n| n.enabled)
             }
+            Command::UninstallHelper => self.snapshot.platform.helper_installed && !busy("helper"),
             Command::DeleteVersion(core, version) => {
                 !busy("install")
                     && self
@@ -882,6 +936,7 @@ impl AppView {
             }
             Command::DeleteDns(_) => Some((self.tr("删除服务器", "Delete server"), self.tr("删除此 DNS 服务器，应用配置后生效。", "Remove this DNS server after applying the configuration."))),
             Command::DeleteHost(_) => Some((self.tr("删除静态解析", "Delete host mapping"), self.tr("删除此域名的静态解析记录，应用配置后生效。", "Remove this static host mapping after applying the configuration."))),
+            Command::UninstallHelper => Some((self.tr("卸载提权助手", "Uninstall privilege helper"), self.tr("卸载后，TUN 和异地组网需要重新安装助手才能使用。", "TUN and mesh networking will require the helper to be installed again."))),
             Command::CloseConnections => Some((self.tr("全部断开", "Close all connections"), self.tr("所有活动连接将立即断开，正在传输的数据可能中断。", "All active connections will close immediately; ongoing transfers may be interrupted."))),
             Command::ClearTrafficStatistics => Some((self.tr("清空统计", "Clear statistics"), self.tr("删除全部历史流量统计和本次累计，此操作无法撤销。统计开关保持当前状态。", "Delete all traffic history and session totals. This cannot be undone. The collection setting is retained."))),
             Command::ClearRecording => Some((self.tr("清空录制", "Clear recording"), self.tr("删除本次会话的连接与测试记录，此操作无法撤销。", "Delete this session's connection and test records. This cannot be undone."))),
@@ -937,6 +992,15 @@ impl AppView {
             Command::SetFrontProxy(id) => {
                 if let Err(err) = self.service.set_front_proxy(id) {
                     self.service.toast(ToastLevel::Error, err.to_string());
+                }
+            }
+            Command::SelectWorkMode(mode) => {
+                let result = match mode {
+                    WorkMode::Direct => self.service.select_direct_mode(),
+                    WorkMode::Proxy => self.service.select_proxy_mode(),
+                };
+                if let Err(error) = result {
+                    self.service.toast(ToastLevel::Error, error.to_string());
                 }
             }
             Command::SelectNode(group_id, node_id) => {
@@ -1119,12 +1183,20 @@ impl AppView {
                 hosts.remove(&id);
                 self.service.set_hosts(hosts);
             }
+            Command::BlockConnection(target, kind) => {
+                self.service.block_connection_target(target, kind)
+            }
             Command::RefreshConnections => self.service.refresh_connections(),
+            Command::UninstallHelper => self.service.uninstall_helper(),
             Command::CloseConnections => {
                 if self.snapshot.process.phase.is_alive()
-                    && self.snapshot.settings.core.capabilities().clash_connections
+                    && self
+                        .snapshot
+                        .process
+                        .core
+                        .is_some_and(|core| core.capabilities().clash_connections)
                 {
-                    self.service.kill_all_connections();
+                    self.service.close_all_connections();
                 }
             }
             Command::ClearRecording => self.service.clear_recording(),
