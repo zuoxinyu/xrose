@@ -30,6 +30,21 @@ enum MonitorRow<'a> {
     Process(&'a ProcessLiveTraffic),
 }
 
+impl MonitorRow<'_> {
+    fn icon_key<'a>(&'a self, connections: &'a [ClashConnection]) -> &'a str {
+        let (path, name) = match self {
+            Self::Connection(c, ..) => (c.process_path(), c.process_basename()),
+            Self::Process(p) => (
+                p.connection_with_path
+                    .and_then(|i| connections.get(i))
+                    .map_or("", ClashConnection::process_path),
+                p.process_name.as_str(),
+            ),
+        };
+        if path.is_empty() { name } else { path }
+    }
+}
+
 impl AppView {
     pub(super) fn connection_search_placeholder(&self) -> SharedString {
         if self.show_live_processes && !self.show_recorded_connections {
@@ -453,11 +468,16 @@ impl AppView {
             )
         }
         for row in visible {
+            let icon = self
+                .process_icons
+                .as_ref()
+                .map(|icons| icons.view(row.icon_key(&self.snapshot.runtime.connections)));
             rows = match row {
-                MonitorRow::Connection(connection, closed, metrics) => {
-                    rows.child(self.connection_row(connection.clone(), closed, metrics, &p, cx))
+                MonitorRow::Connection(connection, closed, metrics) => rows
+                    .child(self.connection_row(connection.clone(), closed, metrics, icon, &p, cx)),
+                MonitorRow::Process(process) => {
+                    rows.child(self.live_process_row(process, icon, &p, cx))
                 }
-                MonitorRow::Process(process) => rows.child(self.live_process_row(process, &p, cx)),
             };
         }
         if count > shown || limit > CONNECTIONS_PAGE_STEP {
@@ -633,6 +653,7 @@ impl AppView {
         connection: ClashConnection,
         closed: bool,
         metrics: Option<ConnectionMetrics>,
+        icon: Option<AnyElement>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -682,20 +703,31 @@ impl AppView {
                                     .truncate()
                                     .child(connection.host()),
                             )
-                            .child(div().text_xs().text_color(p.muted_fg).truncate().child(
-                                format!(
-                                    "{} · {} / {} · {}:{}",
-                                    if process.is_empty() {
-                                        self.tr("进程未提供", "Process unavailable").to_string()
-                                    } else {
-                                        process
-                                    },
-                                    connection.metadata.network,
-                                    connection.metadata.kind,
-                                    connection.metadata.destination_ip,
-                                    connection.metadata.destination_port
-                                ),
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .min_w_0()
+                                    .children(icon)
+                                    .child(
+                                        div().text_xs().text_color(p.muted_fg).truncate().child(
+                                            format!(
+                                                "{} · {} / {} · {}:{}",
+                                                if process.is_empty() {
+                                                    self.tr("进程未提供", "Process unavailable")
+                                                        .to_string()
+                                                } else {
+                                                    process
+                                                },
+                                                connection.metadata.network,
+                                                connection.metadata.kind,
+                                                connection.metadata.destination_ip,
+                                                connection.metadata.destination_port
+                                            ),
+                                        ),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
@@ -829,6 +861,7 @@ impl AppView {
     fn live_process_row(
         &self,
         process: &ProcessLiveTraffic,
+        icon: Option<AnyElement>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -854,26 +887,33 @@ impl AppView {
             .border_1()
             .border_color(p.border)
             .child(
-                div().flex().items_center().flex_1().min_w(px(0.)).child(
-                    Button::new(SharedString::from(format!("process-details-{name}")))
-                        .compact()
-                        .ghost()
-                        .label(label)
-                        .disabled(name.is_empty())
-                        .tooltip(self.tr("查看此进程的连接", "View process connections"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.show_live_processes = false;
-                            this.connection_filter = ConnectionFilterKind::Process;
-                            this.exact_process_filter = Some(filter.clone());
-                            let placeholder = this.connection_search_placeholder();
-                            this.connection_search.update(cx, |input, cx| {
-                                input.set_placeholder(placeholder, window, cx);
-                                input.set_value(filter.clone(), window, cx);
-                            });
-                            this.connections_limit = CONNECTIONS_PAGE_STEP;
-                            cx.notify();
-                        })),
-                ),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .children(icon)
+                    .child(
+                        Button::new(SharedString::from(format!("process-details-{name}")))
+                            .compact()
+                            .ghost()
+                            .label(label)
+                            .disabled(name.is_empty())
+                            .tooltip(self.tr("查看此进程的连接", "View process connections"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.show_live_processes = false;
+                                this.connection_filter = ConnectionFilterKind::Process;
+                                this.exact_process_filter = Some(filter.clone());
+                                let placeholder = this.connection_search_placeholder();
+                                this.connection_search.update(cx, |input, cx| {
+                                    input.set_placeholder(placeholder, window, cx);
+                                    input.set_value(filter.clone(), window, cx);
+                                });
+                                this.connections_limit = CONNECTIONS_PAGE_STEP;
+                                cx.notify();
+                            })),
+                    ),
             )
             .child(div().text_xs().text_color(p.muted_fg).child(format!(
                 "{} {}",

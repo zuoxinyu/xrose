@@ -31,10 +31,12 @@ fn main() {
         let path = "src/ui/qr/macos.m";
         println!("cargo:rerun-if-changed={path}");
         println!("cargo:rerun-if-changed=src/app_launch.c");
+        println!("cargo:rerun-if-changed=src/ui/process_icons/macos.m");
         let mut native = cc::Build::new();
         native
             .file(path)
             .file("src/app_launch.c")
+            .file("src/ui/process_icons/macos.m")
             .flag("-fobjc-arc")
             .flag(format!(
                 "-mmacosx-version-min={}",
@@ -65,6 +67,7 @@ fn main() {
         println!("cargo:rustc-link-lib=static=clang_rt.osx");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
         println!("cargo:rustc-link-lib=framework=Carbon");
+        println!("cargo:rustc-link-lib=framework=UniformTypeIdentifiers");
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
@@ -78,9 +81,13 @@ fn main() {
         return;
     }
     println!("cargo:rerun-if-changed=src/ui/qr/windows.c");
+    println!("cargo:rerun-if-changed=src/ui/process_icons/windows.c");
     cc::Build::new()
         .file("src/ui/qr/windows.c")
+        .file("src/ui/process_icons/windows.c")
         .compile("xrose_scan_input");
+    println!("cargo:rustc-link-lib=windowscodecs");
+    println!("cargo:rustc-link-lib=ole32");
     println!("cargo:rustc-link-lib=comctl32");
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if env == "msvc" {

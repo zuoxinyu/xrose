@@ -13,6 +13,7 @@ pub struct FlowObservation<'a> {
     pub id: &'a str,
     pub start: &'a str,
     pub process: &'a str,
+    pub process_path: &'a str,
     pub upload: u64,
     pub download: u64,
 }
@@ -27,6 +28,9 @@ pub struct ConnectionMetrics {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProcessLiveTraffic {
     pub process_name: String,
+    /// Index into this sample's connections, so process rows can reuse the executable path.
+    #[serde(skip)]
+    pub connection_with_path: Option<usize>,
     pub active_connections: usize,
     pub up_speed: u64,
     pub down_speed: u64,
@@ -110,7 +114,7 @@ impl FlowRateTracker {
         let mut processes = BTreeMap::<&str, ProcessLiveTraffic>::new();
         let mut starts = Vec::new();
         let mut totals = Vec::new();
-        for flow in flows {
+        for (index, flow) in flows.into_iter().enumerate() {
             let key = (flow.id.to_owned(), flow.start.to_owned());
             let last = self.previous.remove(&key);
             let started_at = last.as_ref().map(|v| v.started_at).unwrap_or_else(|| {
@@ -149,6 +153,9 @@ impl FlowRateTracker {
                     process_name: flow.process.into(),
                     ..Default::default()
                 });
+            if proc.connection_with_path.is_none() && !flow.process_path.is_empty() {
+                proc.connection_with_path = Some(index);
+            }
             proc.active_connections += 1;
             proc.up_speed = proc.up_speed.saturating_add(up_speed);
             proc.down_speed = proc.down_speed.saturating_add(down_speed);
@@ -190,11 +197,13 @@ mod tests {
             id: "a",
             start: "2025-01-01T00:00:02Z",
             process: "Reader",
+            process_path: "",
             upload: 30,
             download: 100,
         };
         let b = FlowObservation {
             id: "b",
+            process_path: "/opt/example/Reader",
             start: "",
             download: 10_000,
             ..a
@@ -207,6 +216,15 @@ mod tests {
         };
         let mut tracker = FlowRateTracker::default();
         let first = tracker.observe([a, b, c], at, wall);
+        assert_eq!(
+            first
+                .processes
+                .iter()
+                .find(|p| p.process_name == "Reader")
+                .unwrap()
+                .connection_with_path,
+            Some(1)
+        );
         assert_eq!(
             first.metrics[0],
             ConnectionMetrics {

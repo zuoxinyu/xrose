@@ -53,6 +53,9 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+freedesktop-icons.workspace = true
+freedesktop-desktop-entry.workspace = true
+resvg.workspace = true
 ksni.workspace = true
 x11rb.workspace = true
 

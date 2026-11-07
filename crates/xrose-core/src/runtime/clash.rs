@@ -66,7 +66,24 @@ impl ClashConnection {
         self.process_basename().to_owned()
     }
 
-    fn process_basename(&self) -> &str {
+    pub fn process_path(&self) -> &str {
+        if !self.metadata.process_path.is_empty() {
+            &self.metadata.process_path
+        } else {
+            let process = self.metadata.process.as_str();
+            let process = process
+                .rsplit_once(" (")
+                .filter(|(_, suffix)| suffix.ends_with(')'))
+                .map_or(process, |(path, _)| path);
+            if std::path::Path::new(process).is_absolute() {
+                process
+            } else {
+                ""
+            }
+        }
+    }
+
+    pub fn process_basename(&self) -> &str {
         crate::flow::process_basename(&self.metadata.process, &self.metadata.process_path)
     }
 }
@@ -77,6 +94,7 @@ impl<'a> From<&'a ClashConnection> for crate::flow::FlowObservation<'a> {
             id: &connection.id,
             start: &connection.start,
             process: connection.process_basename(),
+            process_path: connection.process_path(),
             upload: connection.upload,
             download: connection.download,
         }

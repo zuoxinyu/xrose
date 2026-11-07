@@ -1,5 +1,6 @@
 mod about;
 mod connections;
+mod process_icons;
 mod dialogs;
 mod dns;
 mod logs;
@@ -252,6 +253,7 @@ pub struct AppView {
     pub(crate) connection_filter: ConnectionFilterKind,
     pub(crate) show_recorded_connections: bool,
     show_live_processes: bool,
+    process_icons: Option<process_icons::ProcessIcons>,
     connection_sort: xrose_core::flow::ConnectionSort,
     exact_process_filter: Option<String>,
     pub(crate) connections_limit: usize,
@@ -418,6 +420,7 @@ impl AppView {
             connection_filter: ConnectionFilterKind::All,
             show_recorded_connections: false,
             show_live_processes: false,
+            process_icons: None,
             connection_sort: Default::default(),
             exact_process_filter: None,
             connections_limit: 50,
@@ -533,6 +536,11 @@ impl AppView {
 
     /// Poll state without starving live connections while a trace is active.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
+        if self.page == Page::Connections
+            && let Some(icons) = &mut self.process_icons
+        {
+            icons.load_visible(cx);
+        }
         self.statistics_tick(cx);
         if !self.auto_trace_started {
             self.auto_trace_started = true;
