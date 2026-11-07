@@ -12,6 +12,7 @@ use xrose_core::service::ToastLevel;
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
+    BatchTests(Vec<String>),
     Mesh(String),
     MeshPeer(String, String),
     Forward(String, PortForward),
@@ -35,6 +36,8 @@ pub(super) enum MenuTarget {
 
 #[derive(Clone)]
 pub(super) enum Command {
+    BatchHttp(Vec<String>),
+    BatchDownload(Vec<String>),
     ImportRoute,
     ExportRoute(ExportScope),
     SelectNode(String, String),
@@ -170,6 +173,23 @@ impl AppView {
             item(&view, tr(lang, zh, en), enabled && available, command)
         };
         match target {
+            MenuTarget::BatchTests(ids) => {
+                let available =
+                    !ids.is_empty() && !busy("latency") && !busy("download") && !busy("auto-probe");
+                menu = menu
+                    .item(add(
+                        "批量 HTTP 测速",
+                        "Batch HTTP test",
+                        available,
+                        Command::BatchHttp(ids.clone()),
+                    ))
+                    .item(add(
+                        "批量下载测速",
+                        "Batch download test",
+                        available,
+                        Command::BatchDownload(ids),
+                    ));
+            }
             MenuTarget::Mesh(id) => {
                 use xrose_core::mesh::{MeshPhase, MeshProvider};
                 let Some(p) = self.snapshot.mesh.profiles.iter().find(|p| p.id == id) else {
@@ -823,6 +843,9 @@ impl AppView {
         };
         let busy = |key: &str| self.snapshot.busy.iter().any(|s| s == key);
         let exists = match &command {
+            Command::BatchHttp(_) | Command::BatchDownload(_) => {
+                self.batch_mode && !busy("latency") && !busy("download") && !busy("auto-probe")
+            }
             Command::SelectNode(group_id, node_id) => {
                 self.snapshot.model.group(group_id).is_some_and(|g| {
                     g.enabled && g.manually_selectable() && g.members.contains(node_id)
@@ -1140,6 +1163,11 @@ impl AppView {
                     self.service.test_real_latency(&id);
                 }
             }
+            Command::BatchHttp(ids) => {
+                self.latency_pending.extend(ids.iter().cloned());
+                self.service.test_http_latency(ids);
+            }
+            Command::BatchDownload(ids) => self.service.test_downloads(&ids),
             Command::DownloadNode(id) => {
                 if self.snapshot.model.node(&id).is_some_and(|n| n.enabled) {
                     self.service.test_download(&id);

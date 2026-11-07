@@ -1750,6 +1750,14 @@ impl AppService {
     }
 
     pub fn test_latency(&self, scope: LatencyScope) {
+        self.test_latency_scope(scope, false);
+    }
+
+    pub fn test_http_latency(&self, ids: Vec<String>) {
+        self.test_latency_scope(LatencyScope::Nodes(ids), true);
+    }
+
+    fn test_latency_scope(&self, scope: LatencyScope, force_http: bool) {
         if self.is_busy("latency") || self.is_busy("download") || self.is_busy("auto-probe") {
             return;
         }
@@ -1772,7 +1780,7 @@ impl AppService {
         // Use the applied configuration, not a pending settings edit. A TUN TCP
         // handshake can terminate locally before any remote connection exists.
         let bypass_tun = self.inner.core.native_tun_active();
-        let use_http = bypass_tun || model.front_proxy.is_some();
+        let use_http = force_http || bypass_tun || model.front_proxy.is_some();
         let settings = self.settings();
         let core = if bypass_tun {
             self.inner.core.state().core.unwrap_or(settings.core)
@@ -1937,6 +1945,10 @@ impl AppService {
     }
 
     pub fn test_download(&self, node_id: &str) {
+        self.test_downloads(&[node_id.to_owned()]);
+    }
+
+    pub fn test_downloads(&self, ids: &[String]) {
         if self.is_busy("download") || self.is_busy("latency") || self.is_busy("auto-probe") {
             return;
         }
@@ -1955,11 +1967,14 @@ impl AppService {
                 return;
             }
         };
-        let Some(node) = model.node(node_id).cloned() else {
-            return;
-        };
-        if !node.enabled || !node.protocol.supported_by(core) {
-            self.toast(ToastLevel::Warning, "该节点未启用或当前内核不支持该协议");
+        let nodes: Vec<_> = ids
+            .iter()
+            .filter_map(|id| model.node(id))
+            .filter(|node| node.enabled && node.protocol.supported_by(core))
+            .cloned()
+            .collect();
+        if nodes.is_empty() {
+            self.toast(ToastLevel::Warning, "没有已启用且当前内核支持的测速节点");
             return;
         }
         let binary = match self.inner.core.resolve_binary(core, &settings) {
@@ -1972,43 +1987,64 @@ impl AppService {
         if !self.try_begin_probe("download") {
             return;
         }
-        self.set_busy(&format!("download:{}", node.id), true);
-        self.inner.downloads.write().remove(&node.id);
         let service = self.clone();
         self.spawn(async move {
-            let result =
-                crate::runtime::probe::download(&binary, core, &node, front.as_ref(), bypass_tun)
-                    .await;
-            let entry = match result {
-                Ok(entry) => {
-                    service.toast(
-                        ToastLevel::Success,
-                        format!(
-                            "“{}”下载速度 {:.2} MiB/s",
-                            node.name,
-                            entry.bytes_per_second as f64 / 1048576.0
-                        ),
-                    );
-                    entry
-                }
-                Err(err) => {
-                    service.toast(ToastLevel::Warning, err.to_string());
-                    crate::runtime::probe::DownloadResult {
-                        bytes: 0,
-                        elapsed_ms: 0,
-                        bytes_per_second: 0,
-                        checked_at: now_unix(),
-                        error: Some(err.to_string()),
+            // Measure downloads sequentially so probes do not compete for bandwidth.
+            let count = nodes.len();
+            let mut successful = 0;
+            for node in nodes {
+                service.set_busy(&format!("download:{}", node.id), true);
+                service.inner.downloads.write().remove(&node.id);
+                let result = crate::runtime::probe::download(
+                    &binary,
+                    core,
+                    &node,
+                    front.as_ref(),
+                    bypass_tun,
+                )
+                .await;
+                let entry = match result {
+                    Ok(entry) => {
+                        successful += 1;
+                        if count == 1 {
+                            service.toast(
+                                ToastLevel::Success,
+                                format!(
+                                    "“{}”下载速度 {:.2} MiB/s",
+                                    node.name,
+                                    entry.bytes_per_second as f64 / 1048576.0
+                                ),
+                            );
+                        }
+                        entry
                     }
-                }
-            };
-            service
-                .inner
-                .downloads
-                .write()
-                .insert(node.id.clone(), entry);
-            service.set_busy(&format!("download:{}", node.id), false);
+                    Err(err) => {
+                        if count == 1 {
+                            service.toast(ToastLevel::Warning, err.to_string());
+                        }
+                        crate::runtime::probe::DownloadResult {
+                            bytes: 0,
+                            elapsed_ms: 0,
+                            bytes_per_second: 0,
+                            checked_at: now_unix(),
+                            error: Some(err.to_string()),
+                        }
+                    }
+                };
+                service
+                    .inner
+                    .downloads
+                    .write()
+                    .insert(node.id.clone(), entry);
+                service.set_busy(&format!("download:{}", node.id), false);
+            }
             service.set_busy("download", false);
+            if count > 1 {
+                service.toast(
+                    ToastLevel::Info,
+                    format!("下载测速完成：{successful}/{count} 个节点成功"),
+                );
+            }
         });
     }
 
