@@ -149,7 +149,7 @@ impl AppService {
             && actual.pid == expected.pid
             && actual.started_at == expected.started_at
             && !self.is_busy("core")
-            && !self.inner.config_dirty.load(Ordering::SeqCst)
+            && !self.inner.reload.lock().dirty
     }
 
     pub(super) fn start_node_switch_scheduler(&self) {
@@ -232,9 +232,9 @@ impl AppService {
         self.toast(
             ToastLevel::Info,
             if recover {
-                "当前节点不可用，正在切换备用节点并重启内核"
+                "当前节点不可用，正在切换备用节点并重载内核"
             } else {
-                "发现性能更好的节点，正在切换并重启内核"
+                "发现性能更好的节点，正在切换并重载内核"
             },
         );
         match self

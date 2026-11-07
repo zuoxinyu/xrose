@@ -367,8 +367,8 @@ impl AppView {
                                             .text_color(p.warn_text)
                                             .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
                                             .child(self.tr(
-                                                "Xray core 模式：切换节点需重启 core",
-                                                "Xray core: switching node restarts core",
+                                                "Xray core 模式：切换节点需重载内核",
+                                                "Xray core: switching nodes reloads the core",
                                             )),
                                     )
                                 }),

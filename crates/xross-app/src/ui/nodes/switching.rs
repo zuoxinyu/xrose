@@ -262,8 +262,8 @@ impl AppView {
                 "These conditions take effect when auto switch is enabled.",
             )
         } else if group.managed() {
-            self.tr("仅检查路由使用的出站组。切换时会重启内核，现有连接将中断。",
-                "Only groups used by routing are checked. Switching restarts the core and interrupts active connections.")
+            self.tr("仅检查路由使用的出站组。切换时会重载内核，现有连接将中断。",
+                "Only groups used by routing are checked. Reloading the core interrupts active connections.")
         } else {
             self.tr("此组沿用内核测速。修改回退条件或检查间隔后，将使用这里设置的条件。",
                 "This group uses native latency checks. Editing a fallback condition or the interval enables the settings shown here.")

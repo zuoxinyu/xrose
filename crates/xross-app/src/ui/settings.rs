@@ -333,7 +333,7 @@ impl AppView {
             .child(setting_row(
                 &p,
                 self.tr("内核", "Core"),
-                self.tr("需重启", "Restart required"),
+                self.tr("需重载", "Reload required"),
                 ChoiceGroup::new(
                     "core",
                     CoreKind::all()
@@ -350,7 +350,7 @@ impl AppView {
             .child(setting_row(
                 &p,
                 self.tr("日志级别", "Log level"),
-                self.tr("需重启", "Restart required"),
+                self.tr("需重载", "Reload required"),
                 ChoiceGroup::new(
                     "log-level",
                     vec!["Debug".into(), "Info".into(), "Warn".into(), "Error".into()],
@@ -374,6 +374,13 @@ impl AppView {
                         ][*index]
                     })
                 })),
+            ))
+            .child(setting_row(
+                &p,
+                self.tr("热重载", "Hot reload"),
+                self.tr("保存网络配置后自动重载内核，连接可能短暂中断。应用更新后按需更新已安装的提权助手。", "Automatically reload saved network changes. Connections may be interrupted briefly. Update the installed privilege helper when an app update requires it."),
+                toggle("hot-reload", self.tr("启用热重载", "Enable hot reload"), settings.hot_reload)
+                    .on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.hot_reload = *checked))),
             ))
             .child(setting_row(
                 &p,
@@ -654,21 +661,21 @@ impl AppView {
             }));
         card(&p)
             .child(section_title(&p, self.tr("网络与代理", "Network & proxy"), self.tr("连接范围、流量接管与本地端口", "Access scope, traffic routing and local ports")))
-            .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重启", "Route system traffic through the proxy; requires the privilege helper and restart"),
+            .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重载", "Route system traffic through the proxy; requires the privilege helper and a reload"),
                 toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
-            .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重启", "Restrict traffic from bypassing TUN; restart required"),
+            .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重载", "Restrict traffic from bypassing TUN; reload required"),
                 toggle("tun-strict-route", self.tr("启用严格路由", "Enable strict routing"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.tun_strict_route = *checked)))))
             .child(setting_row(&p, self.tr("系统代理", "System proxy"), self.tr("供遵循系统代理设置的应用使用", "For applications that use the system proxy settings"),
                 toggle("system-proxy", self.tr("启用系统代理", "Enable system proxy"), settings.system_proxy).on_change(cx.listener(|this, checked, _, _| this.service.set_system_proxy(*checked)))))
             .child(setting_row(&p, "PAC", self.tr("根据路由规则自动选择代理", "Choose the proxy automatically using routing rules"),
                 toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
-            .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重启", "Apply after editing; restart required"),
+            .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重载", "Apply after editing; reload required"),
                 div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.port_input)))
                     .when(port_dirty, |d| d.child(Button::new("save-ports").primary().label(self.tr("应用", "Apply")).disabled(port_valid.is_none())
                         .on_click(cx.listener(|this, _, _, cx| { if let Some(port) = valid_port(this.port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.mixed_port = port); } }))))))
             .when(port_dirty && port_valid.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text).child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))
             .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))))
-            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重启", "Allow devices on your LAN to use this proxy; restart required"),
+            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重载", "Allow devices on your LAN to use this proxy; reload required"),
                 toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
             .child(div().flex().child(advanced_toggle))
             .when(self.network_advanced_open, |card| card.child(self.advanced_network_settings(&p, cx)))

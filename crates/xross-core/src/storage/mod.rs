@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -93,7 +93,7 @@ impl Store {
             db_path,
             backup_dir: paths.backup_dir(),
         };
-        store.migrate()?;
+        store.migrate(&paths.settings_file())?;
         store.seed_default_profile()?;
         Ok(Arc::new(store))
     }
@@ -107,7 +107,7 @@ impl Store {
         Ok(())
     }
 
-    fn migrate(&self) -> Result<()> {
+    fn migrate(&self, settings_file: &Path) -> Result<()> {
         let mut conn = self.conn.lock();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -270,6 +270,19 @@ impl Store {
                         params![encrypted, id],
                     )?;
                 }
+            }
+        }
+        if version < 10 && settings_file.exists() {
+            // Settings live outside SQLite. Preserve unknown fields and encrypted values.
+            let bytes = std::fs::read(settings_file)?;
+            if let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_slice(&bytes)
+                && !settings.contains_key("hot_reload")
+            {
+                settings.insert("hot_reload".into(), false.into());
+                crate::util::atomic_write_private(
+                    settings_file,
+                    &serde_json::to_vec_pretty(&settings)?,
+                )?;
             }
         }
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -832,6 +845,31 @@ mod tests {
         let actual: serde_json::Value =
             serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
         assert_eq!(actual, profile);
+    }
+
+    #[test]
+    fn settings_migration_preserves_existing_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        let store = Store::open(&paths).unwrap();
+        for explicit in [None, Some(true)] {
+            store
+                .conn
+                .lock()
+                .pragma_update(None, "user_version", 9)
+                .unwrap();
+            let mut legacy = serde_json::json!({"theme": "dark", "extra": {"flag": true}});
+            if let Some(enabled) = explicit {
+                legacy["hot_reload"] = enabled.into();
+            }
+            std::fs::write(paths.settings_file(), legacy.to_string()).unwrap();
+            store.migrate(&paths.settings_file()).unwrap();
+            let migrated: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(paths.settings_file()).unwrap()).unwrap();
+            assert_eq!(migrated["hot_reload"], explicit.unwrap_or(false));
+            assert_eq!(migrated["theme"], "dark");
+            assert_eq!(migrated["extra"], legacy["extra"]);
+        }
     }
 
     #[test]

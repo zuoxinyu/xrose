@@ -290,6 +290,25 @@ impl CoreManager {
         settings: &Settings,
         core: CoreKind,
     ) -> Result<StartOutcome> {
+        let path = self.paths.generated_config(core.as_str());
+        let outcome = self.prepare_at(model, settings, core, path).await?;
+        self.remember_config(&outcome);
+        Ok(outcome)
+    }
+
+    fn remember_config(&self, outcome: &StartOutcome) {
+        *self.last_compiled.lock() = Some(outcome.compiled.clone());
+        *self.last_config_path.lock() = Some(outcome.config_path.clone());
+        *self.last_core.lock() = Some(outcome.core);
+    }
+
+    async fn prepare_at(
+        &self,
+        model: &AppModel,
+        settings: &Settings,
+        core: CoreKind,
+        config_path: PathBuf,
+    ) -> Result<StartOutcome> {
         let binary = self.resolve_binary(core, settings)?;
         let mut detected_version = None;
         if core == CoreKind::SingBox && model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn())
@@ -354,16 +373,12 @@ impl CoreManager {
                 .core_line(LogStream::App, &format!("WARN {warning}"));
         }
         let pretty = compiled.to_pretty_string()?;
-        let config_path = self.paths.generated_config(core.as_str());
         atomic_write_private(&config_path, pretty.as_bytes())?;
         self.logs.push(
             LogStream::App,
             crate::settings::LogLevel::Info,
             format!("已生成配置：{}", config_path.display()),
         );
-        *self.last_compiled.lock() = Some(compiled.clone());
-        *self.last_config_path.lock() = Some(config_path.clone());
-        *self.last_core.lock() = Some(core);
 
         let report = adapters::validate(core, &binary, &config_path).await?;
         if !report.ok {
@@ -435,6 +450,63 @@ impl CoreManager {
         });
         outcome.started = true;
         Ok(outcome)
+    }
+
+    /// Validate a separate file before interrupting traffic. Keep the last working
+    /// configuration under the operation lock until the replacement is ready.
+    pub(crate) async fn reload(
+        &self,
+        model: &AppModel,
+        settings: &Settings,
+        before_start: impl std::future::Future<Output = ()>,
+    ) -> Result<StartOutcome> {
+        let _guard = self.operation.lock().await;
+        if !self.state().phase.is_alive() {
+            return Err(Error::other("内核已停止，保存的配置将在下次启动时生效"));
+        }
+        let old = self
+            .applied
+            .lock()
+            .clone()
+            .ok_or_else(|| Error::other("缺少已应用配置，请重新启动内核"))?;
+        let core = settings.core;
+        let candidate = self.paths.runtime_dir.join("reload-candidate.json");
+        let result = self
+            .prepare_at(model, settings, core, candidate.clone())
+            .await;
+        let _ = std::fs::remove_file(candidate);
+        let mut outcome = result?;
+        if !outcome.report.ok {
+            return Ok(outcome);
+        }
+        outcome.config_path = self.paths.generated_config(core.as_str());
+        let next = AppliedConfig {
+            model: model.clone(),
+            settings: settings.clone(),
+            core,
+            compiled: outcome.compiled.clone(),
+            path: outcome.config_path.clone(),
+        };
+        self.supervisor.stop().await?;
+        before_start.await;
+        replace_with_rollback(self.spawn_reloaded(&next), async {
+            self.supervisor.stop().await?;
+            self.spawn_reloaded(&old).await
+        })
+        .await?;
+        *self.applied.lock() = Some(next);
+        self.remember_config(&outcome);
+        outcome.started = true;
+        Ok(outcome)
+    }
+
+    async fn spawn_reloaded(&self, applied: &AppliedConfig) -> Result<()> {
+        self.spawn_applied(applied).await?;
+        if applied.core == CoreKind::SingBox {
+            self.restore_mesh_selectors(&applied.compiled, &applied.settings)
+                .await?;
+        }
+        Ok(())
     }
 
     /// sing-box prefers the cached selection over its configured default. A choice made

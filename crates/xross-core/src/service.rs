@@ -6,6 +6,7 @@ mod mesh_exit;
 pub mod mesh_sync;
 mod node_switch;
 mod outbound_groups;
+mod reload;
 mod routing_transfer;
 mod traffic_statistics;
 mod update_check;
@@ -165,6 +166,8 @@ pub struct UiSnapshot {
     #[serde(default)]
     pub active_tun_interface: Option<String>,
     pub config_dirty: bool,
+    #[serde(default)]
+    pub auto_reload_pending: bool,
     pub recovery_note: Option<String>,
     pub rule_set_updates: Vec<RuleSetUpdate>,
     #[serde(default)]
@@ -271,7 +274,9 @@ struct Inner {
     validation: RwLock<Option<ValidationReport>>,
     compiled: RwLock<Option<CompiledConfig>>,
     compiled_json: RwLock<Option<String>>,
-    config_dirty: AtomicBool,
+    reload: Mutex<reload::ReloadState>,
+    reload_wake: tokio::sync::watch::Sender<()>,
+    helper_update_attempted: AtomicBool,
     updates: Mutex<UpdateStatus>,
     doctor: RwLock<Vec<DoctorCheck>>,
     doctor_generation: AtomicU64,
@@ -385,7 +390,9 @@ impl AppService {
             validation: RwLock::new(None),
             compiled: RwLock::new(None),
             compiled_json: RwLock::new(None),
-            config_dirty: AtomicBool::new(false),
+            reload: Mutex::default(),
+            reload_wake: tokio::sync::watch::channel(()).0,
+            helper_update_attempted: AtomicBool::new(false),
             updates: Mutex::new(UpdateStatus::default()),
             doctor: RwLock::new(Vec::new()),
             doctor_generation: AtomicU64::new(0),
@@ -430,6 +437,7 @@ impl AppService {
         }
         service.start_mesh_discovery();
         service.start_monitor();
+        service.start_reload_worker();
         service.start_node_switch_scheduler();
         service.start_subscription_scheduler();
         Ok(service)
@@ -468,6 +476,10 @@ impl AppService {
     }
 
     pub fn snapshot(&self) -> UiSnapshot {
+        let (config_dirty, auto_reload_pending) = {
+            let reload = self.inner.reload.lock();
+            (reload.dirty, reload.due.is_some())
+        };
         let settings = self.inner.settings.read().clone();
         let mut model = self.inner.model.read().clone();
         let mut mesh = self.inner.mesh.snapshot();
@@ -560,7 +572,8 @@ impl AppService {
             pac_url,
             active_proxy_addresses: self.inner.core.active_proxy_addresses(),
             active_tun_interface: self.inner.core.active_tun_interface(),
-            config_dirty: self.inner.config_dirty.load(Ordering::SeqCst),
+            config_dirty,
+            auto_reload_pending,
             recovery_note: self.inner.recovery_note.read().clone(),
             rule_set_updates: self.inner.rule_set_updates.read().clone(),
             route_import: self
@@ -701,6 +714,9 @@ impl AppService {
             set.insert(key.to_string());
         } else {
             set.remove(key);
+            if key == "core" {
+                self.inner.reload_wake.send_replace(());
+            }
         }
     }
 
@@ -823,7 +839,7 @@ impl AppService {
             model.routing.move_rule_to(id, group, target, placement)
         })?;
         if changed {
-            self.inner.config_dirty.store(true, Ordering::SeqCst);
+            self.inner.reload.lock().dirty = true;
         }
         Ok(changed)
     }
@@ -832,15 +848,9 @@ impl AppService {
         let changed =
             self.commit_model_change(|model| model.routing.move_group_to(id, target, placement))?;
         if changed {
-            self.inner.config_dirty.store(true, Ordering::SeqCst);
+            self.inner.reload.lock().dirty = true;
         }
         Ok(changed)
-    }
-
-    fn mark_dirty(&self) {
-        if self.is_running() {
-            self.inner.config_dirty.store(true, Ordering::SeqCst);
-        }
     }
 
     fn sync_model_settings(&self) {
@@ -865,6 +875,16 @@ impl AppService {
                 }
             }
             *current = settings.clone();
+        }
+        if settings.hot_reload != old.hot_reload {
+            self.reload_preference_changed();
+            self.inner
+                .helper_update_attempted
+                .store(false, Ordering::SeqCst);
+            if settings.hot_reload && self.inner.startup_started.load(Ordering::SeqCst) {
+                let service = self.clone();
+                self.spawn(async move { service.check_helper_update().await });
+            }
         }
         if settings.traffic_statistics_enabled != old.traffic_statistics_enabled {
             self.statistics_setting_changed(settings.traffic_statistics_enabled);
@@ -910,7 +930,7 @@ impl AppService {
         self.inner.validation.write().take();
         self.inner.compiled.write().take();
         self.inner.compiled_json.write().take();
-        self.inner.config_dirty.store(false, Ordering::SeqCst);
+        *self.inner.reload.lock() = Default::default();
         self.sync_model_settings();
         self.refresh_doctor();
         self.refresh_profiles();
@@ -1030,15 +1050,14 @@ impl AppService {
 
     pub fn delete_subscription(&self, id: &str) -> Result<()> {
         self.inner.store.delete_subscription(id)?;
-        {
-            let mut model = self.inner.model.write();
-            model.remove_subscription_nodes(id);
+        self.inner.subs.write().retain(|s| s.id != id);
+        self.commit_model_change(|model| {
+            let removed = model.remove_subscription_nodes(id);
             for group in &mut model.groups {
                 group.repair();
             }
-        }
-        let _ = self.persist_model();
-        self.inner.subs.write().retain(|s| s.id != id);
+            Ok(removed > 0)
+        })?;
         self.refresh_doctor();
         self.toast(ToastLevel::Info, "订阅及对应节点已删除");
         Ok(())
@@ -1189,6 +1208,9 @@ impl AppService {
             node.source = crate::model::NodeSource::Subscription;
         }
         let added = model.add_nodes(incoming);
+        if added == 0 {
+            return 0;
+        }
         let new_nodes: Vec<(String, String)> = model
             .nodes
             .iter()
@@ -1382,7 +1404,7 @@ impl AppService {
                         // Fall back to a config reapply if the group is not live.
                         service.toast(
                             ToastLevel::Warning,
-                            format!("实时切换失败，将重启 core：{err}"),
+                            format!("实时切换失败，将重载内核：{err}"),
                         );
                         service.apply_config();
                     }
@@ -1391,7 +1413,7 @@ impl AppService {
         } else {
             self.toast(
                 ToastLevel::Info,
-                "Xray 不支持热切换节点，正在重启 core 以应用新节点",
+                "Xray 不支持热切换节点，正在重载内核以应用新节点",
             );
             self.apply_config();
         }
@@ -1919,11 +1941,14 @@ impl AppService {
             return;
         }
         let settings = self.settings();
-        if settings.startup_proxy {
-            self.start_core();
-        }
         let service = self.clone();
         self.spawn(async move {
+            if settings.hot_reload {
+                service.check_helper_update().await;
+            }
+            if settings.startup_proxy {
+                service.start_core();
+            }
             if settings.check_app_updates {
                 if settings.startup_proxy && settings.proxy_resource_updates {
                     while service.is_busy("core") {
@@ -1977,13 +2002,15 @@ impl AppService {
             self.toast(ToastLevel::Info, "core 已在运行");
             return;
         }
-        if self.is_busy("core") {
+        if !self.inner.busy.write().insert("core".into()) {
             return;
         }
         self.sync_model_settings();
-        let _ = self.persist_model();
+        if self.persist_model().is_err() {
+            self.set_busy("core", false);
+            return;
+        }
         self.refresh_doctor();
-        self.set_busy("core", true);
         let service = self.clone();
         self.spawn(async move {
             let mut settings = service.inner.settings.read().clone();
@@ -2026,7 +2053,6 @@ impl AppService {
                 .core
                 .start(&model, &settings, settings.core)
                 .await;
-            service.set_busy("core", false);
             match result {
                 Ok(outcome) => {
                     let started = service.record_outcome(&outcome);
@@ -2034,12 +2060,8 @@ impl AppService {
                         service.inner.traffic.lock().reset();
                         service.inner.connections.write().clear();
                         service.inner.proxies.write().clear();
-                        service.inner.config_dirty.store(
-                            service.model() != model
-                                || service.settings().requires_core_restart(&settings, &model),
-                            Ordering::SeqCst,
-                        );
-                        if settings.system_proxy {
+                        service.finish_config_apply(&model, &settings);
+                        if service.inner.settings.read().system_proxy {
                             service.enable_system_proxy();
                         }
                         service.toast(
@@ -2056,6 +2078,7 @@ impl AppService {
                     service.toast(ToastLevel::Error, format!("启动失败：{err}"));
                 }
             }
+            service.set_busy("core", false);
         });
     }
 
@@ -2064,10 +2087,10 @@ impl AppService {
             self.toast(ToastLevel::Info, "core 未运行");
             return;
         }
-        if self.is_busy("core") {
+        if !self.inner.busy.write().insert("core".into()) {
             return;
         }
-        self.set_busy("core", true);
+        self.inner.reload.lock().due = None;
         let service = self.clone();
         self.spawn(async move {
             service.poll_traffic_statistics().await;
@@ -2098,21 +2121,22 @@ impl AppService {
         }
     }
 
-    /// Stops (if needed) and starts with the current model. This is the
-    /// "apply changes" path: neither core supports config hot reload.
+    /// Apply the saved intent now, validating before replacing a running core.
     pub fn apply_config(&self) {
-        self.apply_config_with_tun_cleanup(false);
+        self.apply_config_with_tun_cleanup(false, false);
     }
 
-    fn apply_config_with_tun_cleanup(&self, cleanup_old_tun: bool) {
-        if self.is_busy("core") {
+    fn apply_config_with_tun_cleanup(&self, cleanup_old_tun: bool, automatic: bool) {
+        if !self.claim_config_apply(automatic) {
             return;
         }
         self.sync_model_settings();
-        let _ = self.persist_model();
+        if self.persist_model().is_err() {
+            self.set_busy("core", false);
+            return;
+        }
         self.refresh_doctor();
         let was_running = self.is_running();
-        self.set_busy("core", true);
         let service = self.clone();
         self.spawn(async move {
             let mut settings = service.inner.settings.read().clone();
@@ -2146,32 +2170,30 @@ impl AppService {
                     service.toast(ToastLevel::Error, err);
                     return;
                 }
-                service.poll_traffic_statistics().await;
+                if settings.traffic_statistics_enabled {
+                    service.poll_traffic_statistics().await;
+                }
                 service.flush_traffic_statistics().await;
-                if let Err(err) = service.inner.core.stop().await {
-                    service.set_busy("core", false);
-                    service.toast(ToastLevel::Error, format!("重启前停止失败：{err}"));
-                    return;
-                }
-                service.inner.traffic.lock().reset();
-                service.inner.connections.write().clear();
             }
-            if was_running {
-                if cleanup_old_tun {
-                    service.cleanup_tun_interface_via_helper().await;
-                }
-                if let Some(warning) = service.prepare_tun_via_helper().await {
-                    service.toast(
-                        ToastLevel::Warning,
-                        format!("提权助手未能准备 TUN：{warning}"),
-                    );
-                }
+            if automatic && !service.inner.settings.read().hot_reload {
+                service.set_busy("core", false);
+                return;
             }
             let result = if was_running {
                 service
                     .inner
                     .core
-                    .start(&model, &settings, settings.core)
+                    .reload(&model, &settings, async {
+                        if cleanup_old_tun {
+                            service.cleanup_tun_interface_via_helper().await;
+                        }
+                        if let Some(warning) = service.prepare_tun_via_helper().await {
+                            service.toast(
+                                ToastLevel::Warning,
+                                format!("提权助手未能准备 TUN：{warning}"),
+                            );
+                        }
+                    })
                     .await
             } else {
                 service
@@ -2180,26 +2202,25 @@ impl AppService {
                     .prepare(&model, &settings, settings.core)
                     .await
             };
-            service.set_busy("core", false);
             match result {
                 Ok(outcome) => {
                     let ok = service.record_outcome(&outcome);
                     if was_running && ok {
-                        service.inner.config_dirty.store(
-                            service.model() != model
-                                || service.settings().requires_core_restart(&settings, &model),
-                            Ordering::SeqCst,
-                        );
-                        if settings.system_proxy {
+                        service.inner.traffic.lock().reset();
+                        service.inner.connections.write().clear();
+                        service.finish_config_apply(&model, &settings);
+                        if service.inner.settings.read().system_proxy {
                             service.enable_system_proxy();
                         }
-                        service.toast(ToastLevel::Success, "配置已应用，core 已重启");
+                        service.toast(ToastLevel::Success, "配置已应用，内核已重载");
                     } else if !was_running && ok {
+                        service.finish_config_apply(&model, &settings);
                         service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
                     }
                 }
                 Err(err) => service.toast(ToastLevel::Error, format!("应用配置失败：{err}")),
             }
+            service.set_busy("core", false);
         });
     }
 
@@ -2362,10 +2383,10 @@ impl AppService {
                 }
             });
         }
-        if new.core != old.core && self.is_running() {
+        if new.core != old.core && self.is_running() && !new.hot_reload {
             self.toast(
                 ToastLevel::Warning,
-                format!("已切换到 {}，请先停止再启动 core", new.core.display_name()),
+                format!("已选择 {}，需重载内核生效", new.core.display_name()),
             );
         }
         if new.system_proxy != old.system_proxy {
@@ -2444,8 +2465,8 @@ impl AppService {
             return;
         }
         if running {
-            self.toast(ToastLevel::Info, "正在重启 Core 以应用 TUN 设置");
-            self.apply_config_with_tun_cleanup(old_tun);
+            self.toast(ToastLevel::Info, "正在重载 Core 以应用 TUN 设置");
+            self.apply_config_with_tun_cleanup(old_tun, false);
         } else {
             self.toast(ToastLevel::Info, "TUN 设置已保存，下次启动 Core 时生效");
         }
@@ -2481,7 +2502,7 @@ impl AppService {
         let running = self.is_running();
         self.set_route_preset(preset);
         if running {
-            self.toast(ToastLevel::Info, "正在重启 Core 以应用路由设置");
+            self.toast(ToastLevel::Info, "正在重载 Core 以应用路由设置");
             self.apply_config();
         } else {
             self.toast(ToastLevel::Info, "路由设置已保存，下次启动 Core 时生效");
@@ -2861,16 +2882,26 @@ impl AppService {
                     &direct_domains,
                     &direct_cidrs,
                 );
-                match PacServer::start(pac, settings.pac_port) {
-                    Ok(server) => {
-                        server.update_mesh(&service.inner.core.mesh_plan());
-                        let url = server.info.url.clone();
-                        *service.inner.pac.lock() = Some(server);
-                        Some(url)
-                    }
-                    Err(err) => {
-                        service.toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
-                        None
+                let mut running = service.inner.pac.lock();
+                let plan = service.inner.core.mesh_plan();
+                if let Some(server) = running
+                    .as_mut()
+                    .filter(|s| s.info.port == settings.pac_port)
+                {
+                    server.update_script(pac, &plan);
+                    Some(server.info.url.clone())
+                } else {
+                    match PacServer::start(pac, settings.pac_port) {
+                        Ok(server) => {
+                            server.update_mesh(&plan);
+                            let url = server.info.url.clone();
+                            *running = Some(server);
+                            Some(url)
+                        }
+                        Err(err) => {
+                            service.toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
+                            None
+                        }
                     }
                 }
             } else {
@@ -2942,6 +2973,64 @@ impl AppService {
                 *service.inner.helper.write() = status;
             }
         });
+    }
+
+    /// Only GUI startup and enabling hot reload proactively check the installed helper.
+    async fn check_helper_update(&self) {
+        let _guard = self.inner.helper_lock.lock().await;
+        if !self.inner.settings.read().hot_reload {
+            return;
+        }
+        let service = self.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            service.update_outdated_helper(privilege::status())
+        })
+        .await;
+        if let Ok(status) = status {
+            *self.inner.helper.write() = status;
+        }
+    }
+
+    fn claim_helper_update(&self, status: &HelperStatus) -> bool {
+        if !(status.supported
+            && status.installed
+            && status.needs_update
+            && self.inner.settings.read().hot_reload)
+        {
+            return false;
+        }
+        let mut busy = self.inner.busy.write();
+        if busy.contains("helper")
+            || self
+                .inner
+                .helper_update_attempted
+                .swap(true, Ordering::SeqCst)
+        {
+            return false;
+        }
+        busy.insert("helper".into());
+        true
+    }
+
+    /// Called on a blocking worker with helper_lock held. A declined elevation
+    /// prompt can be retried manually without prompting again on every use.
+    fn update_outdated_helper(&self, status: HelperStatus) -> HelperStatus {
+        if !self.claim_helper_update(&status) {
+            return status;
+        }
+        self.toast(ToastLevel::Info, "正在更新提权助手，请完成系统授权");
+        let result = privilege::update();
+        privilege::invalidate_status();
+        let status = privilege::status();
+        self.set_busy("helper", false);
+        match result {
+            Ok(message) => self.toast(ToastLevel::Success, message),
+            Err(err) => self.toast(
+                ToastLevel::Error,
+                format!("提权助手自动更新失败，可在设置中重试：{err}"),
+            ),
+        }
+        status
     }
 
     pub fn install_helper(&self) {
@@ -3026,12 +3115,12 @@ impl AppService {
         let result = tokio::task::spawn_blocking(move || {
             let current = privilege::status();
             if current.running {
-                return (Ok(String::new()), current);
+                return (Ok(String::new()), service.update_outdated_helper(current));
             }
             privilege::invalidate_status();
             let current = privilege::status();
             if current.running {
-                return (Ok(String::new()), current);
+                return (Ok(String::new()), service.update_outdated_helper(current));
             }
             let outcome = if current.installed {
                 service.toast(ToastLevel::Info, "正在启动提权助手…");
@@ -3040,7 +3129,7 @@ impl AppService {
                 service.toast(ToastLevel::Info, "正在安装提权助手，请完成系统授权");
                 privilege::install()
             };
-            (outcome, privilege::status())
+            (outcome, service.update_outdated_helper(privilege::status()))
         })
         .await;
         match result {
@@ -4812,7 +4901,7 @@ mod tests {
         let (service, _dir) = service();
         let profile = service.model();
         let generation = service.inner.doctor_generation.load(Ordering::SeqCst);
-        service.inner.config_dirty.store(true, Ordering::SeqCst);
+        service.inner.reload.lock().dirty = true;
         let mut settings = service.settings();
         settings.privacy_mode = !settings.privacy_mode;
         service.update_settings(settings.clone());
@@ -4872,7 +4961,7 @@ mod tests {
         let (service, _dir) = service();
         service.import_content("vless://11111111-2222-3333-4444-555555555555@pending.example.com:443?security=tls#pending");
         // Represent edits made while a real core was running, without starting one.
-        service.inner.config_dirty.store(true, Ordering::SeqCst);
+        service.inner.reload.lock().dirty = true;
         let before = serde_json::to_value(service.model()).unwrap();
         assert!(service.snapshot().config_dirty);
         let active = service.snapshot().active_profile;

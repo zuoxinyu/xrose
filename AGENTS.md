@@ -24,7 +24,7 @@ Xray / sing-box 跨平台桌面客户端，Rust + GPUI Kit，GPL-3.0-or-later。
 2. 内核不支持的能力：降级并在 `CompiledConfig::warnings` 写中文提示；仅在确实无法编译时返回 `Err`。
 3. UI 只通过 `AppService` 访问核心；方法同步、结果经 `snapshot()` 返回，耗时操作设置 `busy` 并提示。
 4. 不得阻塞 `render`/`tick`，渲染路径中不做网络或磁盘操作。
-5. 无热重载：应用配置 = 写入、内核校验、重启进程。
+5. 「热重载」自动应用保存的配置。运行时先校验候选配置，再替换内核进程；替换失败时尝试恢复原配置。
 6. sing-box 输出面向 1.12+，不得回退到旧版 `geoip`/`geosite` 与旧 DNS 格式。
 
 ## 代码约定

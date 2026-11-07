@@ -5,8 +5,8 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -78,6 +78,15 @@ impl PacServer {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+
+    pub(crate) fn update_script(
+        &mut self,
+        content: String,
+        plan: &crate::mesh::coexist::CoexistencePlan,
+    ) {
+        self.original = content;
+        self.update_mesh(plan);
     }
 
     pub fn update_mesh(&self, plan: &crate::mesh::coexist::CoexistencePlan) {

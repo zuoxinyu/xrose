@@ -1002,8 +1002,8 @@ impl AppView {
                             .text_color(p.fg)
                             .child(if self.snapshot.process.phase.is_alive() {
                                 self.tr(
-                                    "有未应用的配置变更，需重启 Core 生效",
-                                    "Unapplied config changes. Restart Core to apply.",
+                                    "有未应用的配置变更，需重载 Core 生效",
+                                    "Unapplied config changes. Reload Core to apply.",
                                 )
                             } else {
                                 self.tr(
@@ -1019,7 +1019,7 @@ impl AppView {
                     .h(px(crate::ui::theme::CONTROL_HEIGHT))
                     .primary()
                     .label(if self.snapshot.process.phase.is_alive() {
-                        self.tr("立即应用并重启", "Apply & Restart")
+                        self.tr("立即应用并重载", "Apply & Reload")
                     } else {
                         self.tr("校验配置", "Validate configuration")
                     })
@@ -1340,9 +1340,13 @@ impl Render for AppView {
                     .bg(p.bg)
                     .overflow_hidden()
                     .child(self.header(cx))
-                    .when(self.snapshot.config_dirty, |d| {
-                        d.child(self.config_dirty_banner(cx))
-                    })
+                    .when(
+                        self.snapshot.config_dirty
+                            && !(self.snapshot.settings.hot_reload
+                                && (self.snapshot.auto_reload_pending
+                                    || self.snapshot.busy.iter().any(|key| key == "core"))),
+                        |d| d.child(self.config_dirty_banner(cx)),
+                    )
                     .child(
                         div()
                             .id("content-scroll")

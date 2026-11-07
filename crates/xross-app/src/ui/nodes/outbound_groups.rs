@@ -399,8 +399,8 @@ impl AppView {
             cx,
         ))
         .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-            "保存后应用配置并重启内核生效。",
-            "Save, then apply the configuration and restart the core.",
+            "配置在内核重载后生效。",
+            "Changes take effect when the core reloads.",
         )))
         .when_some(error, |d, error| {
             d.child(div().text_sm().text_color(p.danger_text).child(error))
@@ -463,8 +463,8 @@ impl AppView {
                             .child(div().text_xs().text_color(p.muted_fg).child(this.outbound_policy_label(group)))
                     }))
                     .child(div().text_xs().text_color(p.muted_fg).child(this.tr(
-                        "可同时加入多个出站组。保存后应用配置并重启内核生效。",
-                        "A node can belong to multiple groups. Save, then apply and restart the core.",
+                        "可同时加入多个出站组。配置在内核重载后生效。",
+                        "A node can belong to multiple groups. Changes take effect when the core reloads.",
                     )))
                     .when_some(error, |d, error| d.child(div().text_sm().text_color(p.danger_text).child(error)));
                 let editor = editor.clone();
