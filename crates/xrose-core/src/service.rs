@@ -13,8 +13,8 @@ mod traffic_statistics;
 mod update_check;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Once};
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -304,6 +304,7 @@ struct Inner {
     store: Arc<Store>,
     core: Arc<CoreManager>,
     rt: Runtime,
+    shutdown: Once,
     subs: RwLock<Vec<Subscription>>,
     profiles: RwLock<Vec<ProfileMeta>>,
     active_profile: RwLock<Option<String>>,
@@ -428,6 +429,7 @@ impl AppService {
             store,
             core,
             rt,
+            shutdown: Once::new(),
             subs: RwLock::new(subs),
             profiles: RwLock::new(profiles),
             active_profile: RwLock::new(active_profile),
@@ -4407,8 +4409,12 @@ impl AppService {
     // Shutdown and misc
     // ------------------------------------------------------------------
 
-    /// Best-effort cleanup called by the UI on exit.
+    /// Complete best-effort cleanup once, including across cloned service handles.
     pub fn shutdown(&self) {
+        self.inner.shutdown.call_once(|| self.shutdown_inner());
+    }
+
+    fn shutdown_inner(&self) {
         self.inner.rt.block_on(async {
             self.poll_traffic_statistics().await;
             self.flush_traffic_statistics().await;

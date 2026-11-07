@@ -121,7 +121,9 @@ impl RenderOnce for WindowControls {
                             match control {
                                 Control::Minimize => window.minimize_window(),
                                 Control::Maximize { .. } => window.zoom_window(),
-                                Control::Close => cx.quit(),
+                                Control::Close => {
+                                    crate::tray::queue_command(crate::tray::TrayCommand::Quit)
+                                }
                             }
                         })
                     })

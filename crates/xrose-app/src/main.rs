@@ -101,6 +101,13 @@ fn main() {
         .with_assets(brand_assets::BrandAssets)
         .run(move |cx| {
             init(cx);
+            // Native termination can bypass the tray command loop.
+            let quit_service = app_service.clone();
+            cx.on_app_quit(move |_| {
+                quit_service.shutdown();
+                std::future::ready(())
+            })
+            .detach();
             app_icon::install();
             match theme_mode {
                 ThemeMode::Light => Theme::change(ComponentThemeMode::Light, None, cx),
@@ -152,7 +159,7 @@ fn main() {
                         })
                         .detach();
                     let close_service = close_service.clone();
-                    window.on_window_should_close(cx, move |window, cx| {
+                    window.on_window_should_close(cx, move |window, _| {
                         if tray::quitting() {
                             return true;
                         }
@@ -164,9 +171,8 @@ fn main() {
                             tray::hide_main_window();
                             false
                         } else {
-                            tray::request_quit();
-                            cx.quit();
-                            true
+                            tray::queue_command(tray::TrayCommand::Quit);
+                            false
                         }
                     });
                     let service = window_service.clone();
@@ -217,8 +223,14 @@ fn main() {
                                     }
                                     tray::TrayCommand::TogglePopup => {}
                                     tray::TrayCommand::Quit => {
+                                        // Keep the event loop alive to finish quitting after cleanup.
+                                        #[cfg(target_os = "linux")]
+                                        let _ = main_window.update(cx, |_, window, _| window.minimize_window());
+                                        tray::hide_main_window();
+                                        cx.background_executor()
+                                            .spawn(async move { service_for_loop.shutdown() })
+                                            .await;
                                         tray::request_quit();
-                                        service_for_loop.shutdown();
                                         cx.update(|cx| cx.quit());
                                         break;
                                     }

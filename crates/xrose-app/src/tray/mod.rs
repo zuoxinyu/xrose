@@ -79,6 +79,10 @@ impl TrayManager {
             queue_command(command);
         }
         let commands = std::mem::take(&mut *COMMANDS.lock());
+        if commands.contains(&TrayCommand::Quit) {
+            self.popup.dismiss(cx);
+            return Some(TrayCommand::Quit);
+        }
         let mut result = None;
         for command in commands {
             if command == TrayCommand::TogglePopup {

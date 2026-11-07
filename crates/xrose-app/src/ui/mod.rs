@@ -1278,12 +1278,6 @@ impl AppView {
     }
 }
 
-impl Drop for AppView {
-    fn drop(&mut self) {
-        self.service.shutdown();
-    }
-}
-
 impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -1370,8 +1364,7 @@ impl Render for AppView {
                             cx.notify();
                         }
                         "q" => {
-                            crate::tray::request_quit();
-                            cx.quit();
+                            crate::tray::queue_command(crate::tray::TrayCommand::Quit);
                         }
                         _ => {}
                     }
