@@ -3,6 +3,9 @@
 > [!IMPORTANT]
 > **里程碑定位（Pre-Xristina M0）**：在启动自研 Rust 统一数据面内核 **Xristina**（参见 [MILESTONE.M1.PROJECT-XRISTINA.md](MILESTONE.M1.PROJECT-XRISTINA.md) 与 M2 方案 [MILESTONE.M2.XRISTINA-LINK.md](MILESTONE.M2.XRISTINA-LINK.md)）之前，先基于现有 `sing-box`（切换为默认内核）与 `AppModel` 完成上层**产品形态转型**与**核心契约解耦**。完成后，Xrose 在零订阅、零代理节点场景下即可作为全天候的**实时流量监控器、连接捕获与轻量应用防火墙、以及网络诊断工具箱**开箱运行，同时为 `CoreKind::Xristina` 锁定稳定的意图、遥测与诊断接口。
 
+
+> **实现说明**：数据库 v10 已用于热重载设置，v11 已用于清理旧的托盘设置。工作模式迁移使用 v12，支持从 v9、v10、v11 升级。新配置使用系统 DNS，广告拦截规则由用户按需启用，因此首次直连启动无需预下载规则集。[架构与迁移](ARCHITECTURE.md#本机直连与迁移)
+
 ---
 
 ## 一、 战略承接：M0 如何为 Xristina 铺平道路
@@ -34,7 +37,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    P1["M0.1 模型、持久化 v10 与直连编译器"] --> P2["M0.2 置顶「本机直连」虚拟节点与全端交互"]
+    P1["M0.1 模型、持久化 v12 与直连编译器"] --> P2["M0.2 置顶「本机直连」虚拟节点与全端交互"]
     P1 --> P3["M0.3 实时进程/连接监控与轻量防火墙管控"]
     P1 --> P4["M0.4 直连链路 Explain、DNS 对比与系统网络体检"]
     P2 --> DONE["M0 验收交付 (衔接 Xristina M1)"]
@@ -68,10 +71,10 @@ flowchart TD
      * `AppModel::default()` 默认 `work_mode: WorkMode::Direct`（新安装开箱即可点「启动」进入直连监控）。
      * 切换 `work_mode` **绝不覆盖** `routing.preset`、`routing.rules`、`default_group` 或各出站组的 `selected` 节点，确保 `Direct <-> Proxy` 往返无损。
 
-#### 2. 数据库平滑迁移（`SCHEMA_VERSION: 9 -> 10`）
+#### 2. 数据库平滑迁移（`SCHEMA_VERSION: 11 -> 12`）
 * **涉及文件**：[storage/mod.rs](../crates/xrose-core/src/storage/mod.rs#L22)
 * **迁移逻辑**：
-  * 提升 `SCHEMA_VERSION` 至 `10`（自动触发迁移前数据库备份 `backup_before_migration`）。
+  * 提升 `SCHEMA_VERSION` 至 `12`（自动触发迁移前数据库备份 `backup_before_migration`）。
   * 遍历 `profiles` 表解密 JSON：若记录尚无 `work_mode` 字段：
     * 当 `model["nodes"]` 为非空数组时，写入 `"work_mode": "proxy"`（**保障升级老用户保持原有代理行为，零破坏性变更**）；
     * 当 `model["nodes"]` 为空时，写入 `"work_mode": "direct"`。
@@ -237,7 +240,7 @@ flowchart TD
 
 | Crate / 模块 | 关键文件 | 主要职责 |
 | :--- | :--- | :--- |
-| **`xrose-core` 模型与存储** | `model/mod.rs`, `settings.rs`, `storage/mod.rs` | `CoreKind` 默认切为 `SingBox`；新增 `WorkMode` 与 `DIRECT_VIRTUAL_NODE_ID`；SQLite `SCHEMA_VERSION` 升至 `10` 平滑迁移新老配置 |
+| **`xrose-core` 模型与存储** | `model/mod.rs`, `settings.rs`, `storage/mod.rs` | `CoreKind` 默认切为 `SingBox`；新增 `WorkMode` 与 `DIRECT_VIRTUAL_NODE_ID`；SQLite `SCHEMA_VERSION` 升至 `12` 平滑迁移新老配置 |
 | **`xrose-core` 编译器** | `adapters/mod.rs`, `adapters/singbox.rs`, `adapters/xray.rs` | 直连模式零节点编译、`Block` 规则保留、代理 `detour` DNS 防断网剥离、按需规则集筛选 |
 | **`xrose-core` 遥测与服务** | `flow.rs` *(新增)*, `runtime/clash.rs`, `service.rs`, `service/node_switch.rs`, `traffic_statistics.rs` | 连接/进程实时速率追踪器、Clash 连接断开 API、直连/代理模式切换事务、PAC 与自动切换适配 |
 | **`xrose-core` 网络诊断** | `trace.rs`, `dns/probe.rs` *(新增)*, `system/net_diag.rs` *(新增)*, `system/port_owner.rs`, `system/tun.rs` | 直连链路测试与 `Block` 命中解释、多上游 DNS 对比探测、免内核网卡/路由/DNS/端口/助手一体化体检 |
@@ -252,7 +255,7 @@ flowchart TD
 > 所有自动化测试严格遵守 [AGENTS.md](../AGENTS.md#L39) 铁律：**不依赖真实网络、运行中内核、root 权限或显示器**，测试夹具一律使用 RFC 5737 保留地址（如 `192.0.2.x`、`example.org`）等虚构数据；CLI 验证全部在隔离目录 `XROSE_HOME=/tmp/xrose-m0-demo` 下执行。
 
 1. **核心层离线单元测试（`cargo test -p xrose-core`）**：
-   * **模式与迁移测试**：全新空库默认 `WorkMode::Direct` + `CoreKind::SingBox`；v9 旧库升级至 v10 时，含节点配置自动迁移为 `Proxy`、空节点配置自动迁移为 `Direct`，加密完整性与未知字段保留无损。
+   * **模式与迁移测试**：全新空库默认 `WorkMode::Direct` + `CoreKind::SingBox`；v9、v10、v11 旧库升级至 v12 时，含节点配置自动迁移为 `Proxy`、空节点配置自动迁移为 `Direct`，加密完整性与未知字段保留无损。
    * **直连编译边界测试**：零节点配置在 `SingBoxAdapter` 与 `XrayAdapter` 下编译成功；`Block` 规则正确生成 `reject`/`blackhole`；`Proxy` 规则归入 `direct`；带 `detour` 的加密 DNS 被剥离且全部被剥离时安全回退 `local` 并产出中文警告；`required_rule_sets` 在直连模式下不包含仅被 `Proxy` 规则引用的 `geosite-gfw`；组网共存路由与 MagicDNS 在直连模式下原样保留。
    * **实时流追踪测试**：`FlowRateTracker` 在连续采样、短连接出现与消失、字节计数回退（内核重启）场景下的速率与进程聚合计算准确性。
    * **诊断与脱敏测试**：`trace` 直连路由与 `Block` 规则命中归因；`net_diag` 输出在开启/关闭 `privacy_mode` 下的地址遮罩完整性。

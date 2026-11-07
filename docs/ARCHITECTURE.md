@@ -5,6 +5,7 @@
 若直接以某个 core 的 JSON 建模，第二个 core 会到处漏。Xrose 的 `AppModel`
 只描述用户意图：
 
+- `work_mode` 保存本机直连或代理，与分流模板、出站组选择独立。
 - `nodes`：协议 + 凭据 + TLS/传输，不含 core 字段名；
 - `groups`：selector / urltest / fallback / loadbalance；
 - `routing.rules`：语义 matcher（geosites / geoips / rule_sets / process ...）；
@@ -13,6 +14,14 @@
 
 `adapters::CoreAdapter::compile` 是唯一可以出现 `outbounds`、`protocol`、
 `route` 这类字段名的地方。
+
+## 本机直连与迁移
+
+新配置默认采用 sing-box、`WorkMode::Direct` 和系统 DNS，默认广告拦截规则由用户启用。节点页、顶栏和托盘共用工作模式选择接口。虚拟标识 `__xrose_direct__` 仅用于界面。节点计数、节点订阅、分享、组网同步只处理实际节点。
+
+数据库 v10 迁移热重载偏好，v11 移除旧的最小化到托盘设置。v12 在迁移前备份，逐条解密配置，为缺少工作模式的旧配置写入 `proxy`（有节点）或 `direct`（空节点），并加密保存。已声明的模式和未知 JSON 字段保留。选择工作模式只修改该字段，点选真实节点或组网出口时，工作模式与节点选择一起保存。
+
+直连编译省略远端出站与前置代理，代理动作使用直连，启用的阻止规则、组网路由及 MagicDNS 继续生效。依赖代理的 DNS 上游及其分域规则会跳过并给出警告，缺少可用上游时使用系统 DNS。预下载范围限于拦截规则和有效 DNS 上游的依赖。开启系统代理且未启用 TUN 时，直连流量经本机 HTTP 或 mixed 入站，以便统计和拦截。
 
 ## 关键差异与处理
 
@@ -36,7 +45,8 @@
 | GFWList 来源 | `geosite:gfw`（需对应资产） | `geosite-gfw` rule-set | 使用 MetaCubeX `gfw.srs`；编译、预下载、手动更新共用来源解析 |
 | fake-ip | 不支持 | 原生（1.12+ typed DNS） | Xray 跳过 DNS fakeip server |
 | DNS schema | `servers[].address` | 1.12+ typed server + domain_resolver | 只生成新式 DNS |
-| 连接列表 | 无 | Clash API | 界面区分 core 能力 |
+| 连接列表与断开 | 无 | Clash API | 支持断开单条或确认断开全部连接 |
+| 实时进程视图 | 无 | 活跃连接按进程聚合 | 支持按进程查看连接与创建阻止规则 |
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求导致缺失时明确提示 |
 | 实时统计 | StatsService(gRPC) | Clash API | Xray 通过 `xray api statsquery` |
 | 历史流量统计 | 业务入站总量、节点与直连出站计数 | 总量及节点／进程／主域名分类 | 默认关闭，按会话与本地自然日保存，周一为每周起点；柱状图与表格共用查询结果 |
@@ -103,6 +113,12 @@ HTTP 排除测试前已有连接，但同时访问相同目标时仍可能无法
 core 不暴露连接 DNS 解析器时明确显示不可得；返回路径是根据已使用的连接推导，时间仅表示端到端探测耗时。
 诊断规则使用精确域名、单 IP（/32 或 /128）或进程名，去重后在用户规则中置顶保存，
 内置 LAN/中国 IP 绕过仍优先，规则变更按热重载设置应用。
+
+## 实时流量与系统诊断
+
+`flow::FlowRateTracker` 接收连接标识、建立时间、进程和累计字节。后台采样用单调时钟计算速率，按当前活跃连接汇总进程并生成排序索引。界面从同一快照读取明细和指标。历史累计器单独处理跨采样、跨天及内核重启。
+
+链路测试按工作模式预览实际启用的规则，并报告阻止规则及所属分组。DNS 对比分别发起 A 与 AAAA 查询，显示各上游的回答、耗时及地址差异。系统网络报告在后台按需采集，通过测试页与 CLI 共用。隐私模式在展示、复制时使用脱敏结果。UDP 连通性与 NAT 类型通过用户单独发起的 STUN 探测获得。
 
 ## 历史流量统计
 
