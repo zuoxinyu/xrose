@@ -71,6 +71,9 @@ tonic = { version = "0.14", features = ["transport"] }
 tonic-prost = "0.14"
 widestring = "1.2"
 raw-window-handle = "0.6"
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "screenshot"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 ksni = { version = "0.3.7", features = ["blocking"] }
 notify-rust = "4.11"
 block = "0.1.6"

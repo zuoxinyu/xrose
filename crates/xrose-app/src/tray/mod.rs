@@ -85,6 +85,14 @@ impl TrayManager {
         }
         let mut result = None;
         for command in commands {
+            #[cfg(target_os = "linux")]
+            if command.shows_main_window() {
+                result = Some(command);
+                continue;
+            } else if command == TrayCommand::TrayUnavailable {
+                result.get_or_insert(command);
+                continue;
+            }
             if command == TrayCommand::TogglePopup {
                 self.popup.toggle(service, backend::popup_anchor(), cx);
             } else {
@@ -94,6 +102,11 @@ impl TrayManager {
         }
         self.popup.tick(service, cx);
         result
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn dismiss_popup(&mut self, cx: &mut App) {
+        self.popup.dismiss(cx);
     }
 }
 

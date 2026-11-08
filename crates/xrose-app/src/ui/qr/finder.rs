@@ -62,6 +62,8 @@ fn analysis_region(position: [f32; 2], dims: [f32; 2]) -> Rect {
 }
 
 struct Finder {
+    #[cfg(target_os = "linux")]
+    main: AnyWindowHandle,
     input: Option<DesktopInput>,
     codes: Vec<Code>,
     summaries: Vec<ScanSummary>,
@@ -73,8 +75,7 @@ struct Finder {
     palette: Palette,
     lang: Language,
     privacy: bool,
-    display: DisplayId,
-    center: (i32, i32),
+    target: platform::CaptureTarget,
     revision: u32,
     generation: u64,
     scan_at: Option<Instant>,
@@ -104,10 +105,7 @@ impl AppView {
         let work_area = display.visible_bounds();
         let status_bottom = (bounds.bottom() - work_area.bottom()).max(px(0.))
             + (work_area.size.height * 0.12).clamp(px(PAGE_PAD), px(6. * PAGE_PAD));
-        let center = (
-            f32::from(bounds.center().x) as i32,
-            f32::from(bounds.center().y) as i32,
-        );
+        let target = platform::CaptureTarget::new(display.as_ref(), cx);
         let main = window.window_handle();
         let owner = cx.weak_entity();
         let lang = self.lang();
@@ -116,6 +114,8 @@ impl AppView {
         self.scan_pending = true;
         let options = WindowOptions {
             display_id: Some(id),
+            #[cfg(target_os = "linux")]
+            app_id: Some(crate::APP_ID.into()),
             window_bounds: Some(if cfg!(target_os = "linux") {
                 WindowBounds::Fullscreen(bounds)
             } else {
@@ -197,6 +197,8 @@ impl AppView {
                     });
                 });
                 Finder {
+                    #[cfg(target_os = "linux")]
+                    main,
                     input,
                     codes: vec![],
                     summaries: vec![],
@@ -208,8 +210,7 @@ impl AppView {
                     palette: colors,
                     lang,
                     privacy,
-                    display: id,
-                    center,
+                    target,
                     revision: 0,
                     generation: 0,
                     scan_at: None,
@@ -254,6 +255,17 @@ fn restore(window: &mut Window, cx: &mut App) {
 }
 
 impl Finder {
+    fn close(&self, window: &mut Window, cx: &mut App) {
+        // Request focus while the surface carrying the last input serial still exists.
+        #[cfg(target_os = "linux")]
+        if cx.compositor_name() == "Wayland" {
+            let _ = self.main.update(cx, |_, main, _| main.activate_window());
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = cx;
+        window.remove_window();
+    }
+
     fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.codes.clear();
@@ -270,7 +282,7 @@ impl Finder {
             self.invalidate();
         }
     }
-    fn select(&mut self, pos: [f32; 2], window: &mut Window) {
+    fn select(&mut self, pos: [f32; 2], window: &mut Window, cx: &mut App) {
         self.click_cursor = Some((Instant::now() + CLICK_CURSOR_TIME, pos));
         if let Some(input) = &mut self.input {
             input.set_cursor_visible(true);
@@ -278,7 +290,7 @@ impl Finder {
         let size = window.viewport_size();
         if let Some((i, _)) = nearest(&self.codes, pos, [size.width.into(), size.height.into()]) {
             self.selection = Some(self.codes[i].text.clone());
-            window.remove_window();
+            self.close(window, cx);
         }
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -290,7 +302,7 @@ impl Finder {
         if let Some(input) = &mut self.input {
             let sample = input.sample();
             if sample.cancel {
-                window.remove_window();
+                self.close(window, cx);
                 return;
             }
             if self.revision != sample.revision {
@@ -303,7 +315,7 @@ impl Finder {
                 cx.notify();
             }
             if let Some(click) = sample.clicked {
-                self.select(click, window);
+                self.select(click, window, cx);
                 cx.notify();
             }
         }
@@ -331,17 +343,12 @@ impl Finder {
         self.scan_at = None;
         self.sampled_at = Some(self.position);
         let region = analysis_region(self.position, dims);
-        let (id, center, generation, privacy, lang) = (
-            self.display,
-            self.center,
-            self.generation,
-            self.privacy,
-            self.lang,
-        );
+        let (target, generation, privacy, lang) =
+            (self.target, self.generation, self.privacy, self.lang);
         cx.spawn_in(window, async move |view, cx| {
             let worker = cx
                 .background_executor()
-                .spawn(async move { scan_desktop(id, center, region, privacy, lang) });
+                .spawn(async move { scan_desktop(target, region, privacy, lang).await });
             let result = tokio::select! {
                 result = worker => result,
                 _ = cx.background_executor().timer(Duration::from_secs(30)) =>
@@ -352,7 +359,7 @@ impl Finder {
                 match result {
                     Err(error) => {
                         finder.error = Some(error);
-                        window.remove_window();
+                        finder.close(window, cx);
                     }
                     Ok((codes, summaries)) if finder.generation == generation => {
                         finder.codes = codes;
@@ -370,14 +377,13 @@ impl Finder {
     }
 }
 
-fn scan_desktop(
-    id: DisplayId,
-    center: (i32, i32),
+async fn scan_desktop(
+    target: platform::CaptureTarget,
     region: Rect,
     privacy: bool,
     lang: Language,
 ) -> Result<(Vec<Code>, Vec<ScanSummary>), platform::CaptureError> {
-    let local = platform::capture(id, center, region)?;
+    let local = platform::capture(target, region).await?;
     let mut codes = decode::screen_codes(&local);
     for code in &mut codes {
         for (i, v) in code.rect.iter_mut().enumerate() {
@@ -387,7 +393,7 @@ fn scan_desktop(
     // A large QR can extend beyond all four brackets. Its whole-screen
     // thumbnail is sufficient to decode it without scanning a native 5K frame.
     if codes.is_empty() && region != [0., 0., 1., 1.] && !platform::uses_portal() {
-        let overview = platform::capture(id, center, [0., 0., 1., 1.])?;
+        let overview = platform::capture(target, [0., 0., 1., 1.]).await?;
         codes = decode::screen_codes(&overview);
     }
     let summaries = codes
@@ -537,17 +543,17 @@ impl Render for Finder {
             .size_full()
             .overflow_hidden()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|s, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    window.remove_window();
+                    s.close(window, cx);
                 }
             }))
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|_, _, window, cx| {
+                cx.listener(|s, _, window, cx| {
                     cx.stop_propagation();
-                    window.remove_window();
+                    s.close(window, cx);
                 }),
             )
             .on_mouse_down(
@@ -556,7 +562,7 @@ impl Render for Finder {
                     if s.input.is_none() {
                         let pos = [event.position.x.into(), event.position.y.into()];
                         s.move_to(pos);
-                        s.select(pos, window);
+                        s.select(pos, window, cx);
                         cx.notify();
                     }
                 }),

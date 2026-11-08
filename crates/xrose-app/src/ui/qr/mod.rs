@@ -4,6 +4,8 @@ mod finder;
 #[cfg(target_os = "linux")]
 mod linux;
 mod platform;
+#[cfg(target_os = "linux")]
+mod portal;
 #[cfg(windows)]
 mod windows;
 

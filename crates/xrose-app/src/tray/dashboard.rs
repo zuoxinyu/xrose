@@ -237,10 +237,21 @@ pub enum TrayAction {
 /// path). Everything else is applied directly from the tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
+    #[cfg(target_os = "linux")]
+    CloseMainWindow,
+    #[cfg(target_os = "linux")]
+    TrayUnavailable,
     TogglePopup,
     ShowWindow,
     ShowSettings,
     Quit,
+}
+
+#[cfg(target_os = "linux")]
+impl TrayCommand {
+    pub(super) fn shows_main_window(self) -> bool {
+        matches!(self, Self::ShowWindow | Self::ShowSettings)
+    }
 }
 
 pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand> {

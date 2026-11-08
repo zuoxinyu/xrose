@@ -104,7 +104,7 @@
 ### 链接与二维码导入
 
 - **多通道导入**：节点页与订阅页共用 `ui/qr` 管线，支持剪贴板粘贴、文件/图片拖放及屏幕二维码扫描，最终统一交由 `AppService::import_shared_content` 与订阅解析器处理，识别 v2rayN VMess JSON、标准 URI 与 Shadowrocket 编码链接（参考 [v2rayN 导出](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib/Handler/Fmt) 与 [Shadowrocket 生成格式](https://github.com/cedar2025/Xboard/blob/master/app/Protocols/Shadowrocket.php)）。
-- **屏幕取景扫描**：透明取景框在后台采集指针附近区域（最长边 1024px；macOS 使用 ScreenCaptureKit，Windows / Linux 使用 XCap），支持跨屏幕与滚动失效判定；预览与批量导出均遵循隐私模式与原始节点顺序。
+- **屏幕取景扫描**：透明取景框在后台采集指针附近的区域，识别图像最长边为 1024px。切换屏幕或滚动时，上次识别结果失效。KDE Wayland 在同一条 D-Bus 连接上登记应用标识并请求桌面截图，再按显示器逻辑坐标裁取识别区域。macOS 使用 ScreenCaptureKit，Windows 和其他 Linux 会话使用 XCap。预览与批量导出均遵循隐私模式与原始节点顺序。
 
 ## 8. 连接诊断与流量统计
 
@@ -168,8 +168,9 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
           AppService ◀── 用户动作 ──▶ 主窗口 / 设置 / 退出
 ```
 
-- **托盘浮窗**：三端共用 `tray::popup` 渲染与 `tray::dashboard` 快照，包含状态、直连/节点切换、路由预设下拉、TUN 开关、组网状态与测速入口；Windows 按显示器 DPI 定位并在任务栏方向执行 250ms/167ms 非阻塞滑入动画，遵循系统动态效果开关；Linux D-Bus 注册在独立线程完成，无宿主时 `available()` 返回 `false`，关闭窗口直接退出。主窗口句柄独立跟踪，浮窗复用不影响主窗口隐藏恢复。
-- **窗口材质**：`Settings.backdrop` 仅影响客户端外观，主题切换后重新执行 `window_effects::make_surface_translucent`；Windows 切换时清理旧 accent policy 并重设 DWM 客户区扩展，不支持模糊的环境回退纯色面板。
+- **托盘浮窗**：三端共用 `tray::popup` 渲染与 `tray::dashboard` 快照，包含状态、直连/节点切换、路由预设下拉、TUN 开关、组网状态与测速入口；Windows 按显示器 DPI 定位并在任务栏方向执行 250ms/167ms 非阻塞滑入动画，遵循系统动态效果开关；Linux D-Bus 注册在独立线程完成，无宿主时 `available()` 返回 `false`，关闭窗口直接退出。主窗口句柄独立跟踪，浮窗复用不影响主窗口隐藏恢复。Wayland 通过 xdg-output 的逻辑坐标选择显示器，支持 layer-shell 时沿托盘所在面板的边缘定位，否则使用普通浮窗。
+- **关闭到托盘**：Windows 和 macOS 隐藏主窗口。KDE 撤下主窗口及其任务栏条目，服务和托盘继续运行。从托盘恢复时重建控件并恢复页面和筛选条件。托盘宿主离线时自动恢复隐藏的主窗口。其他 Linux 桌面最小化主窗口。
+- **窗口材质**：`Settings.backdrop` 仅影响客户端外观，主题切换后重新执行 `window_effects::make_surface_translucent`；Windows 切换时清理旧 accent policy 并重设 DWM 客户区扩展，Wayland 按合成器公布的模糊能力提供毛玻璃，X11 与不支持模糊的环境使用纯色面板。
 - **调试与发布变量**：
   - 发布构建设置 `XROSE_GITHUB_REPOSITORY=<owner>/<repo>` 可启用「关于」页项目链接与客户端版本检查；未配置仍可检查内核更新。
   - 开发验证可在隔离 `XROSE_HOME` 下设置 `XROSE_TRAY_PREVIEW=1` 自动弹出托盘浮窗（debug 构建主窗口支持 `Ctrl/Cmd+Shift+T` 复现打开）。

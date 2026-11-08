@@ -6,7 +6,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
-use gpui_kit::{Window, WindowAppearance, point, px};
+use gpui_kit::{Bounds, Pixels, Point, Window, WindowAppearance, WindowKind, point, px};
 use ksni::blocking::TrayMethods;
 use parking_lot::Mutex;
 use xrose_core::AppService;
@@ -25,7 +25,7 @@ struct Item {
 
 impl ksni::Tray for Item {
     fn id(&self) -> String {
-        "io.xrose.Xrose".into()
+        crate::APP_ID.into()
     }
     fn title(&self) -> String {
         self.dashboard.status_line.clone()
@@ -86,7 +86,7 @@ impl ksni::Tray for Item {
     }
     fn watcher_offline(&self, _reason: ksni::OfflineReason) -> bool {
         WATCHER_OFFLINE.store(true, Ordering::Relaxed);
-        READY.store(false, Ordering::Relaxed);
+        mark_unavailable();
         true
     }
 }
@@ -135,7 +135,7 @@ impl Backend {
                         break;
                     }
                 }
-                READY.store(false, Ordering::Relaxed);
+                mark_unavailable();
                 let _ = handle.shutdown();
             })
             .ok()?;
@@ -154,12 +154,17 @@ impl Backend {
     }
 }
 
+fn mark_unavailable() {
+    if READY.swap(false, Ordering::Relaxed) {
+        super::queue_command(TrayCommand::TrayUnavailable);
+    }
+}
+
 pub fn available() -> bool {
     READY.load(Ordering::Relaxed)
 }
 pub fn register_main_window(_window: &Window) {}
-// GPUI exposes minimize/activate on Linux, but no portable hide/unhide for a
-// Wayland toplevel. The main loop uses those operations for this backend.
+// The application owns withdrawal and restoration of the KDE main window.
 pub fn hide_main_window() {}
 pub fn show_main_window() {}
 pub fn setup_window() {}
@@ -182,4 +187,84 @@ pub fn hide_popup(window: &mut gpui_kit::Window) {
 }
 pub fn show_popup(window: &mut gpui_kit::Window, _bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
     window.activate_window();
+}
+
+/// The compositor places a zero-exclusive-zone layer inside the usable area,
+/// so its near edge clears the panel even when it floats or changes thickness.
+pub fn popup_layer(
+    at: Option<Point<Pixels>>,
+    bounds: Bounds<Pixels>,
+    screen: Bounds<Pixels>,
+) -> WindowKind {
+    use gpui_kit::layer_shell::{Anchor, LayerShellOptions};
+    let gap = px(8.);
+    let zero = px(0.);
+    let at = at.unwrap_or(screen.bottom_right());
+    let edges = [
+        (Anchor::BOTTOM, screen.bottom() - at.y),
+        (Anchor::TOP, at.y - screen.top()),
+        (Anchor::RIGHT, screen.right() - at.x),
+        (Anchor::LEFT, at.x - screen.left()),
+    ];
+    let (edge, _) = edges
+        .into_iter()
+        .min_by_key(|(_, distance)| *distance)
+        .unwrap();
+    let left = bounds.left() - screen.left();
+    let top = (at.y - bounds.size.height / 2. - screen.top()).clamp(
+        gap,
+        (screen.size.height - bounds.size.height - gap).max(gap),
+    );
+    let (anchor, margin) = match edge {
+        Anchor::TOP => (Anchor::TOP | Anchor::LEFT, (gap, zero, zero, left)),
+        Anchor::BOTTOM => (Anchor::BOTTOM | Anchor::LEFT, (zero, zero, gap, left)),
+        Anchor::LEFT => (Anchor::TOP | Anchor::LEFT, (top, zero, zero, gap)),
+        _ => (Anchor::TOP | Anchor::RIGHT, (top, gap, zero, zero)),
+    };
+    WindowKind::LayerShell(LayerShellOptions {
+        namespace: "io.xrose.Xrose.Tray".into(),
+        anchor,
+        margin: Some(margin),
+        ..Default::default()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_kit::{layer_shell::Anchor, size};
+
+    #[test]
+    fn anchors_to_the_clicked_panel_in_output_local_coordinates() {
+        let screen = Bounds::new(point(px(-1200.), px(-100.)), size(px(1200.), px(800.)));
+        let popup = Bounds::new(point(px(-800.), px(80.)), size(px(400.), px(528.)));
+        for (position, edges, margins) in [
+            (
+                (-600., 696.),
+                Anchor::BOTTOM | Anchor::LEFT,
+                (0., 0., 8., 400.),
+            ),
+            (
+                (-600., -96.),
+                Anchor::TOP | Anchor::LEFT,
+                (8., 0., 0., 400.),
+            ),
+            (
+                (-1198., 350.),
+                Anchor::TOP | Anchor::LEFT,
+                (186., 0., 0., 8.),
+            ),
+            ((-2., 350.), Anchor::TOP | Anchor::RIGHT, (186., 8., 0., 0.)),
+        ] {
+            let at = point(px(position.0), px(position.1));
+            let WindowKind::LayerShell(options) = popup_layer(Some(at), popup, screen) else {
+                panic!("expected a layer surface");
+            };
+            assert_eq!(options.anchor, edges);
+            assert_eq!(
+                options.margin,
+                Some((px(margins.0), px(margins.1), px(margins.2), px(margins.3)))
+            );
+        }
+    }
 }

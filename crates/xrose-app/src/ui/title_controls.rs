@@ -122,6 +122,11 @@ impl RenderOnce for WindowControls {
                                 Control::Minimize => window.minimize_window(),
                                 Control::Maximize { .. } => window.zoom_window(),
                                 Control::Close => {
+                                    #[cfg(target_os = "linux")]
+                                    crate::tray::queue_command(
+                                        crate::tray::TrayCommand::CloseMainWindow,
+                                    );
+                                    #[cfg(not(target_os = "linux"))]
                                     crate::tray::queue_command(crate::tray::TrayCommand::Quit)
                                 }
                             }

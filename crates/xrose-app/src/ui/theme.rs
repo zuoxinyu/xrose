@@ -52,6 +52,10 @@ pub fn interaction_tint(dark: bool) -> Hsla {
     }
 }
 
+// Wayland blur filters the pixels behind the surface without adding a system tint.
+#[cfg(target_os = "linux")]
+const WAYLAND_SURFACE_ALPHA: f32 = 0.87;
+
 impl Palette {
     /// Mica and macOS vibrancy supply their own tint through a clear sidebar.
     /// Acrylic and vibrancy over a bright wallpaper get a theme-matched tint so
@@ -63,6 +67,9 @@ impl Palette {
         if crate::window_effects::uses_mica() {
             return gpui_kit::hsla(0., 0., 0., 0.);
         }
+        #[cfg(target_os = "linux")]
+        return self.panel.opacity(WAYLAND_SURFACE_ALPHA);
+        #[cfg(not(target_os = "linux"))]
         if self.is_dark {
             hsl(220., 0.18, 0.08).opacity(0.62)
         } else {
@@ -176,6 +183,7 @@ pub fn latency_label(
 /// Shared geometry and opacity tokens for the desktop surfaces.
 pub const PAGE_PAD: f32 = 24.;
 pub const CONTROL_HEIGHT: f32 = 32.;
+pub const SIDEBAR_WIDTH: f32 = 220.;
 pub const HEADER_HEIGHT: f32 = 54.;
 pub const HEADER_DRAG_GAP: f32 = 24.;
 pub const STATUS_HEIGHT: f32 = 28.;

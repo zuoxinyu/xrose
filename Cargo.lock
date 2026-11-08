@@ -12139,6 +12139,7 @@ name = "xrose-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "block",
  "cc",
  "chrono",
@@ -12164,6 +12165,10 @@ dependencies = [
  "smallvec",
  "tempfile",
  "tokio",
+ "url",
+ "uuid",
+ "wayland-client",
+ "wayland-protocols",
  "windows-sys 0.59.0",
  "winreg 0.55.0",
  "x11rb",

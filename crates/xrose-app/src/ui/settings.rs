@@ -285,7 +285,7 @@ impl AppView {
                     this.sync(cx);
                 })),
             ))
-            .when(cfg!(any(windows, target_os = "macos")), |card| {
+            .when(backdrop_setting_available(), |card| {
                 let choices = backdrop_choices();
                 let selected = choices
                     .iter()
@@ -1516,6 +1516,13 @@ mod tests {
 }
 
 /// Offer native materials only on the platforms that implement them.
+fn backdrop_setting_available() -> bool {
+    #[cfg(target_os = "linux")]
+    return crate::wayland::desktop().blur;
+    #[cfg(not(target_os = "linux"))]
+    return cfg!(any(windows, target_os = "macos"));
+}
+
 fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
     let mut choices = vec![(BackdropStyle::Auto, "自动", "Auto")];
     if cfg!(windows) {
@@ -1528,6 +1535,8 @@ fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
     if cfg!(target_os = "macos") {
         choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Vibrancy"));
     }
+    #[cfg(target_os = "linux")]
+    choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Blur"));
     choices.push((BackdropStyle::Opaque, "纯色", "Solid"));
     choices
 }

@@ -20,6 +20,10 @@ mod subscriptions;
 pub(crate) mod theme;
 mod title_controls;
 mod traffic_statistics;
+#[cfg(target_os = "linux")]
+mod tray_state;
+#[cfg(target_os = "linux")]
+pub(crate) use tray_state::TrayWindowState;
 mod widgets;
 
 use std::time::Duration;
@@ -274,6 +278,8 @@ pub struct AppView {
 
 impl AppView {
     pub fn new(service: AppService, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        #[cfg(target_os = "linux")]
+        crate::wayland::main_window::install(window, cx);
         let snapshot = service.snapshot();
         let mixed_port = snapshot.settings.mixed_port.to_string();
         let sub_name = text_input(window, cx, "订阅名称（可选）");
@@ -598,7 +604,7 @@ impl AppView {
         let lang = self.lang();
         div()
             .id("sidebar-container")
-            .w(px(220.))
+            .w(px(theme::SIDEBAR_WIDTH))
             .h_full()
             .flex()
             .flex_col()

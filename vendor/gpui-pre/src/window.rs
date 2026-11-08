@@ -1222,6 +1222,8 @@ pub struct Window {
     pub(crate) display_id: Option<DisplayId>,
     pub(crate) display_observers: SingleSubscriberSet<AnyObserver>,
     is_resizable: bool,
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    is_layer_surface: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
     text_system: Rc<WindowTextSystem>,
@@ -1671,6 +1673,8 @@ impl Window {
             .and_then(|titlebar| titlebar.title.clone());
 
         let window_bounds = window_bounds.unwrap_or_else(|| default_bounds(display_id, cx));
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        let is_layer_surface = matches!(kind, crate::WindowKind::LayerShell(_));
         let mut platform_window = cx.platform.open_window(
             handle,
             WindowParams {
@@ -2352,6 +2356,8 @@ impl Window {
             platform_window,
             display_id,
             display_observers: SingleSubscriberSet::new(),
+            #[cfg(all(target_os = "linux", feature = "wayland"))]
+            is_layer_surface,
             is_resizable,
             is_minimizable,
             sprite_atlas,
@@ -3251,6 +3257,12 @@ impl Window {
 
     /// Returns whether the title bar window controls need to be rendered by the application (Wayland and X11)
     pub fn window_decorations(&self) -> Decorations {
+        // A layer surface has no toplevel frame. Client-side shadow insets
+        // would enlarge its buffer beyond the compositor-configured layer size.
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        if self.is_layer_surface {
+            return Decorations::Server;
+        }
         self.platform_window.window_decorations()
     }
 

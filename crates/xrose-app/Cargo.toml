@@ -56,6 +56,11 @@ windows-sys = { version = "0.59", features = [
 freedesktop-icons.workspace = true
 freedesktop-desktop-entry.workspace = true
 resvg.workspace = true
+ashpd.workspace = true
+url.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+wayland-client.workspace = true
+wayland-protocols.workspace = true
 ksni.workspace = true
 x11rb.workspace = true
 

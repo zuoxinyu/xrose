@@ -13,6 +13,7 @@ use xrose_core::settings::BackdropStyle;
 static STYLE: RwLock<BackdropStyle> = RwLock::new(BackdropStyle::Auto);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static FOLLOW_SYSTEM: AtomicBool = AtomicBool::new(true);
+#[cfg(not(target_os = "linux"))]
 static BLUR_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static MICA_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -42,17 +43,26 @@ pub fn blur_backdrop() -> bool {
 }
 
 fn effective_style(style: BackdropStyle) -> BackdropStyle {
+    #[cfg(target_os = "linux")]
+    let blur = crate::wayland::desktop().blur;
+    #[cfg(not(target_os = "linux"))]
     let blur =
         *BLUR_AVAILABLE.get_or_init(xrose_core::system::window_effects::blur_backdrop_available);
     let mica =
         *MICA_AVAILABLE.get_or_init(xrose_core::system::window_effects::mica_backdrop_available);
-    resolve_style(style, cfg!(windows), cfg!(target_os = "macos"), blur, mica)
+    resolve_style(
+        style,
+        cfg!(windows),
+        cfg!(any(target_os = "macos", target_os = "linux")),
+        blur,
+        mica,
+    )
 }
 
 fn resolve_style(
     style: BackdropStyle,
     windows: bool,
-    macos: bool,
+    frosted: bool,
     blur: bool,
     mica: bool,
 ) -> BackdropStyle {
@@ -60,10 +70,10 @@ fn resolve_style(
     match style {
         Auto if windows && mica => MicaAlt,
         Auto if windows && blur => Acrylic,
-        Auto if macos && blur => Vibrancy,
+        Auto if frosted && blur => Vibrancy,
         Mica | MicaAlt if windows && mica => style,
         Acrylic if windows && blur => Acrylic,
-        Vibrancy if macos && blur => Vibrancy,
+        Vibrancy if frosted && blur => Vibrancy,
         _ => Opaque,
     }
 }
@@ -168,7 +178,11 @@ pub fn apply(window: &mut Window, cx: &mut App) {
     );
     #[cfg(not(any(windows, target_os = "macos")))]
     let active = {
-        window.set_background_appearance(appearance);
+        #[cfg(target_os = "linux")]
+        let native = crate::wayland::main_window::background(window, cx, appearance);
+        #[cfg(not(target_os = "linux"))]
+        let native = appearance;
+        window.set_background_appearance(native);
         appearance != WindowBackgroundAppearance::Opaque
     };
     ACTIVE.store(active, Ordering::Relaxed);

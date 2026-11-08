@@ -193,37 +193,87 @@ mod mac {
 #[cfg(target_os = "macos")]
 pub(super) use mac::{DesktopInput, enable_drop, install, main_visible, paste_image};
 
-pub(super) fn capture(
+#[derive(Clone, Copy)]
+pub(super) struct CaptureTarget {
+    #[cfg(any(target_os = "macos", windows))]
     id: DisplayId,
+    #[cfg(target_os = "linux")]
     center: (i32, i32),
+    #[cfg(target_os = "linux")]
+    portal_screen: Option<[f32; 4]>,
+}
+
+impl CaptureTarget {
+    pub(super) fn new(display: &dyn PlatformDisplay, cx: &App) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let center = display.bounds().center();
+            let kde = std::env::var("XDG_CURRENT_DESKTOP")
+                .unwrap_or_default()
+                .split(':')
+                .any(|name| name.eq_ignore_ascii_case("KDE"));
+            let portal_screen = (kde && cx.compositor_name() == "Wayland").then(|| {
+                let layout = crate::wayland::desktop();
+                let screen = layout.bounds(display);
+                let workspace = cx
+                    .displays()
+                    .iter()
+                    .map(|d| layout.bounds(d.as_ref()))
+                    .fold(screen, |a, b| a.union(&b));
+                [
+                    (screen.left() - workspace.left()) / workspace.size.width,
+                    (screen.top() - workspace.top()) / workspace.size.height,
+                    screen.size.width / workspace.size.width,
+                    screen.size.height / workspace.size.height,
+                ]
+            });
+            Self {
+                center: (f32::from(center.x) as i32, f32::from(center.y) as i32),
+                portal_screen,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (display, cx);
+            Self {
+                #[cfg(any(target_os = "macos", windows))]
+                id: display.id(),
+            }
+        }
+    }
+}
+
+pub(super) async fn capture(
+    target: CaptureTarget,
     region: [f32; 4],
 ) -> Result<RgbaImage, CaptureError> {
     #[cfg(target_os = "macos")]
     {
-        let _ = center;
-        mac::capture(id, region)
+        mac::capture(target.id, region)
     }
     #[cfg(windows)]
     {
-        let _ = center;
         let monitor = xcap::Monitor::all()
             .map_err(|_| UNAVAILABLE)?
             .into_iter()
-            .find(|m| m.id().ok() == Some(u64::from(id) as u32))
+            .find(|m| m.id().ok() == Some(u64::from(target.id) as u32))
             .ok_or(UNAVAILABLE)?;
         capture_region(&monitor, region)
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = id;
+        if let Some(screen) = target.portal_screen {
+            return super::portal::capture(screen, region).await;
+        }
         capture_region(
-            &xcap::Monitor::from_point(center.0, center.1).map_err(|_| UNAVAILABLE)?,
+            &xcap::Monitor::from_point(target.center.0, target.center.1)
+                .map_err(|_| UNAVAILABLE)?,
             region,
         )
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
-        let _ = (id, center, region);
+        let _ = (target, region);
         Err(UNAVAILABLE)
     }
 }

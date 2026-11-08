@@ -57,24 +57,20 @@ impl PopupManager {
             return;
         }
         let dashboard = dashboard::build(service);
-        let fallback = cx
-            .primary_display()
-            .map(|display| display.visible_bounds())
+        let display = anchor
+            .and_then(|a| {
+                cx.displays()
+                    .into_iter()
+                    .find(|display| tray_display_areas(display.as_ref()).0.contains(&a.position))
+            })
+            .or_else(|| cx.primary_display());
+        let work_area = anchor
+            .and_then(|a| a.work_area)
+            .or_else(|| display.as_ref().map(|d| tray_display_areas(d.as_ref()).1))
             .unwrap_or(Bounds::new(
                 point(px(0.), px(0.)),
                 size(px(1280.), px(800.)),
             ));
-        let work_area = anchor
-            .and_then(|a| a.work_area)
-            .or_else(|| {
-                anchor.and_then(|a| {
-                    cx.displays()
-                        .into_iter()
-                        .find(|display| display.bounds().contains(&a.position))
-                        .map(|display| display.visible_bounds())
-                })
-            })
-            .unwrap_or(fallback);
         let desired_height = 452. + (dashboard.nodes.len().min(4) as f32 * 38.).max(76.);
         let bounds = popup_bounds(
             anchor.map(|a| a.position),
@@ -108,6 +104,15 @@ impl PopupManager {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: None,
+                #[cfg(target_os = "linux")]
+                display_id: display.map(|d| d.id()),
+                #[cfg(target_os = "linux")]
+                kind: if crate::wayland::desktop().layer_shell {
+                    super::linux::popup_layer(anchor.map(|a| a.position), bounds, work_area)
+                } else {
+                    WindowKind::PopUp
+                },
+                #[cfg(not(target_os = "linux"))]
                 kind: WindowKind::PopUp,
                 is_movable: false,
                 is_resizable: false,
@@ -166,6 +171,16 @@ impl PopupManager {
         }
         self.last_refresh = Some(Instant::now());
     }
+}
+
+/// The icon may lie outside the work area, for example in a secondary display's panel.
+fn tray_display_areas(display: &dyn PlatformDisplay) -> (Bounds<Pixels>, Bounds<Pixels>) {
+    #[cfg(target_os = "linux")]
+    if crate::wayland::desktop().layer_shell {
+        let screen = crate::wayland::desktop().bounds(display);
+        return (screen, screen);
+    }
+    (display.bounds(), display.visible_bounds())
 }
 
 /// Clamp both axes to the monitor work area, including negative monitor origins.
@@ -346,6 +361,11 @@ impl PopupView {
     fn action(&mut self, action: TrayAction, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = dashboard::dispatch(action, &self.service) {
             super::queue_command(command);
+            #[cfg(target_os = "linux")]
+            if command.shows_main_window() {
+                // Keep the requesting surface alive until the main window has asked for focus.
+                return;
+            }
             self.dismiss(window);
         } else {
             self.refresh_dashboard(dashboard::build(&self.service), window, cx);
@@ -446,8 +466,18 @@ impl Render for PopupView {
             })
             .collect::<Vec<_>>();
         let translucent = crate::window_effects::blur_backdrop();
+        #[cfg(target_os = "linux")]
+        let corner_radius = rems(0.75).to_pixels(window.rem_size());
+        #[cfg(target_os = "linux")]
+        if cx.compositor_name() == "Wayland"
+            && !matches!(window.window_decorations(), Decorations::Client { .. })
+        {
+            window.set_client_corner_radii(Corners::all(corner_radius));
+        }
         let surface = if crate::window_effects::uses_mica() {
             gpui_kit::hsla(0., 0., 0., 0.)
+        } else if cfg!(target_os = "linux") {
+            p.sidebar()
         } else if translucent {
             p.panel.opacity(if p.is_dark { 0.30 } else { 0.25 })
         } else {
@@ -470,7 +500,13 @@ impl Render for PopupView {
             .when(
                 !cfg!(windows)
                     && !matches!(window.window_decorations(), Decorations::Client { .. }),
-                |surface| surface.rounded_xl().border_1().border_color(p.border),
+                |surface| {
+                    #[cfg(target_os = "linux")]
+                    let surface = surface.rounded(corner_radius);
+                    #[cfg(not(target_os = "linux"))]
+                    let surface = surface.rounded_xl();
+                    surface.border_1().border_color(p.border)
+                },
             )
             .text_color(p.fg)
             .text_xs()
