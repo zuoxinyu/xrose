@@ -4,7 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{Icon, Theme, ThemeMode as ComponentThemeMode};
+use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::CoreKind;
@@ -12,7 +12,7 @@ use xrose_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMod
 use xrose_core::system::CheckLevel;
 
 use super::AppView;
-use super::theme::{ICON_SIZE, Palette, palette};
+use super::theme::{Palette, palette};
 use super::widgets::*;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -405,7 +405,7 @@ impl AppView {
             let active_version = settings.active_version(core).cloned();
             let core_binaries: Vec<_> = binaries
                 .iter()
-                .filter(|b| b.core == core)
+                .filter(|b| b.core == core && b.matches_platform())
                 .cloned()
                 .collect();
             let core_title = core.display_name();
@@ -456,20 +456,13 @@ impl AppView {
                             })
                             .child(div().text_xs().text_color(p.muted_fg).child(format!(
                                 "{}: {}",
-                                self.tr("当前版本", "Active"),
+                                self.tr("当前来源", "Active source"),
                                 if settings.binary_override(core).is_some() {
                                     self.tr("自定义路径", "Custom path").to_string()
                                 } else {
-                                    active_version
-                                        .clone()
-                                        .or_else(|| {
-                                            core_binaries
-                                                .first()
-                                                .map(|record| record.version.clone())
-                                        })
-                                        .unwrap_or_else(|| {
-                                            self.tr("未安装", "Not installed").to_string()
-                                        })
+                                    active_version.clone().unwrap_or_else(|| {
+                                        self.tr("系统 PATH", "System PATH").to_string()
+                                    })
                                 }
                             ))),
                     )
@@ -486,20 +479,14 @@ impl AppView {
                     ),
             );
 
-            if core_binaries.is_empty() && settings.binary_override(core).is_none() {
-                section = section.child(empty_hint(
-                    &p,
-                    self.tr(
-                        "尚未安装该 Core，点击“下载 / 更新”自动获取最新版本",
-                        "This core is not installed — use Download / update",
-                    ),
-                ));
-            } else {
-                for record in core_binaries {
-                    let version = record.version.clone();
-                    let delete_version = record.version.clone();
-                    let is_active = active_version.as_deref() == Some(record.version.as_str());
-                    section = section.child(
+            section = section.child(self.local_binary_rows(core, &p, cx));
+            for record in core_binaries {
+                let version = record.version.clone();
+                let delete_version = record.version.clone();
+                let is_active = settings.binary_override(core).is_none()
+                    && active_version.as_deref() == Some(record.version.as_str());
+                section =
+                    section.child(
                         div()
                             .flex()
                             .items_center()
@@ -559,7 +546,14 @@ impl AppView {
                                             .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .label(self.tr("使用", "Use"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.service.set_active_version(core, &version);
+                                                if let Err(error) =
+                                                    this.service.set_active_version(core, &version)
+                                                {
+                                                    this.service.toast(
+                                                        xrose_core::service::ToastLevel::Error,
+                                                        error.to_string(),
+                                                    );
+                                                }
                                                 this.sync(cx);
                                             })),
                                         )
@@ -589,47 +583,142 @@ impl AppView {
                                     ),
                             ),
                     );
-                }
             }
 
             core_card = core_card.child(section);
         }
 
-        core_card.child(
+        core_card
+    }
+
+    fn local_binary_rows(&self, core: CoreKind, p: &Palette, cx: &mut Context<Self>) -> Div {
+        let settings = &self.snapshot.settings;
+        let status = self
+            .snapshot
+            .local_binaries
+            .get(core.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let custom = settings.binary_override(core);
+        let use_path = custom.is_none() && settings.active_version(core).is_none();
+        let input = match core {
+            CoreKind::SingBox => &self.sing_box_path_input,
+            CoreKind::Xray => &self.xray_path_input,
+        };
+        let draft = input.read(cx).value().trim().to_string();
+        let busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|key| key == "core" || key == "install");
+        let row = |selected| {
             div()
                 .flex()
-                .gap_2()
                 .items_center()
-                .child(div().flex_1().child(Input::new(&self.endpoint_input)))
-                .child(
-                    Button::new("use-custom-path")
-                        .compact()
-                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                        .label(self.tr("使用自定义路径", "Use custom path"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let path = this.endpoint_input.read(cx).value().trim().to_string();
-                            let core = this.snapshot.settings.core;
-                            if path.is_empty() {
-                                this.service.set_binary_override(core, None);
+                .gap_3()
+                .p_2()
+                .rounded_md()
+                .bg(p.bg)
+                .border_1()
+                .border_color(if selected { p.primary } else { p.border })
+        };
+        let title = |label, selected| {
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .child(label)
+                .when(selected, |d| {
+                    d.child(pill(self.tr("已选用", "Selected"), p.primary_fg, p.primary))
+                })
+        };
+        let path_info = status
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    self.tr("PATH 中未找到", "Not found on PATH:"),
+                    core.binary_name()
+                )
+            });
+        let path_row = row(use_path)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(title(self.tr("系统 PATH", "System PATH"), use_path))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if status.path.is_some() {
+                                p.muted_fg
                             } else {
-                                this.service.set_binary_override(core, Some(path));
+                                p.warn_text
+                            })
+                            .child(path_info),
+                    ),
+            )
+            .when(!use_path, |d| {
+                d.child(
+                    Button::new(SharedString::from(format!("use-path-{core:?}")))
+                        .compact()
+                        .label(self.tr("使用", "Use"))
+                        .disabled(busy || status.path.is_none())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(err) = this.service.set_binary_override(core, None) {
+                                this.service
+                                    .toast(xrose_core::service::ToastLevel::Error, err.to_string());
                             }
                             this.sync(cx);
                         })),
                 )
-                .child(
-                    Button::new("clear-custom-path")
-                        .compact()
-                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                        .ghost()
-                        .label(self.tr("清除覆盖", "Clear override"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let core = this.snapshot.settings.core;
-                            this.service.set_binary_override(core, None);
-                            this.sync(cx);
-                        })),
-                ),
-        )
+            });
+        let custom_row = row(custom.is_some())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(title(
+                        self.tr("自定义路径", "Custom path"),
+                        custom.is_some(),
+                    ))
+                    .child(Input::new(input))
+                    .when(custom.is_some() && !status.custom_available, |d| {
+                        d.child(div().text_xs().text_color(p.warn_text).child(
+                            self.tr("文件不存在或不可执行", "File is missing or not executable"),
+                        ))
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("use-custom-path-{core:?}")))
+                    .compact()
+                    .label(self.tr("使用", "Use"))
+                    .disabled(busy || draft.is_empty() || custom == Some(&draft))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Err(err) =
+                            this.service.set_binary_override(core, Some(draft.clone()))
+                        {
+                            this.service
+                                .toast(xrose_core::service::ToastLevel::Error, err.to_string());
+                        }
+                        this.sync(cx);
+                    })),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(path_row)
+            .child(custom_row)
     }
 
     fn settings_network_card(&self, cx: &mut Context<Self>) -> Div {
@@ -647,14 +736,11 @@ impl AppView {
             } else {
                 self.tr("展开高级设置", "Expand advanced settings")
             })
-            .child(
-                Icon::new(if self.network_advanced_open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .size(px(ICON_SIZE)),
-            )
+            .icon(if self.network_advanced_open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.network_advanced_open = !this.network_advanced_open;
                 cx.notify();
@@ -837,7 +923,6 @@ impl AppView {
     fn settings_updates_card(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let settings = self.snapshot.settings.clone();
-        let binaries = self.snapshot.binaries.clone();
         let updates = self.snapshot.updates.clone();
         let core_check = updates.cores.get(settings.core.as_str());
         let app_updates_available = self.service.project_repository().is_some();
@@ -939,9 +1024,11 @@ impl AppView {
                                         .child(if core_check.is_some_and(|c| c.error.is_some()) {
                                             self.tr("检查失败", "Check failed")
                                         } else if core_check.is_none() {
-                                            if settings.binary_override(settings.core).is_none() && !binaries.iter().any(|b| b.core == settings.core) {
+                                            if self.snapshot.core_binary_available(settings.core) {
+                                                self.tr("尚未检查", "Not checked")
+                                            } else {
                                                 self.tr("未安装", "Not installed")
-                                            } else { self.tr("尚未检查", "Not checked") }
+                                            }
                                         } else { self.tr("已是最新版本", "Up to date") }),
                                 }),
                         )

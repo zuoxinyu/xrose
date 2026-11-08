@@ -235,13 +235,19 @@ impl CoreManager {
     pub fn resolve_binary(&self, core: CoreKind, settings: &Settings) -> Result<PathBuf> {
         if let Some(custom) = settings.binary_override(core) {
             let path = PathBuf::from(custom);
-            if path.exists() {
-                return Ok(path);
+            if binary::is_executable(&path) {
+                return std::path::absolute(&path)
+                    .map_err(|e| Error::binary(format!("无法解析自定义内核路径：{e}")));
             }
             return Err(Error::binary(format!(
-                "自定义 {} 路径不存在：{}",
+                "自定义 {} 路径不存在或不可执行：{}",
                 core.display_name(),
                 path.display()
+            )));
+        }
+        if settings.active_version(core).is_none() {
+            return binary::path_binary(core).ok_or_else(|| Error::binary(format!(
+                "系统 PATH 中未找到 {} 可执行文件，请在设置中选择已安装版本、指定路径或下载内核。", core.binary_name()
             )));
         }
         let record = self

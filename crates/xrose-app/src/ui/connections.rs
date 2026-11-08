@@ -599,7 +599,12 @@ impl AppView {
             .gap_4()
             .w_full()
             .child(inspector)
-            .child(self.trace_card(cx))
+            .child(
+                div()
+                    .id("trace-section")
+                    .anchor_scroll(Some(self.trace_anchor.clone()))
+                    .child(self.trace_card(cx)),
+            )
             .child(self.dns_comparison_card(cx))
             .child(self.system_report_card(cx))
             .child(self.stun_diagnostic_card(cx))
@@ -778,12 +783,9 @@ impl AppView {
                                     .disabled(test_target.is_none())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         if let Some(target) = &test_target {
-                                            this.trace_input.update(cx, |input, cx| {
-                                                input.set_value(target.clone(), window, cx)
-                                            });
                                             this.selected_connection = Some(test.clone());
                                             this.page = Page::Diagnostics;
-                                            this.run_trace(target, cx);
+                                            this.replay_connection(target, window, cx);
                                         }
                                     })),
                             )
@@ -1006,6 +1008,12 @@ impl AppView {
         c: &ClashConnection,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let target = connection_test_target(c);
+        let probing = self
+            .snapshot
+            .trace
+            .as_ref()
+            .is_some_and(|t| matches!(t.phase, TracePhase::Request | TracePhase::Response));
         let p = palette(cx);
         let m = &c.metadata;
         let process = c.process_name();
@@ -1077,6 +1085,16 @@ impl AppView {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(Button::new("replay-connection")
+                                .compact().ghost().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                .icon(IconName::Radar)
+                                .label(self.tr("重放测试", "Replay test"))
+                                .disabled(probing || target.is_none())
+                                .tooltip(if target.is_none() { self.tr("缺少目标地址或端口", "Destination address or port unavailable") }
+                                    else { self.tr("使用此连接的目标和协议运行链路测试", "Run a link trace to this destination using its protocol") })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if let Some(target) = &target { this.replay_connection(target, window, cx); }
+                                })))
                             .child(
                                 Button::new("back-to-connections")
                                     .compact()
@@ -1249,6 +1267,23 @@ impl AppView {
                         "Saved at the top of custom rules (below built-in LAN/China bypasses); apply config to take effect",
                     ))),
             )
+    }
+
+    fn replay_connection(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.trace_input.update(cx, |input, cx| {
+            input.set_value(target.to_owned(), window, cx)
+        });
+        self.run_trace(target, cx);
+        // The list shortcut first mounts Diagnostics. Let the new trace card lay out before scrolling.
+        let view = cx.entity().downgrade();
+        window.on_next_frame(move |window, cx| {
+            if let Some(view) = view.upgrade() {
+                let view = view.read(cx);
+                if view.page == Page::Diagnostics {
+                    view.trace_anchor.clone().scroll_to(window, cx);
+                }
+            }
+        });
     }
 
     fn run_trace(&mut self, target: &str, cx: &mut Context<Self>) {

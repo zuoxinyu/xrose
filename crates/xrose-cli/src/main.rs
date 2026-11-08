@@ -292,13 +292,15 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                     _=tokio::signal::ctrl_c()=>break Ok(()),
                     _=&mut deadline=>break Ok(()),
                     _=interval.tick()=>{
-                        let state=svc.snapshot().mesh;
+                        let snapshot = svc.snapshot();
+                        let state = &snapshot.mesh;
                         for network in &state.networks {
                             if let Some(url)=&network.login_url {if login_opened.insert(url.clone()){svc.open_url(url);println!("已打开浏览器，请完成 Tailscale 登录（独立设备身份）");}}
-                            if network.phase==mesh::MeshPhase::Failed {break;}
                         }
-                        if state.networks.iter().any(|n|n.phase==mesh::MeshPhase::Failed){break Err("组网启动或运行失败，请用 mesh status 查看诊断".to_string());}
-                        if state.networks.is_empty(){break Ok(());}
+                        if state.networks.iter().any(|n| n.phase == mesh::MeshPhase::Failed && !n.user_stopped && !snapshot.mesh_reconnecting.contains(&n.profile_id)){break Err("组网启动或运行失败，请用 mesh status 查看诊断".to_string());}
+                        if snapshot.mesh_reconnecting.is_empty() && state.networks.iter().all(|n| n.user_stopped) {
+                            break Ok(());
+                        }
                     }
                 }}
             });
@@ -987,7 +989,9 @@ fn core_command(args: &[String]) -> Result<(), String> {
                 .cloned()
                 .ok_or_else(|| "缺少 --version".to_string())?;
             let service = service(home)?;
-            service.set_active_version(core, &version);
+            service
+                .set_active_version(core, &version)
+                .map_err(|e| e.to_string())?;
             println!("{} 将使用 {}", core.display_name(), version);
             Ok(())
         }
@@ -1005,17 +1009,9 @@ fn fetch_core(args: &[String]) -> Result<(), String> {
     let core = core.unwrap_or(settings.core);
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let manager = service.core();
-    let current = manager
-        .binaries()
-        .resolve(core, settings.active_version(core).map(|s| s.as_str()))
-        .map(|b| b.version);
     let network = service.resource_network();
     let candidate = runtime
-        .block_on(xrose_core::updates::check_core_update(
-            core,
-            current.as_deref(),
-            &network,
-        ))
+        .block_on(service.core_download_candidate(core, &settings, &network))
         .map_err(|e| e.to_string())?;
     let Some(candidate) = candidate else {
         println!("{} 已是最新版本", core.display_name());

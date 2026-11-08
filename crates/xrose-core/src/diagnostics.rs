@@ -281,6 +281,25 @@ mod tests {
     }
 
     #[test]
+    fn replay_uses_the_destination_protocol_host_and_port() {
+        let mut c = connection("fixture");
+        c.metadata.network = "UDP".into();
+        assert_eq!(
+            connection_test_target(&c).as_deref(),
+            Some("udp://Example.com:443")
+        );
+        c.metadata.host.clear();
+        assert_eq!(
+            connection_test_target(&c).as_deref(),
+            Some("udp://cdn.example.com:443")
+        );
+        for port in ["", "0", "65536"] {
+            c.metadata.destination_port = port.into();
+            assert!(connection_test_target(&c).is_none());
+        }
+    }
+
+    #[test]
     fn exact_rules_and_ipv6_test_target() {
         let mut c = connection("a");
         let target = DiagnosticTarget::from_connection(&c);
@@ -305,8 +324,10 @@ mod tests {
             connection_test_target(&c).unwrap(),
             "tcp://[2001:db8::1]:443"
         );
-        assert!(DiagnosticTarget::from_connection(&c)
-            .matchers(DiagnosticRuleKind::Domain)
-            .is_err());
+        assert!(
+            DiagnosticTarget::from_connection(&c)
+                .matchers(DiagnosticRuleKind::Domain)
+                .is_err()
+        );
     }
 }

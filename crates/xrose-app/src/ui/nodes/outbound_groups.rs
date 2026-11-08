@@ -16,7 +16,6 @@ struct GroupEditor {
     draft: OutboundGroup,
     name: Entity<InputState>,
     search: Entity<InputState>,
-    advanced: Entity<bool>,
     error: Option<String>,
 }
 
@@ -179,13 +178,11 @@ impl AppView {
         let name = cx.new(|cx| InputState::new(window, cx).default_value(draft.name.clone()));
         let placeholder = self.tr("搜索成员节点…", "Search member nodes…");
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-        let advanced = cx.new(|_| false);
         let editor = cx.new(|_| GroupEditor {
             original,
             draft,
             name,
             search,
-            advanced,
             error: None,
         });
         let profile = self.snapshot.active_profile.clone();
@@ -256,7 +253,6 @@ impl AppView {
         let p = palette(cx);
         let state = editor.read(cx);
         let draft = state.draft.clone();
-        let advanced = state.advanced.clone();
         let error = state.error.clone();
         let query = state.search.read(cx).value().trim().to_lowercase();
         let busy = this_busy(&self.snapshot.busy, "core");
@@ -387,7 +383,6 @@ impl AppView {
         let policy_editor = editor.clone();
         body.child(self.node_policy_fields(
             &draft,
-            advanced,
             move |_, policy, interval, cx| {
                 policy_editor.update(cx, |state, _| {
                     state.draft.switch_policy = policy;

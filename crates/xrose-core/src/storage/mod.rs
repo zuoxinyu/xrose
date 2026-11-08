@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -250,7 +250,7 @@ impl Store {
         if version < 8 {
             traffic_statistics::migrate(&tx)?;
         }
-        if version < 9 {
+        if version < 13 {
             let mut stmt = tx.prepare("SELECT id, payload FROM mesh_profiles")?;
             let rows = stmt
                 .query_map([], |row| {
@@ -261,8 +261,15 @@ impl Store {
             for (id, payload) in rows {
                 let mut profile: serde_json::Value =
                     serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                if profile.get("service_forwards").is_none() {
-                    profile["service_forwards"] = serde_json::json!([]);
+                let add_forwards = version < 9 && profile.get("service_forwards").is_none();
+                let add_reconnect = profile.get("auto_reconnect").is_none();
+                if add_forwards || add_reconnect {
+                    if add_forwards {
+                        profile["service_forwards"] = serde_json::json!([]);
+                    }
+                    if add_reconnect {
+                        profile["auto_reconnect"] = true.into();
+                    }
                     let encrypted = self.secrets.encrypt(&serde_json::to_string(&profile)?);
                     if !SecretBox::is_encrypted(&encrypted) {
                         return Err(Error::other("组网配置加密失败，请重试迁移"));
@@ -1145,6 +1152,55 @@ mod tests {
         assert_eq!(store.active_profile_id(), proxy_id);
         store.delete_mesh_profile(&profile.id).unwrap();
         assert!(store.mesh_profiles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn existing_mesh_profiles_enable_reconnect_and_preserve_an_explicit_opt_out() {
+        let (store, dir) = store();
+        let mut expected = Vec::new();
+        for enabled in [true, false] {
+            let p = crate::mesh::MeshProfile::default();
+            let mut value = serde_json::to_value(&p).unwrap();
+            if enabled {
+                value.as_object_mut().unwrap().remove("auto_reconnect");
+            } else {
+                value["auto_reconnect"] = false.into();
+            }
+            value["future_field"] = "preserve".into();
+            let payload = store.secrets.encrypt(&value.to_string());
+            store
+                .conn
+                .lock()
+                .execute(
+                    "INSERT INTO mesh_profiles (id,payload,updated_at) VALUES (?1,?2,0)",
+                    params![p.id, payload],
+                )
+                .unwrap();
+            expected.push((p.id, enabled));
+        }
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
+        drop(store);
+        let migrated = Store::open(&AppPaths::from_root(dir.path())).unwrap();
+        for (id, enabled) in expected {
+            let raw: String = migrated
+                .conn
+                .lock()
+                .query_row(
+                    "SELECT payload FROM mesh_profiles WHERE id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(SecretBox::is_encrypted(&raw));
+            let v: serde_json::Value =
+                serde_json::from_str(&migrated.secrets.decrypt(&raw).unwrap()).unwrap();
+            assert_eq!(v["auto_reconnect"], enabled);
+            assert_eq!(v["future_field"], "preserve");
+        }
     }
 
     #[test]

@@ -231,6 +231,7 @@ pub struct AppView {
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
     content_scroll: ScrollHandle,
+    trace_anchor: ScrollAnchor,
     settings_tab: settings::SettingsTab,
     settings_scroll: ScrollHandle,
     settings_tab_scroll: ScrollHandle,
@@ -247,7 +248,8 @@ pub struct AppView {
     lan_user_input: Entity<InputState>,
     lan_password_input: Entity<InputState>,
     update_agent_input: Entity<InputState>,
-    pub(crate) endpoint_input: Entity<InputState>,
+    sing_box_path_input: Entity<InputState>,
+    xray_path_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connection_filter: ConnectionFilterKind,
@@ -323,11 +325,32 @@ impl AppView {
         let update_agent_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(snapshot.settings.update_user_agent.clone())
         });
-        let endpoint_input = text_input(
-            window,
-            cx,
-            "自定义 core 可执行文件路径（留空使用已安装版本）",
-        );
+        let mut path_input = |core| {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .default_value(
+                        snapshot
+                            .settings
+                            .binary_override(core)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                    .placeholder(tr(
+                        snapshot.settings.language,
+                        "可执行文件的完整路径",
+                        "Full path to executable",
+                    ))
+            });
+            cx.subscribe(&input, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            })
+            .detach();
+            input
+        };
+        let sing_box_path_input = path_input(xrose_core::model::CoreKind::SingBox);
+        let xray_path_input = path_input(xrose_core::model::CoreKind::Xray);
         let trace_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(
@@ -359,6 +382,7 @@ impl AppView {
         let show_manual_form = std::env::var_os("XROSE_MANUAL").is_some();
         let hide_ips = snapshot.settings.privacy_mode;
         let traffic_ui = traffic_statistics::TrafficUi::new(window, cx);
+        let content_scroll = ScrollHandle::new();
         let view = Self {
             traffic_ui,
             mesh_form: mesh::MeshForm::new(window, cx),
@@ -403,7 +427,8 @@ impl AppView {
             route_scroll_running: false,
             action_menu: None,
             active_route_drag: None,
-            content_scroll: ScrollHandle::new(),
+            trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
+            content_scroll,
             settings_tab: settings::SettingsTab::default(),
             settings_scroll: ScrollHandle::new(),
             settings_tab_scroll: ScrollHandle::new(),
@@ -420,7 +445,8 @@ impl AppView {
             lan_user_input,
             lan_password_input,
             update_agent_input,
-            endpoint_input,
+            sing_box_path_input,
+            xray_path_input,
             trace_input,
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
             connection_filter: ConnectionFilterKind::All,
@@ -508,11 +534,12 @@ impl AppView {
                 ),
             ),
             (
-                &self.endpoint_input,
-                self.tr(
-                    "自定义 core 可执行文件路径（留空使用已安装版本）",
-                    "Custom core executable path (leave empty to use installed version)",
-                ),
+                &self.sing_box_path_input,
+                self.tr("可执行文件的完整路径", "Full path to executable"),
+            ),
+            (
+                &self.xray_path_input,
+                self.tr("可执行文件的完整路径", "Full path to executable"),
             ),
             (
                 &self.trace_input,

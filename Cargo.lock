@@ -12197,6 +12197,7 @@ dependencies = [
  "flate2",
  "fs2",
  "futures-util",
+ "gethostname 1.1.0",
  "hex",
  "hickory-proto",
  "interprocess",

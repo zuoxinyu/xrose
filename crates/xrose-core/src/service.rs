@@ -3,6 +3,7 @@
 
 mod mesh_discovery;
 mod mesh_exit;
+mod mesh_reconnect;
 pub mod mesh_sync;
 mod network_diagnostics;
 mod node_switch;
@@ -157,6 +158,8 @@ pub struct UiSnapshot {
     #[serde(default)]
     pub mesh: crate::mesh::MeshSnapshot,
     #[serde(default)]
+    pub mesh_reconnecting: BTreeSet<String>,
+    #[serde(default)]
     pub mesh_connection_errors: BTreeMap<String, String>,
     #[serde(default)]
     pub mesh_sync: mesh_sync::SyncView,
@@ -180,6 +183,8 @@ pub struct UiSnapshot {
     pub compiled_warnings: Vec<String>,
     pub compiled_json: Option<String>,
     pub binaries: Vec<BinaryRecord>,
+    #[serde(default)]
+    pub local_binaries: BTreeMap<String, crate::core::binary::LocalBinaryStatus>,
     pub toasts: Vec<Toast>,
     pub busy: Vec<String>,
     pub platform: PlatformInfo,
@@ -210,6 +215,19 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    pub fn core_binary_available(&self, core: CoreKind) -> bool {
+        let local = self.local_binaries.get(core.as_str());
+        if self.settings.binary_override(core).is_some() {
+            return local.is_some_and(|status| status.custom_available);
+        }
+        if let Some(version) = self.settings.active_version(core) {
+            return self.binaries.iter().any(|record| {
+                record.core == core && record.matches_platform() && &record.version == version
+            });
+        }
+        local.is_some_and(|status| status.path.is_some())
+    }
+
     pub fn settings_update_available(&self) -> bool {
         self.platform.helper_needs_update
             || self.updates.app.is_some()
@@ -295,8 +313,10 @@ impl ConnectionState {
 }
 
 struct Inner {
+    local_binaries: RwLock<BTreeMap<String, crate::core::binary::LocalBinaryStatus>>,
     mesh_sync: mesh_sync::SyncState,
     mesh: crate::mesh::controller::MeshController,
+    mesh_reconnect: Mutex<mesh_reconnect::ReconnectState>,
     mesh_connection_errors: RwLock<BTreeMap<String, String>>,
     paths: AppPaths,
     settings: RwLock<Settings>,
@@ -353,6 +373,26 @@ struct Inner {
 #[derive(Clone)]
 pub struct AppService {
     inner: Arc<Inner>,
+}
+
+fn local_binary_status(
+    settings: &Settings,
+) -> BTreeMap<String, crate::core::binary::LocalBinaryStatus> {
+    use crate::core::binary::{LocalBinaryStatus, is_executable, path_binary};
+    CoreKind::all()
+        .into_iter()
+        .map(|core| {
+            (
+                core.as_str().to_owned(),
+                LocalBinaryStatus {
+                    path: path_binary(core),
+                    custom_available: settings
+                        .binary_override(core)
+                        .is_some_and(|p| is_executable(std::path::Path::new(p))),
+                },
+            )
+        })
+        .collect()
 }
 
 impl AppService {
@@ -419,8 +459,10 @@ impl AppService {
         let statistics =
             traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
         let inner = Arc::new(Inner {
+            local_binaries: RwLock::new(local_binary_status(&settings)),
             statistics,
             mesh_sync: Default::default(),
+            mesh_reconnect: Default::default(),
             mesh_connection_errors: Default::default(),
             mesh,
             paths,
@@ -596,6 +638,7 @@ impl AppService {
                 .as_ref()
                 .map(|result| result.visible(settings.privacy_mode)),
             mesh_sync: self.sync_view(),
+            mesh_reconnecting: self.inner.mesh_reconnect.lock().pending(&mesh),
             mesh_connection_errors: self.inner.mesh_connection_errors.read().clone(),
             mesh,
             app_version: APP_VERSION.into(),
@@ -621,6 +664,7 @@ impl AppService {
                 .unwrap_or_default(),
             compiled_json: self.inner.compiled_json.read().clone(),
             binaries: self.inner.core.binaries().list(),
+            local_binaries: self.inner.local_binaries.read().clone(),
             toasts: self.active_toasts(),
             busy: self.inner.busy.read().iter().cloned().collect(),
             platform: PlatformInfo {
@@ -1089,24 +1133,8 @@ impl AppService {
         name: impl Into<String>,
         url: impl Into<String>,
     ) -> Result<String> {
-        let url = url.into().trim().to_owned();
-        if url.is_empty() {
-            return Err(Error::other("订阅地址不能为空"));
-        }
-        if !url::Url::parse(&url)
-            .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
-        {
-            return Err(Error::other("请输入有效的 HTTP 或 HTTPS 订阅地址"));
-        }
-        let name = name.into();
-        let mut subscription = Subscription::new(
-            if name.trim().is_empty() {
-                pretty_host(&url)
-            } else {
-                name
-            },
-            url,
-        );
+        let (name, url) = subscription_fields(&name.into(), &url.into())?;
+        let mut subscription = Subscription::new(name, url);
         {
             let mut subs = self.inner.subs.write();
             if subs.iter().any(|item| item.url == subscription.url) {
@@ -1132,9 +1160,60 @@ impl AppService {
         Ok(())
     }
 
+    fn change_subscription(&self, id: &str, change: impl FnOnce(&mut Subscription)) -> Result<()> {
+        let mut subs = self.inner.subs.write();
+        if self.is_busy(&format!("sub:{id}")) {
+            return Err(Error::other("订阅正在更新，请稍后再试"));
+        }
+        let index = subs
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| Error::other("订阅不存在"))?;
+        let mut updated = subs[index].clone();
+        change(&mut updated);
+        if subs.iter().any(|s| s.id != id && s.url == updated.url) {
+            return Err(Error::other("此订阅地址已添加"));
+        }
+        self.inner.store.save_subscription(&updated)?;
+        subs[index] = updated;
+        Ok(())
+    }
+
+    pub fn edit_subscription(&self, id: &str, name: &str, url: &str) -> Result<()> {
+        let (name, url) = subscription_fields(name, url)?;
+        self.change_subscription(id, |sub| {
+            sub.name = name;
+            if sub.url != url {
+                // Validators, usage and credentials belong to the original feed.
+                if url::Url::parse(&sub.url).ok().map(|u| u.origin())
+                    != url::Url::parse(&url).ok().map(|u| u.origin())
+                {
+                    sub.headers.clear();
+                }
+                sub.url = url;
+                sub.last_updated = None;
+                sub.last_user_agent = None;
+                sub.last_modified = None;
+                sub.etag = None;
+                sub.usage = None;
+                sub.last_error = None;
+            }
+        })
+    }
+
+    pub fn set_subscription_enabled(&self, id: &str, enabled: bool) -> Result<()> {
+        self.change_subscription(id, |sub| sub.enabled = enabled)
+    }
+
     pub fn delete_subscription(&self, id: &str) -> Result<()> {
-        self.inner.store.delete_subscription(id)?;
-        self.inner.subs.write().retain(|s| s.id != id);
+        {
+            let mut subs = self.inner.subs.write();
+            if self.is_busy(&format!("sub:{id}")) {
+                return Err(Error::other("订阅正在更新，请稍后再试"));
+            }
+            self.inner.store.delete_subscription(id)?;
+            subs.retain(|s| s.id != id);
+        }
         self.commit_model_change(|model| {
             let removed = model.remove_subscription_nodes(id);
             for group in &mut model.groups {
@@ -1155,15 +1234,18 @@ impl AppService {
     }
 
     pub fn refresh_subscription(&self, id: &str) {
-        let Some(subscription) = self.inner.subs.read().iter().find(|s| s.id == id).cloned() else {
-            self.toast(ToastLevel::Error, "订阅不存在");
-            return;
-        };
         let key = format!("sub:{id}");
-        if self.is_busy(&key) {
-            return;
-        }
-        self.set_busy(&key, true);
+        let subscription = {
+            let subs = self.inner.subs.read();
+            let Some(subscription) = subs.iter().find(|s| s.id == id) else {
+                self.toast(ToastLevel::Error, "订阅不存在");
+                return;
+            };
+            if !self.inner.busy.write().insert(key.clone()) {
+                return;
+            }
+            subscription.clone()
+        };
         let service = self.clone();
         self.spawn(async move {
             let settings = service.settings();
@@ -1188,7 +1270,6 @@ impl AppService {
                 last_modified: subscription.last_modified.clone().filter(|_| same_agent),
             };
             let result = crate::subscription::fetch_subscription(request).await;
-            service.set_busy(&key, false);
             match result {
                 Ok(response)
                     if response.status == crate::subscription::FetchStatus::NotModified =>
@@ -1210,6 +1291,7 @@ impl AppService {
                         Ok(count) => count,
                         Err(error) => {
                             service.toast(ToastLevel::Error, format!("保存订阅节点失败：{error}"));
+                            service.set_busy(&key, false);
                             return;
                         }
                     };
@@ -1264,6 +1346,7 @@ impl AppService {
                     );
                 }
             }
+            service.set_busy(&key, false);
         });
     }
 
@@ -2129,17 +2212,15 @@ impl AppService {
 
     async fn ensure_core_binary(&self, settings: &mut Settings) -> Result<()> {
         let _install = self.inner.install_lock.lock().await;
-        if self
-            .inner
-            .core
-            .resolve_binary(settings.core, settings)
-            .is_ok()
-        {
-            return Ok(());
-        }
-        // An explicit path is user intent; never silently replace it with a download.
-        if settings.binary_override(settings.core).is_some() {
-            self.inner.core.resolve_binary(settings.core, settings)?;
+        match self.inner.core.resolve_binary(settings.core, settings) {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if settings.binary_override(settings.core).is_some()
+                    || settings.active_version(settings.core).is_none() =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
         }
         self.toast(
             ToastLevel::Info,
@@ -3523,6 +3604,7 @@ impl AppService {
                 settings
                     .active_versions
                     .insert(core.as_str().into(), record.version.clone());
+                settings.binary_paths.remove(core.as_str());
                 let _ = self.save_settings(&settings);
                 self.toast(
                     ToastLevel::Success,
@@ -3559,30 +3641,57 @@ impl AppService {
         }
     }
 
-    pub fn set_active_version(&self, core: CoreKind, version: &str) {
+    pub fn set_active_version(&self, core: CoreKind, version: &str) -> Result<()> {
+        let version = version.trim().trim_start_matches('v');
+        if self
+            .inner
+            .core
+            .binaries()
+            .resolve(core, Some(version))
+            .is_none()
+        {
+            return Err(Error::binary("此内核版本尚未安装，请重新选择或下载"));
+        }
         let mut settings = self.inner.settings.read().clone();
         settings
             .active_versions
             .insert(core.as_str().into(), version.to_string());
         settings.binary_paths.remove(core.as_str());
-        let _ = self.save_settings(&settings);
+        self.save_settings(&settings)?;
         self.toast(
             ToastLevel::Info,
             format!("{} 将使用版本 {}", core.display_name(), version),
         );
+        Ok(())
     }
 
-    pub fn set_binary_override(&self, core: CoreKind, path: Option<String>) {
-        let mut settings = self.inner.settings.read().clone();
-        match path.filter(|p| !p.trim().is_empty()) {
+    /// An empty override selects the system PATH for this core.
+    pub fn set_binary_override(&self, core: CoreKind, path: Option<String>) -> Result<()> {
+        let mut settings = self.settings();
+        match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             Some(path) => {
-                settings.binary_paths.insert(core.as_str().into(), path);
+                let file = std::path::Path::new(path);
+                if !file.is_absolute() || !crate::core::binary::is_executable(file) {
+                    return Err(Error::binary("请选择存在且可执行的文件，并填写完整路径"));
+                }
+                settings
+                    .binary_paths
+                    .insert(core.as_str().into(), path.to_owned());
             }
             None => {
+                if crate::core::binary::path_binary(core).is_none() {
+                    return Err(Error::binary(format!(
+                        "系统 PATH 中未找到 {}，请指定完整路径或下载内核",
+                        core.binary_name()
+                    )));
+                }
                 settings.binary_paths.remove(core.as_str());
             }
         }
-        let _ = self.save_settings(&settings);
+        settings.active_versions.remove(core.as_str());
+        self.save_settings(&settings)?;
+        *self.inner.local_binaries.write() = local_binary_status(&settings);
+        Ok(())
     }
 
     pub fn install_core_update(&self, core: CoreKind) {
@@ -3593,31 +3702,27 @@ impl AppService {
         self.spawn(async move {
             let _install = service.inner.install_lock.lock().await;
             let settings = service.settings();
-            // Explicit installation can replace an unidentifiable custom binary.
-            let current = service
-                .installed_core_version(core, &settings)
-                .await
-                .ok()
-                .flatten();
             let network = service.resource_network();
-            let candidate =
-                match updates::check_core_update(core, current.as_deref(), &network).await {
-                    Ok(Some(candidate)) => candidate,
-                    Ok(None) => {
-                        service.record_core_check(core, &settings, Ok(None));
-                        service.set_busy("install", false);
-                        service.toast(
-                            ToastLevel::Info,
-                            format!("{} 已是最新版本", core.display_name()),
-                        );
-                        return;
-                    }
-                    Err(err) => {
-                        service.set_busy("install", false);
-                        service.toast(ToastLevel::Error, format!("检查更新失败：{err}"));
-                        return;
-                    }
-                };
+            let candidate = match service
+                .core_download_candidate(core, &settings, &network)
+                .await
+            {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) => {
+                    service.record_core_check(core, &settings, Ok(None));
+                    service.set_busy("install", false);
+                    service.toast(
+                        ToastLevel::Info,
+                        format!("{} 已是最新版本", core.display_name()),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    service.set_busy("install", false);
+                    service.toast(ToastLevel::Error, format!("检查更新失败：{err}"));
+                    return;
+                }
+            };
             let checksum = match &candidate.checksum_url {
                 Some(url) => match updates::download_checksum(url, &network).await {
                     Ok(checksum) => checksum,
@@ -4091,7 +4196,11 @@ impl AppService {
             ));
         }
         let provider = profile.provider;
+        let auto_reconnect = profile.auto_reconnect;
         let id = self.inner.mesh.save(profile)?;
+        if !auto_reconnect {
+            self.inner.mesh_reconnect.lock().forget(&id);
+        }
         self.inner
             .mesh
             .sync_outbounds(&mut self.inner.model.write());
@@ -4113,6 +4222,7 @@ impl AppService {
             return Err(Error::other("正在切换组网出口，请稍后再删除配置"));
         }
         self.inner.mesh.delete(id)?;
+        self.inner.mesh_reconnect.lock().forget(id);
         self.inner.mesh_connection_errors.write().remove(id);
         self.inner
             .model
@@ -4163,10 +4273,27 @@ impl AppService {
                 match action {
                     "connect" => {
                         service.inner.mesh_connection_errors.write().remove(&value);
+                        let profile = service.inner.mesh.profile(&value)?;
+                        service.inner.mesh_reconnect.lock().supersede(
+                            &service.inner.mesh.snapshot(),
+                            profile.provider,
+                            &value,
+                        );
                         if !service.inner.mesh.snapshot().supported {
                             return Err(Error::other("当前平台不支持组网连接"));
                         }
-                        service.ensure_helper().await.map_err(Error::other)?;
+                        if let Err(error) = service.ensure_helper().await {
+                            if service.settings().mesh_startup_profile(profile.provider)
+                                == Some(value.as_str())
+                            {
+                                service.inner.mesh_reconnect.lock().remember(
+                                    profile.provider,
+                                    &value,
+                                    profile.auto_reconnect,
+                                );
+                            }
+                            return Err(Error::other(error));
+                        }
                         if service.inner.helper.read().needs_update {
                             service.inner.mesh.verify_protocol().await?;
                         }
@@ -4184,21 +4311,29 @@ impl AppService {
                                 .install(&service.resource_network())
                                 .await?;
                         }
-                        let mut preflight = service.inner.core.mesh_plan();
-                        preflight.active = true;
-                        service.apply_mesh_plan(preflight).await?;
-                        if let Err(error) = service
+                        let provider = profile.provider;
+                        let reconnect = profile.auto_reconnect;
+                        service.connect_mesh_worker(profile).await?;
+                        service
                             .inner
-                            .mesh
-                            .connect(&value, &service.resource_network())
-                            .await
-                        {
-                            let _ = service.reconcile_mesh().await;
-                            return Err(error);
+                            .mesh_reconnect
+                            .lock()
+                            .remember(provider, &value, reconnect);
+                        return Ok(());
+                    }
+                    "disconnect" | "logout" => {
+                        let provider = provider.unwrap();
+                        service
+                            .inner
+                            .mesh_reconnect
+                            .lock()
+                            .forget_provider(provider);
+                        if action == "logout" {
+                            service.inner.mesh.logout(provider).await?;
+                        } else {
+                            service.inner.mesh.disconnect(provider).await?;
                         }
                     }
-                    "disconnect" => service.inner.mesh.disconnect(provider.unwrap()).await?,
-                    "logout" => service.inner.mesh.logout(provider.unwrap()).await?,
                     "probe" => {
                         service
                             .inner
@@ -4317,6 +4452,7 @@ impl AppService {
                         .mesh_connection_errors
                         .write()
                         .insert(state.profile_id.clone(), error.to_string());
+                    self.inner.mesh_reconnect.lock().forget(&state.profile_id);
                     self.inner.mesh.disconnect(state.provider).await?;
                 }
                 return Err(error);
@@ -4338,6 +4474,7 @@ impl AppService {
                     .mesh_connection_errors
                     .write()
                     .insert(state.profile_id.clone(), error.to_string());
+                self.inner.mesh_reconnect.lock().forget(&state.profile_id);
                 let _ = self.inner.mesh.disconnect(state.provider).await;
             }
             return Err(error);
@@ -4364,6 +4501,10 @@ impl AppService {
                 let service = AppService {
                     inner: inner.clone(),
                 };
+                if tick % 10 == 0 {
+                    let status = local_binary_status(&service.settings());
+                    *inner.local_binaries.write() = status;
+                }
                 // Probe the privilege helper off the UI thread. The status is
                 // cached inside `privilege::status`, so this is cheap unless
                 // the cache expired.
@@ -4374,11 +4515,20 @@ impl AppService {
                 }
                 if tick % 2 == 0 && !service.is_busy("core") {
                     if let Ok(_guard) = inner.mesh.operation.try_lock() {
-                        if let Err(error) = inner.mesh.refresh().await {
-                            service.toast(ToastLevel::Warning, error.to_string());
+                        if inner.mesh.refresh().await.is_err()
+                            && inner
+                                .mesh_reconnect
+                                .lock()
+                                .pending(&inner.mesh.snapshot())
+                                .is_empty()
+                        {
+                            service
+                                .toast(ToastLevel::Warning, "与提权助手失去联系，请检查助手状态");
                         }
                         if let Err(error) = service.reconcile_mesh().await {
                             service.toast(ToastLevel::Error, error.to_string());
+                        } else {
+                            service.schedule_mesh_reconnect();
                         }
                     }
                 }
@@ -4451,6 +4601,7 @@ impl AppService {
     }
 
     fn shutdown_inner(&self) {
+        self.inner.mesh_reconnect.lock().close();
         self.inner.rt.block_on(async {
             self.poll_traffic_statistics().await;
             self.flush_traffic_statistics().await;
@@ -4681,6 +4832,26 @@ fn split_shared_content(content: &str) -> (Vec<&str>, std::borrow::Cow<'_, str>)
         .collect::<Vec<_>>()
         .join("\n");
     (urls, rest.into())
+}
+
+fn subscription_fields(name: &str, url: &str) -> Result<(String, String)> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err(Error::other("订阅地址不能为空"));
+    }
+    if !url::Url::parse(url)
+        .is_ok_and(|u| matches!(u.scheme(), "http" | "https") && u.host().is_some())
+    {
+        return Err(Error::other("请输入有效的 HTTP 或 HTTPS 订阅地址"));
+    }
+    Ok((
+        if name.trim().is_empty() {
+            pretty_host(url)
+        } else {
+            name.trim().into()
+        },
+        url.into(),
+    ))
 }
 
 fn pretty_host(url: &str) -> String {
@@ -5457,6 +5628,165 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         let service = AppService::with_paths(paths).unwrap();
         (service, dir)
+    }
+
+    #[test]
+    fn editing_a_subscription_preserves_identity_and_refreshes_feed_metadata() {
+        let (service, _dir) = service();
+        let mut sub = Subscription::new("Sample", "https://feed.example/old");
+        sub.enabled = false;
+        sub.last_updated = Some(100);
+        sub.etag = Some("fixture-etag".into());
+        sub.headers.insert("X-Format".into(), "plain".into());
+        sub.node_count = 1;
+        let id = sub.id.clone();
+        service.update_subscription_settings(sub).unwrap();
+        let mut node = Node::new(
+            "Fixture",
+            crate::model::Protocol::Socks,
+            "proxy.example",
+            1080,
+        );
+        node.subscription_id = Some(id.clone());
+        let node_id = node.id.clone();
+        service
+            .commit_model_change(|model| {
+                model.nodes.push(node);
+                Ok(true)
+            })
+            .unwrap();
+
+        service
+            .edit_subscription(&id, " Renamed ", "https://feed.example/old")
+            .unwrap();
+        let sub = service.store().subscriptions().unwrap().pop().unwrap();
+        assert_eq!(sub.name, "Renamed");
+        assert_eq!(sub.last_updated, Some(100));
+        assert!(sub.etag.is_some());
+        service
+            .edit_subscription(&id, "", " https://feed.example/new ")
+            .unwrap();
+        let sub = service.snapshot().subscriptions.pop().unwrap();
+        assert_eq!(sub.name, "feed.example");
+        assert!(sub.headers.contains_key("X-Format"));
+        assert!(sub.last_updated.is_none() && sub.etag.is_none());
+
+        service
+            .edit_subscription(&id, "New origin", "https://other.example/new")
+            .unwrap();
+        let sub = service.store().subscriptions().unwrap().pop().unwrap();
+        assert_eq!(sub.id, id);
+        assert_eq!(sub.url, "https://other.example/new");
+        assert!(sub.headers.is_empty());
+        assert!(!sub.enabled);
+        assert_eq!(sub.node_count, 1);
+        assert_eq!(service.model().nodes_of_subscription(&id)[0].id, node_id);
+    }
+
+    #[test]
+    fn subscription_edits_reject_invalid_duplicate_missing_and_refreshing_targets() {
+        let (service, _dir) = service();
+        let add = |url| {
+            let mut sub = Subscription::new("Original", url);
+            sub.enabled = false;
+            let id = sub.id.clone();
+            service.update_subscription_settings(sub).unwrap();
+            id
+        };
+        let id = add("https://first.example/feed");
+        add("https://other.example/feed");
+        for url in ["", "file:///feed", "https://other.example/feed"] {
+            assert!(service.edit_subscription(&id, "Changed", url).is_err());
+        }
+        assert!(
+            service
+                .edit_subscription("missing", "Changed", "https://valid.example")
+                .is_err()
+        );
+        let key = format!("sub:{id}");
+        service.set_busy(&key, true);
+        assert!(
+            service
+                .edit_subscription(&id, "Changed", "https://valid.example")
+                .is_err()
+        );
+        assert!(service.delete_subscription(&id).is_err());
+        let sub = service
+            .store()
+            .subscriptions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == id)
+            .unwrap();
+        assert_eq!(sub.name, "Original");
+        assert_eq!(sub.url, "https://first.example/feed");
+        service.set_busy(&key, false);
+        assert!(
+            service
+                .edit_subscription(&id, "Changed", "https://valid.example")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn custom_executables_are_independent_of_each_other_and_managed_versions() {
+        let (service, dir) = service();
+        for core in CoreKind::all() {
+            let path = dir.path().join(format!(
+                "custom-{}{}",
+                core.binary_name(),
+                std::env::consts::EXE_SUFFIX
+            ));
+            std::fs::write(&path, b"fixture").unwrap();
+            crate::util::set_executable(&path).unwrap();
+            service
+                .set_binary_override(core, Some(path.to_str().unwrap().into()))
+                .unwrap();
+            assert_eq!(
+                service
+                    .core()
+                    .resolve_binary(core, &service.settings())
+                    .unwrap(),
+                path
+            );
+            assert!(service.snapshot().core_binary_available(core));
+            assert!(
+                service
+                    .set_binary_override(core, Some("missing".into()))
+                    .is_err()
+            );
+            assert_eq!(
+                service.settings().binary_override(core).unwrap(),
+                path.to_str().unwrap()
+            );
+        }
+        let core = CoreKind::Xray;
+        let path = dir
+            .path()
+            .join(format!("managed{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&path, b"managed fixture").unwrap();
+        crate::util::set_executable(&path).unwrap();
+        service
+            .core()
+            .binaries()
+            .adopt_existing(core, "1.0", &path)
+            .unwrap();
+        assert!(service.set_active_version(core, "missing").is_err());
+        service.set_active_version(core, "1.0").unwrap();
+        assert_eq!(
+            service
+                .core()
+                .resolve_binary(core, &service.settings())
+                .unwrap(),
+            path
+        );
+        assert!(service.settings().binary_override(core).is_none());
+        assert!(
+            service
+                .settings()
+                .binary_override(CoreKind::SingBox)
+                .is_some()
+        );
     }
 
     #[test]

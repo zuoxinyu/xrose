@@ -474,14 +474,14 @@ impl AppView {
     }
     fn traffic_detail(&self, row: &TrafficRow) -> String {
         format!(
-            "{}\n{}: {} B · {}: {} B · {}: {} B",
+            "{}\n{}: {} · {}: {} · {}: {}",
             self.traffic_label(row),
             self.tr("下载", "Download"),
-            row.bytes.download,
+            format_bytes(row.bytes.download),
             self.tr("上传", "Upload"),
-            row.bytes.upload,
+            format_bytes(row.bytes.upload),
             self.tr("合计", "Total"),
-            row.bytes.total()
+            format_bytes(row.bytes.total())
         )
     }
     fn traffic_bars(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {

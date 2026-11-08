@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 netdev.workspace = true
+gethostname.workspace = true
 hickory-proto.workspace = true
 tokio-rustls.workspace = true
 webpki-roots.workspace = true

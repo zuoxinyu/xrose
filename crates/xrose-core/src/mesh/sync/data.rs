@@ -84,6 +84,8 @@ fn portable_mesh(p: &MeshProfile) -> MeshProfile {
         id: p.id.clone(),
         name: p.name.clone(),
         provider: p.provider,
+        // The device hostname is local and must not be sent with portable settings.
+        hostname: "xrose".into(),
         network_name: p.network_name.clone(),
         easytier: super::super::EasyTierOptions {
             device: Default::default(),
@@ -503,6 +505,7 @@ impl Bundle {
                         if old.provider != p.provider {
                             return Err(Error::config("同一组网标识对应不同类型，无法合并"));
                         }
+                        value.auto_reconnect = old.auto_reconnect;
                         value.easytier.device = old.easytier.device.clone();
                         value.hostname = old.hostname.clone();
                         value.ipv4 = old.ipv4.clone();
@@ -516,6 +519,7 @@ impl Bundle {
                         value.validate()?;
                         *old = value;
                     } else {
+                        value.hostname = super::super::local_device_name();
                         value.validate()?;
                         networks.push(value);
                     }
@@ -612,12 +616,14 @@ mod tests {
     #[test]
     fn syncing_easytier_preferences_does_not_publish_or_override_local_forwarding() {
         let mut source = MeshProfile {
+            hostname: "xrose-demo-sender".into(),
             network_name: "fixture".into(),
             network_secret: crate::mesh::MeshSecret("fixture".into()),
             peers: vec!["tcp://192.0.2.1:11010".into()],
             ..Default::default()
         };
         let mut local = source.clone();
+        local.hostname = "custom-receiver".into();
         let service = crate::mesh::ServiceForward {
             protocol: crate::mesh::ForwardProtocol::Tcp,
             port: 18080,
@@ -639,6 +645,7 @@ mod tests {
         };
         assert!(shared.easytier.latency_first && !shared.easytier.device.system_forwarding);
         assert!(shared.service_forwards.is_empty());
+        assert_eq!(shared.hostname, "xrose");
         let mut local = vec![local];
         bundle
             .merge(
@@ -651,6 +658,7 @@ mod tests {
             .unwrap();
         assert!(local[0].easytier.latency_first);
         assert_eq!(local[0].service_forwards, local_services);
+        assert_eq!(local[0].hostname, "custom-receiver");
         assert!(
             !local[0].easytier.device.tcp_hole_punching
                 && !local[0].easytier.device.system_forwarding

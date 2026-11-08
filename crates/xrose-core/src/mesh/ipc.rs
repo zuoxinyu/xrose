@@ -94,6 +94,7 @@ struct Worker {
     directory: PathBuf,
     owner: super::platform::OwnerProcess,
     stopping: std::sync::atomic::AtomicBool,
+    user_stopped: std::sync::atomic::AtomicBool,
 }
 impl Worker {
     fn probe(&self, ip: &str) -> Result<()> {
@@ -164,7 +165,10 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         let worker = sessions
             .values()
             .flat_map(|s| s.workers.values())
-            .find(|w| w.state.lock().profile_id == *profile_id)
+            .find(|w| {
+                !w.user_stopped.load(std::sync::atomic::Ordering::Acquire)
+                    && w.state.lock().profile_id == *profile_id
+            })
             .ok_or_else(|| Error::other("组网未连接"))?;
         worker.probe(ip)?;
         let mut state = worker.state.lock().clone();
@@ -180,6 +184,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             networks: sessions
                 .values()
                 .flat_map(|s| s.workers.values())
+                .filter(|w| !w.user_stopped.load(std::sync::atomic::Ordering::Acquire))
                 .map(|w| {
                     let mut s = w.state.lock().clone();
                     s.login_url = None;
@@ -193,14 +198,21 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             let provider = session
                 .workers
                 .iter()
-                .find(|(_, w)| w.state.lock().profile_id == *profile_id)
+                .find(|(_, w)| {
+                    !w.user_stopped.load(std::sync::atomic::Ordering::Acquire)
+                        && w.state.lock().profile_id == *profile_id
+                })
                 .map(|(p, _)| *p);
             if let Some(provider) = provider {
+                let worker = &session.workers[&provider];
                 if *logout {
-                    session.workers[&provider].send(WorkerCommand::Logout)?;
-                } else if let Some(w) = session.workers.remove(&provider) {
-                    w.stop();
+                    worker.send(WorkerCommand::Logout)?;
+                } else {
+                    worker.stop();
                 }
+                worker
+                    .user_stopped
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
         }
         return Ok(MeshReply {
@@ -350,6 +362,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             }
             let worker = Arc::new(Worker {
                 stopping: Default::default(),
+                user_stopped: Default::default(),
                 child: Mutex::new(child),
                 input: command_pipe(input),
                 state: Mutex::new(MeshRuntimeView {
@@ -463,7 +476,11 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         networks: session
             .workers
             .values()
-            .map(|w| w.state.lock().clone())
+            .map(|w| {
+                let mut state = w.state.lock().clone();
+                state.user_stopped = w.user_stopped.load(std::sync::atomic::Ordering::Acquire);
+                state
+            })
             .collect(),
     })
 }
@@ -543,6 +560,7 @@ mod tests {
             directory: directory.path().to_path_buf(),
             owner: super::super::platform::OwnerProcess::open(std::process::id()).unwrap(),
             stopping: Default::default(),
+            user_stopped: Default::default(),
         };
         let started = Instant::now();
         worker.stop();
@@ -581,6 +599,7 @@ mod tests {
             directory: dir.path().to_path_buf(),
             owner: super::super::platform::OwnerProcess::open(std::process::id()).unwrap(),
             stopping: Default::default(),
+            user_stopped: Default::default(),
         };
         let started = Instant::now();
         worker.stop();

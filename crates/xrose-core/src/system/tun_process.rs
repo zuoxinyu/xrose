@@ -212,7 +212,7 @@ fn validate_start(
         })
         .ok_or_else(|| {
             Error::binary(
-                "TUN 代启仅支持 Xrose 已安装并登记的内核，请在设置中下载内核并取消自定义路径",
+                "TUN 代启仅支持 Xrose 已安装并登记的内核，请选择已下载的版本，或先用 xrose-cli core install 登记此文件",
             )
         })?;
     if !manager.verify(&record)? {

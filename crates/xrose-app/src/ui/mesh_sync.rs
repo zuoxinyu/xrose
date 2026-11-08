@@ -340,7 +340,7 @@ impl AppView {
                         })),
                 );
             };
-            let mut categories = div().flex().flex_wrap().gap_3();
+            let mut categories = div().flex().flex_col().items_start().gap_2();
             for c in Category::ALL {
                 let available = catalog.rows.iter().filter(|r| r.category == c).count();
                 let list = catalog.clone();

@@ -98,6 +98,7 @@ pub(crate) struct MeshForm {
     outbound_port: Entity<InputState>,
     advertise_exit: bool,
     connect_on_startup: bool,
+    auto_reconnect: bool,
 }
 
 impl MeshForm {
@@ -111,7 +112,7 @@ impl MeshForm {
             id: MeshProfile::default().id,
             provider: MeshProvider::EasyTier,
             name: super::text_input(window, cx, ""),
-            hostname: cx.new(|cx| InputState::new(window, cx).default_value("xrose")),
+            hostname: super::text_input(window, cx, ""),
             network: super::text_input(window, cx, ""),
             secret: cx.new(|cx| InputState::new(window, cx).masked(true)),
             peers: super::text_input(window, cx, "tcp://192.0.2.1:11010"),
@@ -125,6 +126,7 @@ impl MeshForm {
             outbound_port: super::text_input(window, cx, ""),
             advertise_exit: false,
             connect_on_startup: false,
+            auto_reconnect: true,
         }
     }
 
@@ -135,6 +137,7 @@ impl MeshForm {
         self.id = profile.id;
         self.provider = profile.provider;
         self.advertise_exit = profile.advertise_exit_node;
+        self.auto_reconnect = profile.auto_reconnect;
         self.error = None;
         for (input, value) in [
             (
@@ -209,6 +212,7 @@ impl MeshForm {
             remote_subnets: list(&self.subnets),
             control_url: value(&self.control),
             auto_connect: false,
+            auto_reconnect: self.auto_reconnect,
             exit_node: value(&self.exit_node),
             advertise_exit_node: self.advertise_exit,
             advertised_subnets: list(&self.advertised),
@@ -284,6 +288,35 @@ impl AppView {
                 .max_w_full()
                 .min_w(px(0.))
                 .when(expanded, |d| d.w_full())
+                .when(overflow, |d| {
+                    let id = id.clone();
+                    d.child(
+                        Button::new(SharedString::from(format!("{id}-expand")))
+                            .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                            .ghost()
+                            .w(px(26.))
+                            .h(px(26.))
+                            .icon(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .text_color(p.muted_fg)
+                            .flex_shrink_0()
+                            .tooltip(if expanded {
+                                self.tr("收起", "Collapse")
+                            } else {
+                                self.tr("展开", "Expand")
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.mesh_expanded.remove(&id) {
+                                    this.mesh_expanded.insert(id.clone());
+                                }
+                                cx.notify();
+                            })),
+                    )
+                })
                 .child(
                     div()
                         .min_w(px(0.))
@@ -321,35 +354,7 @@ impl AppView {
                             this.service
                                 .toast(ToastLevel::Success, this.tr("已复制", "Copied"));
                         })),
-                )
-                .when(overflow, |d| {
-                    d.child(
-                        Button::new(SharedString::from(format!("{id}-expand")))
-                            .compact()
-                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                            .ghost()
-                            .w(px(26.))
-                            .h(px(26.))
-                            .icon(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .text_color(p.muted_fg)
-                            .flex_shrink_0()
-                            .tooltip(if expanded {
-                                self.tr("收起", "Collapse")
-                            } else {
-                                self.tr("展开", "Expand")
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.mesh_expanded.remove(&id) {
-                                    this.mesh_expanded.insert(id.clone());
-                                }
-                                cx.notify();
-                            })),
-                    )
-                });
+                );
         let text = div()
             .relative()
             .flex()
@@ -476,6 +481,39 @@ impl AppView {
         if self.mesh_form.advanced_open && self.mesh_form.provider == MeshProvider::EasyTier {
             form = form.child(self.easytier_advanced_settings(&p, cx));
         } else {
+            let startup = toggle(
+                "mesh-connect-on-startup",
+                self.tr("随应用启动连接", "Connect when app starts"),
+                self.mesh_form.connect_on_startup,
+            )
+            .on_change(cx.listener(|this, checked, _, cx| {
+                this.mesh_form.connect_on_startup = *checked;
+                cx.notify();
+            }));
+            let reconnect = toggle(
+                "mesh-auto-reconnect",
+                self.tr(
+                    "意外断开后自动重连",
+                    "Reconnect after an unexpected disconnect",
+                ),
+                self.mesh_form.auto_reconnect,
+            )
+            .on_change(cx.listener(|this, checked, _, cx| {
+                this.mesh_form.auto_reconnect = *checked;
+                cx.notify();
+            }));
+            let startup_setting = div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .flex_shrink_0()
+                .gap_1()
+                .child(startup)
+                .child(div().text_sm().text_color(p.muted_fg).child(self.tr(
+                    "每种组网类型可选择一个启动连接配置。",
+                    "Select one startup profile for each network type.",
+                )));
+            form = form.child(startup_setting).child(reconnect.flex_shrink_0());
             let mut fields = vec![
                 (self.tr("配置名称", "Profile name"), &self.mesh_form.name),
                 (
@@ -561,9 +599,7 @@ impl AppView {
                         .child(Input::new(input)),
                 );
             }
-            form = form.child(toggle("mesh-connect-on-startup", self.tr("随应用启动连接", "Connect when app starts"), self.mesh_form.connect_on_startup).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.connect_on_startup = *checked; cx.notify(); })))
-            .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("每种组网类型可选择一个启动连接配置。", "Select one startup profile for each network type.")))
-            .child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
+            form = form.child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
             .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("填写出口出站端口后，节点列表将生成可用于出站组和分流规则的出口节点。转发格式：tcp://监听IP:端口/目标IP:端口（支持 udp）。", "An outbound port creates a node for groups and routing rules. Forward format: tcp://listen-IP:port/target-IP:port (udp supported).")));
             if self.mesh_form.provider == MeshProvider::Tailscale {
                 form = form.child(
@@ -598,7 +634,7 @@ impl AppView {
                     cx.notify();
                 });
             })
-            .child(toolbar)
+            .child(toolbar.mb_3())
             .child(form)
             .when_some(self.mesh_form.error.clone(), |d, error| {
                 d.child(
@@ -777,7 +813,9 @@ impl AppView {
             } else {
                 state.phase
             };
+            let retrying = self.snapshot.mesh_reconnecting.contains(&id);
             let label = match display_phase {
+                _ if retrying => tr(lang, "等待重连", "Waiting to reconnect"),
                 MeshPhase::Disconnected => tr(lang, "未连接", "Disconnected"),
                 MeshPhase::Starting => tr(lang, "正在连接", "Connecting"),
                 MeshPhase::NeedsApproval => tr(lang, "等待管理员批准", "Awaiting device approval"),
@@ -790,6 +828,7 @@ impl AppView {
                 MeshPhase::Failed => tr(lang, "连接失败", "Failed"),
             };
             let status_color = match display_phase {
+                _ if retrying => p.warn_text,
                 MeshPhase::Connected => p.ok_text,
                 MeshPhase::Failed => p.danger_text,
                 MeshPhase::Starting
@@ -933,14 +972,22 @@ impl AppView {
                                                 .outline()
                                                 .border_color(p.warn_text)
                                                 .label(tr(lang, "断开", "Disconnect"))
+                                        } else if retrying {
+                                            button.outline().label(tr(
+                                                lang,
+                                                "取消重连",
+                                                "Cancel reconnect",
+                                            ))
                                         } else {
                                             button.primary().label(tr(lang, "连接", "Connect"))
                                         }
                                     })
-                                    .disabled(busy || !self.snapshot.mesh.supported)
+                                    .disabled((busy && !retrying) || !self.snapshot.mesh.supported)
                                     .on_click(cx.listener(move |this, _, _, _| {
                                         if active {
                                             this.service.mesh_disconnect(provider);
+                                        } else if retrying {
+                                            this.service.cancel_mesh_reconnect(&id);
                                         } else {
                                             this.service.mesh_connect(&id);
                                         }
@@ -948,11 +995,26 @@ impl AppView {
                             ),
                     ),
             );
-            if let Some(reason) = connection_error {
+            let detail = if retrying && self.snapshot.platform.helper_needs_update {
+                Some(tr(
+                    lang,
+                    "更新提权助手后将自动重连。",
+                    "Reconnection will resume after the helper is updated.",
+                ))
+            } else if retrying && !self.snapshot.platform.helper_available {
+                Some(tr(
+                    lang,
+                    "提权助手就绪后将自动重连。",
+                    "Reconnection will resume when the helper is ready.",
+                ))
+            } else {
+                connection_error.map(Into::into)
+            };
+            if let Some(reason) = detail {
                 network = network.child(
                     div()
                         .text_sm()
-                        .text_color(p.danger_text)
+                        .text_color(if retrying { p.warn_text } else { p.danger_text })
                         .whitespace_normal()
                         .child(reason),
                 );
@@ -1045,14 +1107,11 @@ impl AppView {
                             .accessibility_label(format!("{tip} ({peer_count})"))
                             .tooltip(tip)
                             .label(label)
-                            .child(
-                                Icon::new(if collapsed {
-                                    IconName::ChevronRight
-                                } else {
-                                    IconName::ChevronDown
-                                })
-                                .size_4(),
-                            )
+                            .icon(if collapsed {
+                                IconName::ChevronRight
+                            } else {
+                                IconName::ChevronDown
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_mesh_devices.remove(&profile_id) {
                                     this.collapsed_mesh_devices.insert(profile_id.clone());

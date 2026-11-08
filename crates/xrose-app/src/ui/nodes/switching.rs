@@ -26,7 +26,6 @@ impl AppView {
             return;
         };
         let selection = cx.new(|_| initial);
-        let advanced = cx.new(|_| false);
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let Some(view) = view.upgrade() else {
@@ -35,13 +34,7 @@ impl AppView {
             view.update(cx, |this, cx| {
                 let p = palette(cx);
                 let body = match this.snapshot.model.group(selection.read(cx)) {
-                    Some(group) => this.node_switch_controls(
-                        group,
-                        selection.clone(),
-                        advanced.clone(),
-                        &p,
-                        cx,
-                    ),
+                    Some(group) => this.node_switch_controls(group, selection.clone(), &p, cx),
                     None => empty_hint(
                         &p,
                         this.tr(
@@ -66,7 +59,6 @@ impl AppView {
         &self,
         group: &OutboundGroup,
         selection: Entity<String>,
-        advanced: Entity<bool>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -98,7 +90,6 @@ impl AppView {
         controls
             .child(self.node_policy_fields(
                 group,
-                advanced,
                 move |this, policy, interval, cx| {
                     this.save_node_switch(&id, policy, interval, cx);
                 },
@@ -121,7 +112,6 @@ impl AppView {
     pub(super) fn node_policy_fields(
         &self,
         group: &OutboundGroup,
-        advanced: Entity<bool>,
         on_change: impl Fn(&mut Self, NodeSwitchPolicy, u64, &mut Context<Self>) + Clone + 'static,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -156,33 +146,15 @@ impl AppView {
                 cx,
             );
         }));
-        let expanded = *advanced.read(cx);
-        let disclosure = Button::new("node-policy-advanced")
-            .ghost()
-            .icon(if expanded {
-                IconName::ChevronUp
-            } else {
-                IconName::ChevronRight
-            })
-            .tooltip(self.tr("高级设置", "Advanced settings"))
-            .accessibility_label(self.tr("高级设置", "Advanced settings"))
-            .on_click(cx.listener(move |_, _, _, cx| {
-                advanced.update(cx, |value, _| *value = !*value);
-                cx.notify();
-            }));
         let mut controls = div().flex().flex_col().gap_3().child(
             self.policy_row(self.tr("自动切换", "Auto switch"), &p)
-                .child(modes)
-                .child(disclosure),
+                .child(modes),
         );
         if mode == SwitchMode::GroupDefault {
             controls = controls.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
                 "此组沿用导入的负载均衡设置。选择切换模式可更改策略。",
                 "This group uses imported load balancing. Choose a mode to change its policy.",
             )));
-        }
-        if !expanded {
-            return controls;
         }
         let policy = NodeSwitchPolicy { mode, ..policy };
         let scopes = [

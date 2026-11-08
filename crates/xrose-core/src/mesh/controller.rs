@@ -4,9 +4,18 @@ use super::{
     ipc::{self, MeshCommand, MeshRequest},
 };
 use crate::{Error, Result, paths::AppPaths, storage::Store};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum StartState {
+    #[default]
+    Idle,
+    Started,
+    Closed,
+}
+
 pub struct MeshController {
+    start_state: Arc<Mutex<StartState>>,
     paths: AppPaths,
     store: Arc<Store>,
     session: MeshSecret,
@@ -22,6 +31,7 @@ impl MeshController {
         let profiles = store.mesh_profiles()?;
         let installed = super::tailscale::archive_path(&paths).exists();
         Ok(Self {
+            start_state: Default::default(),
             sync_password: MeshSecret(uuid::Uuid::new_v4().simple().to_string()),
             sync_port: Default::default(),
             paths,
@@ -300,9 +310,21 @@ impl MeshController {
     }
     async fn send(&self, command: MeshCommand) -> Result<()> {
         let request = self.request(command);
-        let reply = tokio::task::spawn_blocking(move || ipc::call(request))
-            .await
-            .map_err(|_| Error::other("组网助手任务异常"))??;
+        // Serialize Start with the final StopAll, including a start that has not yet returned its first snapshot.
+        let start_state = self.start_state.clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            if matches!(request.command, MeshCommand::Start { .. }) {
+                let mut state = start_state.lock();
+                if *state == StartState::Closed {
+                    return Err(Error::other("应用正在退出"));
+                }
+                *state = StartState::Started;
+                return ipc::call(request);
+            }
+            ipc::call(request)
+        })
+        .await
+        .map_err(|_| Error::other("组网助手任务异常"))??;
         if reply.version != PROTOCOL_VERSION {
             return Err(Error::other("组网助手版本不兼容，请在设置中更新提权助手"));
         }
@@ -317,9 +339,13 @@ impl MeshController {
             .cloned()
             .ok_or_else(|| Error::config("组网配置不存在"))
     }
+    /// Query this exact session even if the last cached status was terminal.
+    pub(crate) async fn poll_status(&self) -> Result<()> {
+        self.send(MeshCommand::Status).await
+    }
     /// Test legacy helpers before changing any proxy or network state.
     pub(crate) async fn verify_protocol(&self) -> Result<()> {
-        self.send(MeshCommand::Status).await.map_err(|error| {
+        self.poll_status().await.map_err(|error| {
             Error::other(format!(
                 "无法确认提权助手支持当前组网协议，请在设置中更新助手后重试：{error}"
             ))
@@ -370,7 +396,7 @@ impl MeshController {
         }
     }
     pub async fn refresh(&self) -> Result<()> {
-        self.refresh_with(self.send(MeshCommand::Status)).await
+        self.refresh_with(self.poll_status()).await
     }
     async fn refresh_with(
         &self,
@@ -386,7 +412,7 @@ impl MeshController {
         }
         if let Err(error) = poll.await {
             for state in self.networks.write().iter_mut() {
-                state.finish(Some("与组网助手失去联系，请重启助手后重新连接".into()));
+                state.finish(Some("与提权助手失去联系，请检查助手状态".into()));
             }
             return Err(error);
         }
@@ -407,7 +433,8 @@ impl MeshController {
         Ok(())
     }
     pub fn shutdown(&self) {
-        if !self.networks.read().is_empty() {
+        let previous = std::mem::replace(&mut *self.start_state.lock(), StartState::Closed);
+        if previous == StartState::Started || !self.networks.read().is_empty() {
             let _ = ipc::call(self.request(MeshCommand::StopAll));
         }
         self.networks.write().clear();

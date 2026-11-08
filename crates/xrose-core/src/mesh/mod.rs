@@ -19,7 +19,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 // Require workers with live updates in both forwarding directions.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -98,6 +98,7 @@ pub struct MeshProfile {
     pub provider: MeshProvider,
     pub hostname: String,
     pub auto_connect: bool,
+    pub auto_reconnect: bool,
     #[serde(default)]
     pub easytier: EasyTierOptions,
     pub network_name: String,
@@ -117,14 +118,44 @@ pub struct MeshProfile {
     pub outbound_port: u16,
     pub outbound_secret: MeshSecret,
 }
+/// Mesh backends accept a single ASCII DNS label of at most 63 bytes.
+fn device_name(hostname: &str) -> String {
+    const PREFIX: &str = "xrose-";
+    let short = hostname.split('.').next().unwrap_or_default().trim();
+    let label: String = short
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    let label = label.trim_matches('-');
+    let encoded;
+    let ascii = if label.is_ascii() {
+        label
+    } else if let Ok(url::Host::Domain(name)) = url::Host::parse(label) {
+        encoded = name;
+        &encoded
+    } else {
+        ""
+    };
+    let suffix = ascii[..ascii.len().min(63 - PREFIX.len())].trim_end_matches('-');
+    format!(
+        "{PREFIX}{}",
+        if suffix.is_empty() { "device" } else { suffix }
+    )
+}
+
+fn local_device_name() -> String {
+    device_name(&gethostname::gethostname().to_string_lossy())
+}
+
 impl Default for MeshProfile {
     fn default() -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             name: "异地组网".into(),
             provider: MeshProvider::EasyTier,
-            hostname: "xrose".into(),
+            hostname: local_device_name(),
             auto_connect: false,
+            auto_reconnect: true,
             easytier: Default::default(),
             network_name: String::new(),
             network_secret: MeshSecret::default(),
@@ -353,6 +384,7 @@ impl MeshProfile {
             provider: self.provider,
             hostname: self.hostname.clone(),
             auto_connect: self.auto_connect,
+            auto_reconnect: self.auto_reconnect,
             easytier: self.easytier.clone(),
             network_name: self.network_name.clone(),
             has_secret: !self.network_secret.0.is_empty(),
@@ -467,6 +499,8 @@ pub struct MeshProfileView {
     pub provider: MeshProvider,
     pub hostname: String,
     pub auto_connect: bool,
+    #[serde(default = "crate::model::default_true")]
+    pub auto_reconnect: bool,
     #[serde(default)]
     pub easytier: EasyTierOptions,
     pub network_name: String,
@@ -552,6 +586,9 @@ pub struct ForwardUpdate {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MeshRuntimeView {
+    /// Set when another client explicitly disconnects or logs out this session.
+    #[serde(default)]
+    pub user_stopped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forward_update: Option<ForwardUpdate>,
     #[serde(default)]
@@ -625,6 +662,19 @@ impl MeshSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn device_names_use_the_short_hostname_and_fit_a_dns_label() {
+        assert_eq!(device_name("demo-laptop.local"), "xrose-demo-laptop");
+        assert_eq!(device_name("Lab--PC"), "xrose-Lab--PC");
+        assert_eq!(device_name(" Lab PC_01 "), "xrose-Lab-PC-01");
+        assert_eq!(device_name("büro.local"), "xrose-xn--bro-hoa");
+        assert_eq!(device_name("---"), "xrose-device");
+        assert_eq!(device_name(""), "xrose-device");
+        let long = device_name(&format!("{}-suffix", "a".repeat(56)));
+        assert_eq!(long, format!("xrose-{}", "a".repeat(56)));
+        assert_eq!(device_name(&"b".repeat(80)).len(), 63);
+    }
+
     #[test]
     fn service_forward_validation_and_legacy_defaults() {
         use super::*;

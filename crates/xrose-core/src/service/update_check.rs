@@ -18,18 +18,14 @@ impl AppService {
             && a.active_version(core) == b.active_version(core)
     }
 
-    pub(super) async fn installed_core_version(
+    async fn installed_core_version(
         &self,
         core: CoreKind,
         settings: &Settings,
     ) -> Result<Option<String>> {
         if settings.binary_override(core).is_none()
-            && self
-                .inner
-                .core
-                .binaries()
-                .resolve(core, settings.active_version(core).map(String::as_str))
-                .is_none()
+            && settings.active_version(core).is_none()
+            && crate::core::binary::path_binary(core).is_none()
         {
             return Ok(None);
         }
@@ -43,6 +39,26 @@ impl AppService {
                     core.display_name()
                 ))
             })
+    }
+
+    /// The download action can install a managed copy even when PATH already has this release.
+    pub async fn core_download_candidate(
+        &self,
+        core: CoreKind,
+        settings: &Settings,
+        network: &updates::UpdateNetwork,
+    ) -> Result<Option<UpdateCandidate>> {
+        let managed =
+            settings.binary_override(core).is_none() && settings.active_version(core).is_some();
+        let current = if managed {
+            self.installed_core_version(core, settings)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        updates::check_core_update(core, current.as_deref(), network).await
     }
 
     pub(super) fn record_core_check(

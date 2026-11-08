@@ -480,7 +480,7 @@ impl AppView {
                     .child(toggle("vpn-pushed-dns", self.tr("使用 VPN 下发的分域 DNS", "Use VPN split DNS"), form.vpn.use_pushed_dns)
                         .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.use_pushed_dns=*checked;cx.notify();})))
                     .child(field(&p, self.tr("服务器证书名称（可选）", "Server certificate name (optional)"), form.sni.clone(), true))
-                    .when(protocol == Protocol::Openconnect, |d| d.child(div().flex().flex_wrap().gap_3()
+                    .when(protocol == Protocol::Openconnect, |d| d.child(div().flex().flex_col().items_start().gap_3()
                         .child(toggle("vpn-no-udp", self.tr("仅使用 TLS 连接", "Use TLS transport only"), form.vpn.disable_udp)
                             .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.disable_udp=*checked;cx.notify();})))
                         .child(toggle("vpn-insecure", self.tr("允许不安全证书", "Allow insecure certificates"), insecure)
@@ -497,9 +497,9 @@ impl AppView {
                         .child(
                             div()
                                 .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_4()
+                                .flex_col()
+                                .items_start()
+                                .gap_3()
                                 .child(
                                     toggle("manual-tls", "TLS", tls || !transport_capable).disabled(!transport_capable).on_change(cx.listener(
                                         |this, checked, _, cx| {

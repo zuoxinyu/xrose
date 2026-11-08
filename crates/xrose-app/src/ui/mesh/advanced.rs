@@ -11,7 +11,7 @@ impl AppView {
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(label)
         };
-        let grid = || div().grid().grid_cols(2).gap_3();
+        let options_list = || div().flex().flex_col().gap_3();
         let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
         // Bind each displayed value and its edit handler to the same draft field.
         macro_rules! option {
@@ -49,7 +49,7 @@ impl AppView {
                 .child(ChoiceGroup::new("et-p2p", vec![self.tr("自动", "Auto"), self.tr("按需", "On demand"), self.tr("关闭", "Off")],
                     policies.iter().position(|v| v == &options.p2p))
                     .on_change(cx.listener(move |this, index: &usize, _, cx| { this.mesh_form.easytier.p2p = policies[*index]; cx.notify(); }))))
-            .child(grid()
+            .child(options_list()
                 .child(option!(p2p_only, "仅使用直连", "Direct connections only", "没有直连时不经中继传输数据。", "Peers without a direct link cannot exchange data."))
                 .child(option!(request_p2p, "请求对端主动连接", "Request a direct link", "请对端主动与本机建立 P2P 连接。", "Ask peers to initiate a P2P connection to this device."))
                 .child(option!(latency_first, "延迟优先", "Prefer lower latency", "按总延迟而非跳数选择路径。", "Choose the lowest-latency path regardless of hop count."))
@@ -61,7 +61,7 @@ impl AppView {
                 .child(ChoiceGroup::new("et-tcp", vec![self.tr("关闭", "Off"), "KCP".into(), "QUIC".into()],
                     acceleration.iter().position(|v| v == &options.tcp_acceleration))
                     .on_change(cx.listener(move |this, index: &usize, _, cx| { this.mesh_form.easytier.tcp_acceleration = acceleration[*index]; cx.notify(); }))))
-            .child(grid()
+            .child(options_list()
                 .child(option!(device.accept_kcp, "接受 KCP 代理", "Accept KCP proxy", "允许对端使用 KCP 代理连接本机。", "Accept KCP-proxied connections from peers."))
                 .child(option!(device.accept_quic, "接受 QUIC 代理", "Accept QUIC proxy", "允许对端使用 QUIC 代理连接本机。", "Accept QUIC-proxied connections from peers."))
                 .child(option!(device.userspace_stack, "用户态 TCP/IP 栈", "User-space TCP/IP stack", "用于子网代理及支持的传输代理。", "Use a user-space stack for subnet and transport proxies."))
@@ -69,7 +69,7 @@ impl AppView {
                 .child(option!(disable_encryption, "关闭组网传输加密", "Disable traffic encryption", "流量将不再加密；需与对端设置一致。", "Traffic will be unencrypted. Peers must use the same setting.")))
             .child(div().flex().flex_col().gap_1().child(self.tr("虚拟网卡 MTU（留空使用默认值）", "Interface MTU (blank for default)")).child(Input::new(&self.mesh_form.mtu)))
             .child(divider(p)).child(heading(self.tr("NAT 穿透与转发", "NAT traversal and forwarding")))
-            .child(grid()
+            .child(options_list()
                 .child(option!(device.tcp_hole_punching, "TCP 打洞", "TCP hole punching", "通过 TCP 尝试穿透 NAT。", "Try to establish direct TCP links through NAT."))
                 .child(option!(device.udp_hole_punching, "UDP 打洞", "UDP hole punching", "通过 UDP 尝试穿透 NAT。", "Try to establish direct UDP links through NAT."))
                 .child(option!(device.symmetric_nat_punching, "对称 NAT 打洞", "Symmetric NAT traversal", "对称 NAT 下尝试额外的 UDP 打洞。", "Use additional UDP traversal techniques for symmetric NAT."))

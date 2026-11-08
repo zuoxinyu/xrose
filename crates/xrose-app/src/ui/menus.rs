@@ -66,7 +66,7 @@ pub(super) enum Command {
     EnableGroup(String),
     MoveGroup(String, isize),
     DeleteGroup(String),
-    RefreshSubscription(String),
+    EditSubscription(String),
     DeleteSubscription(String),
     DeleteDns(String),
     DeleteHost(String),
@@ -719,10 +719,10 @@ impl AppView {
                 let available = !busy(&format!("sub:{id}"));
                 menu = menu
                     .item(add(
-                        "更新",
-                        "Refresh",
+                        "编辑订阅",
+                        "Edit subscription",
                         available,
-                        Command::RefreshSubscription(id.clone()),
+                        Command::EditSubscription(id.clone()),
                     ))
                     .separator()
                     .item(add(
@@ -914,7 +914,7 @@ impl AppView {
                 .any(|g| &g.id == id),
             Command::DeleteDns(id) => self.snapshot.model.dns.servers.iter().any(|s| &s.tag == id),
             Command::DeleteHost(id) => self.snapshot.model.dns.hosts.contains_key(id),
-            Command::RefreshSubscription(id) | Command::DeleteSubscription(id) => {
+            Command::EditSubscription(id) | Command::DeleteSubscription(id) => {
                 self.snapshot.subscriptions.iter().any(|s| &s.id == id)
                     && !busy(&format!("sub:{id}"))
             }
@@ -1244,7 +1244,7 @@ impl AppView {
                     self.rule_group_id = None;
                 }
             }
-            Command::RefreshSubscription(id) => self.service.refresh_subscription(&id),
+            Command::EditSubscription(id) => self.open_edit_subscription(&id, window, cx),
             Command::DeleteSubscription(id) => {
                 if let Err(e) = self.service.delete_subscription(&id) {
                     self.service.toast(ToastLevel::Error, e.to_string());

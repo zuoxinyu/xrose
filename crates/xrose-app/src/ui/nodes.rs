@@ -120,6 +120,9 @@ impl AppView {
 
         // First run / empty state wizard.
         if !has_nodes {
+            let core_available = self
+                .snapshot
+                .core_binary_available(self.snapshot.settings.core);
             body = body.child(
                 card(&p)
                     .border_color(p.primary)
@@ -133,8 +136,8 @@ impl AppView {
                                 &p,
                                 self.tr("欢迎使用 Xrose", "Welcome to Xrose"),
                                 self.tr(
-                                    "下载 sing-box 并点击「启动」，即可查看流量、连接和网络诊断。如需代理，可添加订阅、粘贴节点链接或二维码，或拖入二维码图片。",
-                                    "Install sing-box and click Start to view traffic, connections and network diagnostics. To use a proxy, add a subscription, paste node links or a QR code, or drop a QR image.",
+                                    "配置好内核后，点击「启动」即可查看流量、连接和网络诊断。如需代理，可添加订阅、粘贴节点链接或二维码，或拖入二维码图片。",
+                                    "Set up a core and click Start to view traffic, connections and network diagnostics. To use a proxy, add a subscription, paste node links or a QR code, or drop a QR image.",
                                 ),
                             )),
                     )
@@ -142,7 +145,7 @@ impl AppView {
                         div()
                             .flex()
                             .gap_2()
-                            .child(
+                            .when(!core_available, |row| row.child(
                                 Button::new("wizard-install")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
@@ -151,7 +154,7 @@ impl AppView {
                                         let core = this.snapshot.settings.core;
                                         this.service.install_core_update(core);
                                     })),
-                            )
+                            ))
                             .child(
                                 Button::new("wizard-subscription")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))

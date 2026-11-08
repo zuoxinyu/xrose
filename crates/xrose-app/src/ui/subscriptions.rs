@@ -1,8 +1,11 @@
 use super::menus::{self, MenuTarget};
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::subscription::Subscription;
@@ -13,6 +16,83 @@ use super::theme::palette;
 use super::widgets::*;
 
 impl AppView {
+    pub(super) fn open_edit_subscription(
+        &self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sub) = self.snapshot.subscriptions.iter().find(|s| s.id == id) else {
+            return;
+        };
+        let id = sub.id.clone();
+        let name = cx.new(|cx| InputState::new(window, cx).default_value(sub.name.clone()));
+        let url = cx.new(|cx| InputState::new(window, cx).default_value(sub.url.clone()));
+        let error = cx.new(|_| None::<String>);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let form = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(this.tr("名称", "Name"))
+                    .child(Input::new(&name))
+                    .child(this.tr("订阅地址", "Subscription URL"))
+                    .child(Input::new(&url))
+                    .when_some(error.read(cx).clone(), |d, message| {
+                        d.child(form_feedback(message, false, &p))
+                    });
+                let (name, url, id, error) = (name.clone(), url.clone(), id.clone(), error.clone());
+                super::dialogs::settings_dialog(
+                    dialog,
+                    this.tr("编辑订阅", "Edit subscription"),
+                    form,
+                    &p,
+                    window,
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel-sub-edit")
+                                .compact()
+                                .label(this.tr("取消", "Cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("save-sub-edit")
+                                .compact()
+                                .primary()
+                                .label(this.tr("保存", "Save"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    match this.service.edit_subscription(
+                                        &id,
+                                        &name.read(cx).value(),
+                                        &url.read(cx).value(),
+                                    ) {
+                                        Ok(()) => {
+                                            window.close_dialog(cx);
+                                            this.sync(cx);
+                                        }
+                                        Err(err) => {
+                                            error.update(cx, |e, _| *e = Some(err.to_string()));
+                                            window.refresh();
+                                        }
+                                    }
+                                })),
+                        ),
+                )
+            })
+        });
+    }
+
     pub(crate) fn page_subscriptions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
@@ -121,7 +201,8 @@ impl AppView {
                 .as_ref()
                 .and_then(|u| u.expire)
                 .is_some_and(|ts| ts >= now && ts - now <= 7 * 86400);
-            let sub_for_toggle = sub.clone();
+            let toggle_id = sub.id.clone();
+            let full_url = SharedString::from(sub.url.clone());
 
             body = body.child(
                 card(&p)
@@ -169,6 +250,15 @@ impl AppView {
                                         div()
                                             .text_xs()
                                             .text_color(p.muted_fg)
+                                            .id(SharedString::from(format!(
+                                                "subscription-url-{}",
+                                                sub.id
+                                            )))
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(full_url.clone())
+                                                    .max_w(px(440.))
+                                                    .build(window, cx)
+                                            })
                                             .child(sub.masked_url()),
                                     ),
                             )
@@ -210,6 +300,7 @@ impl AppView {
                                             "",
                                             sub.enabled,
                                         )
+                                        .disabled(refreshing)
                                         .accessibility_label(
                                             self.tr("启用自动更新", "Enable automatic refresh"),
                                         )
@@ -219,11 +310,15 @@ impl AppView {
                                         ))
                                         .on_change(
                                             cx.listener(move |this, checked, _, cx| {
-                                                let mut updated = sub_for_toggle.clone();
-                                                updated.enabled = *checked;
-                                                let _ = this
+                                                if let Err(error) = this
                                                     .service
-                                                    .update_subscription_settings(updated);
+                                                    .set_subscription_enabled(&toggle_id, *checked)
+                                                {
+                                                    this.service.toast(
+                                                        xrose_core::service::ToastLevel::Error,
+                                                        error.to_string(),
+                                                    );
+                                                }
                                                 this.sync(cx);
                                             }),
                                         ),

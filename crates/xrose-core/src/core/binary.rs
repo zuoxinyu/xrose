@@ -8,6 +8,50 @@ use crate::model::CoreKind;
 use crate::paths::AppPaths;
 use crate::util::{atomic_write_json, find_executable, now_unix, set_executable, sha256_file};
 
+/// Availability cached for the settings view. Runtime launches resolve the executable again.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LocalBinaryStatus {
+    pub path: Option<PathBuf>,
+    pub custom_available: bool,
+}
+
+pub(crate) fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(windows)]
+    {
+        path.extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
+    }
+}
+
+fn find_in_search_path(core: CoreKind, search: &std::ffi::OsStr) -> Option<PathBuf> {
+    let exe = format!("{}{}", core.binary_name(), std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(search)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(&exe))
+        .find(|candidate| is_executable(candidate))
+        .and_then(|path| std::path::absolute(path).ok())
+}
+
+pub(crate) fn path_binary(core: CoreKind) -> Option<PathBuf> {
+    find_in_search_path(core, &std::env::var_os("PATH")?)
+}
+
 /// `(platform, arch)` in the naming used by Xray and sing-box releases.
 pub fn platform_arch() -> (&'static str, &'static str) {
     let os = if cfg!(target_os = "windows") {
@@ -126,9 +170,7 @@ impl BinaryManager {
             .collect();
         candidates.sort_by(|a, b| version_key(&b.version).cmp(&version_key(&a.version)));
         if let Some(version) = preferred_version {
-            if let Some(found) = candidates.iter().find(|b| b.version == version) {
-                return Some(found.clone());
-            }
+            return candidates.into_iter().find(|b| b.version == version);
         }
         candidates.into_iter().next()
     }
@@ -408,6 +450,32 @@ mod tests {
         let (platform, arch) = platform_arch();
         assert_ne!(platform, "unknown");
         assert_ne!(arch, "unknown");
+    }
+
+    #[test]
+    fn path_lookup_uses_the_first_executable_for_each_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let search = std::env::join_paths([&first, &second]).unwrap();
+        for core in CoreKind::all() {
+            let name = format!("{}{}", core.binary_name(), std::env::consts::EXE_SUFFIX);
+            let candidate = first.join(&name);
+            fs::create_dir(&candidate).unwrap();
+            assert_eq!(find_in_search_path(core, &search), None);
+            let fallback = second.join(&name);
+            fs::write(&fallback, b"fixture").unwrap();
+            set_executable(&fallback).unwrap();
+            assert_eq!(find_in_search_path(core, &search), Some(fallback.clone()));
+            fs::remove_dir(&candidate).unwrap();
+            fs::write(&candidate, b"fixture").unwrap();
+            #[cfg(unix)]
+            assert_eq!(find_in_search_path(core, &search), Some(fallback));
+            set_executable(&candidate).unwrap();
+            assert_eq!(find_in_search_path(core, &search), Some(candidate));
+        }
     }
 
     #[test]
