@@ -132,8 +132,8 @@ pub fn palette(cx: &App) -> Palette {
 /// Latency grades in milliseconds. Colour is reserved for exceptions: only the
 /// best and the degraded tiers are tinted, the normal tier keeps the text colour.
 pub const LATENCY_EXCELLENT_MS: u32 = 120;
-pub const LATENCY_NORMAL_MS: u32 = 250;
-pub const LATENCY_SLOW_MS: u32 = 500;
+pub const LATENCY_NORMAL_MS: u32 = 500;
+pub const LATENCY_SLOW_MS: u32 = 1000;
 
 /// A measurement older than this is shown dimmed.
 pub const LATENCY_STALE_SECS: i64 = 10 * 60;
@@ -216,4 +216,60 @@ pub const MEMBER_LIST_HEIGHT: f32 = 192.;
 
 pub fn switch_off() -> Hsla {
     hsl(0., 0., 0.5)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_palette() -> Palette {
+        let dummy = gpui_kit::hsla(0., 0., 0., 1.);
+        Palette {
+            bg: dummy,
+            panel: dummy,
+            panel_alt: dummy,
+            fg: gpui_kit::hsla(0.1, 0., 0., 1.),
+            muted_fg: gpui_kit::hsla(0.2, 0., 0., 1.),
+            border: dummy,
+            accent: dummy,
+            primary: dummy,
+            primary_fg: dummy,
+            danger: dummy,
+            success: dummy,
+            warning: dummy,
+            info: dummy,
+            data_down: dummy,
+            data_up: dummy,
+            ok_text: gpui_kit::hsla(0.3, 0., 0., 1.),
+            warn_text: gpui_kit::hsla(0.4, 0., 0., 1.),
+            danger_text: gpui_kit::hsla(0.5, 0., 0., 1.),
+            is_dark: false,
+        }
+    }
+
+    #[test]
+    fn test_latency_color_ms_grades() {
+        let p = dummy_palette();
+
+        // < 120 ms: 优 (ok_text)
+        assert_eq!(latency_color_ms(&p, Some(0)), p.ok_text);
+        assert_eq!(latency_color_ms(&p, Some(119)), p.ok_text);
+
+        // 120 ~ 499 ms: 正常 (fg)
+        assert_eq!(latency_color_ms(&p, Some(120)), p.fg);
+        assert_eq!(latency_color_ms(&p, Some(350)), p.fg);
+        assert_eq!(latency_color_ms(&p, Some(499)), p.fg);
+
+        // 500 ~ 999 ms: 偏慢 (warn_text)
+        assert_eq!(latency_color_ms(&p, Some(500)), p.warn_text);
+        assert_eq!(latency_color_ms(&p, Some(750)), p.warn_text);
+        assert_eq!(latency_color_ms(&p, Some(999)), p.warn_text);
+
+        // >= 1000 ms: 较差 (danger_text)
+        assert_eq!(latency_color_ms(&p, Some(1000)), p.danger_text);
+        assert_eq!(latency_color_ms(&p, Some(1500)), p.danger_text);
+
+        // None: 未测速 (muted_fg)
+        assert_eq!(latency_color_ms(&p, None), p.muted_fg);
+    }
 }
