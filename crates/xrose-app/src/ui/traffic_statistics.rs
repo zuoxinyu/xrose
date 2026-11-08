@@ -153,11 +153,16 @@ impl AppView {
                         .flex()
                         .items_center()
                         .gap_3()
-                        .child(div().text_xs().text_color(p.muted_fg).child(if enabled {
-                            self.tr("统计已开启", "Collection on")
-                        } else {
-                            self.tr("统计已关闭", "Collection off")
-                        }))
+                        .child(
+                            more_button(
+                                "traffic-actions",
+                                self.tr("统计操作", "Statistics actions"),
+                            )
+                            .dropdown_menu(menus::builder(
+                                cx.entity().downgrade(),
+                                MenuTarget::TrafficStatistics,
+                            )),
+                        )
                         .child(
                             toggle(
                                 "traffic-enabled",
@@ -169,16 +174,6 @@ impl AppView {
                                 |this, checked, _, _| {
                                     this.service.set_traffic_statistics_enabled(*checked)
                                 },
-                            )),
-                        )
-                        .child(
-                            more_button(
-                                "traffic-actions",
-                                self.tr("统计操作", "Statistics actions"),
-                            )
-                            .dropdown_menu(menus::builder(
-                                cx.entity().downgrade(),
-                                MenuTarget::TrafficStatistics,
                             )),
                         ),
                 ),

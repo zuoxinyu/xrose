@@ -40,18 +40,7 @@ impl AppView {
                 p.border
             })
             .bg(if selected { p.accent } else { p.bg })
-            .when(selected, |row| {
-                row.child(
-                    div()
-                        .absolute()
-                        .left(px(1.))
-                        .top(px(7.))
-                        .bottom(px(7.))
-                        .w(px(3.))
-                        .rounded_full()
-                        .bg(primary),
-                )
-            })
+            .when(selected, |row| row.child(selection_bar(primary)))
             .child(
                 gpui_base::Radio::new(DIRECT_VIRTUAL_NODE_ID)
                     .checked(selected)

@@ -334,11 +334,11 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 [drag?] [radio?] [主信息]            [次信息: 延迟等] [行内动作…] [⋯] | [switch]
 ```
 
-- **选中行**（列表中"当前使用"的行）：`--accent-soft` 底 + **贴行边**的 3px accent 左条 + radio 选中。**不要再加黑框 / 粗描边。** `⚠K10`
+- **选中行**使用 `--accent-soft` 底色和选中圆点。节点、本机直连、DNS 服务器及内核来源共用 3px 宽的圆头色条，距行外缘左侧 2px、上下各 8px。
 
 ```css
 .row[aria-selected=true] { background:var(--accent-soft); border-color:transparent; position:relative; }
-.row[aria-selected=true]::before { content:""; position:absolute; inset:8px auto 8px 0;
+.row[aria-selected=true]::before { content:""; position:absolute; inset:7px auto 7px 1px;
   width:3px; border-radius:2px; background:var(--accent); }
 .row .row-actions { opacity:0; transition:opacity .12s; }
 .row:hover .row-actions, .row:focus-within .row-actions { opacity:1; }  /* focus-within 不能漏 */
@@ -446,6 +446,8 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 设置页行对齐：label 与首行控件**垂直居中对齐**；label 列宽固定 120，说明置于控件下方。
 
 设置 Tabs 使用 GPUI 的 TabBar / Tab，默认打开「网络与代理」。方向键切换，Home / End 到首尾，Enter / 空格激活；窄窗口允许横向滚动，不显示右侧展开菜单按钮。切换标签将内容滚动到顶部，保留未提交的输入与高级设置展开状态；离开设置页再返回时保留当前标签。提权助手及环境检查独立成页，保留平台差异和已有操作。
+
+Core 页为 sing-box 和 Xray 分别列出一行「自定义路径」和各已安装版本，整行沿用默认 DNS 的单选圆点、浅底与左侧色条。「当前选用」只标记所选内核。自定义路径行默认显示系统 PATH 查找结果，文件夹按钮打开系统文件选择器，清理按钮恢复 PATH 查找。有效文件显示探测到的版本和架构。
 
 ---
 

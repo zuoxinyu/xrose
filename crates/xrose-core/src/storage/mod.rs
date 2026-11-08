@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 13;
+pub const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -316,6 +316,33 @@ impl Store {
                     tx.execute(
                         "UPDATE profiles SET model = ?1 WHERE id = ?2",
                         params![encrypted, id],
+                    )?;
+                }
+            }
+        }
+        if version < 14 && settings_file.exists() {
+            // Older configurations with both a path and a version always ran the custom file.
+            let bytes = std::fs::read(settings_file)?;
+            if let Ok(mut settings) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                let mut changed = false;
+                for core in crate::model::CoreKind::all() {
+                    let key = core.as_str();
+                    if settings["binary_paths"][key]
+                        .as_str()
+                        .is_some_and(|p| !p.is_empty())
+                    {
+                        if let Some(versions) = settings
+                            .get_mut("active_versions")
+                            .and_then(|v| v.as_object_mut())
+                        {
+                            changed |= versions.remove(key).is_some();
+                        }
+                    }
+                }
+                if changed {
+                    crate::util::atomic_write_private(
+                        settings_file,
+                        &serde_json::to_vec_pretty(&settings)?,
                     )?;
                 }
             }
@@ -1022,6 +1049,40 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn v14_keeps_previously_effective_binary_sources() {
+        let (store, dir) = store();
+        let path = AppPaths::from_root(dir.path()).settings_file();
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 13)
+            .unwrap();
+        let legacy = serde_json::json!({
+            "binary_paths": {"xray": "fixture-xray"},
+            "active_versions": {"xray": "1.0", "sing-box": "2.0"},
+            "other_setting": true
+        });
+        std::fs::write(&path, legacy.to_string()).unwrap();
+        store.migrate(&path).unwrap();
+        let saved = crate::settings::Settings::load(&path).unwrap();
+        assert_eq!(
+            saved
+                .binary_override(crate::model::CoreKind::Xray)
+                .map(String::as_str),
+            Some("fixture-xray")
+        );
+        assert_eq!(
+            saved
+                .active_version(crate::model::CoreKind::SingBox)
+                .map(String::as_str),
+            Some("2.0")
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(json["other_setting"], true);
     }
 
     #[test]

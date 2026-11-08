@@ -10,33 +10,57 @@ use crate::util::{atomic_write_json, find_executable, now_unix, set_executable, 
 
 /// Availability cached for the settings view. Runtime launches resolve the executable again.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LocalBinaryStatus {
     pub path: Option<PathBuf>,
-    pub custom_available: bool,
+    pub available: bool,
+    pub info: Option<BinaryInfo>,
+    pub probing: bool,
+    #[serde(skip)]
+    stamp: Option<(u64, Option<std::time::SystemTime>)>,
 }
 
-pub(crate) fn is_executable(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
+impl LocalBinaryStatus {
+    pub(crate) fn discover(core: CoreKind, custom: Option<&str>) -> Self {
+        let path = custom.map(PathBuf::from).or_else(|| path_binary(core));
+        let stamp = path
+            .as_deref()
+            .and_then(executable_metadata)
+            .map(|m| (m.len(), m.modified().ok()));
+        Self {
+            path,
+            available: stamp.is_some(),
+            stamp,
+            ..Default::default()
+        }
     }
+
+    pub(crate) fn same_file(&self, other: &Self) -> bool {
+        self.path == other.path && self.stamp == other.stamp
+    }
+}
+
+fn executable_metadata(path: &Path) -> Option<fs::Metadata> {
+    let metadata = path.metadata().ok().filter(|m| m.is_file())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return None;
+        }
     }
     #[cfg(windows)]
+    if !path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
     {
-        path.extension()
-            .and_then(|s| s.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        return None;
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        true
-    }
+    Some(metadata)
+}
+
+pub(crate) fn is_executable(path: &Path) -> bool {
+    executable_metadata(path).is_some()
 }
 
 fn find_in_search_path(core: CoreKind, search: &std::ffi::OsStr) -> Option<PathBuf> {
@@ -424,9 +448,56 @@ fn extract_archive(archive: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs `version` and extracts a version string. Errors are soft: an unknown
-/// version string is still usable.
-pub async fn probe_version(binary: &Path) -> Option<String> {
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BinaryInfo {
+    pub version: Option<String>,
+    pub architecture: Option<String>,
+}
+
+fn parse_binary_info(core: CoreKind, text: &str) -> BinaryInfo {
+    let mut lines = text.lines().map(str::trim);
+    let prefix = match core {
+        CoreKind::SingBox => "sing-box version ",
+        CoreKind::Xray => "Xray ",
+    };
+    let Some(header) = lines.find_map(|line| line.strip_prefix(prefix)) else {
+        return BinaryInfo::default();
+    };
+    let version = header
+        .split_whitespace()
+        .next()
+        .map(|v| v.trim_start_matches('v').to_owned());
+    let environment = match core {
+        CoreKind::SingBox => lines.find_map(|line| line.strip_prefix("Environment:")),
+        CoreKind::Xray => header
+            .rsplit_once('(')
+            .and_then(|(_, s)| s.strip_suffix(')')),
+    };
+    let architecture = environment
+        .and_then(|s| s.split_whitespace().last())
+        .and_then(|s| s.split_once('/'))
+        .filter(|(os, arch)| {
+            !os.is_empty()
+                && !arch.is_empty()
+                && [os, arch]
+                    .iter()
+                    .all(|s| s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_'))
+        })
+        .map(|(os, arch)| format!("{}/{arch}", if os == "darwin" { "macos" } else { os }));
+    BinaryInfo {
+        version,
+        architecture,
+    }
+}
+
+pub(crate) async fn probe_binary_info(core: CoreKind, binary: &Path) -> BinaryInfo {
+    match version_output(binary).await {
+        Some(text) => parse_binary_info(core, &text),
+        None => BinaryInfo::default(),
+    }
+}
+
+async fn version_output(binary: &Path) -> Option<String> {
     let (code, text) = super::process::run_capture(
         binary,
         &["version".into()],
@@ -434,9 +505,12 @@ pub async fn probe_version(binary: &Path) -> Option<String> {
     )
     .await
     .ok()?;
-    if code != 0 {
-        return None;
-    }
+    (code == 0).then_some(text)
+}
+
+/// Extract a release version for update comparison, including legacy output formats.
+pub async fn probe_version(binary: &Path) -> Option<String> {
+    let text = version_output(binary).await?;
     let re = regex::Regex::new(r"(?i)\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?)").ok()?;
     re.captures(&text).map(|c| c[1].to_string())
 }
@@ -476,6 +550,30 @@ mod tests {
             set_executable(&candidate).unwrap();
             assert_eq!(find_in_search_path(core, &search), Some(candidate));
         }
+    }
+
+    #[test]
+    fn local_binary_info_uses_the_core_version_and_its_reported_target() {
+        let sing = parse_binary_info(
+            CoreKind::SingBox,
+            "sing-box version 1.14.0-beta.1\n\nEnvironment: go1.26.0 darwin/arm64\nTags: example",
+        );
+        assert_eq!(sing.version.as_deref(), Some("1.14.0-beta.1"));
+        assert_eq!(sing.architecture.as_deref(), Some("macos/arm64"));
+        let xray = parse_binary_info(
+            CoreKind::Xray,
+            "Xray 26.10.31 (Xray, Penetrates Everything.) Custom (go1.26.0 windows/amd64)\n",
+        );
+        assert_eq!(xray.version.as_deref(), Some("26.10.31"));
+        assert_eq!(xray.architecture.as_deref(), Some("windows/amd64"));
+        assert_eq!(
+            parse_binary_info(CoreKind::Xray, "unrelated go1.26.0 linux/arm").version,
+            None
+        );
+        assert_eq!(
+            parse_binary_info(CoreKind::SingBox, "sing-box version 1.14.4").architecture,
+            None
+        );
     }
 
     #[test]

@@ -217,15 +217,12 @@ pub struct UiSnapshot {
 impl UiSnapshot {
     pub fn core_binary_available(&self, core: CoreKind) -> bool {
         let local = self.local_binaries.get(core.as_str());
-        if self.settings.binary_override(core).is_some() {
-            return local.is_some_and(|status| status.custom_available);
-        }
         if let Some(version) = self.settings.active_version(core) {
             return self.binaries.iter().any(|record| {
                 record.core == core && record.matches_platform() && &record.version == version
             });
         }
-        local.is_some_and(|status| status.path.is_some())
+        local.is_some_and(|status| status.available)
     }
 
     pub fn settings_update_available(&self) -> bool {
@@ -313,7 +310,7 @@ impl ConnectionState {
 }
 
 struct Inner {
-    local_binaries: RwLock<BTreeMap<String, crate::core::binary::LocalBinaryStatus>>,
+    local_binaries: Arc<RwLock<BTreeMap<String, crate::core::binary::LocalBinaryStatus>>>,
     mesh_sync: mesh_sync::SyncState,
     mesh: crate::mesh::controller::MeshController,
     mesh_reconnect: Mutex<mesh_reconnect::ReconnectState>,
@@ -375,26 +372,6 @@ pub struct AppService {
     inner: Arc<Inner>,
 }
 
-fn local_binary_status(
-    settings: &Settings,
-) -> BTreeMap<String, crate::core::binary::LocalBinaryStatus> {
-    use crate::core::binary::{LocalBinaryStatus, is_executable, path_binary};
-    CoreKind::all()
-        .into_iter()
-        .map(|core| {
-            (
-                core.as_str().to_owned(),
-                LocalBinaryStatus {
-                    path: path_binary(core),
-                    custom_available: settings
-                        .binary_override(core)
-                        .is_some_and(|p| is_executable(std::path::Path::new(p))),
-                },
-            )
-        })
-        .collect()
-}
-
 impl AppService {
     pub fn new() -> Result<Self> {
         Self::with_paths(AppPaths::discover())
@@ -402,16 +379,13 @@ impl AppService {
 
     pub fn with_paths(paths: AppPaths) -> Result<Self> {
         paths.ensure()?;
+        let store = Store::open(&paths)?;
         let settings = Settings::load(&paths.settings_file())?;
         if !paths.settings_file().exists() {
             let _ = settings.save(&paths.settings_file());
         }
         if std::env::var_os("XROSE_DEBUG").is_some() {
             eprintln!("[debug] settings loaded");
-        }
-        let store = Store::open(&paths)?;
-        if std::env::var_os("XROSE_DEBUG").is_some() {
-            eprintln!("[debug] store opened");
         }
         let active_profile = store.active_profile_id();
         let model = active_profile
@@ -459,7 +433,7 @@ impl AppService {
         let statistics =
             traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
         let inner = Arc::new(Inner {
-            local_binaries: RwLock::new(local_binary_status(&settings)),
+            local_binaries: Default::default(),
             statistics,
             mesh_sync: Default::default(),
             mesh_reconnect: Default::default(),
@@ -538,6 +512,7 @@ impl AppService {
             eprintln!("[debug] doctor done");
         }
         service.start_mesh_discovery();
+        service.refresh_local_binaries();
         service.start_monitor();
         service.start_reload_worker();
         service.start_node_switch_scheduler();
@@ -3604,7 +3579,6 @@ impl AppService {
                 settings
                     .active_versions
                     .insert(core.as_str().into(), record.version.clone());
-                settings.binary_paths.remove(core.as_str());
                 let _ = self.save_settings(&settings);
                 self.toast(
                     ToastLevel::Success,
@@ -3656,7 +3630,6 @@ impl AppService {
         settings
             .active_versions
             .insert(core.as_str().into(), version.to_string());
-        settings.binary_paths.remove(core.as_str());
         self.save_settings(&settings)?;
         self.toast(
             ToastLevel::Info,
@@ -3665,32 +3638,75 @@ impl AppService {
         Ok(())
     }
 
-    /// An empty override selects the system PATH for this core.
-    pub fn set_binary_override(&self, core: CoreKind, path: Option<String>) -> Result<()> {
+    fn refresh_local_binaries(&self) {
+        use crate::core::binary::{LocalBinaryStatus, probe_binary_info};
+        let settings = self.inner.settings.read();
+        for core in CoreKind::all() {
+            let current = LocalBinaryStatus::discover(core, settings.local_binary_path(core));
+            let cache = self.inner.local_binaries.clone();
+            let mut rows = cache.write();
+            let row = rows.entry(core.as_str().to_owned()).or_default();
+            if !row.same_file(&current) {
+                *row = current;
+            }
+            if !self.inner.startup_started.load(Ordering::Acquire)
+                || !row.available
+                || row.probing
+                || row.info.is_some()
+            {
+                continue;
+            }
+            let Some(path) = row.path.clone() else {
+                continue;
+            };
+            row.probing = true;
+            let pending = row.clone();
+            drop(rows);
+            self.spawn(async move {
+                let info = probe_binary_info(core, &path).await;
+                if let Some(row) = cache.write().get_mut(core.as_str()) {
+                    if row.same_file(&pending) {
+                        row.info = Some(info);
+                        row.probing = false;
+                    }
+                }
+            });
+        }
+    }
+
+    pub fn select_local_binary(&self, core: CoreKind) -> Result<()> {
         let mut settings = self.settings();
-        match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-            Some(path) => {
-                let file = std::path::Path::new(path);
-                if !file.is_absolute() || !crate::core::binary::is_executable(file) {
-                    return Err(Error::binary("请选择存在且可执行的文件，并填写完整路径"));
-                }
-                settings
-                    .binary_paths
-                    .insert(core.as_str().into(), path.to_owned());
-            }
-            None => {
-                if crate::core::binary::path_binary(core).is_none() {
-                    return Err(Error::binary(format!(
-                        "系统 PATH 中未找到 {}，请指定完整路径或下载内核",
-                        core.binary_name()
-                    )));
-                }
-                settings.binary_paths.remove(core.as_str());
-            }
+        if settings.active_version(core).is_none() {
+            return Ok(());
+        }
+        let local = crate::core::binary::LocalBinaryStatus::discover(
+            core,
+            settings.local_binary_path(core),
+        );
+        if !local.available {
+            return Err(Error::binary(
+                "找不到可执行文件，请先选择文件或将内核加入 PATH",
+            ));
         }
         settings.active_versions.remove(core.as_str());
+        self.save_settings(&settings)
+    }
+
+    /// Picking a file activates the local row. Clearing only changes that row's file.
+    pub fn set_binary_override(&self, core: CoreKind, path: Option<String>) -> Result<()> {
+        let mut settings = self.settings();
+        if let Some(path) = path {
+            let file = std::path::Path::new(&path);
+            if !file.is_absolute() || !crate::core::binary::is_executable(file) {
+                return Err(Error::binary("请选择存在且可执行的内核文件"));
+            }
+            settings.binary_paths.insert(core.as_str().into(), path);
+            settings.active_versions.remove(core.as_str());
+        } else {
+            settings.binary_paths.remove(core.as_str());
+        }
         self.save_settings(&settings)?;
-        *self.inner.local_binaries.write() = local_binary_status(&settings);
+        self.refresh_local_binaries();
         Ok(())
     }
 
@@ -3756,7 +3772,6 @@ impl AppService {
                     settings
                         .active_versions
                         .insert(core.as_str().into(), record.version.clone());
-                    settings.binary_paths.remove(core.as_str());
                     if let Err(err) = service.save_settings(&settings) {
                         service.set_busy("install", false);
                         service.toast(ToastLevel::Error, format!("内核已下载，但启用失败：{err}"));
@@ -4502,8 +4517,7 @@ impl AppService {
                     inner: inner.clone(),
                 };
                 if tick % 10 == 0 {
-                    let status = local_binary_status(&service.settings());
-                    *inner.local_binaries.write() = status;
+                    service.refresh_local_binaries();
                 }
                 // Probe the privilege helper off the UI thread. The status is
                 // cached inside `privilege::status`, so this is cheap unless
@@ -5728,6 +5742,71 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn probes_local_versions_once_per_executable_revision() {
+        let (service, dir) = service();
+        let write_binary = |path: &std::path::Path, output: &str| {
+            let script = format!(
+                "#!/bin/sh\n[ \"$1\" = version ] || exit 1\necho probe >> \"$0.calls\"\nprintf '%s\\n' '{output}'\n"
+            );
+            std::fs::write(path, script).unwrap();
+            crate::util::set_executable(path).unwrap();
+        };
+        for core in CoreKind::all() {
+            let path = dir.path().join(core.binary_name());
+            let output = match core {
+                CoreKind::Xray => "Xray 1.2.3 (fixture) (go1.25 windows/amd64)",
+                CoreKind::SingBox => "sing-box version 1.2.3\nEnvironment: go1.25 darwin/arm64",
+            };
+            write_binary(&path, output);
+            service
+                .set_binary_override(core, Some(path.to_str().unwrap().into()))
+                .unwrap();
+        }
+        service.inner.startup_started.store(true, Ordering::Release);
+        service.refresh_local_binaries();
+        let wait_for_version = |core: CoreKind, version: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if service.inner.local_binaries.read()[core.as_str()]
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.version.as_deref())
+                    == Some(version)
+                {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "version probe timed out"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        wait_for_version(CoreKind::SingBox, "1.2.3");
+        wait_for_version(CoreKind::Xray, "1.2.3");
+        let path = dir.path().join("xray");
+        write_binary(&path, "Xray 1.2.40 (fixture) (go1.25 linux/arm64)");
+        service.refresh_local_binaries();
+        wait_for_version(CoreKind::Xray, "1.2.40");
+        service.refresh_local_binaries();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("xray.calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sing-box.calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn custom_executables_are_independent_of_each_other_and_managed_versions() {
         let (service, dir) = service();
@@ -5780,6 +5859,35 @@ mod tests {
                 .unwrap(),
             path
         );
+        let saved = service
+            .settings()
+            .local_binary_path(core)
+            .unwrap()
+            .to_owned();
+        let reloaded = Settings::load(&service.paths().settings_file()).unwrap();
+        assert_eq!(reloaded.local_binary_path(core), Some(saved.as_str()));
+        assert!(reloaded.binary_override(core).is_none());
+        service.select_local_binary(core).unwrap();
+        assert_eq!(
+            service
+                .core()
+                .resolve_binary(core, &service.settings())
+                .unwrap(),
+            std::path::Path::new(&saved)
+        );
+        service.set_active_version(core, "1.0").unwrap();
+        service.set_binary_override(core, None).unwrap();
+        assert!(service.settings().local_binary_path(core).is_none());
+        assert_eq!(
+            service.settings().active_version(core).map(String::as_str),
+            Some("1.0")
+        );
+        service
+            .set_binary_override(core, Some(saved.clone()))
+            .unwrap();
+        service.set_binary_override(core, None).unwrap();
+        assert!(std::path::Path::new(&saved).exists());
+        assert!(service.settings().active_version(core).is_none());
         assert!(service.settings().binary_override(core).is_none());
         assert!(
             service

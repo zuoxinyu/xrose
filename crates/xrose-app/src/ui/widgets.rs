@@ -80,6 +80,71 @@ pub fn radio_indicator(checked: bool, border: Hsla, dot: Hsla) -> Div {
         })
 }
 
+/// Position inside the row's 1px border, clear of its rounded corners.
+pub(super) fn selection_bar(color: Hsla) -> Div {
+    div()
+        .absolute()
+        .left(px(1.))
+        .top(px(7.))
+        .bottom(px(7.))
+        .w(px(3.))
+        .rounded_full()
+        .bg(color)
+}
+
+pub(super) fn radio_row_surface(
+    id: impl Into<ElementId>,
+    checked: bool,
+    enabled: bool,
+    p: &Palette,
+) -> Stateful<Div> {
+    let accent = p.accent;
+    div()
+        .id(id)
+        .relative()
+        .flex()
+        .items_center()
+        .gap_3()
+        .p_3()
+        .rounded_md()
+        .bg(if checked { p.accent } else { p.bg })
+        .border_1()
+        .border_color(p.border.opacity(0.))
+        .when(checked, |row| row.child(selection_bar(p.primary)))
+        .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(accent)))
+}
+
+pub(super) fn row_radio(
+    id: impl Into<ElementId>,
+    label: SharedString,
+    checked: bool,
+    enabled: bool,
+    p: &Palette,
+) -> gpui_base::Radio {
+    let primary = p.primary;
+    let accent = p.accent;
+    gpui_base::Radio::new(id)
+        .checked(checked)
+        .disabled(!enabled)
+        .size(px(ICON_BUTTON_SIZE))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_2()
+        .border_color(p.border.opacity(0.))
+        .focus_visible(move |s| s.border_color(primary))
+        .when(!enabled, |d| d.opacity(DISABLED_OPACITY))
+        .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(accent)))
+        .accessibility_label(label)
+        .child(radio_indicator(
+            checked,
+            if checked { primary } else { p.muted_fg },
+            primary,
+        ))
+}
+
 pub fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, checked: bool) -> Switch {
     Switch::new(id).checked(checked).label(label.into())
 }

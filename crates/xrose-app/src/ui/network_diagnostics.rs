@@ -162,7 +162,7 @@ impl AppView {
                     );
                 }
             }));
-        let actions = div().flex().gap_2().child(refresh).child(copy);
+        let actions = div().flex().gap_2().child(copy).child(refresh);
         let header = div()
             .flex()
             .items_start()

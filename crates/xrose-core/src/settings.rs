@@ -170,9 +170,9 @@ pub struct Settings {
     pub urltest_url: String,
     pub urltest_interval_secs: u64,
     pub subscription_update_hours: u64,
-    /// Version tag selected per core (empty = latest installed).
+    /// Selected managed version per core. Without a version, use the local executable.
     pub active_versions: BTreeMap<String, String>,
-    /// Custom binary path override per core.
+    /// Remembered local executable per core. Without a file, search the system PATH.
     pub binary_paths: BTreeMap<String, String>,
     pub check_app_updates: bool,
     pub last_update_check: Option<i64>,
@@ -446,8 +446,18 @@ impl Settings {
     }
 
     pub fn binary_override(&self, core: CoreKind) -> Option<&String> {
+        if self.active_version(core).is_some() {
+            return None;
+        }
         self.binary_paths
             .get(core.as_str())
+            .filter(|path| !path.is_empty())
+    }
+
+    pub fn local_binary_path(&self, core: CoreKind) -> Option<&str> {
+        self.binary_paths
+            .get(core.as_str())
+            .map(String::as_str)
             .filter(|v| !v.is_empty())
     }
 

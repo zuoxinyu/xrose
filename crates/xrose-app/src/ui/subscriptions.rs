@@ -268,6 +268,18 @@ impl AppView {
                                     .items_center()
                                     .gap_2()
                                     .child(
+                                        more_button(
+                                            SharedString::from(format!("sub-menu-{}", sub.id)),
+                                            self.tr("订阅操作", "Subscription actions"),
+                                        )
+                                        .dropdown_menu(
+                                            menus::builder(
+                                                cx.entity().downgrade(),
+                                                menu_target.clone(),
+                                            ),
+                                        ),
+                                    )
+                                    .child(
                                         Button::new(SharedString::from(format!(
                                             "refresh-{}",
                                             sub.id
@@ -280,18 +292,6 @@ impl AppView {
                                             cx.listener(move |this, _, _, _| {
                                                 this.service.refresh_subscription(&sub_id_refresh);
                                             }),
-                                        ),
-                                    )
-                                    .child(
-                                        more_button(
-                                            SharedString::from(format!("sub-menu-{}", sub.id)),
-                                            self.tr("订阅操作", "Subscription actions"),
-                                        )
-                                        .dropdown_menu(
-                                            menus::builder(
-                                                cx.entity().downgrade(),
-                                                menu_target.clone(),
-                                            ),
                                         ),
                                     )
                                     .child(

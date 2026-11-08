@@ -1045,7 +1045,6 @@ fn fetch_core(args: &[String]) -> Result<(), String> {
     settings
         .active_versions
         .insert(core.as_str().into(), record.version.clone());
-    settings.binary_paths.remove(core.as_str());
     settings
         .save(&service.paths().settings_file())
         .map_err(|e| e.to_string())?;

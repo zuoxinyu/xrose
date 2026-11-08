@@ -248,8 +248,6 @@ pub struct AppView {
     lan_user_input: Entity<InputState>,
     lan_password_input: Entity<InputState>,
     update_agent_input: Entity<InputState>,
-    sing_box_path_input: Entity<InputState>,
-    xray_path_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connection_filter: ConnectionFilterKind,
@@ -325,32 +323,6 @@ impl AppView {
         let update_agent_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(snapshot.settings.update_user_agent.clone())
         });
-        let mut path_input = |core| {
-            let input = cx.new(|cx| {
-                InputState::new(window, cx)
-                    .default_value(
-                        snapshot
-                            .settings
-                            .binary_override(core)
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                    .placeholder(tr(
-                        snapshot.settings.language,
-                        "可执行文件的完整路径",
-                        "Full path to executable",
-                    ))
-            });
-            cx.subscribe(&input, |_, _, event, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            })
-            .detach();
-            input
-        };
-        let sing_box_path_input = path_input(xrose_core::model::CoreKind::SingBox);
-        let xray_path_input = path_input(xrose_core::model::CoreKind::Xray);
         let trace_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(
@@ -445,8 +417,6 @@ impl AppView {
             lan_user_input,
             lan_password_input,
             update_agent_input,
-            sing_box_path_input,
-            xray_path_input,
             trace_input,
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
             connection_filter: ConnectionFilterKind::All,
@@ -532,14 +502,6 @@ impl AppView {
                     "域名条件，例如 geosite:geolocation-!cn（逗号分隔）",
                     "Domain conditions, e.g. geosite:geolocation-!cn (comma separated)",
                 ),
-            ),
-            (
-                &self.sing_box_path_input,
-                self.tr("可执行文件的完整路径", "Full path to executable"),
-            ),
-            (
-                &self.xray_path_input,
-                self.tr("可执行文件的完整路径", "Full path to executable"),
             ),
             (
                 &self.trace_input,

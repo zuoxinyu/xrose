@@ -232,20 +232,11 @@ impl AppView {
                     let menu_target = MenuTarget::Dns(tag.clone());
                     let view = cx.entity().downgrade();
                     let row_tag = tag.clone();
-                    div().id(SharedString::from(format!("dns-row-{tag}"))).flex().items_center().gap_3().p_3().rounded_md()
-                        .bg(if is_final { p.accent } else { p.bg }).border_l_2().border_color(if is_final { p.primary } else { p.border.opacity(0.) })
-                        .when(!server.is_fakeip(), |d| d.cursor_pointer().hover(move |style| style.bg(p.accent)))
+                    radio_row_surface(SharedString::from(format!("dns-row-{tag}")), is_final, !server.is_fakeip(), &p)
                         .on_click(cx.listener(move |this, _, _, cx| this.select_default_dns(&row_tag, cx)))
-                        .child(gpui_base::Radio::new(SharedString::from(format!("final-{tag}"))).checked(is_final).disabled(server.is_fakeip())
-                            .size(px(super::theme::ICON_BUTTON_SIZE)).flex_shrink_0()
-                            .flex().items_center().justify_center().rounded_full()
-                            .border_2().border_color(p.border.opacity(0.))
-                            .focus_visible(move |style| style.border_color(p.primary))
-                            .when(server.is_fakeip(), |d| d.opacity(super::theme::DISABLED_OPACITY))
-                            .when(!server.is_fakeip(), |d| d.cursor_pointer().hover(move |style| style.bg(p.accent)))
-                            .accessibility_label(self.tr("设为默认 DNS", "Use as default DNS"))
+                        .child(row_radio(SharedString::from(format!("final-{tag}")),
+                            self.tr("设为默认 DNS", "Use as default DNS"), is_final, !server.is_fakeip(), &p)
                             .tooltip(move |window, cx| Tooltip::new(super::tr(lang, "未匹配其他规则时使用此服务器", "Use this server when no other rule matches")).build(window, cx))
-                            .child(radio_indicator(is_final, if is_final { p.primary } else { p.muted_fg }, p.primary))
                             .on_change(move |_, _, _, cx| {
                                 cx.stop_propagation();
                                 let _ = view.update(cx, |this, cx| this.select_default_dns(&tag, cx));

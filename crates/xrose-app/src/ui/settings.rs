@@ -4,10 +4,12 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::CoreKind;
+use xrose_core::service::ToastLevel;
 use xrose_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMode};
 use xrose_core::system::CheckLevel;
 
@@ -479,110 +481,61 @@ impl AppView {
                     ),
             );
 
-            section = section.child(self.local_binary_rows(core, &p, cx));
+            section = section.child(self.local_binary_row(core, &p, cx));
+            let busy = is_installing || self.snapshot.busy.iter().any(|key| key == "core");
             for record in core_binaries {
-                let version = record.version.clone();
-                let delete_version = record.version.clone();
-                let is_active = settings.binary_override(core).is_none()
-                    && active_version.as_deref() == Some(record.version.as_str());
-                section =
-                    section.child(
+                let version = record.version;
+                let selected = active_version.as_ref() == Some(&version);
+                let title = format!("v{version}");
+                let row = self.binary_source_row(
+                    core,
+                    Some(version.clone()),
+                    selected,
+                    !busy,
+                    format!("{} {title}", core.display_name()).into(),
+                    &p,
+                    cx,
+                );
+                section = section.child(
+                    row.child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_center()
-                            .gap_3()
-                            .p_2()
-                            .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(if is_active { p.primary } else { p.border })
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_0p5()
-                                    .flex_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(p.fg)
-                                                    .child(format!("v{version}")),
-                                            )
-                                            .when(is_active, |d| {
-                                                d.child(pill(
-                                                    self.tr("使用中", "active"),
-                                                    p.primary_fg,
-                                                    p.primary,
-                                                ))
-                                            })
-                                            .child(pill(
-                                                format!("{}/{}", record.platform, record.arch),
-                                                p.muted_fg,
-                                                p.panel_alt,
-                                            )),
-                                    )
-                                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                                        "{} · sha256 {}…",
-                                        xrose_core::util::format_bytes(record.size),
-                                        &record.sha256[..12.min(record.sha256.len())]
-                                    ))),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when(!is_active, |d| {
-                                        d.child(
-                                            Button::new(SharedString::from(format!(
-                                                "use-version-{core:?}-{version}"
-                                            )))
-                                            .compact()
-                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                            .label(self.tr("使用", "Use"))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Err(error) =
-                                                    this.service.set_active_version(core, &version)
-                                                {
-                                                    this.service.toast(
-                                                        xrose_core::service::ToastLevel::Error,
-                                                        error.to_string(),
-                                                    );
-                                                }
-                                                this.sync(cx);
-                                            })),
-                                        )
-                                    })
-                                    .child(
-                                        danger_icon_button(
-                                            SharedString::from(format!(
-                                                "remove-version-{core:?}-{delete_version}"
-                                            )),
-                                            IconName::Trash,
-                                            self.tr("删除此版本", "Delete version"),
-                                            cx,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.run_command(
-                                                    super::menus::Command::DeleteVersion(
-                                                        core,
-                                                        delete_version.clone(),
-                                                    ),
-                                                    false,
-                                                    window,
-                                                    cx,
-                                                );
-                                            }),
-                                        ),
-                                    ),
-                            ),
-                    );
+                            .flex_col()
+                            .gap_1()
+                            .child(div().flex().items_center().gap_2().child(title).child(pill(
+                                format!("{}/{}", record.platform, record.arch),
+                                p.muted_fg,
+                                p.panel_alt,
+                            )))
+                            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                "{} · sha256 {}…",
+                                xrose_core::util::format_bytes(record.size),
+                                &record.sha256[..12.min(record.sha256.len())]
+                            ))),
+                    )
+                    .child(
+                        danger_icon_button(
+                            SharedString::from(format!("remove-version-{core:?}-{version}")),
+                            IconName::Trash,
+                            self.tr("删除此版本", "Delete version"),
+                            cx,
+                        )
+                        .disabled(busy)
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.run_command(
+                                    super::menus::Command::DeleteVersion(core, version.clone()),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
+                    ),
+                );
             }
 
             core_card = core_card.child(section);
@@ -591,7 +544,64 @@ impl AppView {
         core_card
     }
 
-    fn local_binary_rows(&self, core: CoreKind, p: &Palette, cx: &mut Context<Self>) -> Div {
+    fn binary_source_row(
+        &self,
+        core: CoreKind,
+        version: Option<String>,
+        selected: bool,
+        enabled: bool,
+        label: SharedString,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let id = match &version {
+            Some(v) => format!("managed-{core:?}-{v}"),
+            None => format!("local-{core:?}"),
+        };
+        let view = cx.entity().downgrade();
+        let select = move |cx: &mut App| {
+            let _ = view.update(cx, |this, cx| {
+                let result = match &version {
+                    Some(v) => this.service.set_active_version(core, v),
+                    None => this.service.select_local_binary(core),
+                };
+                if let Err(error) = result {
+                    this.service.toast(ToastLevel::Error, error.to_string());
+                }
+                this.sync(cx);
+            });
+        };
+        let select_radio = select.clone();
+        radio_row_surface(
+            SharedString::from(format!("binary-{id}")),
+            selected,
+            enabled,
+            p,
+        )
+        .when(enabled && !selected, |row| {
+            row.on_click(move |_, _, cx| select(cx))
+        })
+        .child(
+            row_radio(
+                SharedString::from(format!("radio-{id}")),
+                label,
+                selected,
+                enabled,
+                p,
+            )
+            .on_change(move |_, _, _, cx| {
+                cx.stop_propagation();
+                select_radio(cx);
+            }),
+        )
+    }
+
+    fn local_binary_row(
+        &self,
+        core: CoreKind,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let settings = &self.snapshot.settings;
         let status = self
             .snapshot
@@ -599,126 +609,174 @@ impl AppView {
             .get(core.as_str())
             .cloned()
             .unwrap_or_default();
-        let custom = settings.binary_override(core);
-        let use_path = custom.is_none() && settings.active_version(core).is_none();
-        let input = match core {
-            CoreKind::SingBox => &self.sing_box_path_input,
-            CoreKind::Xray => &self.xray_path_input,
-        };
-        let draft = input.read(cx).value().trim().to_string();
+        let custom = settings.local_binary_path(core);
+        let selected = settings.active_version(core).is_none();
         let busy = self
             .snapshot
             .busy
             .iter()
             .any(|key| key == "core" || key == "install");
-        let row = |selected| {
+        let path = status.path.as_ref().map(|p| p.display().to_string());
+        let path_text = path.clone().unwrap_or_else(|| {
+            format!(
+                "{} {}{}",
+                self.tr("PATH 中未找到", "Not found on PATH:"),
+                core.binary_name(),
+                std::env::consts::EXE_SUFFIX
+            )
+        });
+        let label = self.tr("自定义路径", "Custom path");
+        let row = self.binary_source_row(
+            core,
+            None,
+            selected,
+            !busy && status.available,
+            format!("{} · {label}", core.display_name()).into(),
+            p,
+            cx,
+        );
+        let mut title = div().flex().items_center().gap_2().child(label);
+        if let Some(info) = status.info {
+            title = title
+                .child(
+                    div().text_xs().text_color(p.muted_fg).child(
+                        info.version
+                            .map(|v| format!("v{v}"))
+                            .unwrap_or_else(|| self.tr("版本未知", "Unknown version").to_string()),
+                    ),
+                )
+                .child(pill(
+                    info.architecture
+                        .unwrap_or_else(|| self.tr("架构未知", "Unknown architecture").to_string()),
+                    p.muted_fg,
+                    p.panel_alt,
+                ));
+        } else if status.available {
+            title = title.child(
+                div()
+                    .text_xs()
+                    .text_color(p.muted_fg)
+                    .child(self.tr("正在识别…", "Detecting…")),
+            );
+        }
+        let browse = self.tr("选择可执行文件", "Choose executable file");
+        let clear = self.tr(
+            "清除自定义路径，恢复系统 PATH",
+            "Clear custom path and use system PATH",
+        );
+        row.child(
             div()
+                .min_w_0()
+                .flex_1()
                 .flex()
-                .items_center()
-                .gap_3()
-                .p_2()
-                .rounded_md()
-                .bg(p.bg)
-                .border_1()
-                .border_color(if selected { p.primary } else { p.border })
-        };
-        let title = |label, selected| {
+                .flex_col()
+                .gap_1()
+                .child(title)
+                .child(
+                    div()
+                        .id(SharedString::from(format!("binary-path-{core:?}")))
+                        .truncate()
+                        .text_xs()
+                        .text_color(if status.available {
+                            p.muted_fg
+                        } else {
+                            p.warn_text
+                        })
+                        .when_some(path, |d, path| {
+                            d.tooltip(move |window, cx| {
+                                Tooltip::new(path.clone()).build(window, cx)
+                            })
+                        })
+                        .child(path_text),
+                )
+                .when(custom.is_some() && !status.available, |d| {
+                    d.child(div().text_xs().text_color(p.warn_text).child(
+                        self.tr("文件不存在或不可执行", "File is missing or not executable"),
+                    ))
+                }),
+        )
+        .child(
             div()
+                .id(SharedString::from(format!("binary-file-actions-{core:?}")))
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_sm()
-                .child(label)
-                .when(selected, |d| {
-                    d.child(pill(self.tr("已选用", "Selected"), p.primary_fg, p.primary))
-                })
-        };
-        let path_info = status
-            .path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    self.tr("PATH 中未找到", "Not found on PATH:"),
-                    core.binary_name()
-                )
-            });
-        let path_row = row(use_path)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(title(self.tr("系统 PATH", "System PATH"), use_path))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(if status.path.is_some() {
-                                p.muted_fg
-                            } else {
-                                p.warn_text
-                            })
-                            .child(path_info),
-                    ),
-            )
-            .when(!use_path, |d| {
-                d.child(
-                    Button::new(SharedString::from(format!("use-path-{core:?}")))
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(
+                    Button::new(SharedString::from(format!("browse-binary-{core:?}")))
                         .compact()
-                        .label(self.tr("使用", "Use"))
-                        .disabled(busy || status.path.is_none())
+                        .ghost()
+                        .size(px(super::theme::ICON_BUTTON_SIZE))
+                        .icon(IconName::FolderOpen)
+                        .tooltip(browse.clone())
+                        .accessibility_label(browse)
+                        .disabled(busy)
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.pick_core_binary(core, cx);
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("clear-binary-{core:?}")))
+                        .compact()
+                        .ghost()
+                        .size(px(super::theme::ICON_BUTTON_SIZE))
+                        .icon(IconName::Eraser)
+                        .tooltip(clear.clone())
+                        .accessibility_label(clear)
+                        .disabled(busy || custom.is_none())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
                             if let Err(err) = this.service.set_binary_override(core, None) {
-                                this.service
-                                    .toast(xrose_core::service::ToastLevel::Error, err.to_string());
+                                this.service.toast(ToastLevel::Error, err.to_string());
                             }
                             this.sync(cx);
                         })),
+                ),
+        )
+    }
+
+    fn pick_core_binary(&self, core: CoreKind, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(
+                format!(
+                    "{} {}",
+                    self.tr("选择可执行文件", "Choose executable for"),
+                    core.display_name()
                 )
-            });
-        let custom_row = row(custom.is_some())
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(title(
-                        self.tr("自定义路径", "Custom path"),
-                        custom.is_some(),
-                    ))
-                    .child(Input::new(input))
-                    .when(custom.is_some() && !status.custom_available, |d| {
-                        d.child(div().text_xs().text_color(p.warn_text).child(
-                            self.tr("文件不存在或不可执行", "File is missing or not executable"),
-                        ))
-                    }),
-            )
-            .child(
-                Button::new(SharedString::from(format!("use-custom-path-{core:?}")))
-                    .compact()
-                    .label(self.tr("使用", "Use"))
-                    .disabled(busy || draft.is_empty() || custom == Some(&draft))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Err(err) =
-                            this.service.set_binary_override(core, Some(draft.clone()))
-                        {
-                            this.service
-                                .toast(xrose_core::service::ToastLevel::Error, err.to_string());
+                .into(),
+            ),
+        });
+        let service = self.service.clone();
+        let picker_error = self.tr(
+            "无法打开文件选择器，请重试",
+            "Could not open the file picker. Please retry.",
+        );
+        let encoding_error = self.tr(
+            "请选择路径可用 UTF-8 表示的文件",
+            "Choose a file with a UTF-8 path",
+        );
+        cx.spawn(async move |_, _| match prompt.await {
+            Ok(Ok(Some(paths))) => {
+                if let Some(path) = paths.first() {
+                    match path.to_str() {
+                        Some(path) => {
+                            if let Err(error) = service.set_binary_override(core, Some(path.into()))
+                            {
+                                service.toast(ToastLevel::Error, error.to_string());
+                            }
                         }
-                        this.sync(cx);
-                    })),
-            );
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(path_row)
-            .child(custom_row)
+                        None => service.toast(ToastLevel::Error, encoding_error.to_string()),
+                    }
+                }
+            }
+            Ok(Ok(None)) => {}
+            _ => service.toast(ToastLevel::Error, picker_error.to_string()),
+        })
+        .detach();
     }
 
     fn settings_network_card(&self, cx: &mut Context<Self>) -> Div {

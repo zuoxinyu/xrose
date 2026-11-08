@@ -1091,20 +1091,7 @@ fn render_node_row(
             }
         }))
         .when(!node.enabled || offline_exit, |d| d.opacity(0.45))
-        // Selection bar: inset vertically by the corner radius so it never
-        // protrudes past the rounded corners of the row card.
-        .when(selected, |d| {
-            d.child(
-                div()
-                    .absolute()
-                    .left(px(1.))
-                    .top(px(7.))
-                    .bottom(px(7.))
-                    .w(px(3.))
-                    .rounded_full()
-                    .bg(p.primary),
-            )
-        })
+        .when(selected, |row| row.child(selection_bar(p.primary)))
         .child(
             div()
                 .id(SharedString::from(format!("node-row-{}", node.id)))
