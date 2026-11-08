@@ -11,6 +11,7 @@ pub struct MeshController {
     store: Arc<Store>,
     session: MeshSecret,
     pub(crate) profiles: RwLock<Vec<MeshProfile>>,
+    pub(crate) sync_password: MeshSecret,
     pub(crate) sync_port: std::sync::atomic::AtomicU16,
     networks: RwLock<Vec<MeshRuntimeView>>,
     installed: RwLock<bool>,
@@ -21,6 +22,7 @@ impl MeshController {
         let profiles = store.mesh_profiles()?;
         let installed = super::tailscale::archive_path(&paths).exists();
         Ok(Self {
+            sync_password: MeshSecret(uuid::Uuid::new_v4().simple().to_string()),
             sync_port: Default::default(),
             paths,
             store,
@@ -347,6 +349,7 @@ impl MeshController {
         self.send(MeshCommand::Start {
             profile,
             tailscale_binary: binary,
+            sync_password: self.sync_password.clone(),
             sync_port: self.sync_port.load(std::sync::atomic::Ordering::Acquire),
             driver_archive,
         })

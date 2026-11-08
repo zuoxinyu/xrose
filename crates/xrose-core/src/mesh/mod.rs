@@ -19,7 +19,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 // Require workers with live updates in both forwarding directions.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {

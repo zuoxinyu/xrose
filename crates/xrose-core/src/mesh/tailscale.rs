@@ -199,7 +199,10 @@ pub async fn check_configuration(paths: &crate::paths::AppPaths) -> Result<()> {
             "127.0.0.1:19092".parse().unwrap(),
             "fixture-services",
         );
-        crate::adapters::singbox::allow_mesh_discovery(&mut config, 19093);
+        crate::adapters::singbox::allow_mesh_discovery(
+            &mut config,
+            (19093, &uuid::Uuid::new_v4().simple().to_string()),
+        );
         let path = directory.join(if publish {
             "publish.json"
         } else {
@@ -271,7 +274,8 @@ pub async fn check_api(paths: &crate::paths::AppPaths) -> Result<()> {
         hostname: "xrose-api-check".into(),
         ..Default::default()
     };
-    let backend = Backend::start_inner(profile, &directory, &archive_path(paths), false, 0).await?;
+    let backend =
+        Backend::start_inner(profile, &directory, &archive_path(paths), false, (0, "")).await?;
     let denied = Client {
         channel: backend.client.channel.clone(),
         secret: "invalid-test-credential".into(),
@@ -674,9 +678,9 @@ impl Backend {
         p: MeshProfile,
         directory: &Path,
         archive: &Path,
-        sync_port: u16,
+        discovery_relay: (u16, &str),
     ) -> Result<Self> {
-        Self::start_inner(p, directory, archive, true, sync_port).await
+        Self::start_inner(p, directory, archive, true, discovery_relay).await
     }
 
     async fn start_inner(
@@ -684,7 +688,7 @@ impl Backend {
         directory: &Path,
         archive: &Path,
         with_interface: bool,
-        sync_port: u16,
+        discovery_relay: (u16, &str),
     ) -> Result<Self> {
         let executable = unpack(archive, directory)?;
         let reserve = || {
@@ -714,7 +718,7 @@ impl Backend {
             services.address,
             &services.password.0,
         );
-        crate::adapters::singbox::allow_mesh_discovery(&mut config, sync_port);
+        crate::adapters::singbox::allow_mesh_discovery(&mut config, discovery_relay);
         if !with_interface {
             config["inbounds"] = serde_json::json!([]);
             config["route"]["rules"] = serde_json::json!([]);

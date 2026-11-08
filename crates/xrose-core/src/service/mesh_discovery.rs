@@ -112,7 +112,7 @@ fn listen(listener: TcpListener, ip: IpAddr, weak: Weak<Inner>) -> JoinHandle<()
     tokio::spawn(async move {
         let permits = Arc::new(tokio::sync::Semaphore::new(12));
         loop {
-            let Ok((s, remote)) = listener.accept().await else {
+            let Ok((mut s, remote)) = listener.accept().await else {
                 break;
             };
             let Some(inner) = weak.upgrade() else { break };
@@ -128,11 +128,14 @@ fn listen(listener: TcpListener, ip: IpAddr, weak: Weak<Inner>) -> JoinHandle<()
                 continue;
             };
             let hello = Hello::local(p.advertised_subnets.clone());
+            let relay_password = ip.is_loopback().then(|| inner.mesh.sync_password.clone());
             let weak = weak.clone();
             tokio::spawn(async move {
                 let _permit = permit;
-                let _ = timeout(
-                    Duration::from_secs(15),
+                let _ = timeout(Duration::from_secs(15), async move {
+                    if let Some(password) = relay_password {
+                        sync::accept_relay(&mut s, &password.0).await?;
+                    }
                     sync::serve(s, hello, move || {
                         let inner = weak.upgrade()?;
                         let mesh = inner.mesh.snapshot();
@@ -146,8 +149,9 @@ fn listen(listener: TcpListener, ip: IpAddr, weak: Weak<Inner>) -> JoinHandle<()
                             .as_ref()
                             .filter(|o| o.profile == profile)
                             .cloned()
-                    }),
-                )
+                    })
+                    .await
+                })
                 .await;
             });
         }

@@ -12216,6 +12216,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.1",
  "smoltcp 0.14.0",
+ "snow",
  "socket2 0.6.5",
  "tar",
  "tempfile",

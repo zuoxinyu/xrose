@@ -28,6 +28,8 @@ pub enum MeshCommand {
         driver_archive: PathBuf,
         #[serde(default)]
         sync_port: u16,
+        #[serde(default)]
+        sync_password: MeshSecret,
     },
     Inspect,
     ProbeProfile {
@@ -65,6 +67,7 @@ pub struct MeshReply {
 pub struct Bootstrap {
     #[serde(default)]
     pub sync_port: u16,
+    pub sync_password: MeshSecret,
     pub profile: MeshProfile,
     pub directory: PathBuf,
     pub tailscale_binary: Option<PathBuf>,
@@ -240,6 +243,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             tailscale_binary,
             driver_archive,
             sync_port,
+            sync_password,
         } => {
             profile.validate()?;
             if session
@@ -328,6 +332,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 .ok_or_else(|| Error::other("组网 IPC 不可用"))?;
             let bootstrap = Bootstrap {
                 sync_port: *sync_port,
+                sync_password: sync_password.clone(),
                 profile: profile.clone(),
                 directory: directory.clone(),
                 tailscale_binary: tailscale_binary.clone(),

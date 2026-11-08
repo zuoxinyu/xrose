@@ -5,7 +5,7 @@ use crate::{
     mesh::{
         MeshPhase,
         sync::{
-            self, Hello, Offer,
+            self, Hello, Offer, ShareMode,
             data::{Bundle, Category, Difference, ReviewRow},
         },
     },
@@ -21,6 +21,8 @@ use std::{
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SyncView {
     pub sharing_profile: Option<String>,
+    #[serde(default)]
+    pub sharing_mode: ShareMode,
     #[serde(default)]
     pub catalog: Option<Arc<ShareCatalog>>,
     pub review: Option<Arc<Review>>,
@@ -74,6 +76,15 @@ impl SyncState {
 }
 impl AppService {
     pub(super) fn sync_view(&self) -> SyncView {
+        let (sharing_profile, sharing_mode) = self
+            .inner
+            .mesh_sync
+            .offer
+            .lock()
+            .as_ref()
+            .filter(|o| o.expires > Instant::now())
+            .map(|o| (Some(o.profile.clone()), o.mode))
+            .unwrap_or_default();
         SyncView {
             catalog: self
                 .inner
@@ -82,14 +93,8 @@ impl AppService {
                 .lock()
                 .as_ref()
                 .map(|d| d.view.clone()),
-            sharing_profile: self
-                .inner
-                .mesh_sync
-                .offer
-                .lock()
-                .as_ref()
-                .filter(|o| o.expires > Instant::now())
-                .map(|o| o.profile.clone()),
+            sharing_profile,
+            sharing_mode,
             review: self
                 .inner
                 .mesh_sync
@@ -141,6 +146,15 @@ impl AppService {
             .take_if(|d| d.view.profile == profile);
     }
     pub fn offer_mesh_data(&self, profile: String, draft_id: String, keys: BTreeSet<String>) {
+        self.offer_mesh_data_with_mode(profile, draft_id, keys, ShareMode::SharingCode);
+    }
+    pub fn offer_mesh_data_with_mode(
+        &self,
+        profile: String,
+        draft_id: String,
+        keys: BTreeSet<String>,
+        mode: ShareMode,
+    ) {
         let service = self.clone();
         if !self.inner.busy.write().insert("mesh-share".into()) {
             return;
@@ -181,9 +195,9 @@ impl AppService {
                         "所选配置已更改，请重新打开共享配置并核对项目",
                     ));
                 }
+                let offer = Offer::new(profile.clone(), &bundle, mode)?;
                 service.close_mesh_share(&profile);
-                *service.inner.mesh_sync.offer.lock() =
-                    Some(Arc::new(Offer::new(profile, &bundle)?));
+                *service.inner.mesh_sync.offer.lock() = Some(Arc::new(offer));
                 Ok(())
             })();
             service.set_busy("mesh-share", false);
@@ -199,7 +213,7 @@ impl AppService {
             .lock()
             .as_ref()
             .filter(|o| o.profile == profile && o.expires > Instant::now())
-            .map(|o| o.code())
+            .and_then(|o| o.code())
     }
     pub fn stop_mesh_share(&self, profile: &str) {
         self.inner
@@ -226,7 +240,16 @@ impl AppService {
                     sync::fetch(target.connect().await?, &code).await
                 })
                 .await
-                .map_err(|_| Error::other("接收超时，请确认对端在线"))??;
+                .map_err(|_| Error::other("接收超时，请确认对端在线"))?
+                .inspect_err(|_| {
+                    // Show the code field immediately if a cached open offer has ended.
+                    if code.trim().is_empty()
+                        && let Some(hello) =
+                            service.inner.mesh_sync.discovered.write().get_mut(&target)
+                    {
+                        hello.open_share = false;
+                    }
+                })?;
                 if target != service.sync_target(&profile, &peer)?
                     || service.inner.active_profile.read().as_ref() != Some(&active)
                 {

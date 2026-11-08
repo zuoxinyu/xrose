@@ -117,15 +117,18 @@ pub(crate) fn allow_mesh_services(
 }
 
 /// Incoming connections to the endpoint's own addresses are mapped to loopback by sing-box.
-pub(crate) fn allow_mesh_discovery(config: &mut Value, local_port: u16) {
-    if local_port >= 1024 {
+pub(crate) fn allow_mesh_discovery(config: &mut Value, (port, password): (u16, &str)) {
+    if port >= 1024 && !password.is_empty() {
+        config["outbounds"].as_array_mut().unwrap().push(json!({
+            "type":"socks", "tag":"mesh-discovery", "server":"127.0.0.1",
+            "server_port":port, "version":"5", "username":"xrose", "password":password
+        }));
         config["route"]["rules"].as_array_mut().unwrap().insert(
             0,
             json!({
                 "inbound":"mesh-ts", "network":"tcp", "ip_cidr":["127.0.0.1/32","::1/128"],
                 "source_ip_cidr":["100.64.0.0/10","fd7a:115c:a1e0::/48"],
-                "port":crate::mesh::sync::PORT, "action":"route","outbound":"direct",
-                "override_address":"127.0.0.1","override_port":local_port
+                "port":crate::mesh::sync::PORT, "action":"route","outbound":"mesh-discovery"
             }),
         );
     }

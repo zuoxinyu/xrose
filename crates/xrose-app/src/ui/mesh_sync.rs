@@ -5,10 +5,14 @@ use gpui_kit::component::input::Input;
 use std::collections::BTreeSet;
 use xrose_core::mesh::{
     MeshPeer, MeshProvider,
-    sync::data::{Category, Difference},
+    sync::{
+        ShareMode,
+        data::{Category, Difference},
+    },
 };
 
 pub(super) struct SyncUi {
+    share_mode: ShareMode,
     send_keys: BTreeSet<String>,
     send_page: usize,
     cats: BTreeSet<Category>,
@@ -22,6 +26,7 @@ pub(super) struct SyncUi {
 impl SyncUi {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         Self {
+            share_mode: ShareMode::default(),
             send_keys: Default::default(),
             send_page: 0,
             cats: BTreeSet::new(),
@@ -34,6 +39,7 @@ impl SyncUi {
         }
     }
     fn reset_share_selection(&mut self) {
+        self.share_mode = ShareMode::default();
         self.cats.clear();
         self.send_page = 0;
         self.send_keys.clear();
@@ -264,27 +270,38 @@ impl AppView {
         if sharing {
             let profile = id.to_string();
             let stop = profile.clone();
-            let message = tr(
-                lang,
-                "已共享所选配置。将共享码交给接收设备，十分钟内有效。",
-                "Selected configuration is shared. Give the code to the receiving device within ten minutes.",
-            );
+            let open = self.snapshot.mesh_sync.sharing_mode == ShareMode::Unauthenticated;
+            let message = if open {
+                tr(
+                    lang,
+                    "无认证共享已开启。同一组网内可访问本机的设备可在十分钟内接收所选配置。",
+                    "Sharing without a code is active for ten minutes. Devices that can reach this device on this mesh can receive the selected items.",
+                )
+            } else {
+                tr(
+                    lang,
+                    "已共享所选配置。将共享码交给接收设备，十分钟内有效。",
+                    "Selected configuration is shared. Give the code to the receiving device within ten minutes.",
+                )
+            };
             panel = panel.child(div().text_sm().child(message));
             actions = actions
-                .child(
-                    Button::new("mesh-copy-code")
-                        .compact()
-                        .label(tr(lang, "复制共享码", "Copy sharing code"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(code) = this.service.mesh_share_code(&profile) {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code));
-                                this.service.toast(
-                                    xrose_core::service::ToastLevel::Success,
-                                    this.tr("已复制共享码", "Sharing code copied"),
-                                );
-                            }
-                        })),
-                )
+                .when(!open, |a| {
+                    a.child(
+                        Button::new("mesh-copy-code")
+                            .compact()
+                            .label(tr(lang, "复制共享码", "Copy sharing code"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(code) = this.service.mesh_share_code(&profile) {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(code));
+                                    this.service.toast(
+                                        xrose_core::service::ToastLevel::Success,
+                                        this.tr("已复制共享码", "Sharing code copied"),
+                                    );
+                                }
+                            })),
+                    )
+                })
                 .child(
                     Button::new("mesh-revoke")
                         .compact()
@@ -353,8 +370,42 @@ impl AppView {
                     })),
                 );
             }
-            panel=panel.child(div().text_sm().child(tr(lang,"选择共享类别与项目。所选项目中的节点凭据、订阅地址及组网密钥将一并发送。",
-                "Select categories and items to share. Selected items include node credentials, subscription URLs and mesh network keys."))).child(categories);
+            let open = self.mesh_sync_ui.share_mode == ShareMode::Unauthenticated;
+            let auth_choice = ChoiceGroup::new(
+                "mesh-share-auth",
+                vec![
+                    tr(lang, "共享码", "Sharing code"),
+                    tr(lang, "无认证", "No authentication"),
+                ],
+                usize::from(open),
+            )
+            .disabled(busy)
+            .on_change(cx.listener(|this, index, _, cx| {
+                this.mesh_sync_ui.share_mode = if *index == 1 {
+                    ShareMode::Unauthenticated
+                } else {
+                    ShareMode::SharingCode
+                };
+                cx.notify();
+            }));
+            let auth_row = div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap_2()
+                .child(tr(lang, "认证方式", "Authentication"))
+                .child(auth_choice);
+            let selection_note = tr(
+                lang,
+                "选择共享类别与项目。所选项目中的节点凭据、订阅地址及组网密钥将一并发送。",
+                "Select categories and items to share. Selected items include node credentials, subscription URLs and mesh network keys.",
+            );
+            panel = panel.child(auth_row).when(open, |d| {
+                d.child(div().text_sm().child(tr(lang,
+                    "同一组网内可访问本机的设备都可接收所选项目。",
+                    "Any device that can reach this device on this mesh can receive the selected items.",
+                )))
+            }).child(div().text_sm().child(selection_note)).child(categories);
             const PAGE: usize = 12;
             let visible: Vec<_> = catalog
                 .rows
@@ -425,14 +476,19 @@ impl AppView {
                         .primary()
                         .label(format!(
                             "{} ({count})",
-                            tr(lang, "生成共享码", "Create sharing code")
+                            if open {
+                                tr(lang, "开始共享", "Start sharing")
+                            } else {
+                                tr(lang, "生成共享码", "Create sharing code")
+                            }
                         ))
                         .disabled(busy || count == 0)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.service.offer_mesh_data(
+                            this.service.offer_mesh_data_with_mode(
                                 profile.clone(),
                                 catalog.id.clone(),
                                 this.mesh_sync_ui.send_keys.clone(),
+                                this.mesh_sync_ui.share_mode,
                             );
                             this.sync(cx);
                         })),
@@ -469,7 +525,7 @@ impl AppView {
             .iter()
             .any(|s| s == "mesh-sync" || s == "mesh-share");
         let (profile, peer, name) = self.mesh_sync_ui.receive.clone().filter(|v| v.0 == id)?;
-        let available = self
+        let sender = self
             .snapshot
             .mesh
             .networks
@@ -479,8 +535,10 @@ impl AppView {
                     && network.phase == xrose_core::mesh::MeshPhase::Connected
             })
             .flat_map(|network| &network.peers)
-            .any(|candidate| candidate.id == peer && candidate.online && candidate.xrose.is_some());
-        let empty = self.mesh_sync_ui.code.read(cx).value().trim().is_empty();
+            .find(|candidate| candidate.id == peer && candidate.online)
+            .and_then(|candidate| candidate.xrose.as_ref());
+        let available = sender.is_some();
+        let open = sender.is_some_and(|hello| hello.open_share);
         Some(
             div()
                 .flex()
@@ -488,14 +546,18 @@ impl AppView {
                 .gap_2()
                 .child(div().text_sm().text_color(p.muted_fg).child(format!(
                     "{} · {}",
-                    tr(
-                        lang,
-                        "接收配置，请输入对端共享码",
-                        "Receive configuration using the sender’s sharing code"
-                    ),
-                    name
+                    name,
+                    if open {
+                        tr(lang, "无认证共享", "Shared without a code")
+                    } else {
+                        tr(
+                            lang,
+                            "共享码（无认证时留空）",
+                            "Sharing code (leave blank for unauthenticated sharing)",
+                        )
+                    }
                 )))
-                .child(Input::new(&self.mesh_sync_ui.code))
+                .when(!open, |d| d.child(Input::new(&self.mesh_sync_ui.code)))
                 .when(!available, |d| {
                     d.child(div().text_sm().text_color(p.warn_text).child(tr(
                         lang,
@@ -511,7 +573,7 @@ impl AppView {
                             Button::new("mesh-fetch")
                                 .compact()
                                 .primary()
-                                .disabled(busy || empty || !available)
+                                .disabled(busy || !available)
                                 .loading(busy)
                                 .label(if busy {
                                     tr(lang, "正在接收…", "Receiving…")
@@ -519,7 +581,11 @@ impl AppView {
                                     tr(lang, "接收并预览", "Receive and preview")
                                 })
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    let code = this.mesh_sync_ui.code.read(cx).value().to_string();
+                                    let code = if open {
+                                        String::new()
+                                    } else {
+                                        this.mesh_sync_ui.code.read(cx).value().to_string()
+                                    };
                                     this.service.receive_mesh_data(
                                         profile.clone(),
                                         peer.clone(),

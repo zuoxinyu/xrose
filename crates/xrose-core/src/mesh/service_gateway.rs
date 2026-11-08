@@ -103,20 +103,25 @@ async fn read_address(socket: &mut TcpStream) -> io::Result<SocketAddr> {
     Ok((ip, socket.read_u16().await?).into())
 }
 
+pub(super) async fn read_request(
+    socket: &mut TcpStream,
+    password: &str,
+) -> io::Result<(u8, SocketAddr)> {
+    super::easytier_gateway::authenticate(socket, password).await?;
+    if socket.read_u8().await? != 5 {
+        return Err(invalid());
+    }
+    let command = socket.read_u8().await?;
+    if socket.read_u8().await? != 0 {
+        return Err(invalid());
+    }
+    Ok((command, read_address(socket).await?))
+}
+
 async fn serve(mut socket: TcpStream, password: &str, mut rules: Rules) -> io::Result<()> {
-    let (command, destination) = tokio::time::timeout(TIMEOUT, async {
-        super::easytier_gateway::authenticate(&mut socket, password).await?;
-        if socket.read_u8().await? != 5 {
-            return Err(invalid());
-        }
-        let command = socket.read_u8().await?;
-        if socket.read_u8().await? != 0 {
-            return Err(invalid());
-        }
-        Ok((command, read_address(&mut socket).await?))
-    })
-    .await
-    .map_err(|_| invalid())??;
+    let (command, destination) = tokio::time::timeout(TIMEOUT, read_request(&mut socket, password))
+        .await
+        .map_err(|_| invalid())??;
     if command == 1 {
         let Some(address) = target(&rules, ForwardProtocol::Tcp, destination) else {
             socket.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
