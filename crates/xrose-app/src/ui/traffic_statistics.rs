@@ -81,7 +81,7 @@ impl AppView {
             .max((self.traffic_ui.page + 1) * BAR_PAGE_SIZE);
         self.service
             .query_traffic_statistics(self.traffic_ui.query.clone());
-        self.snapshot = self.service.snapshot();
+        self.refresh_snapshot();
         self.traffic_ui.last_query = Instant::now();
         cx.notify();
     }

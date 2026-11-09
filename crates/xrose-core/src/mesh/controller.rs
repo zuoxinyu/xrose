@@ -47,6 +47,14 @@ impl MeshController {
             operation: tokio::sync::Mutex::new(()),
         })
     }
+    pub(crate) fn phase(&self, provider: MeshProvider) -> super::MeshPhase {
+        self.networks
+            .read()
+            .iter()
+            .find(|n| n.provider == provider)
+            .map_or(super::MeshPhase::Disconnected, |n| n.phase)
+    }
+
     pub fn snapshot(&self) -> MeshSnapshot {
         MeshSnapshot {
             profiles: self

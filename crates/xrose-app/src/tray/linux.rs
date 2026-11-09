@@ -11,14 +11,17 @@ use ksni::blocking::TrayMethods;
 use parking_lot::Mutex;
 use xrose_core::AppService;
 
-use super::dashboard::{Dashboard, TrayCommand};
+use super::dashboard::{TrayCommand, status_lines};
+use xrose_core::settings::Language;
 
 static READY: AtomicBool = AtomicBool::new(false);
 static WATCHER_OFFLINE: AtomicBool = AtomicBool::new(false);
 static ANCHOR: Mutex<Option<(i32, i32)>> = Mutex::new(None);
 
 struct Item {
-    dashboard: Dashboard,
+    language: Language,
+    status_line: String,
+    traffic_line: Option<String>,
     alpha: Vec<u8>,
     ink: u8,
 }
@@ -28,7 +31,7 @@ impl ksni::Tray for Item {
         crate::APP_ID.into()
     }
     fn title(&self) -> String {
-        self.dashboard.status_line.clone()
+        self.status_line.clone()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         vec![ksni::Icon {
@@ -44,8 +47,8 @@ impl ksni::Tray for Item {
     }
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
-            title: self.dashboard.status_line.clone(),
-            description: self.dashboard.traffic_line.clone().unwrap_or_default(),
+            title: self.status_line.clone(),
+            description: self.traffic_line.clone().unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -58,7 +61,7 @@ impl ksni::Tray for Item {
     }
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::StandardItem;
-        let lang = self.dashboard.language;
+        let lang = self.language;
         vec![
             StandardItem {
                 label: crate::i18n::tr(lang, "打开托盘浮窗", "Open tray dashboard").to_string(),
@@ -92,11 +95,12 @@ impl ksni::Tray for Item {
 }
 
 pub struct Backend {
-    updates: SyncSender<(Dashboard, u8)>,
+    updates: SyncSender<u8>,
 }
 
 impl Backend {
-    pub fn new(_service: &AppService) -> Option<Self> {
+    pub fn new(service: &AppService) -> Option<Self> {
+        let service = service.clone();
         let (updates, receiver) = sync_channel(1);
         std::thread::Builder::new()
             .name("xrose-status-notifier".into())
@@ -107,12 +111,17 @@ impl Backend {
                 let image = image
                     .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
                     .to_rgba8();
-                let (dashboard, ink) = match receiver.recv() {
+                let ink = match receiver.recv() {
                     Ok(update) => update,
                     Err(_) => return,
                 };
+                let status = service.tray_status();
+                let (status_line, traffic_line) = status_lines(&status);
+                let mut previous = (status, ink);
                 let item = Item {
-                    dashboard,
+                    language: status.language,
+                    status_line,
+                    traffic_line,
                     alpha: image.pixels().map(|p| p[3]).collect(),
                     ink,
                 };
@@ -124,10 +133,18 @@ impl Backend {
                     }
                 };
                 READY.store(!WATCHER_OFFLINE.load(Ordering::Relaxed), Ordering::Relaxed);
-                while let Ok((dashboard, ink)) = receiver.recv() {
+                while let Ok(ink) = receiver.recv() {
+                    let status = service.tray_status();
+                    if (status, ink) == previous {
+                        continue;
+                    }
+                    previous = (status, ink);
+                    let (status_line, traffic_line) = status_lines(&status);
                     if handle
                         .update(|item| {
-                            item.dashboard = dashboard;
+                            item.language = status.language;
+                            item.status_line = status_line;
+                            item.traffic_line = traffic_line;
                             item.ink = ink;
                         })
                         .is_none()
@@ -141,15 +158,13 @@ impl Backend {
             .ok()?;
         Some(Self { updates })
     }
-    pub fn tick(&mut self, service: &AppService, cx: &gpui_kit::App) -> Option<TrayCommand> {
+    pub fn tick(&mut self, _service: &AppService, cx: &gpui_kit::App) -> Option<TrayCommand> {
         let dark = matches!(
             cx.window_appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
         let ink = if dark { 255 } else { 0 };
-        let _ = self
-            .updates
-            .try_send((super::dashboard::build(service), ink));
+        let _ = self.updates.try_send(ink);
         None
     }
 }

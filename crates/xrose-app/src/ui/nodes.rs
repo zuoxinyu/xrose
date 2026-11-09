@@ -95,20 +95,17 @@ impl AppView {
     }
 
     pub(crate) fn page_nodes(
-        &mut self,
+        &self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
-        let model = self.snapshot.model.clone();
-        let exits = mesh_exits::choices(&self.snapshot.mesh, &model, self.hide_ips, lang);
+        let model = &self.snapshot.model;
+        let exits = mesh_exits::choices(&self.snapshot.mesh, model, self.hide_ips, lang);
         let has_nodes = !model.nodes.is_empty() || !exits.is_empty();
         let active_group = model.default_group_id();
-        let group = active_group
-            .as_ref()
-            .and_then(|id| model.group(id))
-            .cloned();
+        let group = active_group.as_ref().and_then(|id| model.group(id));
         let active_node = self
             .snapshot
             .selected_node(active_group.as_deref())
@@ -182,7 +179,7 @@ impl AppView {
         let selectable_members: HashSet<_> = group
             .iter()
             .filter(|group| group.enabled && group.manually_selectable())
-            .flat_map(|group| &group.members)
+            .flat_map(|group| group.members.iter().cloned())
             .collect();
         let auto_mode = group.as_ref().is_some_and(|g| !g.manually_selectable());
 
@@ -194,10 +191,11 @@ impl AppView {
         } else {
             String::new()
         };
-        let mut display_nodes: Vec<Node> = model
+        let mut display_nodes: Vec<usize> = model
             .nodes
             .iter()
-            .filter(|n| {
+            .enumerate()
+            .filter(|(_, n)| {
                 if search_query.is_empty() {
                     true
                 } else {
@@ -209,12 +207,13 @@ impl AppView {
                             .contains(&search_query)
                 }
             })
-            .cloned()
+            .map(|(index, _)| index)
             .collect();
 
         // Sorting only changes the view; the stored order is left alone.
         if sort_active {
-            display_nodes.sort_by_key(|n| {
+            display_nodes.sort_by_key(|&index| {
+                let n = &model.nodes[index];
                 let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms);
                 match ms {
                     Some(v) => (0, v),
@@ -237,7 +236,7 @@ impl AppView {
         );
 
         let batch_mode = self.batch_mode;
-        let batch_selected = self.batch_selected.clone();
+        let batch_selected = &self.batch_selected;
         let latency_busy = this_busy(&self.snapshot.busy, "latency");
         let tests_busy = latency_busy
             || this_busy(&self.snapshot.busy, "download")
@@ -245,32 +244,37 @@ impl AppView {
         let exit_busy = this_busy(&self.snapshot.busy, "mesh-exit");
         let core_busy = is_core_busy || exit_busy;
         let exit_count = exits.len();
-        let mut exit_rows = Vec::new();
-        for exit in exits
-            .iter()
+        let row_gap = rems(if grouped { 0.5 } else { 0.75 }).to_pixels(window.rem_size());
+        let exits: Vec<_> = exits
+            .into_iter()
             .filter(|exit| exit.matches(&search_query, hide_ips))
-        {
-            let disabled = core_busy
-                || this_busy(&self.snapshot.busy, "mesh")
-                || auto_mode
-                || batch_mode
-                || active_group
-                    .as_ref()
-                    .is_none_or(|id| !model.can_select_mesh_exit(id, &exit.gateway));
-            exit_rows.push(exit.row(active_group.clone(), disabled, hide_ips, lang, &p, cx));
-        }
-        let shown = display_nodes.len() + exit_rows.len();
-
-        // Subscription map for grouping.
-        let sub_names: HashMap<String, String> = self
-            .snapshot
-            .subscriptions
-            .iter()
-            .map(|s| (s.id.clone(), s.name.clone()))
             .collect();
+        let shown_exits = exits.len();
+        let shown = display_nodes.len() + shown_exits;
+        let mut exit_rows = (shown_exits != 0).then(|| {
+            let busy =
+                core_busy || this_busy(&self.snapshot.busy, "mesh") || auto_mode || batch_mode;
+            let group = active_group.clone();
+            node_rows(
+                shown_exits,
+                px(super::theme::NODE_ROW_HEIGHT),
+                row_gap,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    exits[range]
+                        .iter()
+                        .map(|exit| {
+                            let disabled = busy
+                                || group.as_ref().is_none_or(|id| {
+                                    !this.snapshot.model.can_select_mesh_exit(id, &exit.gateway)
+                                });
+                            exit.row(group.clone(), disabled, hide_ips, lang, &p, cx)
+                                .into_any_element()
+                        })
+                        .collect()
+                }),
+            )
+        });
 
-        // Rows are rendered up front so flat and grouped views share them.
-        let mut rows: HashMap<String, AnyElement> = HashMap::new();
         let offline_exits: std::collections::HashSet<_> = self
             .snapshot
             .mesh
@@ -278,43 +282,68 @@ impl AppView {
             .filter(|(_, peer, _)| peer.exit_selected && !peer.online)
             .map(|(profile, _, _)| format!("mesh-exit-{}", profile.id))
             .collect();
-        for node in display_nodes.iter() {
-            let row = render_node_row(
-                RowProps {
-                    node,
-                    lang,
-                    selected: active_node.as_deref() == Some(node.id.as_str()),
-                    fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
-                    latency: self.snapshot.latency.get(&node.id),
-                    location: self.snapshot.node_location(node),
-                    download: self.snapshot.downloads.get(&node.id),
-                    downloading: this_busy(&self.snapshot.busy, &format!("download:{}", node.id)),
-                    hide_ips,
-                    auto_mode,
-                    offline_exit: offline_exits.contains(&node.id),
-                    group_id: active_group
-                        .as_ref()
-                        .filter(|_| {
-                            selectable_members.contains(&node.id)
-                                && node.usable_with(self.snapshot.settings.core)
+        let row_group = active_group.clone();
+        let view = cx.entity();
+        let render_rows = std::rc::Rc::new(
+            move |indices: &[usize], window: &mut Window, cx: &mut App| {
+                view.update(cx, |this, cx| {
+                    indices
+                        .iter()
+                        .map(|&index| {
+                            let node = &this.snapshot.model.nodes[index];
+                            render_node_row(
+                                RowProps {
+                                    node,
+                                    lang,
+                                    selected: active_node.as_deref() == Some(node.id.as_str()),
+                                    fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
+                                    latency: this.snapshot.latency.get(&node.id),
+                                    location: this.snapshot.node_location(node),
+                                    download: this.snapshot.downloads.get(&node.id),
+                                    downloading: this_busy(
+                                        &this.snapshot.busy,
+                                        &format!("download:{}", node.id),
+                                    ),
+                                    hide_ips,
+                                    auto_mode,
+                                    offline_exit: offline_exits.contains(&node.id),
+                                    group_id: row_group
+                                        .as_ref()
+                                        .filter(|_| {
+                                            selectable_members.contains(&node.id)
+                                                && node.usable_with(this.snapshot.settings.core)
+                                        })
+                                        .cloned(),
+                                    core_busy,
+                                    latency_busy: tests_busy,
+                                    testing: latency_busy
+                                        && node.enabled
+                                        && this.latency_pending.contains(&node.id),
+                                    batch_mode,
+                                    batch_checked: this.batch_selected.contains(&node.id),
+                                    drag_enabled: !sort_active,
+                                },
+                                &p,
+                                window,
+                                cx,
+                            )
+                            .into_any_element()
                         })
-                        .cloned(),
-                    core_busy,
-                    latency_busy: tests_busy,
-                    testing: latency_busy
-                        && node.enabled
-                        && self.latency_pending.contains(&node.id),
-                    batch_mode,
-                    batch_checked: batch_selected.contains(&node.id),
-                    drag_enabled: !sort_active,
-                },
-                &p,
-                window,
-                cx,
-            );
-            rows.insert(node.id.clone(), row.into_any_element());
-        }
+                        .collect::<Vec<_>>()
+                })
+            },
+        );
 
+        let configured_rows = |indices: Vec<usize>| {
+            let render_rows = render_rows.clone();
+            // The outer border adds one pixel on either side of the row.
+            node_rows(
+                indices.len(),
+                px(super::theme::NODE_ROW_HEIGHT + 2.),
+                row_gap,
+                move |range, window, cx| render_rows(&indices[range], window, cx),
+            )
+        };
         // Node list card (now the primary focal point of the page).
         body = body.child(
             card(&p)
@@ -528,7 +557,10 @@ impl AppView {
                 })
                 // Batch Operation Bar (Visible when batch_mode is active).
                 .when(batch_mode, |d| {
-                    let all_ids: Vec<String> = display_nodes.iter().map(|n| n.id.clone()).collect();
+                    let all_ids: Vec<String> = display_nodes
+                        .iter()
+                        .map(|&i| model.nodes[i].id.clone())
+                        .collect();
                     let all_selected =
                         !all_ids.is_empty() && all_ids.iter().all(|id| batch_selected.contains(id));
                     let selected_ids: Vec<String> = model
@@ -713,16 +745,21 @@ impl AppView {
                 // Node list: either Grouped by Subscription or Flat List.
                 .when(!grouped, |container| {
                     container
-                        .children(
-                            display_nodes
-                                .iter()
-                                .filter_map(|node| rows.remove(&node.id)),
-                        )
-                        .children(exit_rows.drain(..))
+                        .when(!display_nodes.is_empty(), |d| {
+                            d.child(configured_rows(std::mem::take(&mut display_nodes)))
+                        })
+                        .children(exit_rows.take())
                 })
                 .when(grouped, |container| {
-                    let mut sub_groups: BTreeMap<NodeSection, Vec<&Node>> = BTreeMap::new();
-                    for node in display_nodes.iter() {
+                    let sub_names: HashMap<_, _> = self
+                        .snapshot
+                        .subscriptions
+                        .iter()
+                        .map(|s| (s.id.as_str(), s.name.as_str()))
+                        .collect();
+                    let mut sub_groups: BTreeMap<NodeSection, Vec<usize>> = BTreeMap::new();
+                    for &index in &display_nodes {
+                        let node = &model.nodes[index];
                         let section = if node.is_mesh_gateway() {
                             NodeSection::MeshExits
                         } else if let Some(id) = &node.subscription_id {
@@ -730,13 +767,13 @@ impl AppView {
                         } else {
                             NodeSection::Manual
                         };
-                        sub_groups.entry(section).or_default().push(node);
+                        sub_groups.entry(section).or_default().push(index);
                     }
-                    if !exit_rows.is_empty() {
+                    if shown_exits != 0 {
                         sub_groups.entry(NodeSection::MeshExits).or_default();
                     }
 
-                    let collapsed_set = self.collapsed_subs.clone();
+                    let collapsed_set = &self.collapsed_subs;
 
                     container.children(sub_groups.into_iter().map(|(section, group_nodes)| {
                         let mesh = section == NodeSection::MeshExits;
@@ -750,17 +787,20 @@ impl AppView {
                             NodeSection::MeshExits => {
                                 self.tr("组网出口节点", "Mesh exit nodes").to_string()
                             }
-                            NodeSection::Subscription(id) => {
-                                sub_names.get(id).cloned().unwrap_or_else(|| {
+                            NodeSection::Subscription(id) => sub_names
+                                .get(id)
+                                .map(|&name| name.to_owned())
+                                .unwrap_or_else(|| {
                                     self.tr("订阅节点", "Subscription nodes").to_string()
-                                })
-                            }
+                                }),
                             NodeSection::Manual => self
                                 .tr("手动导入 / 未分类", "Manual / Uncategorized")
                                 .to_string(),
                         };
-                        let node_ids_for_ping: Vec<String> =
-                            group_nodes.iter().map(|n| n.id.clone()).collect();
+                        let node_ids_for_ping: Vec<String> = group_nodes
+                            .iter()
+                            .map(|&i| model.nodes[i].id.clone())
+                            .collect();
                         let key_for_click = group_key.clone();
 
                         div()
@@ -815,7 +855,7 @@ impl AppView {
                                                 format!(
                                                     "{}{}",
                                                     group_nodes.len()
-                                                        + if mesh { exit_rows.len() } else { 0 },
+                                                        + if mesh { shown_exits } else { 0 },
                                                     self.tr(" 个", "")
                                                 ),
                                                 p.muted_fg,
@@ -848,10 +888,10 @@ impl AppView {
                                     }),
                             )
                             .when(!is_collapsed, |d| {
-                                d.children(
-                                    group_nodes.iter().filter_map(|node| rows.remove(&node.id)),
-                                )
-                                .when(mesh, |d| d.children(exit_rows.drain(..)))
+                                d.when(!group_nodes.is_empty(), |d| {
+                                    d.child(configured_rows(group_nodes))
+                                })
+                                .when(mesh, |d| d.children(exit_rows.take()))
                             })
                     }))
                 }),
@@ -859,6 +899,77 @@ impl AppView {
 
         body
     }
+}
+
+/// The page owns the scroll offset. Lay out only the rows intersecting its clip,
+/// using the same row and gap dimensions for hit testing and scroll extent.
+fn node_rows(
+    count: usize,
+    height: Pixels,
+    gap: Pixels,
+    render: impl FnOnce(std::ops::Range<usize>, &mut Window, &mut App) -> Vec<AnyElement> + 'static,
+) -> impl IntoElement {
+    let stride = height + gap;
+    canvas(
+        move |bounds, window, cx| {
+            let clip = window.content_mask().bounds;
+            if !clip.intersects(&bounds) {
+                return Vec::new();
+            }
+            let range = node_row_range(
+                clip.top() - bounds.top(),
+                clip.bottom() - bounds.top(),
+                stride,
+                count,
+            );
+            let rows = render(range.clone(), window, cx);
+            range
+                .zip(rows)
+                .map(|(index, content)| {
+                    let mut row = div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(content)
+                        .into_any_element();
+                    row.prepaint_as_root(
+                        point(bounds.left(), bounds.top() + stride * index as f32),
+                        size(
+                            AvailableSpace::Definite(bounds.size.width),
+                            AvailableSpace::Definite(height),
+                        ),
+                        window,
+                        cx,
+                    );
+                    row
+                })
+                .collect::<Vec<_>>()
+        },
+        |_, mut rows, window, cx| {
+            for row in &mut rows {
+                row.paint(window, cx);
+            }
+        },
+    )
+    .w_full()
+    .flex_shrink_0()
+    .h(height * count as f32 + gap * count.saturating_sub(1) as f32)
+}
+
+// Keep one neighbour on either side for focus traversal at the viewport edge.
+fn node_row_range(
+    top: Pixels,
+    bottom: Pixels,
+    stride: Pixels,
+    count: usize,
+) -> std::ops::Range<usize> {
+    let first = ((top / stride).floor() as usize)
+        .saturating_sub(1)
+        .min(count);
+    let end = ((bottom / stride).ceil() as usize)
+        .saturating_add(1)
+        .min(count);
+    first..end
 }
 
 fn this_busy(busy: &[String], key: &str) -> bool {
@@ -1429,6 +1540,23 @@ fn render_node_row(
 #[cfg(test)]
 mod tests {
     use super::clear_winner;
+
+    #[test]
+    fn row_range_is_bounded_by_the_viewport_even_for_large_subscriptions() {
+        use gpui_kit::px;
+        assert_eq!(
+            super::node_row_range(px(-120.), px(160.), px(80.), 10_000),
+            0..3
+        );
+        assert_eq!(
+            super::node_row_range(px(80_000.), px(80_640.), px(80.), 10_000),
+            999..1009
+        );
+        assert_eq!(
+            super::node_row_range(px(760.), px(1100.), px(80.), 10),
+            8..10
+        );
+    }
 
     fn nodes(values: &[u32]) -> Vec<(String, u32)> {
         values

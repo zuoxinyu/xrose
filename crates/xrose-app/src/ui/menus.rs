@@ -157,7 +157,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
-        self.snapshot = self.service.snapshot();
+        self.refresh_snapshot();
         let view = cx.entity().downgrade();
         let lang = self.lang();
         let busy = |key: &str| self.snapshot.busy.iter().any(|s| s == key);
@@ -829,7 +829,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.snapshot = self.service.snapshot();
+        self.refresh_snapshot();
         let command = if matches!(command, Command::CleanNodes) {
             Command::DeleteNodes(
                 self.snapshot

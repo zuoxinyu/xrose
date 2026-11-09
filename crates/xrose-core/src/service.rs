@@ -152,6 +152,19 @@ pub struct RuntimeView {
     pub error: Option<String>,
 }
 
+/// Cached status for a tray icon. Independent of node, connection and log counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct TrayStatus {
+    pub language: crate::settings::Language,
+    pub core: CoreKind,
+    pub running: bool,
+    pub easytier: crate::mesh::MeshPhase,
+    pub tailscale: crate::mesh::MeshPhase,
+    pub up_speed: u64,
+    pub down_speed: u64,
+    pub total_bytes: u64,
+}
+
 /// Everything the UI needs for one frame. Cloned at ~3 Hz by the view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiSnapshot {
@@ -534,6 +547,24 @@ impl AppService {
 
     pub fn model(&self) -> AppModel {
         self.inner.model.read().clone()
+    }
+
+    pub fn tray_status(&self) -> TrayStatus {
+        let (language, core) = {
+            let settings = self.inner.settings.read();
+            (settings.language, settings.core)
+        };
+        let (up, down, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
+        TrayStatus {
+            language,
+            core,
+            running: self.is_running(),
+            easytier: self.inner.mesh.phase(crate::mesh::MeshProvider::EasyTier),
+            tailscale: self.inner.mesh.phase(crate::mesh::MeshProvider::Tailscale),
+            up_speed,
+            down_speed,
+            total_bytes: up.saturating_add(down),
+        }
     }
 
     pub fn process_state(&self) -> ProcessState {

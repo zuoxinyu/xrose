@@ -82,60 +82,150 @@ impl AppView {
                 filter.matches(c, &query)
             }
         };
-        let (total, rows): (usize, Box<dyn Iterator<Item = MonitorRow<'_>> + '_>) = if self
-            .show_recorded_connections
-        {
-            let all = &self.snapshot.recording.connections;
-            (
-                all.len(),
-                Box::new(
-                    all.iter()
-                        .rev()
-                        .filter(|r| matches(&r.connection))
-                        .map(|r| {
-                            MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
-                        }),
-                ),
-            )
-        } else if processes {
-            let text = query.trim().to_lowercase();
-            (
-                live.processes.len(),
-                Box::new(
-                    live.processes
-                        .iter()
-                        .filter(move |p| {
-                            text.is_empty() || p.process_name.to_lowercase().contains(&text)
-                        })
-                        .map(MonitorRow::Process),
-                ),
-            )
-        } else {
-            let all = &self.snapshot.runtime.connections;
-            (
-                all.len(),
-                Box::new(
-                    live.ordered(self.connection_sort)
-                        .iter()
-                        .filter_map(|&index| {
-                            let c = all.get(index)?;
-                            matches(c).then(|| {
-                                MonitorRow::Connection(c, false, live.metrics.get(index).copied())
-                            })
-                        }),
-                ),
-            )
-        };
-        let (visible, count) = {
-            let mut rows = rows;
-            let visible: Vec<_> = rows.by_ref().take(limit).collect();
-            let count = if query.is_empty() {
-                total
+        // Store indices in display order. The list resolves rich rows and icons only
+        // when it measures or paints them, including variable-height wrapped rows.
+        let (total, rows): (usize, Box<dyn Iterator<Item = usize> + '_>) =
+            if self.show_recorded_connections {
+                let all = &self.snapshot.recording.connections;
+                (
+                    all.len(),
+                    Box::new(
+                        (0..all.len())
+                            .rev()
+                            .filter(|&i| matches(&all[i].connection)),
+                    ),
+                )
+            } else if processes {
+                let text = query.to_lowercase();
+                (
+                    live.processes.len(),
+                    Box::new((0..live.processes.len()).filter(move |&i| {
+                        text.is_empty()
+                            || live.processes[i]
+                                .process_name
+                                .to_lowercase()
+                                .contains(&text)
+                    })),
+                )
             } else {
-                visible.len() + rows.count()
+                let all = &self.snapshot.runtime.connections;
+                (
+                    all.len(),
+                    Box::new(
+                        live.ordered(self.connection_sort)
+                            .iter()
+                            .copied()
+                            .filter(|&i| all.get(i).is_some_and(|c| matches(c))),
+                    ),
+                )
             };
-            (visible, count)
+        let mut rows = rows;
+        let visible: Vec<_> = rows.by_ref().take(limit).collect();
+        let shown = visible.len();
+        let count = if query.is_empty() {
+            total
+        } else {
+            shown + rows.count()
         };
+        let has_hint = !self.show_recorded_connections && (!supported || !running) || count == 0;
+        let has_footer = count > shown || limit > CONNECTIONS_PAGE_STEP;
+        let panel_count = usize::from(has_hint) + shown + usize::from(has_footer);
+        let item_count = 2 + panel_count;
+        let old_count = self.connection_list.item_count();
+        if old_count != item_count {
+            self.connection_list.splice(
+                old_count.min(item_count)..old_count,
+                item_count.saturating_sub(old_count),
+            );
+        }
+        let filtered = !query.is_empty() || filter != ConnectionFilterKind::All;
+        list(
+            self.connection_list.clone(),
+            cx.processor(move |this, index: usize, _, cx| {
+                let pad = px(super::theme::PAGE_PAD);
+                if index == 0 {
+                    return div()
+                        .px(pad)
+                        .pt(pad)
+                        .pb_4()
+                        .child(
+                            this.connection_header(processes, supported, running, count, total, cx),
+                        )
+                        .into_any_element();
+                }
+                if index == 1 {
+                    return div()
+                        .px(pad)
+                        .pb_4()
+                        .child(this.traffic_statistics_card(&p, cx))
+                        .into_any_element();
+                }
+                let panel_index = index - 2;
+                let last = panel_index + 1 == panel_count;
+                let content = if has_hint && panel_index == 0 {
+                    this.connection_hint(supported, running, filtered, count, &p, cx)
+                        .into_any_element()
+                } else if last && has_footer {
+                    this.connection_footer(count, shown, limit, &p, cx)
+                        .into_any_element()
+                } else {
+                    let i = visible[panel_index - usize::from(has_hint)];
+                    let row = if this.show_recorded_connections {
+                        let r = &this.snapshot.recording.connections[i];
+                        MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
+                    } else if processes {
+                        MonitorRow::Process(&this.snapshot.runtime.live_traffic.processes[i])
+                    } else {
+                        MonitorRow::Connection(
+                            &this.snapshot.runtime.connections[i],
+                            false,
+                            this.snapshot.runtime.live_traffic.metrics.get(i).copied(),
+                        )
+                    };
+                    let icon = this
+                        .process_icons
+                        .as_ref()
+                        .map(|icons| icons.view(row.icon_key(&this.snapshot.runtime.connections)));
+                    match row {
+                        MonitorRow::Connection(connection, closed, metrics) => this
+                            .connection_row(connection.clone(), closed, metrics, icon, &p, cx)
+                            .into_any_element(),
+                        MonitorRow::Process(process) => this
+                            .live_process_row(process, icon, &p, cx)
+                            .into_any_element(),
+                    }
+                };
+                div()
+                    .px(pad)
+                    .when(last, |d| d.pb(pad))
+                    .child(
+                        div()
+                            .px_4()
+                            .border_x_1()
+                            .bg(p.panel)
+                            .border_color(p.border)
+                            .when(panel_index == 0, |d| d.pt_4().border_t_1().rounded_t_lg())
+                            .when(!last, |d| d.pb_2())
+                            .when(last, |d| d.pb_4().border_b_1().rounded_b_lg())
+                            .child(content),
+                    )
+                    .into_any_element()
+            }),
+        )
+        .size_full()
+    }
+
+    fn connection_header(
+        &self,
+        processes: bool,
+        supported: bool,
+        running: bool,
+        count: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let filter = self.connection_filter;
         let recording_active = self.snapshot.recording.active;
         let recording_started = self.snapshot.recording.started_at.is_some();
         let recorded_conn_len = self.snapshot.recording.connections.len();
@@ -196,7 +286,7 @@ impl AppView {
             && self.snapshot.model.work_mode == WorkMode::Direct
             && !self.snapshot.settings.tun_enabled;
 
-        let header = card(&p)
+        card(&p)
             .child(
                 div()
                     .flex()
@@ -389,14 +479,23 @@ impl AppView {
                     "容量已满，较早的记录已移除。",
                     "Capacity reached; older records have been removed.",
                 )))
-            });
+            })
+    }
 
-        let shown = visible.len();
+    fn connection_hint(
+        &self,
+        supported: bool,
+        running: bool,
+        filtered: bool,
+        count: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut rows = div().flex().flex_col().gap_2().w_full();
         if !self.show_recorded_connections && !supported {
             rows = rows.child(
                 empty_state(
-                    &p,
+                    p,
                     IconName::Info,
                     self.tr("当前 Core 不提供连接列表", "Connection list unavailable"),
                     self.tr(
@@ -417,7 +516,7 @@ impl AppView {
         } else if !self.show_recorded_connections && !running {
             rows = rows.child(
                 empty_state(
-                    &p,
+                    p,
                     IconName::Power,
                     self.tr("Core 未运行", "Core stopped"),
                     self.tr(
@@ -435,10 +534,9 @@ impl AppView {
                 ),
             );
         } else if count == 0 {
-            let filtered = !query.trim().is_empty() || filter != ConnectionFilterKind::All;
             rows = rows.child(
                 empty_state(
-                    &p,
+                    p,
                     IconName::ArrowLeftRight,
                     if filtered {
                         self.tr("没有符合条件的连接", "No matching connections")
@@ -469,76 +567,60 @@ impl AppView {
                 }),
             )
         }
-        for row in visible {
-            let icon = self
-                .process_icons
-                .as_ref()
-                .map(|icons| icons.view(row.icon_key(&self.snapshot.runtime.connections)));
-            rows = match row {
-                MonitorRow::Connection(connection, closed, metrics) => rows
-                    .child(self.connection_row(connection.clone(), closed, metrics, icon, &p, cx)),
-                MonitorRow::Process(process) => {
-                    rows.child(self.live_process_row(process, icon, &p, cx))
-                }
-            };
-        }
-        if count > shown || limit > CONNECTIONS_PAGE_STEP {
-            rows = rows.child(
+        rows
+    }
+
+    fn connection_footer(
+        &self,
+        count: usize,
+        shown: usize,
+        limit: usize,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .pt_2()
+            .flex_wrap()
+            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                "{} {shown} / {count}",
+                self.tr("当前显示", "Showing")
+            )))
+            .child(
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap_2()
-                    .pt_2()
-                    .flex_wrap()
-                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                        "{} {shown} / {count}",
-                        self.tr("当前显示", "Showing")
-                    )))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .when(count > shown, |d| {
-                                d.child(
-                                    Button::new("load-more-connections")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .ghost()
-                                        .label(self.tr("加载更多 (+50)", "Load 50 more"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.connections_limit += CONNECTIONS_PAGE_STEP;
-                                            cx.notify();
-                                        })),
-                                )
-                            })
-                            .when(limit > CONNECTIONS_PAGE_STEP, |d| {
-                                d.child(
-                                    Button::new("collapse-connections")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .ghost()
-                                        .label(self.tr("收起", "Show less"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.connections_limit = CONNECTIONS_PAGE_STEP;
-                                            cx.notify();
-                                        })),
-                                )
-                            }),
-                    ),
-            );
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .w_full()
-            .flex_shrink_0()
-            .child(header.flex_shrink_0())
-            .child(self.traffic_statistics_card(&p, cx))
-            .child(card(&p).flex_shrink_0().child(rows))
+                    .when(count > shown, |d| {
+                        d.child(
+                            Button::new("load-more-connections")
+                                .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                .ghost()
+                                .label(self.tr("加载更多 (+50)", "Load 50 more"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.connections_limit += CONNECTIONS_PAGE_STEP;
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(limit > CONNECTIONS_PAGE_STEP, |d| {
+                        d.child(
+                            Button::new("collapse-connections")
+                                .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                .ghost()
+                                .label(self.tr("收起", "Show less"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.connections_limit = CONNECTIONS_PAGE_STEP;
+                                    cx.notify();
+                                })),
+                        )
+                    }),
+            )
     }
 
     pub(crate) fn page_diagnostics(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

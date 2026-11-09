@@ -187,6 +187,45 @@ fn text_input(
     cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
 }
 
+/// Scroll invalidation belongs to the page. Fixed navigation and window controls
+/// can reuse their painted subtrees until application state or appearance changes.
+#[derive(Clone, Copy)]
+enum Region {
+    Sidebar,
+    Header,
+    Content,
+}
+
+struct WindowRegion {
+    app: WeakEntity<AppView>,
+    region: Region,
+}
+
+impl WindowRegion {
+    fn new(region: Region, cx: &mut Context<AppView>) -> Entity<Self> {
+        let app = cx.entity();
+        cx.new(|cx| {
+            cx.observe(&app, |_, _, cx| cx.notify()).detach();
+            Self {
+                app: app.downgrade(),
+                region,
+            }
+        })
+    }
+}
+
+impl Render for WindowRegion {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.app
+            .update(cx, |app, cx| match self.region {
+                Region::Sidebar => app.sidebar(cx).into_any_element(),
+                Region::Header => app.header(cx).into_any_element(),
+                Region::Content => app.scroll_content(window, cx).into_any_element(),
+            })
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
 pub struct AppView {
     scan_pending: bool,
     import_editor_epoch: u64,
@@ -227,6 +266,8 @@ pub struct AppView {
     pub(crate) import_input: Entity<TextareaState>,
     pub(crate) log_search: Entity<InputState>,
     log_list: logs::LogListState,
+    log_revision: u64,
+    connection_list: ListState,
     log_filter: LogFilter,
     pub(crate) rule_name: Entity<InputState>,
     pub(crate) rule_group_id: Option<String>,
@@ -234,6 +275,9 @@ pub struct AppView {
     route_scroll_running: bool,
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
+    sidebar_view: Entity<WindowRegion>,
+    header_view: Entity<WindowRegion>,
+    content_view: Entity<WindowRegion>,
     content_scroll: ScrollHandle,
     trace_anchor: ScrollAnchor,
     settings_tab: settings::SettingsTab,
@@ -266,7 +310,8 @@ pub struct AppView {
     pub(crate) diagnostic_rule_action: RouteActionKind,
     pub(crate) expanded_trace_step: Option<TraceStepKind>,
     pub(crate) auto_trace_started: bool,
-    pub(crate) last_refresh: std::time::Instant,
+    last_refresh: std::time::Instant,
+    snapshot_task: Option<Task<()>>,
 
     pub(crate) show_subscription_form: bool,
     pub(crate) show_rule_form: bool,
@@ -281,6 +326,7 @@ impl AppView {
         #[cfg(target_os = "linux")]
         crate::wayland::main_window::install(window, cx);
         let snapshot = service.snapshot();
+        let log_revision = service.logs().revision();
         let mixed_port = snapshot.settings.mixed_port.to_string();
         let sub_name = text_input(window, cx, "订阅名称（可选）");
         let sub_url = text_input(
@@ -398,6 +444,9 @@ impl AppView {
             import_input,
             log_search,
             log_list: logs::LogListState::new(),
+            log_revision,
+            connection_list: ListState::new(0, ListAlignment::Top, px(80.))
+                .with_uniform_item_height(px(100.)),
             log_filter: LogFilter::default(),
             rule_name,
             rule_group_id: None,
@@ -406,6 +455,9 @@ impl AppView {
             action_menu: None,
             active_route_drag: None,
             trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
+            sidebar_view: WindowRegion::new(Region::Sidebar, cx),
+            header_view: WindowRegion::new(Region::Header, cx),
+            content_view: WindowRegion::new(Region::Content, cx),
             content_scroll,
             settings_tab: settings::SettingsTab::default(),
             settings_scroll: ScrollHandle::new(),
@@ -438,6 +490,7 @@ impl AppView {
             expanded_trace_step: None,
             auto_trace_started: false,
             last_refresh: std::time::Instant::now(),
+            snapshot_task: None,
             show_subscription_form: false,
             show_rule_form: false,
             show_dns_form: false,
@@ -523,8 +576,16 @@ impl AppView {
         }
     }
 
-    fn sync(&mut self, cx: &mut Context<Self>) {
+    fn refresh_snapshot(&mut self) {
+        // An earlier poll must not overwrite the result of an explicit action.
+        self.snapshot_task = None;
         self.snapshot = self.service.snapshot();
+        self.log_revision = self.service.logs().revision();
+        self.last_refresh = std::time::Instant::now();
+    }
+
+    fn sync(&mut self, cx: &mut Context<Self>) {
+        self.refresh_snapshot();
         self.refresh_header_location();
         cx.notify();
     }
@@ -570,18 +631,31 @@ impl AppView {
         };
         self.snapshot.trace = current;
         let refresh_due = now.duration_since(self.last_refresh) >= Duration::from_millis(400);
-        if refresh_due {
-            self.snapshot = self.service.snapshot();
+        if refresh_due && self.snapshot_task.is_none() {
             self.last_refresh = now;
-            if !self.snapshot.busy.iter().any(|key| key == "mesh") {
-                self.mesh_probe_feedback.observe(&self.snapshot.mesh, now);
-            }
-            if !self.snapshot.busy.iter().any(|b| b == "latency") {
-                self.latency_pending.clear();
-            }
-            self.refresh_header_location();
-            cx.notify();
-        } else if changed {
+            let service = self.service.clone();
+            let read = cx
+                .background_executor()
+                .spawn(async move { service.snapshot() });
+            self.snapshot_task = Some(cx.spawn(async move |view, cx| {
+                let snapshot = read.await;
+                let _ = view.update(cx, |view, cx| {
+                    view.snapshot_task = None;
+                    view.snapshot = snapshot;
+                    view.log_revision = view.service.logs().revision();
+                    if !view.snapshot.busy.iter().any(|key| key == "mesh") {
+                        view.mesh_probe_feedback
+                            .observe(&view.snapshot.mesh, std::time::Instant::now());
+                    }
+                    if !view.snapshot.busy.iter().any(|key| key == "latency") {
+                        view.latency_pending.clear();
+                    }
+                    view.refresh_header_location();
+                    cx.notify();
+                });
+            }));
+        }
+        if changed {
             cx.notify();
         }
     }
@@ -886,6 +960,7 @@ impl AppView {
         };
         div()
             .id("header-bar")
+            .w_full()
             .h(px(theme::HEADER_HEIGHT))
             .flex_shrink_0()
             .flex()
@@ -1081,6 +1156,51 @@ impl AppView {
                         this.service.apply_config();
                     })),
             )
+    }
+
+    fn scroll_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("content-scroll")
+            .track_scroll(&self.content_scroll)
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<route_drag::RouteDrag>, window, cx| {
+                    if this.page != Page::Routing || !event.bounds.contains(&event.event.position) {
+                        return;
+                    }
+                    cx.notify();
+                    let y = event.event.position.y;
+                    let delta = if y < event.bounds.top() + px(theme::DRAG_EDGE) {
+                        theme::DRAG_SCROLL_STEP
+                    } else if y > event.bounds.bottom() - px(theme::DRAG_EDGE) {
+                        -theme::DRAG_SCROLL_STEP
+                    } else {
+                        0.
+                    };
+                    if delta != 0. && !this.route_scroll_running {
+                        this.route_scroll_running = true;
+                        route_drag::scroll_next_frame(cx.entity().downgrade(), window, cx);
+                    }
+                    if delta != 0. {
+                        let mut offset = this.content_scroll.offset();
+                        offset.y += px(delta);
+                        this.content_scroll.set_offset(offset);
+                        cx.notify();
+                    }
+                },
+            ))
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .when(
+                matches!(self.page, Page::Connections | Page::Logs | Page::Settings),
+                |d| d.flex().flex_col().overflow_hidden(),
+            )
+            .when(
+                !matches!(self.page, Page::Connections | Page::Logs | Page::Settings),
+                |d| d.overflow_y_scroll(),
+            )
+            .when(self.page != Page::Connections, |d| d.p(px(theme::PAGE_PAD)))
+            .child(self.page_content(window, cx))
     }
 
     fn page_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1295,6 +1415,15 @@ impl Render for AppView {
         let p = palette(cx);
         #[cfg(target_os = "macos")]
         qr::enable_drop(self.accepts_import(window, cx));
+        // GPUI replays paint and mouse listeners from cached views, but native
+        // caption hitboxes and the active accessibility tree are built per frame.
+        let chrome = |view: &Entity<WindowRegion>, style| {
+            if cfg!(target_os = "linux") && !window.is_a11y_active() {
+                view.clone().cached(style)
+            } else {
+                view.clone().into_element()
+            }
+        };
         let import_page = matches!(self.page, Page::Nodes | Page::Subscriptions);
         div()
             .track_focus(&self.focus_handle)
@@ -1392,7 +1521,12 @@ impl Render for AppView {
             })
             .text_color(p.fg)
             .font_family(cx.theme().font_family.clone())
-            .child(self.sidebar(cx))
+            .child(chrome(
+                &self.sidebar_view,
+                StyleRefinement::default()
+                    .w(px(theme::SIDEBAR_WIDTH))
+                    .h_full(),
+            ))
             .child(
                 div()
                     .flex()
@@ -1402,7 +1536,13 @@ impl Render for AppView {
                     .min_w(px(0.))
                     .bg(p.bg)
                     .overflow_hidden()
-                    .child(self.header(cx))
+                    .child(chrome(
+                        &self.header_view,
+                        StyleRefinement::default()
+                            .h(px(theme::HEADER_HEIGHT))
+                            .flex_shrink_0()
+                            .w_full(),
+                    ))
                     .when(
                         self.snapshot.config_dirty
                             && !(self.snapshot.settings.hot_reload
@@ -1410,54 +1550,7 @@ impl Render for AppView {
                                     || self.snapshot.busy.iter().any(|key| key == "core"))),
                         |d| d.child(self.config_dirty_banner(cx)),
                     )
-                    .child(
-                        div()
-                            .id("content-scroll")
-                            .track_scroll(&self.content_scroll)
-                            .on_drag_move(cx.listener(
-                                |this, event: &DragMoveEvent<route_drag::RouteDrag>, window, cx| {
-                                    if this.page != Page::Routing
-                                        || !event.bounds.contains(&event.event.position)
-                                    {
-                                        return;
-                                    }
-                                    cx.notify();
-                                    let y = event.event.position.y;
-                                    let delta = if y < event.bounds.top() + px(theme::DRAG_EDGE) {
-                                        theme::DRAG_SCROLL_STEP
-                                    } else if y > event.bounds.bottom() - px(theme::DRAG_EDGE) {
-                                        -theme::DRAG_SCROLL_STEP
-                                    } else {
-                                        0.
-                                    };
-                                    if delta != 0. && !this.route_scroll_running {
-                                        this.route_scroll_running = true;
-                                        route_drag::scroll_next_frame(
-                                            cx.entity().downgrade(),
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                    if delta != 0. {
-                                        let mut offset = this.content_scroll.offset();
-                                        offset.y += px(delta);
-                                        this.content_scroll.set_offset(offset);
-                                        cx.notify();
-                                    }
-                                },
-                            ))
-                            .flex_1()
-                            .min_h(px(0.))
-                            .w_full()
-                            .when(matches!(self.page, Page::Logs | Page::Settings), |d| {
-                                d.flex().flex_col().overflow_hidden()
-                            })
-                            .when(!matches!(self.page, Page::Logs | Page::Settings), |d| {
-                                d.overflow_y_scroll()
-                            })
-                            .p(px(theme::PAGE_PAD))
-                            .child(self.page_content(window, cx)),
-                    ),
+                    .child(self.content_view.clone()),
             )
             .child(self.toasts(cx))
     }

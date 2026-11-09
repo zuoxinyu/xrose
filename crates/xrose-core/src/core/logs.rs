@@ -94,6 +94,7 @@ pub struct LogBus {
 }
 
 struct LogInner {
+    revision: u64,
     entries: VecDeque<LogEntry>,
     dropped: u64,
 }
@@ -102,6 +103,7 @@ impl LogBus {
     pub fn new(max_entries: usize) -> Self {
         Self {
             inner: Arc::new(Mutex::new(LogInner {
+                revision: 0,
                 entries: VecDeque::new(),
                 dropped: 0,
             })),
@@ -151,6 +153,7 @@ impl LogBus {
         let entry = LogEntry { message, ..entry };
         {
             let mut inner = self.inner.lock();
+            inner.revision = inner.revision.wrapping_add(1);
             inner.entries.push_back(entry.clone());
             while inner.entries.len() > self.max_entries {
                 inner.entries.pop_front();
@@ -221,8 +224,14 @@ impl LogBus {
 
     pub fn clear(&self) {
         let mut inner = self.inner.lock();
+        inner.revision = inner.revision.wrapping_add(1);
         inner.entries.clear();
         inner.dropped = 0;
+    }
+
+    /// Changes on append, eviction or clear, even when the ring length is unchanged.
+    pub fn revision(&self) -> u64 {
+        self.inner.lock().revision
     }
 
     pub fn len(&self) -> usize {
@@ -380,6 +389,19 @@ impl RollingFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_tracks_replacements_and_clear() {
+        let bus = LogBus::new(1);
+        bus.push(LogStream::Core, LogLevel::Info, "one");
+        let revision = bus.revision();
+        bus.push(LogStream::Core, LogLevel::Info, "two");
+        assert_eq!(bus.len(), 1);
+        assert_ne!(revision, bus.revision());
+        let revision = bus.revision();
+        bus.clear();
+        assert_ne!(revision, bus.revision());
+    }
 
     #[test]
     fn level_inference() {

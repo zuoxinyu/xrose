@@ -93,6 +93,13 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # 精简开发环境下的 PDB 调试信息：仅保留行号，大幅减小 PDB 体积并大幅加速链接
 debug = 1
 
+# Keep interactive layout and frame rendering fast in local debug builds.
+[profile.dev.package.gpui-pre]
+opt-level = 2
+
+[profile.dev.package.taffy]
+opt-level = 2
+
 [profile.release]
 strip = true
 lto = "thin"

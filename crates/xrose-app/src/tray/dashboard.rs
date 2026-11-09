@@ -2,7 +2,7 @@
 
 use xrose_core::AppService;
 use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
-use xrose_core::service::LatencyScope;
+use xrose_core::service::{APP_VERSION, LatencyScope, TrayStatus};
 use xrose_core::settings::Language;
 use xrose_core::util::{format_bytes, format_speed};
 
@@ -27,6 +27,7 @@ pub struct DashboardMeshStatus {
 #[derive(Debug, Clone)]
 pub struct Dashboard {
     pub language: Language,
+    #[cfg_attr(target_os = "linux", allow(dead_code))]
     pub status_line: String,
     #[allow(dead_code)]
     pub traffic_line: Option<String>,
@@ -53,6 +54,37 @@ pub struct Dashboard {
     pub busy_latency: bool,
 }
 
+pub(super) fn status_lines(status: &TrayStatus) -> (String, Option<String>) {
+    let language = status.language;
+    let running = status.running;
+    let mut status_line = format!(
+        "Xrose v{} · {} ({})",
+        APP_VERSION,
+        tr(
+            language,
+            if running { "运行中" } else { "已停止" },
+            if running { "Running" } else { "Stopped" }
+        ),
+        status.core.display_name()
+    );
+    if status.easytier != xrose_core::mesh::MeshPhase::Disconnected {
+        status_line.push_str(&format!(" · EasyTier: {:?}", status.easytier));
+    }
+    if status.tailscale != xrose_core::mesh::MeshPhase::Disconnected {
+        status_line.push_str(&format!(" · Tailscale: {:?}", status.tailscale));
+    }
+    let traffic_line = running.then(|| {
+        format!(
+            "↓ {}  ↑ {}  ·  {} {}",
+            format_speed(status.down_speed),
+            format_speed(status.up_speed),
+            tr(language, "累计", "total"),
+            format_bytes(status.total_bytes)
+        )
+    });
+    (status_line, traffic_line)
+}
+
 /// Builds the dashboard from one snapshot. Called by the tray tick at 5 Hz;
 /// keep it allocation-light.
 pub fn build(service: &AppService) -> Dashboard {
@@ -74,16 +106,12 @@ pub fn build(service: &AppService) -> Dashboard {
         delay_ms: None,
         active: direct,
     }];
+    let members: std::collections::HashSet<_> = group.iter().flat_map(|g| &g.members).collect();
     nodes.extend(
         model
             .nodes
             .iter()
-            .filter(|node| {
-                node.usable_with(snapshot.settings.core)
-                    && group
-                        .as_ref()
-                        .is_some_and(|group| group.members.contains(&node.id))
-            })
+            .filter(|node| node.usable_with(snapshot.settings.core) && members.contains(&node.id))
             .map(|node| {
                 let delay = snapshot
                     .latency
@@ -147,35 +175,18 @@ pub fn build(service: &AppService) -> Dashboard {
         ip: ts_ip,
     };
 
-    let mut status_line = format!(
-        "Xrose v{} · {} ({})",
-        snapshot.app_version,
-        tr(
-            language,
-            if running { "运行中" } else { "已停止" },
-            if running { "Running" } else { "Stopped" }
-        ),
-        snapshot.settings.core.display_name()
-    );
-    if et_phase != xrose_core::mesh::MeshPhase::Disconnected {
-        status_line.push_str(&format!(" · EasyTier: {:?}", et_phase));
-    }
-    if ts_phase != xrose_core::mesh::MeshPhase::Disconnected {
-        status_line.push_str(&format!(" · Tailscale: {:?}", ts_phase));
-    }
-    let traffic_line = running.then(|| {
-        format!(
-            "↓ {}  ↑ {}  ·  {} {}",
-            format_speed(snapshot.runtime.down_speed),
-            format_speed(snapshot.runtime.up_speed),
-            tr(language, "累计", "total"),
-            format_bytes(
-                snapshot
-                    .runtime
-                    .down_total
-                    .saturating_add(snapshot.runtime.up_total)
-            )
-        )
+    let (status_line, traffic_line) = status_lines(&TrayStatus {
+        language,
+        core: snapshot.settings.core,
+        running,
+        easytier: et_phase,
+        tailscale: ts_phase,
+        up_speed: snapshot.runtime.up_speed,
+        down_speed: snapshot.runtime.down_speed,
+        total_bytes: snapshot
+            .runtime
+            .down_total
+            .saturating_add(snapshot.runtime.up_total),
     });
     Dashboard {
         language,

@@ -18,6 +18,7 @@ use super::theme::{Palette, palette};
 use super::widgets::*;
 
 pub(super) struct LogListState {
+    revision: Option<u64>,
     list: ListState,
     rows: Rc<Vec<LogRow>>,
     filter: LogFilter,
@@ -32,6 +33,7 @@ const LOG_ROW_HEIGHT_HINT: Pixels = px(22.);
 struct LogRow {
     key: SharedString,
     entry: LogEntry,
+    text: std::cell::OnceCell<(SharedString, SharedString, SharedString)>,
 }
 
 fn same_entry(a: &LogEntry, b: &LogEntry) -> bool {
@@ -45,7 +47,9 @@ fn same_entry(a: &LogEntry, b: &LogEntry) -> bool {
 impl LogListState {
     pub(super) fn new() -> Self {
         Self {
-            list: ListState::new(0, ListAlignment::Top, px(128.)),
+            revision: None,
+            list: ListState::new(0, ListAlignment::Top, px(128.))
+                .with_uniform_item_height(LOG_ROW_HEIGHT_HINT),
             rows: Rc::new(Vec::new()),
             filter: LogFilter::default(),
             query: String::new(),
@@ -102,7 +106,11 @@ impl LogListState {
                 let occurrence = occurrences.entry(hash).or_insert(0usize);
                 let key = format!("log-{hash:x}-{occurrence}").into();
                 *occurrence += 1;
-                LogRow { key, entry }
+                LogRow {
+                    key,
+                    entry,
+                    text: Default::default(),
+                }
             })
             .collect();
         if self.newest_first {
@@ -129,11 +137,6 @@ impl LogListState {
                 .count();
             let inserted = rows.len() - prefix - suffix;
             self.list.splice(prefix..self.rows.len() - suffix, inserted);
-            if inserted > 0 {
-                self.list
-                    .clone()
-                    .with_uniform_item_height(LOG_ROW_HEIGHT_HINT);
-            }
             if self.list.is_following_tail() {
                 self.list.scroll_to_end();
             } else if self.newest_first && top == ListOffset::default() {
@@ -152,9 +155,18 @@ impl LogListState {
 impl AppView {
     pub(crate) fn page_logs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let query = self.log_search.read(cx).value().to_string();
-        let logs = self.service.logs_matching(&self.log_filter, &query, 400);
-        self.log_list.update(logs, &self.log_filter, query);
+        let query = self.log_search.read(cx).value();
+        // Sample arriving logs on the data poll, independently of scroll frame rate.
+        let revision = self.log_revision;
+        if self.log_list.revision != Some(revision)
+            || self.log_list.filter != self.log_filter
+            || self.log_list.query != query.as_ref()
+        {
+            let logs = self.service.logs_matching(&self.log_filter, &query, 400);
+            self.log_list
+                .update(logs, &self.log_filter, query.to_string());
+            self.log_list.revision = Some(revision);
+        }
         let rows = self.log_list.rows.clone();
         let visible_rows = rows.clone();
         let mono = cx.theme().mono_font_family.clone();
@@ -525,7 +537,13 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
         LogLevel::Warn => p.warn_text,
         LogLevel::Error => p.danger_text,
     };
-    let timestamp = log_time_in_timezone(&entry.timestamp, &chrono::Local);
+    let (timestamp, level, message) = row.text.get_or_init(|| {
+        (
+            log_time_in_timezone(&entry.timestamp, &chrono::Local).into(),
+            entry.level.as_str().to_uppercase().into(),
+            displayed_log_message(entry).to_owned().into(),
+        )
+    });
     div()
         .id(key.clone())
         .flex()
@@ -541,30 +559,21 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
                 .w(px(64.))
                 .flex_shrink_0()
                 .text_color(p.muted_fg)
-                .child(SelectableText::new(
-                    SharedString::from(format!("{key}-time")),
-                    timestamp,
-                )),
+                .child(SelectableText::new("time", timestamp.clone())),
         )
         .child(
             div()
                 .w(px(64.))
                 .flex_shrink_0()
                 .text_color(color)
-                .child(SelectableText::new(
-                    SharedString::from(format!("{key}-level")),
-                    entry.level.as_str().to_uppercase(),
-                )),
+                .child(SelectableText::new("level", level.clone())),
         )
         .child(
             div()
                 .w(px(48.))
                 .flex_shrink_0()
                 .text_color(p.muted_fg)
-                .child(SelectableText::new(
-                    SharedString::from(format!("{key}-stream")),
-                    entry.stream.label(),
-                )),
+                .child(SelectableText::new("stream", entry.stream.label())),
         )
         .child(
             div()
@@ -572,10 +581,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
                 .min_w(px(0.))
                 .text_color(color)
                 .whitespace_normal()
-                .child(SelectableText::new(
-                    SharedString::from(format!("{key}-message")),
-                    displayed_log_message(entry).to_owned(),
-                )),
+                .child(SelectableText::new("message", message.clone())),
         )
 }
 
@@ -715,6 +721,17 @@ mod tests {
         state.update(entries(0..400), &LogFilter::default(), String::new());
         assert!(Rc::ptr_eq(&rows, &state.rows));
         assert_eq!(state.list.logical_scroll_top(), top);
+    }
+
+    #[test]
+    fn appended_rows_contribute_to_scroll_extent_before_paint() {
+        let mut state = LogListState::new();
+        state.toggle_order();
+        state.update(entries(0..10), &LogFilter::default(), String::new());
+        state.update(entries(0..30), &LogFilter::default(), String::new());
+        state.list.scroll_to(ListOffset::default());
+        state.list.scroll_by(super::LOG_ROW_HEIGHT_HINT * 24.);
+        assert_eq!(state.list.logical_scroll_top().item_ix, 24);
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub(crate) struct TrayWindowState {
     show_recorded_connections: bool,
     show_live_processes: bool,
     content_offset: Point<Pixels>,
+    connection_list: ListState,
+    connections_limit: usize,
     settings_offset: Point<Pixels>,
     log_filter: LogFilter,
     rule_group_id: Option<String>,
@@ -47,6 +49,8 @@ impl AppView {
             network_advanced_open: self.network_advanced_open,
             page_inputs: self.page_inputs().map(|input| input.read(cx).value()),
             content_offset: self.content_scroll.offset(),
+            connection_list: self.connection_list.clone(),
+            connections_limit: self.connections_limit,
             settings_offset: self.settings_scroll.offset(),
             exact_process_filter: self.exact_process_filter.clone(),
             hide_ips: self.hide_ips,
@@ -77,6 +81,8 @@ impl AppView {
         self.rule_group_id = state.rule_group_id;
         self.collapsed_subs = state.collapsed_subs;
         self.mesh_expanded = state.mesh_expanded;
+        self.connection_list = state.connection_list;
+        self.connections_limit = state.connections_limit;
         self.content_scroll.set_offset(state.content_offset);
         self.settings_scroll.set_offset(state.settings_offset);
         self.exact_process_filter = state.exact_process_filter;
