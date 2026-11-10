@@ -37,9 +37,9 @@ tempfile.workspace = true
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 notify-rust.workspace = true
-xcap.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+xcap = { workspace = true, features = ["wgc"] }
 winreg.workspace = true
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
@@ -57,6 +57,7 @@ freedesktop-icons.workspace = true
 freedesktop-desktop-entry.workspace = true
 resvg.workspace = true
 ashpd.workspace = true
+xcap.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 wayland-client.workspace = true

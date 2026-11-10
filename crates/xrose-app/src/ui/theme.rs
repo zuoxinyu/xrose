@@ -1,5 +1,5 @@
 use gpui_kit::component::ActiveTheme;
-use gpui_kit::{App, Hsla};
+use gpui_kit::{App, Hsla, rgb};
 use xrose_core::storage::LatencyEntry;
 
 #[derive(Clone, Copy)]
@@ -32,6 +32,17 @@ pub struct Palette {
 /// HSL from degrees (GPUI's `hsla` expects the hue as a 0..1 fraction).
 pub fn hsl(h: f32, s: f32, l: f32) -> Hsla {
     gpui_kit::hsla(h / 360., s, l, 1.0)
+}
+
+/// Sample the three sRGB stops of the Xrose mark for the viewfinder.
+pub fn finder_brand_color(phase: f32, opacity: f32) -> Hsla {
+    let position = 0.5 - 0.5 * (phase * std::f32::consts::TAU).cos();
+    let (from, to, t) = if position < 0.48 {
+        (0x00bdf5, 0x187af7, position / 0.48)
+    } else {
+        (0x187af7, 0x963bf2, (position - 0.48) / 0.52)
+    };
+    Hsla::from(rgb(from).blend(rgb(to).alpha(t))).opacity(opacity)
 }
 
 /// Interaction color shared by the theme override and the palette.

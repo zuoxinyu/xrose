@@ -54,7 +54,9 @@ fn scan(gray: &GrayImage) -> Vec<Code> {
 }
 
 /// The live finder samples a crop and bounds both luma allocation and QR work.
-pub(super) fn screen_codes(image: &image::RgbaImage) -> Vec<Code> {
+pub(super) fn screen_codes(
+    image: &impl image::GenericImageView<Pixel = image::Rgba<u8>>,
+) -> Vec<Code> {
     let (w, h) = image.dimensions();
     let step = w.max(h).div_ceil(1024).max(1);
     let gray = GrayImage::from_fn(w.div_ceil(step), h.div_ceil(step), |x, y| {
@@ -248,9 +250,9 @@ mod tests {
         let right = codes.iter().find(|c| c.text == b).unwrap();
         assert!((left.rect[0] - 32. / 640.).abs() < 0.01);
         assert!((right.rect[1] - 140. / 340.).abs() < 0.01);
-        let (index, _) = super::super::finder::nearest(&codes, [224., 98.], [320., 170.]).unwrap();
+        let (index, _) = super::super::sample::nearest(&codes, [224., 98.], [320., 170.]).unwrap();
         assert_eq!(codes[index].text, b);
-        assert!(super::super::finder::nearest(&codes, [318., 1.], [320., 170.]).is_none());
+        assert!(super::super::sample::nearest(&codes, [318., 1.], [320., 170.]).is_none());
         let mut bytes = Cursor::new(Vec::new());
         DynamicImage::ImageLuma8(img)
             .write_to(&mut bytes, ImageFormat::Png)

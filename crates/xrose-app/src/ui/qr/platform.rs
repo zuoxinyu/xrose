@@ -13,9 +13,53 @@ const UNAVAILABLE: CaptureError = (
 #[derive(Default)]
 pub(super) struct Pointer {
     pub position: [f32; 2],
-    pub clicked: Option<[f32; 2]>,
+    pub selection: Option<([f32; 2], SelectionSource)>,
+    pub pressed: bool,
+    pub zoom_delta: f32,
     pub cancel: bool,
     pub revision: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SelectionSource {
+    Click,
+    Keyboard,
+}
+
+#[cfg(any(target_os = "macos", windows))]
+impl SelectionSource {
+    pub(super) fn from_native(flags: u32) -> Option<Self> {
+        if flags & 1 != 0 {
+            Some(Self::Click)
+        } else if flags & 8 != 0 {
+            Some(Self::Keyboard)
+        } else {
+            None
+        }
+    }
+}
+
+pub(super) fn play_import_sound(success: bool, window: &Window, cx: &App) {
+    #[cfg(target_os = "macos")]
+    if mac::play_import_sound(success) {
+        return;
+    }
+    #[cfg(windows)]
+    if super::windows::play_import_sound(success) {
+        return;
+    }
+    window.play_system_bell();
+    // Backends with only a system bell distinguish failures with a second beat.
+    if !success {
+        window
+            .spawn(cx, async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(160))
+                    .await;
+                let _ = cx.update(|window, _| window.play_system_bell());
+            })
+            .detach();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -47,10 +91,12 @@ mod mac {
             cx: *mut f32,
             cy: *mut f32,
             revision: *mut u32,
+            zoom: *mut f32,
         ) -> u32;
+        fn xrose_finder_set_hit(session: *mut c_void, hit: bool);
         fn xrose_end_finder(session: *mut c_void);
-        fn xrose_finder_cursor(session: *mut c_void, visible: bool);
         fn xrose_main_visible(view: *mut c_void, show: bool);
+        fn xrose_play_import_sound(success: bool) -> bool;
         fn xrose_paste_image(
             limit: usize,
             ctx: *mut c_void,
@@ -122,8 +168,12 @@ mod mac {
             })
             .map(Self)
         }
+        pub(in super::super) fn set_hit(&self, hit: bool) {
+            unsafe { xrose_finder_set_hit(self.0.as_ptr(), hit) }
+        }
         pub(in super::super) fn sample(&mut self) -> Pointer {
             let (mut x, mut y, mut cx, mut cy, mut revision) = (0., 0., 0., 0., 0);
+            let mut zoom = 0.;
             let flags = unsafe {
                 xrose_finder_input(
                     self.0.as_ptr(),
@@ -132,23 +182,26 @@ mod mac {
                     &mut cx,
                     &mut cy,
                     &mut revision,
+                    &mut zoom,
                 )
             };
             Pointer {
                 position: [x, y],
-                clicked: (flags & 1 != 0).then_some([cx, cy]),
+                selection: SelectionSource::from_native(flags).map(|source| ([cx, cy], source)),
+                pressed: flags & 4 != 0,
+                zoom_delta: zoom,
                 cancel: flags & 2 != 0,
                 revision,
             }
-        }
-        pub(in super::super) fn set_cursor_visible(&mut self, visible: bool) {
-            unsafe { xrose_finder_cursor(self.0.as_ptr(), visible) }
         }
     }
     impl Drop for DesktopInput {
         fn drop(&mut self) {
             unsafe { xrose_end_finder(self.0.as_ptr()) }
         }
+    }
+    pub(super) fn play_import_sound(success: bool) -> bool {
+        unsafe { xrose_play_import_sound(success) }
     }
     pub(in super::super) fn main_visible(window: &Window, show: bool) {
         if let Some(v) = view(window) {
@@ -197,6 +250,10 @@ pub(super) use mac::{DesktopInput, enable_drop, install, main_visible, paste_ima
 pub(super) struct CaptureTarget {
     #[cfg(any(target_os = "macos", windows))]
     id: DisplayId,
+    #[cfg(windows)]
+    physical_center: Option<(i32, i32)>,
+    #[cfg(target_os = "linux")]
+    x11_output: Option<u32>,
     #[cfg(target_os = "linux")]
     center: (i32, i32),
     #[cfg(target_os = "linux")]
@@ -228,6 +285,7 @@ impl CaptureTarget {
                 ]
             });
             Self {
+                x11_output: None,
                 center: (f32::from(center.x) as i32, f32::from(center.y) as i32),
                 portal_screen,
             }
@@ -238,9 +296,45 @@ impl CaptureTarget {
             Self {
                 #[cfg(any(target_os = "macos", windows))]
                 id: display.id(),
+                #[cfg(windows)]
+                physical_center: super::windows::monitor_center(display.id()),
             }
         }
     }
+}
+
+/// GPUI enumerates X screens (which may span several RandR outputs). Create
+/// one overlay per physical output and keep its capture target in the same space.
+pub(super) fn overlays(cx: &App) -> Vec<(DisplayId, Bounds<Pixels>, Pixels, CaptureTarget)> {
+    let mut overlays = Vec::new();
+    for display in cx.displays() {
+        let bounds = display.bounds();
+        let target = CaptureTarget::new(display.as_ref(), cx);
+        #[cfg(target_os = "linux")]
+        if cx.compositor_name() == "X11"
+            && let Some(outputs) = super::linux::outputs(display.id(), bounds)
+        {
+            overlays.extend(outputs.into_iter().map(|(bounds, id)| {
+                (
+                    display.id(),
+                    bounds,
+                    bounds.bottom(),
+                    CaptureTarget {
+                        x11_output: Some(id),
+                        ..target
+                    },
+                )
+            }));
+            continue;
+        }
+        overlays.push((
+            display.id(),
+            bounds,
+            display.visible_bounds().bottom(),
+            target,
+        ));
+    }
+    overlays
 }
 
 pub(super) async fn capture(
@@ -254,9 +348,17 @@ pub(super) async fn capture(
     #[cfg(windows)]
     {
         let monitor = xcap::Monitor::all()
-            .map_err(|_| UNAVAILABLE)?
-            .into_iter()
-            .find(|m| m.id().ok() == Some(u64::from(target.id) as u32))
+            .ok()
+            .and_then(|monitors| {
+                monitors
+                    .into_iter()
+                    .find(|m| m.id().ok() == Some(u64::from(target.id) as u32))
+            })
+            .or_else(|| {
+                target
+                    .physical_center
+                    .and_then(|(x, y)| xcap::Monitor::from_point(x, y).ok())
+            })
             .ok_or(UNAVAILABLE)?;
         capture_region(&monitor, region)
     }
@@ -265,11 +367,16 @@ pub(super) async fn capture(
         if let Some(screen) = target.portal_screen {
             return super::portal::capture(screen, region).await;
         }
-        capture_region(
-            &xcap::Monitor::from_point(target.center.0, target.center.1)
-                .map_err(|_| UNAVAILABLE)?,
-            region,
-        )
+        let monitor = if let Some(id) = target.x11_output {
+            xcap::Monitor::all()
+                .map_err(|_| UNAVAILABLE)?
+                .into_iter()
+                .find(|m| m.id().ok() == Some(id))
+                .ok_or(UNAVAILABLE)?
+        } else {
+            xcap::Monitor::from_point(target.center.0, target.center.1).map_err(|_| UNAVAILABLE)?
+        };
+        capture_region(&monitor, region)
     }
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
@@ -280,6 +387,9 @@ pub(super) async fn capture(
 
 #[cfg(any(windows, target_os = "linux"))]
 fn capture_region(monitor: &xcap::Monitor, region: [f32; 4]) -> Result<RgbaImage, CaptureError> {
+    if region == [0., 0., 1., 1.] {
+        return monitor.capture_image().map_err(|_| UNAVAILABLE);
+    }
     let width = monitor.width().map_err(|_| UNAVAILABLE)?;
     let height = monitor.height().map_err(|_| UNAVAILABLE)?;
     let [l, t, w, h] = region;
@@ -313,7 +423,6 @@ impl DesktopInput {
     pub(super) fn sample(&mut self) -> Pointer {
         Pointer::default()
     }
-    pub(super) fn set_cursor_visible(&mut self, _: bool) {}
 }
 
 pub(super) fn uses_portal() -> bool {

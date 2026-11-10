@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use gpui_base::Disableable;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
@@ -212,7 +213,9 @@ impl AppView {
                     div().flex().flex_wrap().justify_end().gap_2()
                         .child(self.scan_button(cx))
                         .child(Button::new("import-clipboard")
+                            .icon(IconName::Copy)
                             .label(self.tr("从剪贴板粘贴", "Paste from clipboard"))
+                            .tooltip(if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" })
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.paste_into_import(window,cx);
                             })))

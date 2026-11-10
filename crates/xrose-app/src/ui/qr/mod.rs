@@ -6,6 +6,7 @@ mod linux;
 mod platform;
 #[cfg(target_os = "linux")]
 mod portal;
+mod sample;
 #[cfg(windows)]
 mod windows;
 
@@ -41,6 +42,13 @@ fn inputs_from_clipboard(item: ClipboardItem) -> Vec<Input> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    Review,
+    Apply,
+    ClickedCode,
+}
+
 impl AppView {
     pub(super) fn accepts_import(&self, window: &mut Window, cx: &mut App) -> bool {
         matches!(self.page, Page::Nodes | Page::Subscriptions) && !window.has_active_dialog(cx)
@@ -48,6 +56,21 @@ impl AppView {
 
     pub(super) fn init_import(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_handle.focus(window, cx);
+        // Dialogs can own keyboard focus outside the AppView's dispatch path.
+        let main = window.window_handle();
+        let view = cx.weak_entity();
+        let shortcut = KeybindingKeystroke::from_keystroke(
+            Keystroke::parse_with_os("secondary-shift-s", cx.platform_info().os)
+                .expect("valid scan shortcut"),
+        );
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == main && event.keystroke.should_match(&shortcut) {
+                window.prevent_default();
+                cx.stop_propagation();
+                let _ = view.update(cx, |view, cx| view.start_finder(window, cx));
+            }
+        });
+        cx.on_release(move |_, _| drop(keys)).detach();
         #[cfg(target_os = "macos")]
         {
             let mut rx = platform::install(window);
@@ -55,7 +78,7 @@ impl AppView {
                 while let Some(input) = rx.recv().await {
                     let _ = view.update_in(cx, |this, window, cx| {
                         if this.accepts_import(window, cx) {
-                            this.process_import(vec![input], false, window, cx);
+                            this.process_import(vec![input], ImportMode::Apply, window, cx);
                         }
                     });
                 }
@@ -70,6 +93,11 @@ impl AppView {
             .h(px(theme::CONTROL_HEIGHT))
             .icon(gpui_kit::assets::IconName::ScanLine)
             .label(self.tr("扫描屏幕二维码", "Scan screen QR code"))
+            .tooltip(if cfg!(target_os = "macos") {
+                "⇧⌘S"
+            } else {
+                "Ctrl+Shift+S"
+            })
             .loading(self.scan_pending || self.import_busy)
             .on_click(cx.listener(|this, _, window, cx| this.start_finder(window, cx)))
     }
@@ -78,7 +106,7 @@ impl AppView {
         if !self.accepts_import(window, cx) || window.has_focused_input(cx) {
             return false;
         }
-        self.read_import_clipboard(false, window, cx);
+        self.read_import_clipboard(ImportMode::Apply, window, cx);
         true
     }
 
@@ -87,14 +115,19 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.read_import_clipboard(true, window, cx);
+        self.read_import_clipboard(ImportMode::Review, window, cx);
         true
     }
 
-    fn read_import_clipboard(&mut self, review: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn read_import_clipboard(
+        &mut self,
+        mode: ImportMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(target_os = "macos")]
         match platform::paste_image() {
-            Ok(Some(image)) => return self.process_import(vec![image], review, window, cx),
+            Ok(Some(image)) => return self.process_import(vec![image], mode, window, cx),
             Err(issue) => {
                 let (zh, en) = issue.message();
                 return self.import_problem(self.tr(zh, en).to_string(), window, cx);
@@ -106,12 +139,14 @@ impl AppView {
         cx.spawn_in(window, async move |view, cx| {
             let result = read.await;
             let _ = view.update_in(cx, |this, window, cx| {
-                if review && (!this.show_import_box || this.import_editor_epoch != epoch) {
+                if mode == ImportMode::Review
+                    && (!this.show_import_box || this.import_editor_epoch != epoch)
+                {
                     return;
                 }
                 match result {
                     Ok(Some(item)) => {
-                        this.process_import(inputs_from_clipboard(item), review, window, cx)
+                        this.process_import(inputs_from_clipboard(item), mode, window, cx)
                     }
                     Ok(None) => this.import_problem(
                         this.tr(
@@ -144,7 +179,12 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         if self.accepts_import(window, cx) {
-            self.process_import(inputs_from_clipboard(item.clone()), false, window, cx);
+            self.process_import(
+                inputs_from_clipboard(item.clone()),
+                ImportMode::Apply,
+                window,
+                cx,
+            );
         }
     }
 
@@ -157,7 +197,7 @@ impl AppView {
         if self.accepts_import(window, cx) {
             self.process_import(
                 paths.paths().iter().cloned().map(Input::File).collect(),
-                false,
+                ImportMode::Apply,
                 window,
                 cx,
             );
@@ -170,7 +210,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.process_import(vec![Input::Text(text)], false, window, cx);
+        self.process_import(vec![Input::Text(text)], ImportMode::Apply, window, cx);
     }
 
     fn import_problem(&mut self, message: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -187,10 +227,11 @@ impl AppView {
     fn process_import(
         &mut self,
         inputs: Vec<Input>,
-        review: bool,
+        mode: ImportMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let review = mode == ImportMode::Review;
         let lang = self.lang();
         let problem = if inputs.is_empty() {
             Some(Issue::Unsupported)
@@ -199,6 +240,9 @@ impl AppView {
         } else {
             None
         };
+        if mode == ImportMode::ClickedCode && (problem.is_some() || self.import_busy) {
+            platform::play_import_sound(false, window, cx);
+        }
         if let Some(issue) = problem {
             let (zh, en) = issue.message();
             return self.import_problem(self.tr(zh, en).to_string(), window, cx);
@@ -312,6 +356,9 @@ impl AppView {
                 let failed = report.unreadable
                     || !report.errors.is_empty()
                     || (report.duplicates > 0 && added == 0);
+                if mode == ImportMode::ClickedCode {
+                    platform::play_import_sound(added > 0 && !failed, window, cx);
+                }
                 feedback.extend(report.errors);
                 if !feedback.is_empty() {
                     let message = feedback.join(" · ");

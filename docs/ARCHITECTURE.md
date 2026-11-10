@@ -107,7 +107,8 @@
 - **分享**：节点与订阅共用复制链接操作和二维码弹窗。执行时按 ID 读取当前快照；节点导出协议链接，订阅仅分享完整订阅 URL，不附带自定义请求头或节点列表。二维码在内存生成。
 
 - **多通道导入**：节点页与订阅页共用 `ui/qr` 管线，支持剪贴板粘贴、文件/图片拖放及屏幕二维码扫描，最终统一交由 `AppService::import_shared_content` 与订阅解析器处理，识别 v2rayN VMess JSON、标准 URI 与 Shadowrocket 编码链接（参考 [v2rayN 导出](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib/Handler/Fmt) 与 [Shadowrocket 生成格式](https://github.com/cedar2025/Xboard/blob/master/app/Protocols/Shadowrocket.php)）。
-- **屏幕取景扫描**：透明取景框在后台采集指针附近的区域，识别图像最长边为 1024px。切换屏幕或滚动时，上次识别结果失效。KDE Wayland 在同一条 D-Bus 连接上登记应用标识并请求桌面截图，再按显示器逻辑坐标裁取识别区域。macOS 使用 ScreenCaptureKit，Windows 和其他 Linux 会话使用 XCap。预览与批量导出均遵循隐私模式与原始节点顺序。
+- **屏幕取景扫描**：添加节点、添加订阅及主窗口快捷键共用取景会话。每个显示器有一个透明窗口，仅在指针所在屏幕显示准星和预览。按住 ⌘（macOS）或 Ctrl 滚动可缩放取景框；点击目标或预览、按回车或空格导入，右键或 Esc 取消。一次确认只导入一个二维码。点击二维码或预览后，根据导入结果播放成功或失败提示音；键盘确认保持静音。预览沿用节点与订阅的隐私遮罩，不写入扫码历史、剪贴板，也不保留截图。
+- **采集与快捷键**：截屏和 QR 解码在后台执行，识别图像最长边为 1024px；滚动底层页面或切屏会丢弃旧结果。macOS 使用 ScreenCaptureKit；Windows 使用 XCap 的 Windows Graphics Capture；X11 按 RandR 显示器定位，KDE Wayland 经截图门户按逻辑坐标裁切。Windows 与 Wayland 在内存中短暂复用当前屏幕的截图。扫码快捷键为 macOS 的 `⇧⌘S` 和 Windows / Linux 的 `Ctrl+Shift+S`，仅在 Xrose 主窗口有焦点时生效，包括窗口内的对话框。其他应用占用该组合键时，可使用添加节点或订阅对话框中的扫码按钮。
 
 ## 8. 连接诊断与流量统计
 

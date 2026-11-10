@@ -101,17 +101,22 @@ int xrose_capture(uint32_t display, const float *region, void *context, PixelRec
     }
 }
 
-// A mouse-transparent panel leaves wheel gestures and application switching with
-// the desktop. Only mouse-downs, scroll invalidation and Escape are observed.
+// Nonactivating panels leave ordinary scrolling and application focus with the desktop.
+enum { FINDER_CLICK = 1u, FINDER_CONFIRM_KEY = 8u };
 typedef CGError (*SetConnectionProperty)(int, int, CFStringRef, CFTypeRef);
 @interface XroseFinderInput : NSObject {
   @public
     NSRect screenFrame;
     CGPoint clickPoint;
     unsigned int actions, revision;
-    uint32_t leftCount, rightCount, scrollCount;
+    BOOL hit, leftDown, rightDown;
+    NSTimeInterval passWheelUntil;
+    uint32_t scrollCount;
     id globalMonitor, localMonitor, activation, space;
-    EventHotKeyRef escape;
+    float zoomDelta;
+    __weak NSWindow *panel;
+    NSTimeInterval zoomTailUntil;
+    EventHotKeyRef keys[3];
     EventHandlerRef handler;
     CGDirectDisplayID displayID;
     BOOL cursorHidden, running;
@@ -145,8 +150,7 @@ static void allowBackgroundCursor(XroseFinderInput *s) {
     }
 }
 
-void xrose_finder_cursor(void *ptr, bool visible) {
-    XroseFinderInput *s = (__bridge XroseFinderInput *)ptr;
+static void setFinderCursorVisible(XroseFinderInput *s, BOOL visible) {
     if (visible && s->cursorHidden) {
         if (CGDisplayShowCursor(s->displayID) == kCGErrorSuccess)
             s->cursorHidden = NO;
@@ -154,24 +158,99 @@ void xrose_finder_cursor(void *ptr, bool visible) {
         s->cursorHidden = CGDisplayHideCursor(s->displayID) == kCGErrorSuccess;
     }
 }
-static OSStatus finderEscape(EventHandlerCallRef next, EventRef event, void *context) {
-    (void)next;
-    EventHotKeyID key;
-    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(key), NULL,
-                          &key) != noErr ||
-        key.signature != 'XrQR')
-        return eventNotHandledErr;
-    ((__bridge XroseFinderInput *)context)->actions |= 2;
-    return noErr;
+// AppKit, Carbon and the session tap all dispatch on the main thread.
+static NSMutableArray<XroseFinderInput *> *activeFinders;
+static XroseFinderInput *cursorPolicyOwner;
+
+// Global monitors can observe another application's click but cannot consume it.
+static void updateMouseTarget(XroseFinderInput *s, NSEventModifierFlags flags) {
+    if (s->tap)
+        return;
+    NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    BOOL intercept = s->leftDown || s->rightDown || (flags & NSEventModifierFlagCommand) ||
+                     now < s->zoomTailUntil || (s->hit && now >= s->passWheelUntil);
+    NSWindow *panel = s->panel;
+    if (panel.ignoresMouseEvents == !intercept)
+        return;
+    // Fully clear pixels are not hit-tested by WindowServer.
+    panel.backgroundColor = intercept ? [NSColor colorWithWhite:0 alpha:1.0 / 255.0] : NSColor.clearColor;
+    panel.ignoresMouseEvents = !intercept;
 }
+
+void xrose_finder_set_hit(void *ptr, bool hit) {
+    XroseFinderInput *s = (__bridge XroseFinderInput *)ptr;
+    s->hit = hit;
+    updateMouseTarget(s, NSEvent.modifierFlags);
+}
+
 static CGPoint finderPosition(XroseFinderInput *s) {
     NSPoint p = NSEvent.mouseLocation;
     return CGPointMake(p.x - NSMinX(s->screenFrame), NSMaxY(s->screenFrame) - p.y);
+}
+static OSStatus finderKey(EventHandlerCallRef next, EventRef event, void *context) {
+    (void)next;
+    (void)context;
+    EventHotKeyID key;
+    if (GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, NULL, sizeof(key), NULL,
+                          &key) != noErr || key.signature != 'XrQR')
+        return eventNotHandledErr;
+    for (XroseFinderInput *s in activeFinders) {
+        if (key.id == 0) {
+            s->actions |= 2;
+        } else if (NSMouseInRect(NSEvent.mouseLocation, s->screenFrame, NO)) {
+            s->clickPoint = finderPosition(s);
+            s->actions = (s->actions & ~FINDER_CLICK) | FINDER_CONFIRM_KEY;
+        }
+    }
+    return noErr;
+}
+static BOOL consumeZoom(XroseFinderInput *s, NSEvent *event) {
+    BOOL command = (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+    BOOL trackpadGesture = event.phase != NSEventPhaseNone || event.momentumPhase != NSEventPhaseNone;
+    BOOL tail = trackpadGesture && event.phase != NSEventPhaseBegan &&
+                event.timestamp < s->zoomTailUntil;
+    if (!command && !tail) {
+        s->zoomTailUntil = 0;
+        return NO;
+    }
+    if (command)
+        s->zoomDelta += event.scrollingDeltaY / (event.hasPreciseScrollingDeltas ? 20. : 1.);
+    // Keep the end and momentum of this gesture away from the underlying page
+    // even when Command is released before the trackpad comes to rest.
+    s->zoomTailUntil = trackpadGesture && !(event.momentumPhase & NSEventPhaseEnded) &&
+                       !(event.phase & NSEventPhaseCancelled) ? event.timestamp + 0.12 : 0;
+    return YES;
 }
 static CGPoint finderEventPoint(XroseFinderInput *s, CGEventRef event) {
     CGPoint point = CGEventGetLocation(event);
     CGRect display = CGDisplayBounds(s->displayID);
     return CGPointMake(point.x - display.origin.x, point.y - display.origin.y);
+}
+// Only the owner of a press may confirm on release, including across displays.
+static BOOL handleButton(XroseFinderInput *s, CGEventType type, CGPoint p) {
+    switch (type) {
+    case kCGEventLeftMouseDown:
+        s->leftDown = YES;
+        s->clickPoint = p;
+        return YES;
+    case kCGEventRightMouseDown:
+        s->rightDown = YES;
+        return YES;
+    case kCGEventLeftMouseUp:
+        if (!s->leftDown)
+            return NO;
+        s->leftDown = NO;
+        s->actions = (s->actions & ~FINDER_CONFIRM_KEY) | FINDER_CLICK;
+        return YES;
+    case kCGEventRightMouseUp:
+        if (!s->rightDown)
+            return NO;
+        s->rightDown = NO;
+        s->actions |= 2;
+        return YES;
+    default:
+        return NO;
+    }
 }
 static CGEventRef captureButtons(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *ptr) {
     (void)proxy;
@@ -181,16 +260,12 @@ static CGEventRef captureButtons(CGEventTapProxy proxy, CGEventType type, CGEven
         return event;
     }
     CGPoint p = finderEventPoint(s, event);
-    if (!CGRectContainsPoint(CGRectMake(0, 0, s->screenFrame.size.width, s->screenFrame.size.height), p))
+    if (type != kCGEventLeftMouseUp && type != kCGEventRightMouseUp &&
+        !CGRectContainsPoint(CGRectMake(0, 0, s->screenFrame.size.width, s->screenFrame.size.height), p))
         return event;
-    if (type == kCGEventLeftMouseDown) {
-        s->clickPoint = p;
-        s->actions |= 1;
-    }
-    if (type == kCGEventRightMouseDown) {
-        s->actions |= 2;
-    }
-    return NULL;
+    if (type == kCGEventScrollWheel)
+        return consumeZoom(s, [NSEvent eventWithCGEvent:event]) ? NULL : event;
+    return handleButton(s, type, p) ? NULL : event;
 }
 void *xrose_begin_finder(void *view, uint32_t display) {
     NSWindow *window = [(__bridge NSView *)view window];
@@ -203,13 +278,10 @@ void *xrose_begin_finder(void *view, uint32_t display) {
     }
     if (!window || NSIsEmptyRect(s->screenFrame))
         return NULL;
-    s->leftCount =
-        CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState, kCGEventLeftMouseDown);
-    s->rightCount = CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState,
-                                                     kCGEventRightMouseDown);
     s->scrollCount =
         CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState, kCGEventScrollWheel);
     s->displayID = display;
+    s->panel = window;
     s->running = YES;
     // Set the hit policy before ordering the window; it never becomes key.
     window.ignoresMouseEvents = YES;
@@ -230,14 +302,19 @@ void *xrose_begin_finder(void *view, uint32_t display) {
       window.level = NSFloatingWindowLevel;
       [window setFrame:s->screenFrame display:YES];
       [window orderFrontRegardless];
+      updateMouseTarget(s, NSEvent.modifierFlags);
+      // The button entry orders out and hides the main app on this queue.
+      // Hiding the cursor before that transition lets AppKit reveal it again.
+      if (s == cursorPolicyOwner)
+          setFinderCursorVisible(s, NO);
     });
-    NSEventMask mask = NSEventMaskScrollWheel;
-    // When input interception is already allowed, consume scanner clicks. No
-    // accessibility prompt is needed for the ordinary observation-only path.
+    // Use an existing system-wide tap permission when available; otherwise
+    // WindowServer routes selectable clicks directly to the nonactivating panel.
     if (AXIsProcessTrusted()) {
         CGEventMask buttons = CGEventMaskBit(kCGEventLeftMouseDown) |
                               CGEventMaskBit(kCGEventRightMouseDown) |
-                              CGEventMaskBit(kCGEventLeftMouseUp) | CGEventMaskBit(kCGEventRightMouseUp);
+                              CGEventMaskBit(kCGEventLeftMouseUp) | CGEventMaskBit(kCGEventRightMouseUp) |
+                              CGEventMaskBit(kCGEventScrollWheel);
         s->tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault,
                                   buttons, captureButtons, (__bridge void *)s);
         if (s->tap) {
@@ -245,38 +322,52 @@ void *xrose_begin_finder(void *view, uint32_t display) {
             CFRunLoopAddSource(CFRunLoopGetMain(), s->tapSource, kCFRunLoopCommonModes);
         }
     }
-    mask |= NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown;
-    void (^record)(NSEvent *) = ^(NSEvent *e) {
-      switch (e.type) {
-      case NSEventTypeRightMouseDown:
-          s->actions |= 2;
-          break;
-      case NSEventTypeLeftMouseDown:
-          s->clickPoint = e.CGEvent ? finderEventPoint(s, e.CGEvent) : finderPosition(s);
-          s->actions |= 1;
-          break;
-      case NSEventTypeScrollWheel:
+    NSEventMask observed = NSEventMaskFlagsChanged | NSEventMaskScrollWheel;
+    void (^observe)(NSEvent *) = ^(NSEvent *e) {
+      if (e.type == NSEventTypeScrollWheel && NSMouseInRect(NSEvent.mouseLocation, s->screenFrame, NO)) {
           s->revision++;
-          break;
-      default:
-          break;
+          if (!(e.modifierFlags & NSEventModifierFlagCommand))
+              s->passWheelUntil = e.timestamp + 0.18;
       }
+      updateMouseTarget(s, e.modifierFlags);
     };
-    s->globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:record];
-    s->localMonitor = [NSEvent
-        addLocalMonitorForEventsMatchingMask:mask | NSEventMaskKeyDown
-                                     handler:^NSEvent *(NSEvent *e) {
-                                       if (e.type == NSEventTypeKeyDown && e.keyCode == kVK_Escape) {
-                                           s->actions |= 2;
-                                           return nil;
-                                       }
-                                       record(e);
-                                       return e;
-                                     }];
+    s->globalMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:observed | NSEventMaskRightMouseUp
+        handler:^(NSEvent *e) {
+          // A passive panel can still dismiss on right-click outside a target.
+          if (e.type == NSEventTypeRightMouseUp) {
+              if (!s->tap && NSMouseInRect(NSEvent.mouseLocation, s->screenFrame, NO))
+                  s->actions |= 2;
+          } else {
+              observe(e);
+          }
+        }];
+    NSEventMask buttons = NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp |
+                          NSEventMaskRightMouseDown | NSEventMaskRightMouseUp;
+    s->localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:observed | buttons | NSEventMaskKeyDown
+        handler:^NSEvent *(NSEvent *e) {
+          if (!s->tap && e.window == s->panel) {
+              if (e.type == NSEventTypeScrollWheel && consumeZoom(s, e))
+                  return nil;
+              if ((NSEventMaskFromType(e.type) & buttons) && e.CGEvent &&
+                  handleButton(s, CGEventGetType(e.CGEvent), finderEventPoint(s, e.CGEvent)))
+                  return nil;
+          }
+          if (e.type == NSEventTypeKeyDown && e.keyCode == kVK_Escape) {
+              s->actions |= 2;
+              return nil;
+          }
+          if (NSEventMaskFromType(e.type) & observed)
+              observe(e);
+          return e;
+        }];
     NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
     void (^changed)(NSNotification *) = ^(NSNotification *n) {
-      (void)n;
       s->revision++;
+      if (s == cursorPolicyOwner && s->cursorHidden &&
+          [n.name isEqual:NSWorkspaceDidActivateApplicationNotification]) {
+          setFinderCursorVisible(s, YES);
+          setFinderCursorVisible(s, NO);
+      }
     };
     s->activation = [center addObserverForName:NSWorkspaceDidActivateApplicationNotification
                                         object:nil
@@ -286,37 +377,35 @@ void *xrose_begin_finder(void *view, uint32_t display) {
                                    object:nil
                                     queue:NSOperationQueue.mainQueue
                                usingBlock:changed];
-    EventTypeSpec type = {kEventClassKeyboard, kEventHotKeyPressed};
-    EventHotKeyID key = {'XrQR', 1};
-    if (InstallEventHandler(GetApplicationEventTarget(), finderEscape, 1, &type, (__bridge void *)s,
-                            &s->handler) == noErr)
-        RegisterEventHotKey(kVK_Escape, 0, key, GetApplicationEventTarget(), 0, &s->escape);
-    allowBackgroundCursor(s);
-    xrose_finder_cursor((__bridge void *)s, false);
+    if (!activeFinders)
+        activeFinders = [NSMutableArray array];
+    if (!activeFinders.count) {
+        cursorPolicyOwner = s;
+        allowBackgroundCursor(s);
+        EventTypeSpec type = {kEventClassKeyboard, kEventHotKeyPressed};
+        if (InstallEventHandler(GetApplicationEventTarget(), finderKey, 1, &type, NULL,
+                                &s->handler) == noErr) {
+            const UInt32 codes[] = {kVK_Escape, kVK_Return, kVK_Space};
+            for (UInt32 i = 0; i < 3; i++) {
+                EventHotKeyID key = {'XrQR', i};
+                RegisterEventHotKey(codes[i], 0, key, GetApplicationEventTarget(), 0, &s->keys[i]);
+            }
+        }
+    }
+    [activeFinders addObject:s];
     return (__bridge_retained void *)s;
 }
 unsigned int xrose_finder_input(void *ptr, float *x, float *y, float *clickX, float *clickY,
-                                unsigned int *revision) {
+                                unsigned int *revision, float *zoom) {
     XroseFinderInput *s = (__bridge XroseFinderInput *)ptr;
-    // Mouse event counters survive short clicks and applications with their own
-    // event loops. AppKit monitors supply the event position when available.
-    uint32_t left =
-        CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState, kCGEventLeftMouseDown);
-    uint32_t right = CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState,
-                                                      kCGEventRightMouseDown);
+    // Flags-changed monitors can be restricted when another app has focus.
+    updateMouseTarget(s, NSEvent.modifierFlags);
     uint32_t scroll =
         CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState, kCGEventScrollWheel);
-    if (left != s->leftCount && !(s->actions & 1)) {
-        s->clickPoint = finderPosition(s);
-        s->actions |= 1;
-    }
-    if (right != s->rightCount ||
-        CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Escape))
+    if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, kVK_Escape))
         s->actions |= 2;
     if (scroll != s->scrollCount)
         s->revision++;
-    s->leftCount = left;
-    s->rightCount = right;
     s->scrollCount = scroll;
     CGPoint p = finderPosition(s);
     *x = p.x;
@@ -324,7 +413,11 @@ unsigned int xrose_finder_input(void *ptr, float *x, float *y, float *clickX, fl
     *clickX = s->clickPoint.x;
     *clickY = s->clickPoint.y;
     *revision = s->revision;
+    *zoom = s->zoomDelta;
+    s->zoomDelta = 0;
     unsigned int result = s->actions;
+    if (s->leftDown)
+        result |= 4;
     s->actions = 0;
     return result;
 }
@@ -343,19 +436,31 @@ void xrose_end_finder(void *ptr) {
         [NSEvent removeMonitor:s->localMonitor];
     s->globalMonitor = nil;
     s->localMonitor = nil;
-    if (s->escape)
-        UnregisterEventHotKey(s->escape);
-    if (s->handler)
-        RemoveEventHandler(s->handler);
     NSNotificationCenter *center = NSWorkspace.sharedWorkspace.notificationCenter;
     [center removeObserver:s->activation];
     [center removeObserver:s->space];
     s->activation = nil;
     s->space = nil;
-    xrose_finder_cursor((__bridge void *)s, true);
-    if (s->setConnectionProperty)
-        s->setConnectionProperty(s->cursorConnection, s->cursorConnection, CFSTR("SetsCursorInBackground"),
-                                 (__bridge CFTypeRef)(s->previousCursorPolicy ?: @NO));
+    [activeFinders removeObject:s];
+    if (!activeFinders.count) {
+        XroseFinderInput *owner = cursorPolicyOwner;
+        setFinderCursorVisible(owner, YES);
+        for (size_t i = 0; i < 3; i++)
+            if (owner->keys[i])
+                UnregisterEventHotKey(owner->keys[i]);
+        if (owner->handler)
+            RemoveEventHandler(owner->handler);
+        if (owner->setConnectionProperty)
+            owner->setConnectionProperty(owner->cursorConnection, owner->cursorConnection,
+                                         CFSTR("SetsCursorInBackground"),
+                                         (__bridge CFTypeRef)(owner->previousCursorPolicy ?: @NO));
+        cursorPolicyOwner = nil;
+    }
+}
+
+bool xrose_play_import_sound(bool success) {
+    NSSound *sound = [NSSound soundNamed:(success ? @"Hero" : @"Basso")];
+    return [sound play];
 }
 
 // Window ordering sends synchronous AppKit notifications. Schedule it outside
