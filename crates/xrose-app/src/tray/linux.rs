@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use xrose_core::AppService;
 
 use super::dashboard::{TrayCommand, status_lines};
+use crate::brand_assets::TrayGlyph;
 use xrose_core::settings::Language;
 
 static READY: AtomicBool = AtomicBool::new(false);
@@ -22,8 +23,7 @@ struct Item {
     language: Language,
     status_line: String,
     traffic_line: Option<String>,
-    alpha: Vec<u8>,
-    ink: u8,
+    pixmap: Vec<u8>,
 }
 
 impl ksni::Tray for Item {
@@ -38,11 +38,7 @@ impl ksni::Tray for Item {
             width: 32,
             height: 32,
             // StatusNotifierItem uses network-order ARGB, with straight alpha.
-            data: self
-                .alpha
-                .iter()
-                .flat_map(|&a| [a, self.ink, self.ink, self.ink])
-                .collect(),
+            data: self.pixmap.clone(),
         }]
     }
     fn tool_tip(&self) -> ksni::ToolTip {
@@ -94,8 +90,26 @@ impl ksni::Tray for Item {
     }
 }
 
+fn tray_pixmap(glyph: TrayGlyph) -> Vec<u8> {
+    glyph
+        .raster(32)
+        .pixels()
+        .flat_map(|p| {
+            let a = u16::from(p[3]);
+            let straight = |v: u8| {
+                if a == 0 {
+                    0
+                } else {
+                    ((u16::from(v) * 255 + a / 2) / a).min(255) as u8
+                }
+            };
+            [p[3], straight(p[0]), straight(p[1]), straight(p[2])]
+        })
+        .collect()
+}
+
 pub struct Backend {
-    updates: SyncSender<u8>,
+    updates: SyncSender<bool>,
 }
 
 impl Backend {
@@ -105,25 +119,18 @@ impl Backend {
         std::thread::Builder::new()
             .name("xrose-status-notifier".into())
             .spawn(move || {
-                let Ok(image) = image::load_from_memory(crate::brand_assets::TRAY_TEMPLATE) else {
+                let Ok(white_ink) = receiver.recv() else {
                     return;
                 };
-                let image = image
-                    .resize_exact(32, 32, image::imageops::FilterType::Lanczos3)
-                    .to_rgba8();
-                let ink = match receiver.recv() {
-                    Ok(update) => update,
-                    Err(_) => return,
-                };
                 let status = service.tray_status();
+                let glyph = TrayGlyph::new(&status, white_ink);
                 let (status_line, traffic_line) = status_lines(&status);
-                let mut previous = (status, ink);
+                let mut previous = (status, glyph);
                 let item = Item {
                     language: status.language,
                     status_line,
                     traffic_line,
-                    alpha: image.pixels().map(|p| p[3]).collect(),
-                    ink,
+                    pixmap: tray_pixmap(glyph),
                 };
                 let handle = match item.assume_sni_available(true).spawn() {
                     Ok(handle) => handle,
@@ -133,19 +140,23 @@ impl Backend {
                     }
                 };
                 READY.store(!WATCHER_OFFLINE.load(Ordering::Relaxed), Ordering::Relaxed);
-                while let Ok(ink) = receiver.recv() {
+                while let Ok(white_ink) = receiver.recv() {
                     let status = service.tray_status();
-                    if (status, ink) == previous {
+                    let glyph = TrayGlyph::new(&status, white_ink);
+                    if (status, glyph) == previous {
                         continue;
                     }
-                    previous = (status, ink);
+                    let image_changed = previous.1 != glyph;
+                    previous = (status, glyph);
                     let (status_line, traffic_line) = status_lines(&status);
                     if handle
                         .update(|item| {
                             item.language = status.language;
                             item.status_line = status_line;
                             item.traffic_line = traffic_line;
-                            item.ink = ink;
+                            if image_changed {
+                                item.pixmap = tray_pixmap(glyph);
+                            }
                         })
                         .is_none()
                     {
@@ -159,12 +170,11 @@ impl Backend {
         Some(Self { updates })
     }
     pub fn tick(&mut self, _service: &AppService, cx: &gpui_kit::App) -> Option<TrayCommand> {
-        let dark = matches!(
+        let white_ink = matches!(
             cx.window_appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
-        let ink = if dark { 255 } else { 0 };
-        let _ = self.updates.try_send(ink);
+        let _ = self.updates.try_send(white_ink);
         None
     }
 }

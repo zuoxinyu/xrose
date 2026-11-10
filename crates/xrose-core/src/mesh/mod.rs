@@ -612,6 +612,19 @@ pub struct MeshRuntimeView {
 }
 
 impl MeshRuntimeView {
+    /// Prefer a connected session when a provider has multiple profiles.
+    pub fn for_provider(networks: &[Self], provider: MeshProvider) -> Option<&Self> {
+        let mut matches = networks.iter().filter(|net| net.provider == provider);
+        let first = matches.next()?;
+        if first.phase == MeshPhase::Connected {
+            Some(first)
+        } else {
+            matches
+                .find(|net| net.phase == MeshPhase::Connected)
+                .or(Some(first))
+        }
+    }
+
     /// Discard live network data once the worker has exited or become unreachable.
     pub(super) fn finish(&mut self, error: Option<String>) {
         *self = Self {
@@ -662,6 +675,29 @@ impl MeshSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_status_finds_a_connected_profile_after_a_disconnected_one() {
+        use super::*;
+        let networks = [
+            MeshRuntimeView {
+                provider: MeshProvider::EasyTier,
+                ..Default::default()
+            },
+            MeshRuntimeView {
+                provider: MeshProvider::EasyTier,
+                phase: MeshPhase::Connected,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            MeshRuntimeView::for_provider(&networks, MeshProvider::EasyTier)
+                .unwrap()
+                .phase,
+            MeshPhase::Connected
+        );
+        assert!(MeshRuntimeView::for_provider(&networks, MeshProvider::Tailscale).is_none());
+    }
+
     #[test]
     fn device_names_use_the_short_hostname_and_fit_a_dns_label() {
         assert_eq!(device_name("demo-laptop.local"), "xrose-demo-laptop");

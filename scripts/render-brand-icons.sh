@@ -14,11 +14,24 @@ cp "$assets/app-icon-256.png" "$assets/icons/xrose.png"
 cp "$assets/app-icon-128.png" "$assets/icons/xrose-128.png"
 cp "$art" "$assets/icons/xrose.svg"
 
-# Optical weights for the 16–22 pt status glyph. The OS supplies the ink;
-# retain only the mark's coverage, with no background, tile, border or badge.
-rsvg-convert -w 96 -h 96 -s /dev/stdin -o "$assets/tray-template.png" "$art" <<'CSS'
-#mark { stroke: black; transform: translate(259px, 256px) scale(1.05) translate(-259px, -256px); }
+# Fit the horizontal brand gradient to the rose path rather than the entire X.
+tray_art=$(mktemp)
+trap 'rm -f "$tray_art"' EXIT
+sed 's/<linearGradient id="brand"[^>]*>/<linearGradient id="brand">/' "$art" > "$tray_art"
+mkdir -p "$assets/tray"
+tray() {
+    rsvg-convert -w 96 -h 96 -s /dev/stdin -o "$assets/tray/$ink-$1.png" "$tray_art" <<CSS
+#mark { stroke: $ink; transform: translate(259px, 256px) scale(1.05) translate(-259px, -256px); }
 #arms { stroke-width: 30; }
 #ribbons { stroke-width: 21; }
-#rose { stroke-width: 17; }
+#rose { stroke-width: 17; stroke: $2; }
 CSS
+}
+for ink in black white; do
+    tray plain "$ink"
+    tray idle '#909399'
+    tray proxy '#00bdf5'
+    tray mesh '#963bf2'
+    tray mesh-proxy 'url(#brand)'
+    tray unavailable '#ef4444'
+done

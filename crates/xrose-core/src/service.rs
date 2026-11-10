@@ -11,6 +11,8 @@ mod outbound_groups;
 mod reload;
 mod routing_transfer;
 mod traffic_statistics;
+mod tray;
+pub use tray::{TrayIndicator, TrayStatus};
 mod update_check;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -156,19 +158,6 @@ pub struct RuntimeView {
     pub down_speed: u64,
     pub history: Vec<TrafficSample>,
     pub error: Option<String>,
-}
-
-/// Cached status for a tray icon. Independent of node, connection and log counts.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct TrayStatus {
-    pub language: crate::settings::Language,
-    pub core: CoreKind,
-    pub running: bool,
-    pub easytier: crate::mesh::MeshPhase,
-    pub tailscale: crate::mesh::MeshPhase,
-    pub up_speed: u64,
-    pub down_speed: u64,
-    pub total_bytes: u64,
 }
 
 /// Everything the UI needs for one frame. Cloned at ~3 Hz by the view.
@@ -395,6 +384,8 @@ struct Inner {
     recording: Mutex<DiagnosticRecording>,
     toast_seq: AtomicU64,
     startup_started: AtomicBool,
+    last_start_failed: AtomicBool,
+    failed_proxy_probe: Mutex<Option<tray::ProbeTarget>>,
     notification_sender: RwLock<Option<std::sync::mpsc::Sender<NotificationEvent>>>,
     install_lock: tokio::sync::Mutex<()>,
     helper_lock: tokio::sync::Mutex<()>,
@@ -517,6 +508,8 @@ impl AppService {
             recording: Mutex::new(DiagnosticRecording::default()),
             toast_seq: AtomicU64::new(1),
             startup_started: AtomicBool::new(false),
+            last_start_failed: AtomicBool::new(false),
+            failed_proxy_probe: Mutex::new(None),
             notification_sender: RwLock::new(None),
             install_lock: tokio::sync::Mutex::new(()),
             helper_lock: tokio::sync::Mutex::new(()),
@@ -570,24 +563,6 @@ impl AppService {
 
     pub fn model(&self) -> AppModel {
         self.inner.model.read().clone()
-    }
-
-    pub fn tray_status(&self) -> TrayStatus {
-        let (language, core) = {
-            let settings = self.inner.settings.read();
-            (settings.language, settings.core)
-        };
-        let (up, down, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
-        TrayStatus {
-            language,
-            core,
-            running: self.is_running(),
-            easytier: self.inner.mesh.phase(crate::mesh::MeshProvider::EasyTier),
-            tailscale: self.inner.mesh.phase(crate::mesh::MeshProvider::Tailscale),
-            up_speed,
-            down_speed,
-            total_bytes: up.saturating_add(down),
-        }
     }
 
     pub fn process_state(&self) -> ProcessState {
@@ -1930,6 +1905,7 @@ impl AppService {
         if !self.try_begin_probe("latency") {
             return;
         }
+        let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
             use futures_util::{StreamExt, stream};
@@ -1962,6 +1938,11 @@ impl AppService {
                 .buffer_unordered(4)
                 .collect()
                 .await;
+            if use_http {
+                for (id, result) in &results {
+                    service.record_proxy_probe(target.as_ref(), id, result.ok);
+                }
+            }
             let mut ok_count = 0;
             {
                 let mut cache = service.inner.latency.write();
@@ -2029,6 +2010,7 @@ impl AppService {
         if !self.try_begin_probe("latency") {
             return;
         }
+        let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
             let result = crate::runtime::probe::http_latency(
@@ -2040,6 +2022,7 @@ impl AppService {
                 bypass_tun,
             )
             .await;
+            service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
             let entry = LatencyEntry {
                 key: node.id.clone(),
                 delay_ms: result.as_ref().ok().copied(),
@@ -2105,6 +2088,7 @@ impl AppService {
         if !self.try_begin_probe("download") {
             return;
         }
+        let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
             // Measure downloads sequentially so probes do not compete for bandwidth.
@@ -2121,6 +2105,7 @@ impl AppService {
                     bypass_tun,
                 )
                 .await;
+                service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
                 let entry = match result {
                     Ok(entry) => {
                         successful += 1;
@@ -2372,81 +2357,78 @@ impl AppService {
         if !self.inner.busy.write().insert("core".into()) {
             return;
         }
+        self.inner.last_start_failed.store(false, Ordering::Relaxed);
         self.sync_model_settings();
         if self.persist_model().is_err() {
+            self.inner.last_start_failed.store(true, Ordering::Relaxed);
             self.set_busy("core", false);
             return;
         }
         self.refresh_doctor();
         let service = self.clone();
         self.spawn(async move {
-            let mut settings = service.inner.settings.read().clone();
-            let model = service.inner.model.read().clone();
-            let ctx = crate::adapters::CompileContext::new(
-                &settings,
-                service.inner.paths.data_dir.clone(),
-                service.inner.paths.runtime_dir.clone(),
-            );
-            if let Err(err) =
-                crate::adapters::adapter_for(settings.core).compile(&model, &settings, &ctx)
-            {
-                service.set_busy("core", false);
-                service.toast(ToastLevel::Error, err.to_string());
-                return;
-            }
-            if let Err(err) = service.ensure_core_binary(&mut settings).await {
-                service.set_busy("core", false);
-                service.toast(ToastLevel::Error, format!("准备内核失败：{err}"));
-                return;
-            }
-            if let Err(err) = service.ensure_rule_sets(&model, &settings).await {
-                service.set_busy("core", false);
-                service.toast(ToastLevel::Error, err);
-                return;
-            }
-            if let Err(err) = service.ensure_tun_helper().await {
-                service.set_busy("core", false);
-                service.toast(ToastLevel::Error, err);
-                return;
-            }
-            if let Some(warning) = service.prepare_tun_via_helper().await {
-                service.toast(
-                    ToastLevel::Warning,
-                    format!("提权助手未能准备 TUN：{warning}"),
-                );
-            }
-            let result = service
+            let success = match service.start_core_task().await {
+                Ok(started) => started,
+                Err(error) => {
+                    service.toast(ToastLevel::Error, error);
+                    false
+                }
+            };
+            service
                 .inner
-                .core
-                .start(&model, &settings, settings.core)
-                .await;
-            match result {
-                Ok(outcome) => {
-                    let started = service.record_outcome(&outcome);
-                    if started {
-                        service.inner.traffic.lock().reset();
-                        service.inner.connections.write().clear();
-                        service.inner.proxies.write().clear();
-                        service.finish_config_apply(&model, &settings);
-                        if service.inner.settings.read().system_proxy {
-                            service.enable_system_proxy();
-                        }
-                        service.toast(
-                            ToastLevel::Success,
-                            format!(
-                                "{} 已启动，代理端口 {}",
-                                settings.core.display_name(),
-                                settings.mixed_port
-                            ),
-                        );
-                    }
-                }
-                Err(err) => {
-                    service.toast(ToastLevel::Error, format!("启动失败：{err}"));
-                }
-            }
+                .last_start_failed
+                .store(!success, Ordering::Relaxed);
             service.set_busy("core", false);
         });
+    }
+
+    async fn start_core_task(&self) -> std::result::Result<bool, String> {
+        let mut settings = self.settings();
+        let model = self.model();
+        let ctx = crate::adapters::CompileContext::new(
+            &settings,
+            self.inner.paths.data_dir.clone(),
+            self.inner.paths.runtime_dir.clone(),
+        );
+        crate::adapters::adapter_for(settings.core)
+            .compile(&model, &settings, &ctx)
+            .map_err(|err| err.to_string())?;
+        self.ensure_core_binary(&mut settings)
+            .await
+            .map_err(|err| format!("准备内核失败：{err}"))?;
+        self.ensure_rule_sets(&model, &settings).await?;
+        self.ensure_tun_helper().await?;
+        if let Some(warning) = self.prepare_tun_via_helper().await {
+            self.toast(
+                ToastLevel::Warning,
+                format!("提权助手未能准备 TUN：{warning}"),
+            );
+        }
+        let outcome = self
+            .inner
+            .core
+            .start(&model, &settings, settings.core)
+            .await
+            .map_err(|err| format!("启动失败：{err}"))?;
+        let started = self.record_outcome(&outcome);
+        if started {
+            self.inner.traffic.lock().reset();
+            self.inner.connections.write().clear();
+            self.inner.proxies.write().clear();
+            self.finish_config_apply(&model, &settings);
+            if self.inner.settings.read().system_proxy {
+                self.enable_system_proxy();
+            }
+            self.toast(
+                ToastLevel::Success,
+                format!(
+                    "{} 已启动，代理端口 {}",
+                    settings.core.display_name(),
+                    settings.mixed_port
+                ),
+            );
+        }
+        Ok(started)
     }
 
     pub fn stop_core(&self) {

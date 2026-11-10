@@ -249,19 +249,15 @@ fn mesh_phase_info(
     p: &crate::ui::theme::Palette,
     lang: Language,
 ) -> (Hsla, SharedString) {
-    match phase {
-        xrose_core::mesh::MeshPhase::Connected => (p.success, tr(lang, "已连接", "Connected")),
-        xrose_core::mesh::MeshPhase::Starting => (p.info, tr(lang, "连接中", "Connecting")),
-        xrose_core::mesh::MeshPhase::NeedsLogin => (p.warning, tr(lang, "待登录", "Login req.")),
-        xrose_core::mesh::MeshPhase::NeedsApproval => {
-            (p.warning, tr(lang, "待批准", "Approval req."))
-        }
-        xrose_core::mesh::MeshPhase::Stopping => (p.warning, tr(lang, "断开中", "Stopping")),
-        xrose_core::mesh::MeshPhase::Failed => (p.danger, tr(lang, "异常", "Failed")),
-        xrose_core::mesh::MeshPhase::Disconnected => {
-            (p.muted_fg, tr(lang, "未连接", "Disconnected"))
-        }
-    }
+    use xrose_core::mesh::MeshPhase::*;
+    let color = match phase {
+        Connected => p.success,
+        Starting => p.info,
+        NeedsLogin | NeedsApproval | Stopping => p.warning,
+        Failed => p.danger,
+        Disconnected => p.muted_fg,
+    };
+    (color, super::dashboard::mesh_phase_label(phase, lang))
 }
 
 pub struct PopupView {

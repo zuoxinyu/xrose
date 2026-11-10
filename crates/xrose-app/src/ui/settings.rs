@@ -942,6 +942,23 @@ impl AppView {
                 ))
                 .child(setting_row(
                     &p,
+                    if cfg!(target_os = "macos") {
+                        self.tr("菜单栏图标", "Menu bar icon")
+                    } else {
+                        self.tr("托盘图标", "Tray icon")
+                    },
+                    "",
+                    toggle(
+                        "show-tray-indicator",
+                        self.tr("显示运行状态指示灯", "Show status indicator"),
+                        settings.show_tray_indicator,
+                    )
+                    .on_change(cx.listener(|this, checked, _, cx| {
+                        this.modify_settings(cx, |s| s.show_tray_indicator = *checked)
+                    })),
+                ))
+                .child(setting_row(
+                    &p,
                     self.tr("网速显示", "Traffic speed"),
                     "",
                     toggle(

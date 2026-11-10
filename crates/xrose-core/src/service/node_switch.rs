@@ -297,7 +297,9 @@ impl AppService {
             bypass_tun,
             mode: group.switch_mode(),
         };
+        let target = self.tray_probe_target();
         let current = probe.measure(active).await;
+        self.record_proxy_probe(target.as_ref(), &active.id, current.is_some());
         let search = state.observe(group, current.is_some());
         if search == Search::Stay {
             return Ok(None);

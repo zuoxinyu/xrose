@@ -2,7 +2,7 @@
 
 use xrose_core::AppService;
 use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
-use xrose_core::service::{APP_VERSION, LatencyScope, TrayStatus};
+use xrose_core::service::{APP_VERSION, LatencyScope, TrayIndicator, TrayStatus};
 use xrose_core::settings::Language;
 use xrose_core::util::{format_bytes, format_speed};
 
@@ -27,18 +27,12 @@ pub struct DashboardMeshStatus {
 #[derive(Debug, Clone)]
 pub struct Dashboard {
     pub language: Language,
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub status_line: String,
-    #[allow(dead_code)]
-    pub traffic_line: Option<String>,
     pub group_id: Option<String>,
     pub direct: bool,
     pub automatic_group: bool,
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
     pub running: bool,
-    #[cfg(target_os = "macos")]
-    pub show_speed: bool,
     pub easytier: DashboardMeshStatus,
     pub tailscale: DashboardMeshStatus,
     pub proxy_address: String,
@@ -54,26 +48,56 @@ pub struct Dashboard {
     pub busy_latency: bool,
 }
 
+pub(super) fn mesh_phase_label(
+    phase: xrose_core::mesh::MeshPhase,
+    lang: Language,
+) -> gpui_kit::SharedString {
+    use xrose_core::mesh::MeshPhase::*;
+    match phase {
+        Connected => tr(lang, "已连接", "Connected"),
+        Starting => tr(lang, "连接中", "Connecting"),
+        NeedsLogin => tr(lang, "待登录", "Sign-in required"),
+        NeedsApproval => tr(lang, "待批准", "Approval required"),
+        Stopping => tr(lang, "断开中", "Disconnecting"),
+        Failed => tr(lang, "异常", "Failed"),
+        Disconnected => tr(lang, "未连接", "Disconnected"),
+    }
+}
+
 pub(super) fn status_lines(status: &TrayStatus) -> (String, Option<String>) {
     let language = status.language;
-    let running = status.running;
+    use xrose_core::core::ProcessPhase;
+    let (zh, en) = match status.indicator {
+        TrayIndicator::Unavailable => ("代理不可用", "Proxy unavailable"),
+        TrayIndicator::MeshOnly => ("仅组网运行", "Mesh only"),
+        TrayIndicator::MeshProxy => ("代理与组网运行中", "Proxy and mesh active"),
+        TrayIndicator::Direct => ("直连监控", "Direct monitoring"),
+        TrayIndicator::Proxy => ("代理运行中", "Proxy running"),
+        TrayIndicator::Idle => match status.phase {
+            ProcessPhase::Starting => ("启动中", "Starting"),
+            ProcessPhase::Stopping => ("停止中", "Stopping"),
+            _ => ("代理未运行", "Proxy stopped"),
+        },
+    };
     let mut status_line = format!(
         "Xrose v{} · {} ({})",
         APP_VERSION,
-        tr(
-            language,
-            if running { "运行中" } else { "已停止" },
-            if running { "Running" } else { "Stopped" }
-        ),
+        tr(language, zh, en),
         status.core.display_name()
     );
     if status.easytier != xrose_core::mesh::MeshPhase::Disconnected {
-        status_line.push_str(&format!(" · EasyTier: {:?}", status.easytier));
+        status_line.push_str(&format!(
+            " · EasyTier: {}",
+            mesh_phase_label(status.easytier, language)
+        ));
     }
     if status.tailscale != xrose_core::mesh::MeshPhase::Disconnected {
-        status_line.push_str(&format!(" · Tailscale: {:?}", status.tailscale));
+        status_line.push_str(&format!(
+            " · Tailscale: {}",
+            mesh_phase_label(status.tailscale, language)
+        ));
     }
-    let traffic_line = running.then(|| {
+    let traffic_line = status.phase.is_alive().then(|| {
         format!(
             "↓ {}  ↑ {}  ·  {} {}",
             format_speed(status.down_speed),
@@ -85,8 +109,16 @@ pub(super) fn status_lines(status: &TrayStatus) -> (String, Option<String>) {
     (status_line, traffic_line)
 }
 
-/// Builds the dashboard from one snapshot. Called by the tray tick at 5 Hz;
-/// keep it allocation-light.
+#[cfg(any(target_os = "macos", windows))]
+pub(super) fn tooltip(status: &TrayStatus) -> String {
+    let (line, traffic) = status_lines(status);
+    match traffic {
+        Some(traffic) => format!("{line}\n{traffic}"),
+        None => line,
+    }
+}
+
+/// Builds the flyout from one UI snapshot.
 pub fn build(service: &AppService) -> Dashboard {
     let snapshot = service.snapshot();
     let language = snapshot.settings.language;
@@ -125,19 +157,17 @@ pub fn build(service: &AppService) -> Dashboard {
                 }
             }),
     );
-    let et_net = snapshot
-        .mesh
-        .networks
-        .iter()
-        .find(|n| n.provider == xrose_core::mesh::MeshProvider::EasyTier);
+    let et_net = xrose_core::mesh::MeshRuntimeView::for_provider(
+        &snapshot.mesh.networks,
+        xrose_core::mesh::MeshProvider::EasyTier,
+    );
     let et_phase = et_net
         .map(|n| n.phase)
         .unwrap_or(xrose_core::mesh::MeshPhase::Disconnected);
-    let et_profile = snapshot
-        .mesh
-        .profiles
-        .iter()
-        .find(|p| p.provider == xrose_core::mesh::MeshProvider::EasyTier);
+    let et_profile = snapshot.mesh.profiles.iter().find(|p| {
+        p.provider == xrose_core::mesh::MeshProvider::EasyTier
+            && et_net.is_none_or(|net| p.id == net.profile_id)
+    });
     let et_ip = et_net.and_then(|n| {
         n.addresses
             .first()
@@ -150,19 +180,17 @@ pub fn build(service: &AppService) -> Dashboard {
         ip: et_ip,
     };
 
-    let ts_net = snapshot
-        .mesh
-        .networks
-        .iter()
-        .find(|n| n.provider == xrose_core::mesh::MeshProvider::Tailscale);
+    let ts_net = xrose_core::mesh::MeshRuntimeView::for_provider(
+        &snapshot.mesh.networks,
+        xrose_core::mesh::MeshProvider::Tailscale,
+    );
     let ts_phase = ts_net
         .map(|n| n.phase)
         .unwrap_or(xrose_core::mesh::MeshPhase::Disconnected);
-    let ts_profile = snapshot
-        .mesh
-        .profiles
-        .iter()
-        .find(|p| p.provider == xrose_core::mesh::MeshProvider::Tailscale);
+    let ts_profile = snapshot.mesh.profiles.iter().find(|p| {
+        p.provider == xrose_core::mesh::MeshProvider::Tailscale
+            && ts_net.is_none_or(|net| p.id == net.profile_id)
+    });
     let ts_ip = ts_net.and_then(|n| {
         n.addresses
             .first()
@@ -175,23 +203,8 @@ pub fn build(service: &AppService) -> Dashboard {
         ip: ts_ip,
     };
 
-    let (status_line, traffic_line) = status_lines(&TrayStatus {
-        language,
-        core: snapshot.settings.core,
-        running,
-        easytier: et_phase,
-        tailscale: ts_phase,
-        up_speed: snapshot.runtime.up_speed,
-        down_speed: snapshot.runtime.down_speed,
-        total_bytes: snapshot
-            .runtime
-            .down_total
-            .saturating_add(snapshot.runtime.up_total),
-    });
     Dashboard {
         language,
-        status_line,
-        traffic_line,
         direct,
         automatic_group: group.as_ref().is_some_and(|g| !g.manually_selectable())
             && model.has_usable_default_group(snapshot.settings.core),
@@ -204,8 +217,6 @@ pub fn build(service: &AppService) -> Dashboard {
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
         nodes,
         running,
-        #[cfg(target_os = "macos")]
-        show_speed: snapshot.settings.show_tray_speed,
         easytier,
         tailscale,
         proxy_address: format!("127.0.0.1:{}", snapshot.settings.mixed_port),

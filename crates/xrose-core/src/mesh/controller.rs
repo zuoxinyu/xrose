@@ -48,11 +48,9 @@ impl MeshController {
         })
     }
     pub(crate) fn phase(&self, provider: MeshProvider) -> super::MeshPhase {
-        self.networks
-            .read()
-            .iter()
-            .find(|n| n.provider == provider)
-            .map_or(super::MeshPhase::Disconnected, |n| n.phase)
+        MeshRuntimeView::for_provider(&self.networks.read(), provider)
+            .map(|net| net.phase)
+            .unwrap_or_default()
     }
 
     pub fn snapshot(&self) -> MeshSnapshot {

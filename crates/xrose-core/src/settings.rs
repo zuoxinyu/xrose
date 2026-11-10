@@ -177,6 +177,7 @@ pub struct Settings {
     pub check_app_updates: bool,
     pub last_update_check: Option<i64>,
     pub show_tray_speed: bool,
+    pub show_tray_indicator: bool,
     /// Masks server addresses and node locations in the UI (on by default).
     pub privacy_mode: bool,
     /// Collect local, persistent traffic aggregates independently of diagnostics.
@@ -227,6 +228,7 @@ impl Default for Settings {
             check_app_updates: true,
             last_update_check: None,
             show_tray_speed: true,
+            show_tray_indicator: true,
             privacy_mode: true,
             traffic_statistics_enabled: false,
             active_versions: BTreeMap::new(),
@@ -508,6 +510,19 @@ mod tests {
     }
 
     #[test]
+    fn tray_indicator_defaults_on_for_existing_settings_and_can_be_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"show_tray_speed":false}"#).unwrap();
+        let mut settings = Settings::load(&path).unwrap();
+        assert!(settings.show_tray_indicator);
+        settings.show_tray_indicator = false;
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert!(!loaded.show_tray_indicator && !loaded.show_tray_speed);
+    }
+
+    #[test]
     fn client_preferences_do_not_require_a_core_restart() {
         let old = Settings::default();
         let model = crate::model::AppModel::default();
@@ -517,6 +532,7 @@ mod tests {
         new.backdrop = BackdropStyle::Opaque;
         new.privacy_mode = !old.privacy_mode;
         new.show_tray_speed = !old.show_tray_speed;
+        new.show_tray_indicator = !old.show_tray_indicator;
         new.close_to_tray = !old.close_to_tray;
         new.autostart = !old.autostart;
         new.start_minimized = !old.start_minimized;

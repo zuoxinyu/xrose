@@ -33,8 +33,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::TrayCommand as Command;
-use super::dashboard::{self, Dashboard};
+use super::dashboard;
+use crate::brand_assets::TrayGlyph;
 use xrose_core::AppService;
+use xrose_core::service::TrayStatus;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_POPUP: u32 = WM_APP + 2;
@@ -75,8 +77,8 @@ fn post_popup(operation: PopupOp) {
 
 const TRAY_UID: u32 = 1;
 const CLASS_NAME: &str = "XroseTrayWindow";
-static NEEDS_READD: AtomicBool = AtomicBool::new(false);
 static DARK_TASKBAR: AtomicBool = AtomicBool::new(true);
+static NEEDS_READD: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static MAIN_HWND: OnceLock<Mutex<usize>> = OnceLock::new();
@@ -90,7 +92,7 @@ struct IconState {
 
 pub struct Backend {
     last_tip: String,
-    white_icon: bool,
+    glyph: TrayGlyph,
     added: bool,
     add_attempts: u32,
     reported_failure: bool,
@@ -100,7 +102,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    pub fn new(_service: &AppService) -> Option<Self> {
+    pub fn new(service: &AppService) -> Option<Self> {
         // SAFETY: called on the GPUI main thread; all pointers refer to live
         // buffers for the duration of each call.
         unsafe {
@@ -145,15 +147,17 @@ impl Backend {
                 return None;
             }
             let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
-            let white_icon = taskbar_is_dark();
-            DARK_TASKBAR.store(white_icon, Ordering::Relaxed);
-            let icon = make_icon(white_icon);
+            let status = service.tray_status();
+            let white_ink = taskbar_is_dark();
+            DARK_TASKBAR.store(white_ink, Ordering::Relaxed);
+            let glyph = TrayGlyph::new(&status, white_ink);
+            let icon = make_icon(glyph);
             if icon == 0 {
                 debug_log("make_icon failed");
                 DestroyWindow(hwnd);
                 return None;
             }
-            let tip = "◈ Xrose".to_string();
+            let tip = dashboard::tooltip(&status);
             ICON.get_or_init(|| {
                 Mutex::new(IconState {
                     hwnd: hwnd as usize,
@@ -163,7 +167,7 @@ impl Backend {
             });
             let mut backend = Self {
                 last_tip: tip,
-                white_icon,
+                glyph,
                 added: false,
                 add_attempts: 0,
                 reported_failure: false,
@@ -229,19 +233,19 @@ impl Backend {
                 );
             }
         }
-        let dashboard = dashboard::build(service);
         if self.added {
-            self.refresh_tooltip(&dashboard);
-            self.refresh_icon();
+            let status = service.tray_status();
+            self.refresh_tooltip(&status);
+            self.refresh_icon(TrayGlyph::new(
+                &status,
+                DARK_TASKBAR.load(Ordering::Relaxed),
+            ));
         }
         None
     }
 
-    fn refresh_tooltip(&mut self, dashboard: &Dashboard) {
-        let tip = match &dashboard.traffic_line {
-            Some(traffic) => format!("{}\n{traffic}", dashboard.status_line),
-            None => dashboard.status_line.clone(),
-        };
+    fn refresh_tooltip(&mut self, status: &TrayStatus) {
+        let tip = dashboard::tooltip(status);
         if tip == self.last_tip {
             return;
         }
@@ -258,15 +262,14 @@ impl Backend {
         self.last_tip = tip;
     }
 
-    fn refresh_icon(&mut self) {
-        let white_icon = DARK_TASKBAR.load(Ordering::Relaxed);
-        if self.white_icon == white_icon {
+    fn refresh_icon(&mut self, glyph: TrayGlyph) {
+        if self.glyph == glyph {
             return;
         }
         let Some((hwnd, old_icon, tip)) = icon_snapshot() else {
             return;
         };
-        let icon = make_icon(white_icon);
+        let icon = make_icon(glyph);
         if icon == 0 {
             return;
         }
@@ -283,7 +286,7 @@ impl Backend {
                 DestroyIcon(old_icon as HICON);
             }
         }
-        self.white_icon = white_icon;
+        self.glyph = glyph;
     }
 }
 
@@ -463,21 +466,13 @@ fn taskbar_is_dark() -> bool {
         == 0
 }
 
-/// Builds a borderless monochrome HICON from the template's alpha channel.
-fn make_icon(white: bool) -> isize {
+/// Builds a premultiplied BGRA HICON for the current notification area size.
+fn make_icon(glyph: TrayGlyph) -> isize {
     // SAFETY: GetSystemMetrics has no preconditions.
     let size = unsafe { GetSystemMetrics(SM_CXSMICON) }.clamp(16, 64) as u32;
-    let Ok(image) = image::load_from_memory(crate::brand_assets::TRAY_TEMPLATE) else {
-        return 0;
-    };
-    let resized = image
-        .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
-        .to_rgba8();
-    let mut bgra = Vec::with_capacity(resized.as_raw().len());
-    for pixel in resized.pixels() {
-        let alpha = pixel[3];
-        let ink = if white { alpha } else { 0 };
-        bgra.extend_from_slice(&[ink, ink, ink, alpha]);
+    let mut bgra = glyph.raster(size).into_raw();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
     }
 
     // SAFETY: every GDI object is created and released in this function.

@@ -4,8 +4,9 @@ use std::ffi::{c_char, c_void};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+use crate::brand_assets::TrayGlyph;
 use cocoa::appkit::{NSApplication, NSStatusBar, NSVariableStatusItemLength};
-use cocoa::base::{BOOL, YES, id, nil};
+use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
 use gpui_kit::{Window, point, px};
 use objc::declare::ClassDecl;
@@ -13,6 +14,7 @@ use objc::runtime::{Object, Sel};
 use objc::{class, msg_send, sel, sel_impl};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use xrose_core::AppService;
+use xrose_core::service::TrayStatus;
 
 static POPUP_TARGET: AtomicUsize = AtomicUsize::new(0);
 static POPUP_OPS: parking_lot::Mutex<Vec<PopupOp>> = parking_lot::Mutex::new(Vec::new());
@@ -109,8 +111,8 @@ fn format_fixed_speed(bytes_per_sec: u64) -> String {
     format!("{:>4.0} G/s", gb.min(999.0))
 }
 
-unsafe fn build_template_logo_image() -> id {
-    let png_bytes = crate::brand_assets::TRAY_TEMPLATE;
+unsafe fn build_logo_image(glyph: TrayGlyph) -> id {
+    let png_bytes = glyph.png();
     unsafe {
         let data: id = msg_send![
             class!(NSData),
@@ -124,13 +126,27 @@ unsafe fn build_template_logo_image() -> id {
         let image: id = msg_send![image, initWithData: data];
         if image != nil {
             let _: () = msg_send![image, setSize: NSSize::new(18.0, 18.0)];
-            let _: () = msg_send![image, setTemplate: YES];
+            let _: () = msg_send![image, setTemplate: NO];
         }
         image
     }
 }
 
-unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64) -> id {
+/// Menu bar appearance can differ from the app theme (for example over a dark wallpaper).
+unsafe fn light_menu_ink(button: id) -> bool {
+    unsafe {
+        let appearance: id = msg_send![button, effectiveAppearance];
+        let dark = string("NSAppearanceNameDarkAqua");
+        let names = [dark, string("NSAppearanceNameAqua")];
+        let choices: id =
+            msg_send![class!(NSArray), arrayWithObjects: names.as_ptr() count: names.len()];
+        let best: id = msg_send![appearance, bestMatchFromAppearancesWithNames: choices];
+        let matches: BOOL = msg_send![best, isEqualToString: dark];
+        matches == YES
+    }
+}
+
+unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64, light_ink: bool) -> id {
     unsafe {
         let size = NSSize::new(80.0, 22.0);
         let image: id = msg_send![class!(NSImage), alloc];
@@ -150,7 +166,11 @@ unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64) -> id {
             monospacedSystemFontOfSize: 9.0f64
             weight: 0.0f64
         ];
-        let color: id = msg_send![class!(NSColor), blackColor];
+        let color: id = if light_ink {
+            msg_send![class!(NSColor), whiteColor]
+        } else {
+            msg_send![class!(NSColor), blackColor]
+        };
         if font != nil && color != nil {
             let font_key = string("NSFont");
             let color_key = string("NSColor");
@@ -175,7 +195,7 @@ unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64) -> id {
         }
 
         let _: () = msg_send![image, unlockFocus];
-        let _: () = msg_send![image, setTemplate: YES];
+        let _: () = msg_send![image, setTemplate: NO];
         image
     }
 }
@@ -183,15 +203,14 @@ unsafe fn build_speed_image(logo: id, up_speed: u64, down_speed: u64) -> id {
 pub struct Backend {
     item: id,
     target: id,
-    last_running: Option<bool>,
-    last_show_speed: Option<bool>,
-    last_speeds: Option<(u64, u64)>,
-    current_speed_image: id,
+    last_status: Option<TrayStatus>,
+    glyph: TrayGlyph,
+    speed_display: Option<(u64, u64, bool)>,
     logo_image: id,
 }
 
 impl Backend {
-    pub fn new(_service: &AppService) -> Option<Self> {
+    pub fn new(service: &AppService) -> Option<Self> {
         unsafe {
             static REGISTER: Once = Once::new();
             REGISTER.call_once(|| {
@@ -222,7 +241,8 @@ impl Backend {
             let _: () = msg_send![button, setAction: sel!(togglePopup:)];
             let _: isize = msg_send![button, sendActionOn: (1u64 << 2) | (1u64 << 4)];
 
-            let logo_image = build_template_logo_image();
+            let glyph = TrayGlyph::new(&service.tray_status(), light_menu_ink(button));
+            let logo_image = build_logo_image(glyph);
             if logo_image != nil {
                 let _: () = msg_send![button, setImage: logo_image];
                 let _: () = msg_send![button, setImagePosition: 1usize]; // NSImageOnly = 1
@@ -234,10 +254,9 @@ impl Backend {
             Some(Self {
                 item,
                 target,
-                last_running: None,
-                last_show_speed: None,
-                last_speeds: None,
-                current_speed_image: nil,
+                last_status: None,
+                glyph,
+                speed_display: None,
                 logo_image,
             })
         }
@@ -248,64 +267,47 @@ impl Backend {
         service: &AppService,
         _cx: &gpui_kit::App,
     ) -> Option<super::TrayCommand> {
-        let dashboard = super::dashboard::build(service);
-        let show_speed = dashboard.running && dashboard.show_speed;
-        let speeds = (dashboard.up_speed, dashboard.down_speed);
-
-        let state_changed = self.last_running != Some(dashboard.running)
-            || self.last_show_speed != Some(show_speed)
-            || (show_speed && self.last_speeds != Some(speeds));
-
-        if state_changed {
-            unsafe {
-                let pool = NSAutoreleasePool::new(nil);
-                let button: id = msg_send![self.item, button];
-
-                if show_speed {
-                    let new_image = build_speed_image(
-                        self.logo_image,
-                        dashboard.up_speed,
-                        dashboard.down_speed,
-                    );
-                    if new_image != nil {
-                        let _: () = msg_send![button, setImage: new_image];
-                        let _: () = msg_send![button, setImagePosition: 1usize]; // NSImageOnly
-                        let _: () = msg_send![button, setTitle: string("")];
+        let status = service.tray_status();
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let button: id = msg_send![self.item, button];
+            let white_ink = light_menu_ink(button);
+            let glyph = TrayGlyph::new(&status, white_ink);
+            let speeds = (status.phase.is_alive() && status.show_speed).then_some((
+                status.up_speed,
+                status.down_speed,
+                white_ink,
+            ));
+            let changed = glyph != self.glyph;
+            if changed {
+                let image = build_logo_image(glyph);
+                if image != nil {
+                    let _: () = msg_send![self.logo_image, release];
+                    self.logo_image = image;
+                    self.glyph = glyph;
+                }
+            }
+            if changed || speeds != self.speed_display {
+                if let Some((up, down, light_ink)) = speeds {
+                    let image = build_speed_image(self.logo_image, up, down, light_ink);
+                    if image != nil {
+                        let _: () = msg_send![button, setImage: image];
+                        let _: () = msg_send![image, release];
                         let _: () = msg_send![self.item, setLength: 82.0f64];
-
-                        if self.current_speed_image != nil {
-                            let _: () = msg_send![self.current_speed_image, release];
-                        }
-                        self.current_speed_image = new_image;
                     }
                 } else {
-                    if self.current_speed_image != nil {
-                        let _: () = msg_send![self.current_speed_image, release];
-                        self.current_speed_image = nil;
-                    }
-                    if self.logo_image != nil {
-                        let _: () = msg_send![button, setImage: self.logo_image];
-                        let _: () = msg_send![button, setImagePosition: 1usize];
-                        // NSImageOnly
-                    }
-                    let _: () = msg_send![button, setTitle: string("")];
+                    let _: () = msg_send![button, setImage: self.logo_image];
                     let _: () = msg_send![self.item, setLength: NSVariableStatusItemLength];
                 }
-
-                let tooltip = if let Some(traffic) = &dashboard.traffic_line {
-                    format!("{}\n{}", dashboard.status_line, traffic)
-                } else {
-                    dashboard.status_line.clone()
-                };
-                let _: () = msg_send![button, setToolTip: string(&tooltip)];
-                let _: () = msg_send![pool, drain];
+                self.speed_display = speeds;
             }
-
-            self.last_running = Some(dashboard.running);
-            self.last_show_speed = Some(show_speed);
-            self.last_speeds = Some(speeds);
+            if self.last_status != Some(status) {
+                let tip = super::dashboard::tooltip(&status);
+                let _: () = msg_send![button, setToolTip: string(&tip)];
+                self.last_status = Some(status);
+            }
+            let _: () = msg_send![pool, drain];
         }
-
         None
     }
 }
@@ -322,9 +324,6 @@ impl Drop for Backend {
             let _: () = msg_send![self.target, release];
             if self.logo_image != nil {
                 let _: () = msg_send![self.logo_image, release];
-            }
-            if self.current_speed_image != nil {
-                let _: () = msg_send![self.current_speed_image, release];
             }
         }
     }

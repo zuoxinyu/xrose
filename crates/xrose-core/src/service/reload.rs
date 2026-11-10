@@ -209,6 +209,14 @@ exec sleep 90
                 && service.inner.core.applied_work_mode() == Some(WorkMode::Proxy)
         });
         assert_ne!(service.process_state().pid, direct_pid);
+        assert_eq!(service.tray_status().indicator, TrayIndicator::Proxy);
+        let measured = service.tray_probe_target().unwrap();
+        service.record_proxy_probe(Some(&measured), "another-node", false);
+        assert_eq!(service.tray_status().indicator, TrayIndicator::Proxy);
+        service.record_proxy_probe(Some(&measured), &node_id, false);
+        assert_eq!(service.tray_status().indicator, TrayIndicator::Unavailable);
+        service.record_proxy_probe(Some(&measured), &node_id, true);
+        assert_eq!(service.tray_status().indicator, TrayIndicator::Proxy);
         service.select_direct_mode().unwrap();
         wait(|| {
             !service.is_busy("core")
@@ -218,6 +226,8 @@ exec sleep 90
             service.model().group("proxy").unwrap().selected.as_deref(),
             Some(node_id.as_str())
         );
+        service.record_proxy_probe(Some(&measured), &node_id, false);
+        assert_eq!(service.tray_status().indicator, TrayIndicator::Direct);
         let original_pid = service.process_state().pid;
         let mut settings = service.settings();
         settings.mixed_port = 17442;

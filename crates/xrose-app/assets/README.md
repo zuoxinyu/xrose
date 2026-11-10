@@ -6,7 +6,7 @@
 
 - `logo-mark.png`：900×900 透明标志。
 - `app-icon.png`、`app-icon-{256,128,96,64}.png`：应用、窗口及启动器使用的彩色图标。
-- `tray-template.png`：菜单栏和托盘共用的透明蒙版；针对小尺寸加粗，按系统外观显示为黑色或白色，无底板和边框。
+- `tray/{black,white}-*.png`：菜单栏与托盘共用的图标。X 使用黑、白两种前景，中央玫瑰按[运行状态](../../../docs/branding/tray-states.png)着色。
 - `icons/xrose.svg`、`icons/xrose.png`、`icons/xrose-128.png`：hicolor 主题使用的矢量与彩色图标。
 - `io.xrose.Xrose.desktop`：与 Wayland `app_id` 对应的桌面入口。
 
