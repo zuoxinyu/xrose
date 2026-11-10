@@ -79,6 +79,12 @@ pub enum SharePreview {
     Unsupported,
 }
 
+#[derive(Clone)]
+pub enum ShareTarget {
+    Node(String),
+    Subscription(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toast {
     pub id: u64,
@@ -228,6 +234,20 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
+    /// Resolve the display name and exact link together when a share action runs.
+    pub fn share_link(&self, target: &ShareTarget) -> Option<(&str, String)> {
+        match target {
+            ShareTarget::Node(id) => {
+                let node = self.model.node(id)?;
+                Some((&node.name, crate::subscription::node_to_share_link(node)?))
+            }
+            ShareTarget::Subscription(id) => {
+                let sub = self.subscriptions.iter().find(|sub| &sub.id == id)?;
+                Some((&sub.name, sub.url.clone()))
+            }
+        }
+    }
+
     pub fn core_binary_available(&self, core: CoreKind) -> bool {
         let local = self.local_binaries.get(core.as_str());
         if let Some(version) = self.settings.active_version(core) {
@@ -1798,17 +1818,7 @@ impl AppService {
 
     /// Returns QR modules for graphical sharing, without writing credentials to disk.
     pub fn node_qr_matrix(&self, node_id: &str) -> Result<Vec<Vec<bool>>> {
-        let link = self.node_share_link(node_id)?;
-        let code = qrcode::QrCode::new(link.as_bytes())
-            .map_err(|err| Error::other(format!("无法生成二维码：{err}")))?;
-        let width = code.width();
-        Ok((0..width)
-            .map(|y| {
-                (0..width)
-                    .map(|x| code[(x, y)] == qrcode::Color::Dark)
-                    .collect()
-            })
-            .collect())
+        crate::subscription::qr_matrix(&self.node_share_link(node_id)?)
     }
 
     fn node_share_link(&self, node_id: &str) -> Result<String> {
@@ -5558,6 +5568,34 @@ mod tests {
         service
             .update_node(&first, NodeDraft::from(before.node(&first).unwrap()))
             .unwrap();
+    }
+
+    #[test]
+    fn subscription_sharing_uses_the_current_feed_url_even_without_nodes() {
+        let (service, _dir) = service();
+        let initial = "https://feed.example/first";
+        let updated = "https://feed.example/list?format=full&name=A%2FB";
+        let mut sub = Subscription::new("First", initial);
+        sub.enabled = false;
+        sub.headers.insert("X-Example".into(), "not-shared".into());
+        let id = sub.id.clone();
+        let target = ShareTarget::Subscription(id.clone());
+        service.update_subscription_settings(sub).unwrap();
+        assert_eq!(
+            service.snapshot().share_link(&target),
+            Some(("First", initial.into()))
+        );
+        service.edit_subscription(&id, "Edited", updated).unwrap();
+        let snapshot = service.snapshot();
+        let (name, link) = snapshot.share_link(&target).unwrap();
+        assert_eq!(name, "Edited");
+        assert_eq!(link, updated);
+        assert!(matches!(
+            AppService::preview_shared_content(&link),
+            SharePreview::Subscription { .. }
+        ));
+        service.delete_subscription(&id).unwrap();
+        assert!(service.snapshot().share_link(&target).is_none());
     }
 
     #[test]

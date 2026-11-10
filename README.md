@@ -40,7 +40,7 @@ Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 
 ## 其他核心能力
 
 - **双内核对等编排**：统一意图模型同时编译为 sing-box（1.12+）与 Xray（1.8+）配置，覆盖主流代理与 VPN 协议（VLESS、VMess、Trojan、Shadowsocks、Hysteria2、TUIC、AnyTLS、WireGuard、OpenVPN、OpenConnect），不支持的能力自动降级并提示警告；应用配置前执行内核校验，支持按需开启热重载。
-- **节点订阅与路由管理**：支持 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON 导入，支持二维码与分享链接导出；支持自定义规则分组、规则集更新、SwitchyOmega / AutoProxy 规则导入，以及手动、故障切换、延迟优先与吞吐优先等节点自动切换策略。
+- **节点订阅与路由管理**：支持 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON 导入；单个节点和整个订阅均可通过链接或二维码分享。支持自定义规则分组、规则集更新、SwitchyOmega / AutoProxy 规则导入，以及手动、故障切换、延迟优先与吞吐优先等节点自动切换策略。
 - **网络接入与数据安全**：支持系统代理、PAC、TUN 模式、局域网共享端口认证与前置代理；提供系统代理崩溃恢复，节点凭据、订阅令牌与历史流量统计均采用加密存储。
 
 ## 快速开始

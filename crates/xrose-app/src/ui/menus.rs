@@ -8,7 +8,7 @@ use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xrose_core::model::WorkMode;
 use xrose_core::route::transfer::ExportScope;
-use xrose_core::service::{LatencyScope, ToastLevel};
+use xrose_core::service::{LatencyScope, ShareTarget, ToastLevel};
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
@@ -52,8 +52,8 @@ pub(super) enum Command {
     EditNode(String),
     TestNode(String),
     DownloadNode(String),
-    CopyNode(String),
-    QrNode(String),
+    CopyLink(ShareTarget),
+    ShowQr(ShareTarget),
     DeleteNode(String),
     DeleteNodes(Vec<String>),
     NodeSwitchSettings,
@@ -165,13 +165,23 @@ impl AppView {
             let available = !busy("core")
                 || matches!(
                     &command,
-                    Command::CopyNode(_)
-                        | Command::QrNode(_)
+                    Command::CopyLink(_)
+                        | Command::ShowQr(_)
                         | Command::BatchNodes
                         | Command::ClearLogs
                         | Command::ClearRecording
                 );
             item(&view, tr(lang, zh, en), enabled && available, command)
+        };
+        let share_items = |menu: PopupMenu, target: ShareTarget| {
+            menu.separator()
+                .item(add(
+                    "复制链接",
+                    "Copy link",
+                    true,
+                    Command::CopyLink(target.clone()),
+                ))
+                .item(add("二维码", "QR code", true, Command::ShowQr(target)))
         };
         match target {
             MenuTarget::BatchTests(ids) => {
@@ -512,15 +522,8 @@ impl AppView {
                         "Download test",
                         node.enabled && !testing,
                         Command::DownloadNode(id.clone()),
-                    ))
-                    .separator()
-                    .item(add(
-                        "复制链接",
-                        "Copy link",
-                        true,
-                        Command::CopyNode(id.clone()),
-                    ))
-                    .item(add("二维码", "QR code", true, Command::QrNode(id.clone())))
+                    ));
+                menu = share_items(menu, ShareTarget::Node(id.clone()))
                     .separator()
                     .item(add(
                         "删除节点",
@@ -717,13 +720,13 @@ impl AppView {
                     return menu;
                 }
                 let available = !busy(&format!("sub:{id}"));
-                menu = menu
-                    .item(add(
-                        "编辑订阅",
-                        "Edit subscription",
-                        available,
-                        Command::EditSubscription(id.clone()),
-                    ))
+                menu = menu.item(add(
+                    "编辑订阅",
+                    "Edit subscription",
+                    available,
+                    Command::EditSubscription(id.clone()),
+                ));
+                menu = share_items(menu, ShareTarget::Subscription(id.clone()))
                     .separator()
                     .item(add(
                         "删除订阅",
@@ -889,8 +892,6 @@ impl AppView {
             Command::EditNode(id)
             | Command::TestNode(id)
             | Command::DownloadNode(id)
-            | Command::CopyNode(id)
-            | Command::QrNode(id)
             | Command::DeleteNode(id) => self.snapshot.model.node(id).is_some(),
             Command::DeleteRule(id) | Command::AssignRule(id, _) | Command::MoveRule(id, _, _) => {
                 self.snapshot
@@ -925,8 +926,8 @@ impl AppView {
         }
         if !matches!(
             &command,
-            Command::CopyNode(_)
-                | Command::QrNode(_)
+            Command::CopyLink(_)
+                | Command::ShowQr(_)
                 | Command::BatchNodes
                 | Command::ClearLogs
                 | Command::ClearRecording
@@ -1184,9 +1185,21 @@ impl AppView {
                     self.service.test_download(&id);
                 }
             }
-            Command::CopyNode(id) => {
-                let link = self.service.export_links(&[id]);
-                if !link.is_empty() {
+            Command::CopyLink(ref target) | Command::ShowQr(ref target) => {
+                let Some((name, link)) = self.snapshot.share_link(target) else {
+                    let message = match target {
+                        ShareTarget::Node(_) => self.tr(
+                            "节点不存在或该协议不支持分享链接",
+                            "The node is missing or its protocol cannot be shared",
+                        ),
+                        ShareTarget::Subscription(_) => {
+                            self.tr("订阅已不存在", "The subscription no longer exists")
+                        }
+                    };
+                    self.service.toast(ToastLevel::Warning, message.to_string());
+                    return;
+                };
+                if matches!(command, Command::CopyLink(_)) {
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
                     self.service.toast(
                         ToastLevel::Success,
@@ -1194,17 +1207,15 @@ impl AppView {
                             .to_string(),
                     );
                 } else {
-                    self.service.toast(
-                        ToastLevel::Warning,
-                        self.tr(
-                            "该协议暂不支持导出链接",
-                            "Link export is unavailable for this protocol",
-                        )
-                        .to_string(),
-                    );
+                    let title = match target {
+                        ShareTarget::Node(_) => self.tr("节点二维码", "Node QR code"),
+                        ShareTarget::Subscription(_) => {
+                            self.tr("订阅二维码", "Subscription QR code")
+                        }
+                    };
+                    self.open_share_qr(title, name, link, window, cx);
                 }
             }
-            Command::QrNode(id) => self.open_node_qr(&id, window, cx),
             Command::DeleteNode(id) => self.service.delete_node(&id),
             Command::DeleteNodes(ids) => {
                 self.service.delete_nodes(&ids);

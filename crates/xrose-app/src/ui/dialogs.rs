@@ -243,45 +243,32 @@ impl AppView {
         cx.notify();
     }
 
-    pub(crate) fn open_node_qr(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let matrix = match self.service.node_qr_matrix(id) {
-            Ok(matrix) => matrix,
-            Err(err) => {
-                self.service.toast(ToastLevel::Error, err.to_string());
+    pub(super) fn open_share_qr(
+        &self,
+        title: SharedString,
+        name: &str,
+        link: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (pixels, modules) = match share_qr_image(&link) {
+            Ok(qr) => qr,
+            Err(_) => {
+                self.service.toast(
+                    ToastLevel::Error,
+                    self.tr(
+                        "链接过长，无法生成二维码，请使用「复制链接」",
+                        "The link is too long for a QR code. Use Copy link instead.",
+                    )
+                    .to_string(),
+                );
                 return;
             }
         };
-        let name = self
-            .snapshot
-            .model
-            .node(id)
-            .map(|n| n.name.clone())
-            .unwrap_or_default();
-        let link = self.service.export_links(&[id.to_string()]);
-        let modules = matrix.len() + 8;
-        let scale = 8;
-        let side = (modules * scale) as u32;
-        let mut pixels =
-            image::RgbaImage::from_pixel(side, side, image::Rgba([255, 255, 255, 255]));
-        for (y, row) in matrix.iter().enumerate() {
-            for (x, dark) in row.iter().enumerate() {
-                if *dark {
-                    for dy in 0..scale {
-                        for dx in 0..scale {
-                            pixels.put_pixel(
-                                ((x + 4) * scale + dx) as u32,
-                                ((y + 4) * scale + dy) as u32,
-                                image::Rgba([0, 0, 0, 255]),
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let name = SharedString::from(name.to_owned());
         let qr = Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(
             pixels
         )]));
-        let title = self.tr("节点二维码", "Node QR code");
         let copy = self.tr("复制链接", "Copy link");
         let close = self.tr("关闭", "Close");
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -332,5 +319,51 @@ impl AppView {
                         ),
                 )
         });
+    }
+}
+
+fn share_qr_image(link: &str) -> xrose_core::Result<(image::RgbaImage, usize)> {
+    let matrix = xrose_core::subscription::qr_matrix(link)?;
+    let modules = matrix.len() + 8;
+    let scale = 8;
+    let side = (modules * scale) as u32;
+    let mut pixels = image::RgbaImage::from_pixel(side, side, image::Rgba([255, 255, 255, 255]));
+    for (y, row) in matrix.iter().enumerate() {
+        for (x, dark) in row.iter().enumerate() {
+            if *dark {
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        pixels.put_pixel(
+                            ((x + 4) * scale + dx) as u32,
+                            ((y + 4) * scale + dy) as u32,
+                            image::Rgba([0, 0, 0, 255]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok((pixels, modules))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::share_qr_image;
+
+    #[test]
+    fn subscription_qr_scans_as_the_exact_copyable_url() {
+        let link = "https://feed.example/list?name=A%2FB&format=full";
+        let (pixels, _) = share_qr_image(link).unwrap();
+        let gray = image::DynamicImage::ImageRgba8(pixels).into_luma8();
+        let mut scanner = quircs::Quirc::default();
+        let code = scanner
+            .identify(gray.width() as usize, gray.height() as usize, &gray)
+            .next()
+            .unwrap()
+            .unwrap()
+            .decode()
+            .unwrap();
+        assert_eq!(code.payload, link.as_bytes());
+        assert!(share_qr_image(&"a".repeat(4096)).is_err());
     }
 }

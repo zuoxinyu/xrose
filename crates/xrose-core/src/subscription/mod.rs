@@ -149,6 +149,20 @@ impl Subscription {
     }
 }
 
+/// Dark modules of a graphical QR code, without its quiet zone.
+pub fn qr_matrix(text: &str) -> crate::Result<Vec<Vec<bool>>> {
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .map_err(|err| crate::Error::other(format!("无法生成二维码：{err}")))?;
+    let width = code.width();
+    Ok((0..width)
+        .map(|y| {
+            (0..width)
+                .map(|x| code[(x, y)] == qrcode::Color::Dark)
+                .collect()
+        })
+        .collect())
+}
+
 /// Renders a QR code as block characters, suitable for a monospace UI.
 pub fn qr_ascii(text: &str) -> crate::Result<String> {
     let code = qrcode::QrCode::new(text.as_bytes())

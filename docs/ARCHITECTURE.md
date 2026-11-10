@@ -101,7 +101,9 @@
 3. **合并与去重**：按订阅 ID 替换旧节点（保留其他订阅），按指纹去重；Clash `proxy-groups` 按名称合并，新节点加入默认出站组。更换订阅 URL 会清理旧缓存验证信息，跨来源更换清除自定义请求头。
 4. **更新代理策略**：订阅更新与资源下载（版本检查、内核包、规则集、地理数据、组网组件）各自按配置开关决定直连或经运行中内核的 HTTP/mixed 入站访问。
 
-### 链接与二维码导入
+### 链接与二维码导入、分享
+
+- **分享**：节点与订阅共用复制链接操作和二维码弹窗。执行时按 ID 读取当前快照；节点导出协议链接，订阅仅分享完整订阅 URL，不附带自定义请求头或节点列表。二维码在内存生成。
 
 - **多通道导入**：节点页与订阅页共用 `ui/qr` 管线，支持剪贴板粘贴、文件/图片拖放及屏幕二维码扫描，最终统一交由 `AppService::import_shared_content` 与订阅解析器处理，识别 v2rayN VMess JSON、标准 URI 与 Shadowrocket 编码链接（参考 [v2rayN 导出](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib/Handler/Fmt) 与 [Shadowrocket 生成格式](https://github.com/cedar2025/Xboard/blob/master/app/Protocols/Shadowrocket.php)）。
 - **屏幕取景扫描**：透明取景框在后台采集指针附近的区域，识别图像最长边为 1024px。切换屏幕或滚动时，上次识别结果失效。KDE Wayland 在同一条 D-Bus 连接上登记应用标识并请求桌面截图，再按显示器逻辑坐标裁取识别区域。macOS 使用 ScreenCaptureKit，Windows 和其他 Linux 会话使用 XCap。预览与批量导出均遵循隐私模式与原始节点顺序。
