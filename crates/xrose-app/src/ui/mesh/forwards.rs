@@ -384,11 +384,6 @@ impl AppView {
             }
         }));
         let body = div()
-            .id("forward-editor-body")
-            .max_h(window.viewport_size().height * 0.62)
-            .overflow_y_scroll()
-            .mx_neg_1()
-            .px_1()
             .flex()
             .flex_col()
             .gap_3()
@@ -496,7 +491,11 @@ impl AppView {
             } else {
                 self.tr("添加端口转发", "Add port forward")
             })
-            .child(body)
+            .child(crate::ui::dialogs::dialog_scroll_body(
+                "forward-editor-body",
+                window.viewport_size().height * 0.62,
+                body,
+            ))
             .footer(footer)
     }
 }

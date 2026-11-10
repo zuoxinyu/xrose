@@ -1,4 +1,5 @@
 use super::theme::*;
+use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode};
 use gpui_kit::App;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -12,6 +13,28 @@ use gpui_kit::{
 };
 
 use super::theme::Palette;
+
+/// Overlay the thumb on the bounded viewport, outside its scrolling content.
+pub(super) fn scroll_frame(
+    id: &'static str,
+    handle: &(impl ScrollbarHandle + Clone),
+    viewport: impl IntoElement,
+) -> Div {
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .child(viewport)
+        .child(
+            Scrollbar::vertical(handle)
+                .id(id)
+                .mode(ScrollbarMode::Scrolling)
+                .viewport_from_layout(),
+        )
+}
 
 pub fn card(p: &Palette) -> Div {
     div()

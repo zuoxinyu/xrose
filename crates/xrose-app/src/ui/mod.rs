@@ -1159,7 +1159,8 @@ impl AppView {
     }
 
     fn scroll_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        let page_scrolls = !matches!(self.page, Page::Connections | Page::Logs | Page::Settings);
+        let viewport = div()
             .id("content-scroll")
             .track_scroll(&self.content_scroll)
             .on_drag_move(cx.listener(
@@ -1191,16 +1192,18 @@ impl AppView {
             .flex_1()
             .min_h(px(0.))
             .w_full()
-            .when(
-                matches!(self.page, Page::Connections | Page::Logs | Page::Settings),
-                |d| d.flex().flex_col().overflow_hidden(),
-            )
-            .when(
-                !matches!(self.page, Page::Connections | Page::Logs | Page::Settings),
-                |d| d.overflow_y_scroll(),
-            )
+            .when(!page_scrolls, |d| d.flex().flex_col().overflow_hidden())
+            .when(page_scrolls, |d| d.overflow_y_scroll())
             .when(self.page != Page::Connections, |d| d.p(px(theme::PAGE_PAD)))
-            .child(self.page_content(window, cx))
+            .child(self.page_content(window, cx));
+        match self.page {
+            Page::Connections => {
+                scroll_frame("connections-scrollbar", &self.connection_list, viewport)
+                    .into_any_element()
+            }
+            Page::Logs | Page::Settings => viewport.into_any_element(),
+            _ => scroll_frame("page-scrollbar", &self.content_scroll, viewport).into_any_element(),
+        }
     }
 
     fn page_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

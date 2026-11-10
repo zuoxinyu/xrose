@@ -415,21 +415,7 @@ impl AppView {
     fn mesh_dialog(&mut self, dialog: Dialog, window: &Window, cx: &mut Context<Self>) -> Dialog {
         let p = palette(cx);
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
-        let mut form = div()
-            .id(if self.mesh_form.advanced_open {
-                "mesh-advanced-scroll"
-            } else {
-                "mesh-editor-scroll"
-            })
-            .max_h(px(520.).min(window.viewport_size().height * 0.62))
-            .overflow_y_scroll()
-            // Extend the scroll viewport into the dialog padding to fit the outer focus ring.
-            .mx_neg_1()
-            .px_1()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .min_w(px(0.));
+        let mut form = div().flex().flex_col().gap_3().min_w(px(0.));
         let toolbar = div()
             .flex()
             .items_center()
@@ -635,7 +621,15 @@ impl AppView {
                 });
             })
             .child(toolbar.mb_3())
-            .child(form)
+            .child(super::dialogs::dialog_scroll_body(
+                if self.mesh_form.advanced_open {
+                    "mesh-advanced-scroll"
+                } else {
+                    "mesh-editor-scroll"
+                },
+                px(520.).min(window.viewport_size().height * 0.62),
+                form,
+            ))
             .when_some(self.mesh_form.error.clone(), |d, error| {
                 d.child(
                     div()

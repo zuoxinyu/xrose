@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::rc::Rc;
 
-use gpui_base::{Disableable, Scrollbar, ScrollbarMode, SelectableText};
+use gpui_base::{Disableable, SelectableText};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -372,21 +372,11 @@ impl AppView {
             })
             .flex_1()
             .w_full();
-            list = list.child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(viewport)
-                    .child(
-                        Scrollbar::vertical(&self.log_list.list)
-                            .id("logs-scrollbar")
-                            .mode(ScrollbarMode::Scrolling)
-                            .viewport_from_layout(),
-                    ),
-            );
+            list = list.child(scroll_frame(
+                "logs-scrollbar",
+                &self.log_list.list,
+                viewport,
+            ));
         }
 
         body = body.child(list);

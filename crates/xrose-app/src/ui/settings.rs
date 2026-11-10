@@ -198,7 +198,9 @@ impl AppView {
                         }
                     })),
             )
-            .child(
+            .child(scroll_frame(
+                "settings-scrollbar",
+                &self.settings_scroll,
                 div()
                     .id(("settings-panel", selected as usize))
                     .track_scroll(&self.settings_scroll)
@@ -209,7 +211,7 @@ impl AppView {
                     .w_full()
                     .overflow_y_scroll()
                     .child(content.flex_shrink_0()),
-            )
+            ))
     }
 
     fn settings_appearance_card(&self, cx: &mut Context<Self>) -> Div {

@@ -7,6 +7,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::Node;
@@ -16,6 +17,22 @@ use super::{AppView, theme::palette, widgets::ChoiceGroup};
 
 /// Shared motion policy for form, detail, and confirmation dialogs.
 pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
+
+pub(super) fn dialog_scroll_body(
+    id: &'static str,
+    max_height: Pixels,
+    body: impl IntoElement,
+) -> Div {
+    // Extend the viewport into the dialog padding to leave room for outer focus rings.
+    div().mx_neg_1().child(
+        div()
+            .px_1()
+            .max_h(max_height)
+            .child(body)
+            .overflow_y_scrollbar()
+            .id(id),
+    )
+}
 
 /// Places settings in a scrollable surface so the close control stays reachable.
 pub(super) fn settings_dialog(
@@ -34,15 +51,11 @@ pub(super) fn settings_dialog(
         .entrance(DIALOG_ENTRANCE)
         .on_ok(|_, _, _| false)
         .title(title)
-        .child(
-            div()
-                .id("settings-dialog-body")
-                .max_h(window.viewport_size().height * 0.68)
-                .overflow_y_scroll()
-                .mx_neg_1()
-                .px_1()
-                .child(body),
-        )
+        .child(dialog_scroll_body(
+            "settings-dialog-body",
+            window.viewport_size().height * 0.68,
+            body,
+        ))
 }
 
 impl AppView {

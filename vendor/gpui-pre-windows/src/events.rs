@@ -108,6 +108,12 @@ impl WindowsWindowInner {
             WM_PAINT => self.handle_paint_msg(handle),
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
+            WM_POINTERDOWN
+            | WM_POINTERUPDATE
+            | WM_POINTERUP
+            | WM_POINTERCAPTURECHANGED
+            | WM_POINTERENTER
+            | WM_POINTERLEAVE => self.handle_touch_msg(handle, msg, wparam, lparam),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
             WM_MOUSELEAVE | WM_NCMOUSELEAVE => self.handle_mouse_leave_msg(),
             WM_NCMOUSEMOVE => self.handle_nc_mouse_move_msg(handle, lparam),
