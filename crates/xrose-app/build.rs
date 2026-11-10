@@ -30,12 +30,10 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         let path = "src/ui/qr/macos.m";
         println!("cargo:rerun-if-changed={path}");
-        println!("cargo:rerun-if-changed=src/app_launch.c");
         println!("cargo:rerun-if-changed=src/ui/process_icons/macos.m");
         let mut native = cc::Build::new();
         native
             .file(path)
-            .file("src/app_launch.c")
             .file("src/ui/process_icons/macos.m")
             .flag("-fobjc-arc")
             .flag(format!(

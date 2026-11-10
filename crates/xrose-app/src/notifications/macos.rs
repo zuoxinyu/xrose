@@ -20,7 +20,7 @@ fn with_center<T>(f: impl FnOnce(id) -> Result<T, String>) -> Result<T, String> 
         let identifier: id = msg_send![bundle, bundleIdentifier];
         // Calling currentNotificationCenter without an app identity raises an ObjC exception.
         let result = if identifier == nil {
-            Err("无法识别应用身份，请重新启动 Xrose 或从 Xrose.app 启动".into())
+            Err("请从 Xrose.app 启动以使用系统通知".into())
         } else {
             let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
             install_delegate(center);

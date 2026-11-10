@@ -6,6 +6,7 @@ Xrose 是 Project Xristina 旗下的 Xray / sing-box 跨平台桌面客户端，
 ## 常用命令
 
 - 构建 `cargo build --workspace`；运行 GUI `cargo run -p xrose-app`
+- 打包安装 macOS 应用 `scripts/build-macos.sh [-r]`（产出 `target/macos/<profile>/Xrose.app`，签名后复制到 `~/Applications`）
 - 测试 `cargo test -p xrose-core`
 - 无界面验证优先用 `xrose-cli`（`demo`、`seed-demo --home <dir>`、`check --core sing-box --home <dir>`，详见 `--help`）
 - 状态一律用 `XROSE_HOME=/tmp/xrose-demo` 或 `--home` 隔离，不得触碰用户真实配置

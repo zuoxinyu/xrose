@@ -1,8 +1,6 @@
 // The GUI also hosts the scheduled privilege helper; neither needs a console.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(target_os = "macos")]
-mod app_bundle;
 mod app_icon;
 mod brand_assets;
 mod i18n;
@@ -24,24 +22,6 @@ const APP_ID: &str = "io.xrose.Xrose";
 
 fn main() {
     let args = std::env::args_os().skip(1);
-    #[cfg(target_os = "macos")]
-    let args = {
-        let mut args = args.peekable();
-        // Launch Services starts GUI applications in a different working directory.
-        if args
-            .next_if(|arg| arg == "--xrose-launch-directory")
-            .is_some()
-        {
-            let Some(dir) = args.next() else {
-                std::process::exit(1)
-            };
-            if let Err(error) = std::env::set_current_dir(dir) {
-                eprintln!("无法恢复启动目录：{error}");
-                std::process::exit(1);
-            }
-        }
-        args
-    };
     let args: Vec<String> = args.map(|arg| arg.to_string_lossy().into_owned()).collect();
     // Privilege-helper entry points must run before the database/GUI starts.
     match xrose_core::system::privilege::helper_main(&args) {
@@ -58,8 +38,6 @@ fn main() {
         .find(|args| args[0] == "--home")
         .map(|args| xrose_core::paths::AppPaths::from_root(std::path::Path::new(&args[1])))
         .unwrap_or_else(xrose_core::paths::AppPaths::discover);
-    #[cfg(target_os = "macos")]
-    let bundle_error = app_bundle::ensure(&paths.data_dir.join("desktop")).err();
     let service = match AppService::with_paths(paths) {
         Ok(service) => service,
         Err(err) => {
@@ -67,10 +45,6 @@ fn main() {
             std::process::exit(1);
         }
     };
-    #[cfg(target_os = "macos")]
-    if let Some(error) = bundle_error {
-        service.report_notification_error(&format!("准备 macOS 应用包失败：{error}"));
-    }
 
     // Single instance: the lock is held for the lifetime of the process.
     let _instance = if service.settings().single_instance {

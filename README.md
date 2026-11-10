@@ -51,6 +51,7 @@ Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 
 
 - **环境要求**：Rust 1.95+，Windows、macOS 或 Linux 桌面。
 - **Linux 依赖**：需要 GTK3、`libxkbcommon` 与 `wayland-client`（或 X11）开发库；屏幕二维码捕获还需 Clang、PipeWire、XCB、XRandR、D-Bus、GBM 与 EGL 开发库。
+- **macOS 打包**：运行 `scripts/build-macos.sh -r --open` 构建、安装并打开 `Xrose.app`。使用系统通知或授权屏幕录制时，请从应用包启动；`cargo run` 直接运行开发用可执行文件。
 - **Windows 构建**：参见 [组网文档 · Windows 构建](docs/MESH.md#windows-构建)。
 
 ```bash

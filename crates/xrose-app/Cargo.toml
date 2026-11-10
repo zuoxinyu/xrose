@@ -32,8 +32,6 @@ embed-resource = "3"
 cocoa = "0.25"
 objc = "0.2"
 block.workspace = true
-fs2.workspace = true
-tempfile.workspace = true
 
 [target.'cfg(any(windows, target_os = "linux"))'.dependencies]
 notify-rust.workspace = true

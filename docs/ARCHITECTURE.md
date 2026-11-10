@@ -157,6 +157,7 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 
 ### 启动动作与系统通知
 
+- macOS 应用包由 `scripts/build-macos.sh` 在构建时生成。签名优先使用 `XROSE_SIGN_IDENTITY` 指定的身份，其次使用本机有效的 Apple Development 证书；没有可用证书时使用临时签名。从 Finder 或 `open` 启动 `Xrose.app` 时使用其应用身份；直接运行 `xrose-app` 不创建应用包，也不重新启动进程。
 - `Settings.autostart` 独立控制系统登录入口 `--autostart`；`startup_proxy` 与各组网 `startup_*` 配置由 `run_startup_actions()` 在 GUI 每次启动时按序执行一次。
 - `AppService::toast()` 维护应用内提示并在启用系统通知（Windows WinRT Toast / macOS UserNotifications / Linux 桌面通知）时后台投递，30 秒内同内容去重，投递失败仅记日志而不递归弹窗。
 
