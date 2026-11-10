@@ -47,19 +47,46 @@ pub(crate) fn default_rule_set(tag: &str) -> Option<RuleSet> {
 }
 
 pub(crate) fn resolve_rule_set(model: &AppModel, tag: &str) -> Option<RuleSet> {
-    if let Some(set) = model.routing.rule_sets.iter().find(|set| set.tag == tag) {
-        // Repair only the old built-in URL; user mirrors retain precedence.
-        if tag != "geosite-gfw"
-            || set.url
-                != "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs"
-        {
-            return Some(set.clone());
-        }
+    use crate::model::RuleSetSource;
+    let configured = model.routing.rule_sets.iter().find(|set| set.tag == tag);
+    let Some(default) = default_rule_set(tag) else {
+        return configured.cloned();
+    };
+    let mut set = configured.cloned().unwrap_or_else(|| default.clone());
+    let legacy_gfw = tag == "geosite-gfw"
+        && set.url
+            == "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-gfw.srs";
+    if set.format != RuleSetFormat::Binary || (set.url != default.url && !legacy_gfw) {
+        return Some(set);
     }
-    default_rule_set(tag)
+    let (kind, name) = tag.split_once('-')?;
+    set.url = match model.routing.rule_set_source {
+        RuleSetSource::Upstream => default.url,
+        RuleSetSource::MetaCubeX => format!(
+            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/{kind}/{name}.srs"
+        ),
+        RuleSetSource::JsDelivr => {
+            let repo = match kind {
+                "geoip" => "sing-geoip",
+                _ => "sing-geosite",
+            };
+            if tag == "geosite-gfw" {
+                "https://cdn.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/geo/geosite/gfw.srs"
+                    .into()
+            } else {
+                format!("https://cdn.jsdelivr.net/gh/SagerNet/{repo}@rule-set/{tag}.srs")
+            }
+        }
+        RuleSetSource::Custom => crate::model::route::expand_rule_set_template(
+            &model.routing.custom_rule_set_template,
+            kind,
+            name,
+        ),
+    };
+    Some(set)
 }
 
-/// Includes implicit route/DNS references so manual retries match startup.
+/// Only the files referenced by this run are startup dependencies.
 pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
     rule_set_tags(model, model.work_mode)
         .into_iter()
@@ -67,43 +94,65 @@ pub(crate) fn required_rule_sets(model: &AppModel) -> Vec<RuleSet> {
         .collect()
 }
 
-/// Use Proxy when listing all editable rules, including inactive proxy intent.
+fn add_matcher_tags(tags: &mut BTreeSet<String>, matchers: &Matchers) {
+    tags.extend(matchers.rule_sets.iter().cloned());
+    tags.extend(matchers.geosites.iter().map(|s| format!("geosite-{s}")));
+    tags.extend(matchers.geoips.iter().map(|s| format!("geoip-{s}")));
+}
+
+fn add_dns_tags(tags: &mut BTreeSet<String>, server: &DnsServer) {
+    let domains = split_dns_domains(&server.domains);
+    tags.extend(domains.geosites.into_iter().map(|s| format!("geosite-{s}")));
+    tags.extend(domains.rule_sets);
+}
+
 pub(crate) fn rule_set_tags(model: &AppModel, mode: WorkMode) -> BTreeSet<String> {
     let mut tags = BTreeSet::new();
-    let mut add = |tag: &str| {
-        tags.insert(tag.to_owned());
-    };
     for rule in model.routing.rules_for_mode(mode) {
-        for tag in &rule.matchers.rule_sets {
-            add(tag);
-        }
-        for name in &rule.matchers.geosites {
-            add(&format!("geosite-{name}"));
-        }
-        for code in &rule.matchers.geoips {
-            add(&format!("geoip-{code}"));
-        }
+        add_matcher_tags(&mut tags, &rule.matchers);
     }
     if model.dns.enabled {
         for server in &model.dns.servers {
             if mode == WorkMode::Direct && (server.requires_proxy() || server.is_fakeip()) {
                 continue;
             }
-            let split = split_dns_domains(&server.domains);
-            for name in split.geosites {
-                add(&format!("geosite-{name}"));
-            }
-            for tag in split.rule_sets {
-                add(&tag);
-            }
+            add_dns_tags(&mut tags, server);
         }
     }
-    if mode == WorkMode::Proxy {
-        for tag in ["geosite-cn", "geoip-cn"] {
-            add(tag);
-        }
+    if mode == WorkMode::Proxy && model.routing.bypass_china_ips {
+        tags.insert("geoip-cn".into());
     }
     tags
+}
+
+/// Assets available for manual download, including inactive rules and other built-in presets.
+pub(crate) fn downloadable_rule_sets(model: &AppModel) -> Vec<RuleSet> {
+    use crate::model::{RoutePreset, preset_rules, route::default_rule_sets};
+    static PRESET_TAGS: std::sync::LazyLock<BTreeSet<String>> = std::sync::LazyLock::new(|| {
+        let mut tags: BTreeSet<_> = default_rule_sets().into_iter().map(|set| set.tag).collect();
+        for preset in RoutePreset::all() {
+            for rule in preset_rules(preset) {
+                add_matcher_tags(&mut tags, &rule.matchers);
+            }
+        }
+        tags
+    });
+    let mut tags = PRESET_TAGS.clone();
+    tags.extend(model.routing.rule_sets.iter().map(|set| set.tag.clone()));
+    for rule in model
+        .routing
+        .rules
+        .iter()
+        .chain(model.routing.rule_groups.iter().flat_map(|g| &g.rules))
+    {
+        add_matcher_tags(&mut tags, &rule.matchers);
+    }
+    for server in &model.dns.servers {
+        add_dns_tags(&mut tags, server);
+    }
+    tags.into_iter()
+        .filter_map(|tag| resolve_rule_set(model, &tag))
+        .collect()
 }
 
 /// Reduce saved user intent to the node and resolver graph for this run.
@@ -557,6 +606,93 @@ mod tests {
     use super::*;
     use crate::model::{Node, Protocol, RoutePreset, RouteRule, RouteRuleGroup};
     use serde_json::json;
+
+    #[test]
+    fn global_can_boot_without_files_and_prefetch_every_routing_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let ctx = CompileContext::new(&settings, dir.path().join("data"), dir.path().join("run"));
+        let mut model = AppModel::default();
+        model.add_nodes([Node::new("Fixture", Protocol::Socks, "proxy.example", 1080)]);
+        model.work_mode = WorkMode::Proxy;
+        model.apply_preset(RoutePreset::Global);
+        model.routing.rule_sets.clear();
+        assert!(required_rule_sets(&model).is_empty());
+        assert!(
+            SingBoxAdapter
+                .compile(&model, &settings, &ctx)
+                .unwrap()
+                .json["route"]
+                .get("rule_set")
+                .is_none()
+        );
+
+        // A saved mirror, disabled group, disabled rule, and inactive DNS still belong to the catalog.
+        let mut mirror = default_rule_set("geosite-gfw").unwrap();
+        mirror.url = "https://mirror.example/gfw.srs".into();
+        model.routing.rule_sets.push(mirror.clone());
+        let mut inactive = RouteRule::new(
+            "Fixture",
+            Matchers {
+                geoips: vec!["fixture".into()],
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        );
+        inactive.enabled = false;
+        model.routing.rule_groups.push(RouteRuleGroup {
+            enabled: false,
+            rules: vec![inactive],
+            ..Default::default()
+        });
+        model.dns.enabled = false;
+        model.dns.servers[0].domains = vec!["geosite:fixture-dns".into()];
+        let all = downloadable_rule_sets(&model);
+        let tags: BTreeSet<_> = all.iter().map(|s| s.tag.as_str()).collect();
+        assert_eq!(tags.len(), all.len());
+        for tag in [
+            "geosite-gfw",
+            "geosite-cn",
+            "geoip-cn",
+            "geosite-geolocation-!cn",
+            "geosite-category-ads-all",
+            "geoip-fixture",
+            "geosite-fixture-dns",
+        ] {
+            assert!(tags.contains(tag), "{tag}");
+        }
+        assert_eq!(all.iter().find(|s| s.tag == mirror.tag), Some(&mirror));
+        assert!(required_rule_sets(&model).is_empty());
+        for set in &all {
+            crate::util::atomic_write(&ctx.rule_set_path(&set.tag), b"fixture").unwrap();
+        }
+        for preset in [RoutePreset::BypassMainland, RoutePreset::GfwList] {
+            model.apply_preset(preset);
+            let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+            let sets = compiled.json["route"]["rule_set"].as_array().unwrap();
+            assert!(!sets.is_empty());
+            assert!(
+                sets.iter()
+                    .all(|s| s["type"] == "local" && tags.contains(s["tag"].as_str().unwrap()))
+            );
+        }
+
+        model.apply_preset(RoutePreset::Global);
+        model.routing.bypass_china_ips = true;
+        assert_eq!(
+            required_rule_sets(&model)
+                .iter()
+                .map(|s| s.tag.as_str())
+                .collect::<Vec<_>>(),
+            ["geoip-cn"]
+        );
+        model.dns.enabled = true;
+        assert!(
+            required_rule_sets(&model)
+                .iter()
+                .any(|s| s.tag == "geosite-fixture-dns")
+        );
+    }
 
     #[test]
     fn zero_node_monitor_keeps_firewall_mesh_and_direct_dns_in_both_cores() {

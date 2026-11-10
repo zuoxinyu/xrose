@@ -42,6 +42,8 @@ pub struct UpdateCandidate {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RuleSetUpdate {
+    #[serde(default)]
+    pub updated_at: Option<i64>,
     pub tag: String,
     pub status: String,
     pub bytes: u64,
@@ -363,8 +365,6 @@ pub async fn check_app_update(
     }))
 }
 
-/// Downloads rule-set files, honoring cached checksums. Returns one result per
-/// rule-set; failures are reported rather than aborting the whole batch.
 /// Download only assets actually referenced by the generated Xray config.
 pub async fn ensure_xray_geo(
     config: &serde_json::Value,
@@ -403,114 +403,158 @@ pub async fn ensure_xray_geo(
     Ok(())
 }
 
+fn rule_set_metadata(dir: &Path, tag: &str) -> BTreeMap<String, String> {
+    std::fs::read(dir.join(format!("{tag}.meta.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn cached_rule_set(
+    dir: &Path,
+    tag: &str,
+    meta: &BTreeMap<String, String>,
+) -> Option<RuleSetUpdate> {
+    let file = std::fs::metadata(rule_set_file(dir, tag)).ok()?;
+    if !file.is_file() || file.len() == 0 {
+        return None;
+    }
+    let updated_at = meta
+        .get("updated_at")
+        .and_then(|value| value.parse().ok())
+        .or_else(|| {
+            let modified = file
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?;
+            i64::try_from(modified.as_secs()).ok()
+        });
+    Some(RuleSetUpdate {
+        tag: tag.into(),
+        status: "cached".into(),
+        bytes: file.len(),
+        updated_at,
+        sha256: meta.get("sha256").cloned(),
+        error: None,
+    })
+}
+
+pub(crate) fn cached_rule_set_updates(dir: &Path) -> BTreeMap<String, RuleSetUpdate> {
+    let mut results = BTreeMap::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(tag) = name.to_str().and_then(|name| name.strip_suffix(".srs")) else {
+                continue;
+            };
+            if let Some(state) = cached_rule_set(dir, tag, &rule_set_metadata(dir, tag)) {
+                results.insert(tag.to_owned(), state);
+            }
+        }
+    }
+    results
+}
+
+async fn update_rule_set(
+    set: &crate::model::RuleSet,
+    dir: &Path,
+    client: &reqwest::Client,
+    meta: &BTreeMap<String, String>,
+    state: &mut RuleSetUpdate,
+) -> Result<()> {
+    let mut request = client.get(&set.url);
+    let source = sha256_bytes(set.url.as_bytes());
+    let same_source = state.bytes > 0 && meta.get("source") == Some(&source);
+    if same_source {
+        if let Some(etag) = meta.get("etag") {
+            request = request.header(reqwest::header::IF_NONE_MATCH, etag);
+        }
+        if let Some(modified) = meta.get("last_modified") {
+            request = request.header(reqwest::header::IF_MODIFIED_SINCE, modified);
+        }
+    }
+    let response = request.send().await?;
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED && same_source {
+        state.status = "not-modified".into();
+        return Ok(());
+    }
+    if !response.status().is_success() {
+        return Err(Error::other(format!("HTTP {}", response.status())));
+    }
+    let mut metadata = BTreeMap::new();
+    for (name, header) in [
+        ("etag", reqwest::header::ETAG),
+        ("last_modified", reqwest::header::LAST_MODIFIED),
+    ] {
+        if let Some(value) = response.headers().get(header).and_then(|h| h.to_str().ok()) {
+            metadata.insert(name, value.to_owned());
+        }
+    }
+    let bytes = response.bytes().await?;
+    if bytes.is_empty() {
+        return Err(Error::other("下载内容为空，请检查规则集来源并重试"));
+    }
+    let hash = sha256_bytes(&bytes);
+    atomic_write(&rule_set_file(dir, &set.tag), &bytes)?;
+    let updated_at = now_unix();
+    state.updated_at = Some(updated_at);
+    state.bytes = bytes.len() as u64;
+    state.sha256 = Some(hash.clone());
+    metadata.insert("sha256", hash);
+    metadata.insert("source", source);
+    metadata.insert("updated_at", updated_at.to_string());
+    crate::util::atomic_write_json(&dir.join(format!("{}.meta.json", set.tag)), &metadata)?;
+    state.status = "updated".into();
+    Ok(())
+}
+
 pub async fn sync_rule_sets(
     rule_sets: &[crate::model::RuleSet],
     dir: &Path,
     network: &UpdateNetwork,
 ) -> Vec<RuleSetUpdate> {
-    let mut results = Vec::new();
-    let _ = std::fs::create_dir_all(dir);
-    let client = match network.client(Duration::from_secs(30)) {
-        Ok(client) => client,
-        Err(err) => {
-            return rule_sets
-                .iter()
-                .map(|set| RuleSetUpdate {
-                    tag: set.tag.clone(),
-                    status: "failed".into(),
-                    error: Some(err.to_string()),
-                    ..Default::default()
-                })
-                .collect();
-        }
-    };
+    sync_rule_sets_reporting(rule_sets, dir, network, |_| {}).await
+}
+
+pub(crate) async fn sync_rule_sets_reporting(
+    rule_sets: &[crate::model::RuleSet],
+    dir: &Path,
+    network: &UpdateNetwork,
+    mut report: impl FnMut(&RuleSetUpdate),
+) -> Vec<RuleSetUpdate> {
+    let mut results = Vec::with_capacity(rule_sets.len());
+    let client = network.client(Duration::from_secs(30));
     for set in rule_sets {
-        let target = dir.join(format!("{}.srs", set.tag));
-        let meta_path = dir.join(format!("{}.meta.json", set.tag));
-        let mut meta: BTreeMap<String, String> = std::fs::read(&meta_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default();
-        let mut request = client.get(&set.url);
-        if target.exists() {
-            if let Some(etag) = meta.get("etag") {
-                request = request.header(reqwest::header::IF_NONE_MATCH, etag);
-            }
-            if let Some(last_modified) = meta.get("last_modified") {
-                request = request.header(reqwest::header::IF_MODIFIED_SINCE, last_modified);
-            }
-        }
-        match request.send().await {
-            Ok(response) if response.status() == reqwest::StatusCode::NOT_MODIFIED => {
-                results.push(RuleSetUpdate {
-                    tag: set.tag.clone(),
-                    status: "not-modified".into(),
-                    bytes: std::fs::metadata(&target).map(|m| m.len()).unwrap_or(0),
-                    sha256: meta.get("sha256").cloned(),
-                    error: None,
-                });
-            }
-            Ok(response) if response.status().is_success() => {
-                let etag = response
-                    .headers()
-                    .get(reqwest::header::ETAG)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string);
-                let last_modified = response
-                    .headers()
-                    .get(reqwest::header::LAST_MODIFIED)
-                    .and_then(|v| v.to_str().ok())
-                    .map(str::to_string);
-                match response.bytes().await {
-                    Ok(bytes) => {
-                        let hash = sha256_bytes(&bytes);
-                        if let Err(err) = atomic_write(&target, &bytes) {
-                            results.push(RuleSetUpdate {
-                                tag: set.tag.clone(),
-                                status: "failed".into(),
-                                error: Some(err.to_string()),
-                                ..Default::default()
-                            });
-                            continue;
-                        }
-                        meta.insert("sha256".into(), hash.clone());
-                        meta.insert("updated_at".into(), now_unix().to_string());
-                        if let Some(etag) = etag {
-                            meta.insert("etag".into(), etag);
-                        }
-                        if let Some(last_modified) = last_modified {
-                            meta.insert("last_modified".into(), last_modified);
-                        }
-                        let _ = crate::util::atomic_write_json(&meta_path, &meta);
-                        results.push(RuleSetUpdate {
-                            tag: set.tag.clone(),
-                            status: "updated".into(),
-                            bytes: bytes.len() as u64,
-                            sha256: Some(hash),
-                            error: None,
-                        });
-                    }
-                    Err(err) => results.push(RuleSetUpdate {
-                        tag: set.tag.clone(),
-                        status: "failed".into(),
-                        error: Some(format!("读取失败：{err}")),
-                        ..Default::default()
-                    }),
-                }
-            }
-            Ok(response) => results.push(RuleSetUpdate {
+        if !crate::route::transfer::safe_tag(&set.tag) {
+            let state = RuleSetUpdate {
                 tag: set.tag.clone(),
                 status: "failed".into(),
-                error: Some(format!("HTTP {}", response.status())),
+                error: Some("规则集标签不能用作文件名，请修改标签后重试".into()),
                 ..Default::default()
-            }),
-            Err(err) => results.push(RuleSetUpdate {
-                tag: set.tag.clone(),
-                status: "failed".into(),
-                error: Some(err.to_string()),
-                ..Default::default()
-            }),
+            };
+            report(&state);
+            results.push(state);
+            continue;
         }
+        let meta = rule_set_metadata(dir, &set.tag);
+        let mut state = cached_rule_set(dir, &set.tag, &meta).unwrap_or_else(|| RuleSetUpdate {
+            tag: set.tag.clone(),
+            ..Default::default()
+        });
+        let error = match &client {
+            Ok(client) => update_rule_set(set, dir, client, &meta, &mut state)
+                .await
+                .err()
+                .map(|e| e.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if error.is_some() {
+            state.status = "failed".into();
+            state.error = error;
+        }
+        report(&state);
+        results.push(state);
     }
     results
 }
@@ -572,13 +616,19 @@ mod tests {
             user_agent: "Fixture/2".into(),
         };
         let capture = tokio::spawn(async move {
-            for path in ["subscription", "asset"] {
+            for (path, status) in [
+                ("subscription", "200 OK"),
+                ("asset", "200 OK"),
+                ("asset", "304 Not Modified"),
+                ("asset", "503 Service Unavailable"),
+                ("mirror", "200 OK"),
+            ] {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut reader = BufReader::new(socket);
                 let mut first = String::new();
                 reader.read_line(&mut first).await.unwrap();
                 assert!(first.starts_with(&format!("GET http://updates.invalid/{path} ")));
-                let (mut agent, mut authenticated) = (false, false);
+                let (mut agent, mut authenticated, mut conditional) = (false, false, false);
                 loop {
                     let mut header = String::new();
                     reader.read_line(&mut header).await.unwrap();
@@ -587,12 +637,19 @@ mod tests {
                     }
                     let header = header.to_ascii_lowercase();
                     agent |= header.trim() == "user-agent: fixture/2";
+                    conditional |= header.trim() == "if-none-match: fixture";
                     authenticated |= header.starts_with("proxy-authorization: basic ");
                 }
                 assert!(agent && authenticated);
+                assert_eq!(conditional, status != "200 OK");
+                let body = if status == "200 OK" { "ok" } else { "" };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nConnection: close\r\nETag: fixture\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
                 reader
                     .get_mut()
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .write_all(response.as_bytes())
                     .await
                     .unwrap();
             }
@@ -608,8 +665,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut set = crate::adapters::default_rule_set("geoip-cn").unwrap();
         set.url = "http://updates.invalid/asset".into();
-        let result = sync_rule_sets(&[set], dir.path(), &network).await;
+        let sets = std::slice::from_ref(&set);
+        let result = sync_rule_sets(sets, dir.path(), &network).await;
         assert_eq!(result[0].status, "updated");
+        assert!(result[0].updated_at.is_some());
+        // The timestamp is the last content update, even after a restart, 304 or failed retry.
+        let meta = dir.path().join(format!("{}.meta.json", set.tag));
+        let mut metadata = rule_set_metadata(dir.path(), &set.tag);
+        metadata.insert("updated_at".into(), "1650000000".into());
+        crate::util::atomic_write_json(&meta, &metadata).unwrap();
+        assert_eq!(
+            cached_rule_set_updates(dir.path())[&set.tag].updated_at,
+            Some(1650000000)
+        );
+        for expected in ["not-modified", "failed"] {
+            let result = sync_rule_sets(sets, dir.path(), &network).await;
+            assert_eq!(result[0].status, expected);
+            assert_eq!(result[0].updated_at, Some(1650000000));
+            assert_eq!(result[0].error.is_some(), expected == "failed");
+            assert_eq!(
+                std::fs::read(rule_set_file(dir.path(), &set.tag)).unwrap(),
+                b"ok"
+            );
+        }
+        set.url = "http://updates.invalid/mirror".into();
+        assert_eq!(
+            sync_rule_sets(std::slice::from_ref(&set), dir.path(), &network).await[0].status,
+            "updated"
+        );
+        std::fs::remove_file(&meta).unwrap();
+        assert!(
+            cached_rule_set_updates(dir.path())[&set.tag]
+                .updated_at
+                .is_some()
+        );
+        std::fs::remove_file(rule_set_file(dir.path(), &set.tag)).unwrap();
+        assert!(cached_rule_set_updates(dir.path()).is_empty());
         capture.await.unwrap();
         assert!(
             UpdateNetwork {

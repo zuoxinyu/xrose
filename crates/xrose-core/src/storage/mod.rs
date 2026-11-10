@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -343,6 +343,37 @@ impl Store {
                     crate::util::atomic_write_private(
                         settings_file,
                         &serde_json::to_vec_pretty(&settings)?,
+                    )?;
+                }
+            }
+        }
+        if version < 15 {
+            // Keep explicit rule-set URLs and all unrelated encrypted profile fields intact.
+            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(stmt);
+            for (id, payload) in rows {
+                let mut model: serde_json::Value =
+                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+                if let Some(route) = model.get_mut("routing").and_then(|v| v.as_object_mut()) {
+                    if route.contains_key("rule_set_source")
+                        && route.contains_key("custom_rule_set_template")
+                    {
+                        continue;
+                    }
+                    route.entry("rule_set_source").or_insert("upstream".into());
+                    route.entry("custom_rule_set_template").or_insert("".into());
+                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
+                    if !SecretBox::is_encrypted(&encrypted) {
+                        return Err(Error::other("配置加密失败，请重试迁移"));
+                    }
+                    tx.execute(
+                        "UPDATE profiles SET model=?1 WHERE id=?2",
+                        params![encrypted, id],
                     )?;
                 }
             }
@@ -1049,6 +1080,39 @@ mod tests {
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn v15_preserves_per_set_urls_and_initializes_the_upstream_source() {
+        let (store, dir) = store();
+        let paths = AppPaths::from_root(dir.path());
+        let id = store.active_profile_id().unwrap();
+        let mut model = serde_json::to_value(AppModel::default()).unwrap();
+        let routing = model["routing"].as_object_mut().unwrap();
+        routing.remove("rule_set_source");
+        routing.remove("custom_rule_set_template");
+        model["routing"]["rule_sets"][0]["url"] = "https://fixture.example/domains.srs".into();
+        let encrypted = store.secrets.encrypt(&model.to_string());
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "UPDATE profiles SET model=?1 WHERE id=?2",
+                params![encrypted, id],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 14).unwrap();
+        }
+        store.migrate(&paths.settings_file()).unwrap();
+        let migrated = store.load_profile(&id).unwrap().unwrap().model;
+        assert_eq!(
+            migrated.routing.rule_set_source,
+            crate::model::RuleSetSource::Upstream
+        );
+        assert!(migrated.routing.custom_rule_set_template.is_empty());
+        assert_eq!(
+            migrated.routing.rule_sets[0].url,
+            "https://fixture.example/domains.srs"
+        );
     }
 
     #[test]

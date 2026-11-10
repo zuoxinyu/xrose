@@ -18,6 +18,7 @@ pub(super) enum MenuTarget {
     Forward(String, PortForward),
     ServiceForward(String, ServiceForward),
     RoutingFiles,
+    RuleSetSources,
     NodeSelector,
     DefaultOutbound,
     OutboundGroup(String),
@@ -40,6 +41,8 @@ pub(super) enum Command {
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
     ImportRoute,
+    SetRuleSetSource(xrose_core::model::RuleSetSource),
+    EditRuleSetSource,
     ExportRoute(ExportScope),
     SelectNode(String, String),
     SelectWorkMode(WorkMode),
@@ -569,6 +572,54 @@ impl AppView {
                         Command::CleanNodes,
                     ));
             }
+            MenuTarget::RuleSetSources => {
+                use xrose_core::model::RuleSetSource::*;
+                let current = self.snapshot.model.routing.rule_set_source;
+                let available = !busy("rulesets");
+                menu = menu.label(self.tr("sing-box 规则源", "sing-box rule set source"));
+                for (source, zh, en) in [
+                    (Upstream, "默认上游", "Default upstream"),
+                    (MetaCubeX, "MetaCubeX", "MetaCubeX"),
+                    (JsDelivr, "jsDelivr 镜像", "jsDelivr mirror"),
+                ] {
+                    menu = menu.item(
+                        add(zh, en, available, Command::SetRuleSetSource(source))
+                            .checked(current == source),
+                    );
+                }
+                if self
+                    .snapshot
+                    .model
+                    .routing
+                    .custom_rule_set_template
+                    .is_empty()
+                {
+                    menu = menu.item(add(
+                        "自定义规则源…",
+                        "Custom source…",
+                        available,
+                        Command::EditRuleSetSource,
+                    ));
+                } else {
+                    menu = menu
+                        .item(
+                            add(
+                                "自定义",
+                                "Custom",
+                                available,
+                                Command::SetRuleSetSource(Custom),
+                            )
+                            .checked(current == Custom),
+                        )
+                        .separator()
+                        .item(add(
+                            "编辑自定义规则源…",
+                            "Edit custom source…",
+                            available,
+                            Command::EditRuleSetSource,
+                        ));
+                }
+            }
             MenuTarget::RoutingFiles => {
                 let ready = !busy("route-file");
                 menu = menu
@@ -862,6 +913,7 @@ impl AppView {
                 }) && self.snapshot.model.node(node_id).is_some_and(|n| n.enabled)
             }
             Command::UninstallHelper => self.snapshot.platform.helper_installed && !busy("helper"),
+            Command::SetRuleSetSource(_) | Command::EditRuleSetSource => !busy("rulesets"),
             Command::DeleteVersion(core, version) => {
                 !busy("install")
                     && self
@@ -1033,6 +1085,12 @@ impl AppView {
             }
             Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
+            Command::SetRuleSetSource(source) => {
+                if let Err(error) = self.service.set_rule_set_source(source, None) {
+                    self.service.toast(ToastLevel::Error, error.to_string());
+                }
+            }
+            Command::EditRuleSetSource => self.open_rule_set_source_dialog(window, cx),
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
             Command::SetDefaultOutbound(id) => {
                 if let Err(err) = self.service.set_default_outbound_group(&id) {

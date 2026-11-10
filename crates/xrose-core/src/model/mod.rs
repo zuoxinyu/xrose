@@ -16,7 +16,7 @@ pub use node::{
 };
 pub use route::{
     DomainStrategy, Matchers, Placement, RouteAction, RouteActionKind, RoutePreset, RouteRule,
-    RouteRuleGroup, RoutingConfig, RuleSet, RuleSetFormat,
+    RouteRuleGroup, RoutingConfig, RuleSet, RuleSetFormat, RuleSetSource,
 };
 
 use serde::{Deserialize, Serialize};

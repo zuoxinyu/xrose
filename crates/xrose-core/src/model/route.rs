@@ -243,6 +243,61 @@ pub struct RuleSet {
     pub update_interval_hours: u64,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSetSource {
+    #[default]
+    Upstream,
+    MetaCubeX,
+    JsDelivr,
+    Custom,
+}
+
+/// Accept a directory or a template whose substitutions are confined to the URL path.
+pub fn rule_set_source_template(value: &str) -> crate::Result<String> {
+    let value = value.trim();
+    let error = || {
+        crate::Error::config(
+            "请输入 HTTP(S) 目录地址，或在路径中使用 {tag} 或 {name}；地址不能包含认证信息、查询参数或片段",
+        )
+    };
+    let (_, after_scheme) = value.split_once("://").ok_or_else(error)?;
+    let authority = after_scheme.split('/').next().unwrap_or_default();
+    if authority.is_empty()
+        || authority.contains(['{', '}', '@'])
+        || value.contains('\\')
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(error());
+    }
+    let template = if value.contains(['{', '}']) {
+        if !value.contains("{tag}") && !value.contains("{name}") {
+            return Err(error());
+        }
+        value.to_owned()
+    } else {
+        format!("{}/{{tag}}.srs", value.trim_end_matches('/'))
+    };
+    let sample = expand_rule_set_template(&template, "geoip", "cn");
+    let url = url::Url::parse(&sample).map_err(|_| error())?;
+    if sample.contains(['{', '}'])
+        || !matches!(url.scheme(), "http" | "https")
+        || !url.has_host()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(error());
+    }
+    Ok(template)
+}
+
+pub(crate) fn expand_rule_set_template(template: &str, kind: &str, name: &str) -> String {
+    template
+        .replace("{tag}", &format!("{kind}-{name}"))
+        .replace("{kind}", kind)
+        .replace("{name}", name)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoutingConfig {
     #[serde(default)]
@@ -256,6 +311,10 @@ pub struct RoutingConfig {
     pub final_action: RouteAction,
     #[serde(default)]
     pub rule_sets: Vec<RuleSet>,
+    #[serde(default)]
+    pub rule_set_source: RuleSetSource,
+    #[serde(default)]
+    pub custom_rule_set_template: String,
     #[serde(default)]
     pub domain_strategy: DomainStrategy,
     #[serde(default = "crate::model::default_true")]
@@ -272,6 +331,8 @@ impl Default for RoutingConfig {
             rule_groups: Vec::new(),
             final_action: RouteAction::proxy(),
             rule_sets: default_rule_sets(),
+            rule_set_source: RuleSetSource::Upstream,
+            custom_rule_set_template: String::new(),
             domain_strategy: DomainStrategy::PreferIpv4,
             bypass_lan: true,
             bypass_china_ips: false,

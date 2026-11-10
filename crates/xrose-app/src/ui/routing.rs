@@ -17,6 +17,48 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
 
 impl AppView {
+    pub(super) fn open_rule_set_source_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let lang = self.lang();
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("https://rules.example/{tag}.srs")
+                .default_value(self.snapshot.model.routing.custom_rule_set_template.clone())
+        });
+        let error = cx.new(|_| None::<String>);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            let p = palette(cx);
+            let tr = |zh, en| super::tr(lang, zh, en);
+            let form = div().flex().flex_col().gap_2()
+                .child(tr("下载目录或 URL 模板", "Download directory or URL template"))
+                .child(Input::new(&input))
+                .child(div().text_xs().text_color(p.muted_fg).child(tr(
+                    "目录下按 {tag}.srs 下载。模板可使用 {tag}（geoip-cn）、{kind}（geoip）和 {name}（cn）。单独指定地址的规则集保留原来源。",
+                    "A directory serves {tag}.srs. Templates accept {tag} (geoip-cn), {kind} (geoip), and {name} (cn). Individually configured URLs are kept.",
+                )))
+                .when_some(error.read(cx).clone(), |d, e| d.child(form_feedback(e, false, &p)));
+            let (input, error, view) = (input.clone(), error.clone(), view.clone());
+            let focus = input.read(cx).focus_handle(cx);
+            super::dialogs::settings_dialog(dialog, tr("自定义规则源", "Custom rule set source"), form, &p, window)
+                .footer(div().flex().justify_end().gap_2()
+                    .child(Button::new("rule-set-source-cancel").compact().label(tr("取消","Cancel")).on_click(|_,w,cx| w.close_dialog(cx)))
+                    .child(Button::new("rule-set-source-save").compact().primary().label(tr("保存并使用","Save and use")).on_click(move |_, w, cx| {
+                        focus.dispatch_action(&gpui_kit::component::dialog::Confirm { secondary: false }, w, cx);
+                    })))
+                .on_ok(move |_, _, cx| view.update(cx, |this, cx| {
+                    let value = input.read(cx).value();
+                    let result = xrose_core::model::route::rule_set_source_template(&value)
+                        .map_err(|_| this.tr("请输入有效的 HTTP(S) 目录地址或模板。变量仅可用于路径，地址不能包含认证信息、查询参数或片段。",
+                            "Enter a valid HTTP(S) directory or template. Use placeholders only in the path and omit credentials, query strings, and fragments.").to_string())
+                        .and_then(|template| this.service.set_rule_set_source(xrose_core::model::RuleSetSource::Custom, Some(&template)).map_err(|e| e.to_string()));
+                    match result {
+                        Ok(()) => { this.sync(cx); true }
+                        Err(e) => { error.update(cx, |error, cx| { *error = Some(e); cx.notify(); }); cx.notify(); false }
+                    }
+                }).unwrap_or(false))
+        });
+    }
+
     pub(super) fn open_rule_group_dialog(
         &self,
         group_id: Option<String>,
@@ -154,6 +196,12 @@ impl AppView {
             .find(|g| Some(&g.id) == self.rule_group_id.as_ref());
         let visible_rules = selected_group.map(|g| &g.rules).unwrap_or(&routing.rules);
         let rule_sets = self.snapshot.rule_sets();
+        let rule_set_updates: std::collections::BTreeMap<_, _> = self
+            .snapshot
+            .rule_set_updates
+            .iter()
+            .map(|update| (update.tag.as_str(), update))
+            .collect();
         let mut body = div().flex().flex_col().gap_4().w_full();
 
         // Presets.
@@ -789,78 +837,33 @@ impl AppView {
                             &p,
                             self.tr("规则集 / Geo 数据", "Rule sets / Geo data"),
                             self.tr(
-                                "管理路由与 DNS 规则引用的本地规则集与 Geo 数据",
-                                "Manage local rule-sets and Geo data referenced by routing and DNS rules",
+                                "可在任意路由模式下更新内置模板、路由规则和 DNS 引用的规则集",
+                                "Update rule sets for built-in presets, routing rules and DNS in any routing mode",
                             ),
                         ))
                         .child(
-                            Button::new("sync-rulesets")
-                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .label(self.tr("更新规则集", "Update rule-sets"))
-                                .loading(self.snapshot.busy.iter().any(|b| b == "rulesets"))
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.service.sync_rule_sets();
-                                })),
+                            div()
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    more_button("rule-set-sources", self.tr("切换规则源", "Change rule set source"))
+                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RuleSetSources)),
+                                )
+                                .child(
+                                    Button::new("sync-rulesets")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .label(self.tr("更新全部规则集", "Update all rule sets"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "rulesets"))
+                                        .on_click(cx.listener(|this, _, _, _| this.service.sync_rule_sets())),
+                                ),
                         ),
                 )
                 .children(rule_sets.iter().map(|set| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_2()
-                        .rounded_md()
-                        .bg(p.bg)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w(px(0.))
-                                        .text_sm()
-                                        .text_color(p.fg)
-                                        .truncate()
-                                        .child(set.tag.clone()),
-                                )
-                                .child(
-                                    div().flex_shrink_0().child(pill(
-                                        set.format.as_str(),
-                                        p.muted_fg,
-                                        p.panel_alt,
-                                    )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(p.muted_fg)
-                                .truncate()
-                                .child(set.url.clone()),
-                        )
-                }))
-                .when(!self.snapshot.rule_set_updates.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .children(self.snapshot.rule_set_updates.iter().map(|update| {
-                                div()
-                                    .text_xs()
-                                    .text_color(if update.status == "failed" { p.danger } else { p.muted_fg })
-                                    .child(format!(
-                                        "{} · {} · {}",
-                                        update.tag,
-                                        update.status,
-                                        update.error.clone().unwrap_or_else(|| format!("{} B", update.bytes))
-                                    ))
-                            })),
-                    )
-                }),
+                    self.rule_set_row(set, rule_set_updates.get(set.tag.as_str()).copied(), &p)
+                })),
         );
 
         // Validation / warnings.
@@ -892,5 +895,90 @@ impl AppView {
 
         let _ = lang;
         body
+    }
+
+    fn rule_set_row(
+        &self,
+        set: &xrose_core::model::RuleSet,
+        update: Option<&xrose_core::updates::RuleSetUpdate>,
+        p: &super::theme::Palette,
+    ) -> Div {
+        let timestamp = update
+            .and_then(|u| u.updated_at)
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            });
+        let last_updated = match timestamp {
+            Some(time) => format!("{} {time}", self.tr("最后更新", "Last updated")),
+            None => self.tr("尚未更新", "Never updated").to_string(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .bg(p.bg)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(p.fg)
+                            .truncate()
+                            .child(set.tag.clone()),
+                    )
+                    .child(pill(set.format.as_str(), p.muted_fg, p.panel_alt)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(p.muted_fg)
+                    .truncate()
+                    .child(set.url.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
+                    .text_xs()
+                    .child(div().text_color(p.muted_fg).child(last_updated))
+                    .when_some(update, |row, update| {
+                        let (label, color) = match update.status.as_str() {
+                            "updated" => (
+                                format!(
+                                    "{} · {}",
+                                    self.tr("已更新", "Updated"),
+                                    xrose_core::util::format_bytes(update.bytes)
+                                ),
+                                p.ok_text,
+                            ),
+                            "not-modified" => {
+                                (self.tr("已是最新", "Up to date").to_string(), p.muted_fg)
+                            }
+                            "failed" => (
+                                format!(
+                                    "{} · {}",
+                                    self.tr("更新失败", "Update failed"),
+                                    update.error.as_deref().unwrap_or_default()
+                                ),
+                                p.danger_text,
+                            ),
+                            _ => return row,
+                        };
+                        row.child(div().text_color(color).child(label))
+                    }),
+            )
     }
 }

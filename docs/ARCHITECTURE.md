@@ -78,6 +78,7 @@
 ## 5. 路由、规则集与文件交换
 
 - **规则编译**：`RoutingConfig.rule_groups` 保存自定义分组；启用分组按顺序优先于未分组与预设规则展开，内核编译、本地路由预览（`effective_rules()`）与 PAC 直连收集共用同一规则顺序。
+- **规则集更新**：sing-box 启动只准备当前路由和 DNS 实际引用的文件。路由页的批量更新还包括其他内置路由模板、已保存但未启用的规则和 DNS 引用，按标签去重并优先采用配置的镜像。默认上游、MetaCubeX、jsDelivr 及自定义地址模板按配置档保存，供列表、编译与下载共用；显式指定的独立地址保留。列表从本地缓存恢复最后更新时间；条件请求按下载 URL 区分，切源后首次更新重新获取内容，失败与 HTTP 304 保留上一次写入时间。
 - **路由交换**（`route/transfer.rs`）：定义独立于数据库版本的 `xrose-routing` v1 JSON（包含 `rules`、`rule_groups`、`rule_sets` 与用于跨配置解析出站组的 `outbound_names`），不含节点、订阅或运行状态。同标签且同定义的规则集直接复用，定义冲突则拒绝整批导入；规则集来源限制为无凭据与无查询参数的 HTTP(S) URL。
 - **SwitchyOmega / AutoProxy 转换**（`route/transfer/omega.rs`）：按 [SwitchyOmega 解析顺序](https://github.com/FelisCatus/SwitchyOmega/blob/master/omega-pac/src/rule_list.coffee) 转换为统一意图模型并生成预览摘要，不支持的浏览器专有条件记入跳过提示。后台解析结果仅存内存，用户确认后验证预览 ID 与引用完整性再事务提交。
 
@@ -179,6 +180,6 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 ## 11. 持久化与安全边界
 
-- **加密存储与迁移**：使用 SQLite WAL 模式，当前数据库版本 `SCHEMA_VERSION = 14`。迁移前自动执行数据库备份（`backup_before_migration`），历史演进覆盖多配置与订阅加密（v1–v4）、出站组与 EasyTier 选项补全（v5–v7）、历史流量统计表（v8）、服务端口转发与自动重连字段（v9/v13）、热重载与托盘设置迁移（v10–v11）、工作模式迁移（v12）以及自定义内核路径版本清理（v14）。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
+- **加密存储与迁移**：使用 SQLite WAL 模式，当前数据库版本 `SCHEMA_VERSION = 15`。迁移前自动执行数据库备份（`backup_before_migration`），历史演进覆盖多配置与订阅加密（v1–v4）、出站组与 EasyTier 选项补全（v5–v7）、历史流量统计表（v8）、服务端口转发与自动重连字段（v9/v13）、热重载与托盘设置迁移（v10–v11）、工作模式迁移（v12）、自定义内核路径版本清理（v14）以及规则集下载来源（v15）。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
 - **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
 - **代理崩溃恢复**：应用系统代理前保存状态快照，启动时若检测到异常退出残留则自动还原，防止系统断网。

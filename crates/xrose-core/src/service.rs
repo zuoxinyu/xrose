@@ -277,7 +277,7 @@ impl UiSnapshot {
     }
 
     pub fn rule_sets(&self) -> Vec<crate::model::RuleSet> {
-        crate::route::transfer::listed_rule_sets(&self.model)
+        crate::adapters::downloadable_rule_sets(&self.model)
     }
 
     /// Resolve the same group as the node list, including live automatic choices.
@@ -387,7 +387,8 @@ struct Inner {
     doctor_generation: AtomicU64,
     recovery_note: RwLock<Option<String>>,
     helper: RwLock<HelperStatus>,
-    rule_set_updates: RwLock<Vec<RuleSetUpdate>>,
+    rule_set_updates: RwLock<BTreeMap<String, RuleSetUpdate>>,
+    rule_set_lock: tokio::sync::Mutex<()>,
     route_import: Mutex<Option<routing_transfer::PendingImport>>,
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
@@ -465,6 +466,7 @@ impl AppService {
         mesh.sync_outbounds(&mut model);
         let statistics =
             traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
+        let rule_set_updates = updates::cached_rule_set_updates(&paths.rule_sets_dir());
         let inner = Arc::new(Inner {
             local_binaries: Default::default(),
             statistics,
@@ -507,7 +509,8 @@ impl AppService {
             doctor_generation: AtomicU64::new(0),
             recovery_note: RwLock::new(None),
             helper: RwLock::new(privilege::initial_status()),
-            rule_set_updates: RwLock::new(Vec::new()),
+            rule_set_updates: RwLock::new(rule_set_updates),
+            rule_set_lock: Default::default(),
             route_import: Mutex::new(None),
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
@@ -718,7 +721,13 @@ impl AppService {
             config_dirty,
             auto_reload_pending,
             recovery_note: self.inner.recovery_note.read().clone(),
-            rule_set_updates: self.inner.rule_set_updates.read().clone(),
+            rule_set_updates: self
+                .inner
+                .rule_set_updates
+                .read()
+                .values()
+                .cloned()
+                .collect(),
             route_import: self
                 .inner
                 .route_import
@@ -958,6 +967,17 @@ impl AppService {
         &self,
         change: impl FnOnce(&mut AppModel) -> Result<bool>,
     ) -> Result<bool> {
+        let changed = self.save_model_change(change)?;
+        if changed {
+            self.mark_dirty();
+        }
+        Ok(changed)
+    }
+
+    fn save_model_change(
+        &self,
+        change: impl FnOnce(&mut AppModel) -> Result<bool>,
+    ) -> Result<bool> {
         let mut current = self.inner.model.write();
         let mut next = current.clone();
         if !change(&mut next)? {
@@ -967,7 +987,6 @@ impl AppService {
         *current = next;
         drop(current);
         *self.inner.active_profile.write() = Some(profile);
-        self.mark_dirty();
         Ok(true)
     }
 
@@ -2186,10 +2205,15 @@ impl AppService {
         }
         let sets = crate::adapters::required_rule_sets(model);
         let dir = self.inner.paths.rule_sets_dir();
-        let missing: Vec<crate::model::RuleSet> = sets
-            .into_iter()
-            .filter(|set| !dir.join(format!("{}.srs", set.tag)).exists())
-            .collect();
+        let missing_file = |set: &crate::model::RuleSet| {
+            !std::fs::metadata(updates::rule_set_file(&dir, &set.tag))
+                .is_ok_and(|m| m.is_file() && m.len() > 0)
+        };
+        if !sets.iter().any(missing_file) {
+            return Ok(());
+        }
+        let _lock = self.inner.rule_set_lock.lock().await;
+        let missing: Vec<_> = sets.into_iter().filter(missing_file).collect();
         if missing.is_empty() {
             return Ok(());
         }
@@ -2197,7 +2221,7 @@ impl AppService {
             ToastLevel::Info,
             format!("正在预下载 {} 个规则集…", missing.len()),
         );
-        let results = updates::sync_rule_sets(&missing, &dir, &self.resource_network()).await;
+        let results = self.download_rule_sets(&missing).await;
         let failed: Vec<_> = results.iter().filter(|r| r.status == "failed").collect();
         for failure in failed {
             self.inner.core.logs().push(
@@ -2210,10 +2234,9 @@ impl AppService {
                 ),
             );
         }
-        *self.inner.rule_set_updates.write() = results;
         let still_missing: Vec<String> = missing
             .iter()
-            .filter(|set| !dir.join(format!("{}.srs", set.tag)).exists())
+            .filter(|set| missing_file(set))
             .map(|set| set.tag.clone())
             .collect();
         if still_missing.is_empty() {
@@ -3830,28 +3853,92 @@ impl AppService {
         });
     }
 
+    // Callers serialize manual and startup downloads so cache files and row results stay in order.
+    async fn download_rule_sets(&self, sets: &[crate::model::RuleSet]) -> Vec<RuleSetUpdate> {
+        updates::sync_rule_sets_reporting(
+            sets,
+            &self.inner.paths.rule_sets_dir(),
+            &self.resource_network(),
+            |result| {
+                self.inner
+                    .rule_set_updates
+                    .write()
+                    .insert(result.tag.clone(), result.clone());
+            },
+        )
+        .await
+    }
+
+    /// Changes future downloads without interrupting the running core or removing cached files.
+    pub fn set_rule_set_source(
+        &self,
+        source: crate::model::RuleSetSource,
+        custom: Option<&str>,
+    ) -> Result<()> {
+        let busy_error = || Error::config("规则集正在使用，请在更新或内核操作完成后重试");
+        let _lock = self
+            .inner
+            .rule_set_lock
+            .try_lock()
+            .map_err(|_| busy_error())?;
+        if self.is_busy("rulesets") || self.is_busy("core") {
+            return Err(busy_error());
+        }
+        let mut changed_tags = Vec::new();
+        if self.save_model_change(|model| {
+            let template = if source == crate::model::RuleSetSource::Custom {
+                crate::model::route::rule_set_source_template(
+                    custom.unwrap_or(&model.routing.custom_rule_set_template),
+                )?
+            } else {
+                model.routing.custom_rule_set_template.clone()
+            };
+            if model.routing.rule_set_source == source
+                && template == model.routing.custom_rule_set_template
+            {
+                return Ok(false);
+            }
+            let previous = crate::adapters::downloadable_rule_sets(model);
+            model.routing.rule_set_source = source;
+            model.routing.custom_rule_set_template = template;
+            model.updated_at = now_unix();
+            changed_tags.extend(
+                previous
+                    .into_iter()
+                    .filter(|set| {
+                        crate::adapters::resolve_rule_set(model, &set.tag)
+                            .is_some_and(|next| next.url != set.url)
+                    })
+                    .map(|set| set.tag),
+            );
+            Ok(true)
+        })? {
+            let mut updates = self.inner.rule_set_updates.write();
+            for tag in changed_tags {
+                if let Some(result) = updates.get_mut(&tag) {
+                    result.status = "cached".into();
+                    result.error = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn sync_rule_sets(&self) {
-        if self.is_busy("rulesets") {
+        if !self.inner.busy.write().insert("rulesets".into()) {
             return;
         }
-        self.set_busy("rulesets", true);
         let service = self.clone();
         self.spawn(async move {
-            let model = service.inner.model.read().clone();
-            let dir = service.inner.paths.rule_sets_dir();
-            let results = updates::sync_rule_sets(
-                &crate::route::transfer::listed_rule_sets(&model),
-                &dir,
-                &service.resource_network(),
-            )
-            .await;
+            let _lock = service.inner.rule_set_lock.lock().await;
+            let sets = crate::adapters::downloadable_rule_sets(&service.inner.model.read());
+            let results = service.download_rule_sets(&sets).await;
             let updated = results.iter().filter(|r| r.status == "updated").count();
             let failed = results.iter().filter(|r| r.status == "failed").count();
             let unchanged = results
                 .iter()
                 .filter(|r| r.status == "not-modified")
                 .count();
-            *service.inner.rule_set_updates.write() = results;
             service.set_busy("rulesets", false);
             service.toast(
                 if failed > 0 {
@@ -5571,6 +5658,73 @@ mod tests {
     }
 
     #[test]
+    fn rule_set_source_applies_to_new_tags_and_retains_custom_addresses() {
+        use crate::model::RuleSetSource::*;
+        let (service, _dir) = service();
+        let url = |tag: &str| {
+            crate::adapters::resolve_rule_set(&service.model(), tag)
+                .unwrap()
+                .url
+        };
+        let upstream = url("geoip-cn");
+        service.set_rule_set_source(MetaCubeX, None).unwrap();
+        assert!(url("geoip-cn").ends_with("/sing/geo/geoip/cn.srs"));
+        service.set_rule_set_source(JsDelivr, None).unwrap();
+        assert!(url("geosite-gfw").contains("cdn.jsdelivr.net/gh/MetaCubeX/"));
+        assert!(url("geoip-cn").contains("sing-geoip@rule-set/"));
+        let exported = crate::route::transfer::export(
+            &service.model(),
+            &crate::route::transfer::ExportScope::RuleSets,
+        )
+        .unwrap();
+        assert!(exported.contains(&url("geoip-cn")));
+        service
+            .set_rule_set_source(Custom, Some("https://rules.example/base/"))
+            .unwrap();
+        assert_eq!(
+            url("geosite-new"),
+            "https://rules.example/base/geosite-new.srs"
+        );
+        let template = "https://rules.example/{kind}/{name}.srs";
+        service.set_rule_set_source(Custom, Some(template)).unwrap();
+        assert_eq!(url("geosite-new"), "https://rules.example/geosite/new.srs");
+        for invalid in [
+            "",
+            "file:///rules",
+            "https://rules.example/{bad}.srs",
+            "https://{tag}.example/",
+            "https://rules.example/a?q=b",
+            "https://rules.example/#{tag}",
+        ] {
+            assert!(service.set_rule_set_source(Custom, Some(invalid)).is_err());
+            assert_eq!(service.model().routing.custom_rule_set_template, template);
+        }
+        service.set_rule_set_source(Upstream, None).unwrap();
+        assert_eq!(url("geoip-cn"), upstream);
+        let store = service.store();
+        let stored = store
+            .load_profile(&store.active_profile_id().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.model.routing.custom_rule_set_template, template);
+        let mut explicit = crate::adapters::default_rule_set("geosite-gfw").unwrap();
+        explicit.url = "https://other.example/explicit.srs".into();
+        service
+            .inner
+            .model
+            .write()
+            .routing
+            .rule_sets
+            .push(explicit.clone());
+        service.set_rule_set_source(Custom, None).unwrap();
+        assert_eq!(url("geosite-gfw"), explicit.url);
+        assert!(!service.snapshot().config_dirty);
+        service.set_busy("rulesets", true);
+        assert!(service.set_rule_set_source(Upstream, None).is_err());
+        assert_eq!(service.model().routing.rule_set_source, Custom);
+    }
+
+    #[test]
     fn subscription_sharing_uses_the_current_feed_url_even_without_nodes() {
         let (service, _dir) = service();
         let initial = "https://feed.example/first";
@@ -6635,6 +6789,73 @@ proxy-groups:
         assert!(service.model().routing.rules.is_empty());
         service.set_route_preset(RoutePreset::BypassMainland);
         assert!(!service.model().routing.rules.is_empty());
+    }
+
+    #[test]
+    fn global_start_needs_no_cache_and_manual_update_reports_each_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        let cache = paths.rule_sets_dir();
+        // An existing file without a sidecar predates the current run.
+        crate::util::atomic_write(&cache.join("geoip-cn.srs"), b"cached").unwrap();
+        let service = AppService::with_paths(paths).unwrap();
+        let before = service
+            .snapshot()
+            .rule_set_updates
+            .into_iter()
+            .find(|row| row.tag == "geoip-cn")
+            .unwrap();
+        assert!(before.updated_at.is_some());
+        let mut settings = service.settings();
+        settings.proxy_resource_updates = true;
+        service.save_settings(&settings).unwrap();
+        service
+            .commit_model_change(|model| {
+                model.add_nodes([Node::new("Fixture", Protocol::Socks, "proxy.example", 1080)]);
+                model.work_mode = WorkMode::Proxy;
+                model.apply_preset(RoutePreset::Global);
+                Ok(true)
+            })
+            .unwrap();
+        let model = service.model();
+        service.inner.rt.block_on(async {
+            let _manual_download = service.inner.rule_set_lock.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.ensure_rule_sets(&model, &settings),
+            )
+            .await
+            .expect("global startup waited for optional downloads")
+            .unwrap();
+        });
+        service.sync_rule_sets();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while service.is_busy("rulesets") {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let snapshot = service.snapshot();
+        assert_eq!(snapshot.model.routing.preset, RoutePreset::Global);
+        let sets = snapshot.rule_sets();
+        assert_eq!(snapshot.rule_set_updates.len(), sets.len());
+        // The resource proxy is deliberately unavailable, so no network is accessed.
+        for set in sets {
+            let row = snapshot
+                .rule_set_updates
+                .iter()
+                .find(|r| r.tag == set.tag)
+                .unwrap();
+            assert_eq!(row.status, "failed");
+            assert!(row.error.is_some());
+            assert_eq!(
+                row.updated_at,
+                if set.tag == "geoip-cn" {
+                    before.updated_at
+                } else {
+                    None
+                }
+            );
+        }
     }
 
     #[test]

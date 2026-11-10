@@ -102,10 +102,14 @@ pub fn export(model: &AppModel, scope: &ExportScope) -> Result<String> {
         ExportScope::All => {
             bundle.rules = config.rules.clone();
             bundle.rule_groups = config.rule_groups.clone();
-            bundle.rule_sets = config.rule_sets.clone();
+            bundle.rule_sets = config
+                .rule_sets
+                .iter()
+                .filter_map(|set| crate::adapters::resolve_rule_set(model, &set.tag))
+                .collect();
         }
         ExportScope::RuleSets => {
-            bundle.rule_sets = listed_rule_sets(model);
+            bundle.rule_sets = crate::adapters::downloadable_rule_sets(model);
         }
         ExportScope::Group(id) => bundle.rule_groups.push(
             config
@@ -172,23 +176,7 @@ fn encode_bundle(mut bundle: Bundle, model: &AppModel) -> Result<String> {
     Ok(output)
 }
 
-pub(crate) fn listed_rule_sets(model: &AppModel) -> Vec<RuleSet> {
-    let mut sets: BTreeMap<_, _> = model
-        .routing
-        .rule_sets
-        .iter()
-        .cloned()
-        .map(|s| (s.tag.clone(), s))
-        .collect();
-    for tag in crate::adapters::rule_set_tags(model, crate::model::WorkMode::Proxy) {
-        if let Some(set) = crate::adapters::resolve_rule_set(model, &tag) {
-            sets.insert(tag, set);
-        }
-    }
-    sets.into_values().collect()
-}
-
-fn safe_tag(tag: &str) -> bool {
+pub(crate) fn safe_tag(tag: &str) -> bool {
     let stem = tag.split('.').next().unwrap_or("").to_ascii_uppercase();
     !tag.is_empty()
         && tag.len() <= 200
@@ -238,7 +226,10 @@ fn validate_sets(bundle: &Bundle, model: &AppModel) -> Result<()> {
                 "规则集来源需为不含认证信息、查询参数或片段的 HTTP(S) 地址",
             ));
         }
-        if by_tag.get(&key).is_some_and(|existing| **existing != *set) {
+        if by_tag.get(&key).is_some_and(|existing| {
+            **existing != *set
+                && crate::adapters::resolve_rule_set(model, &existing.tag).as_ref() != Some(set)
+        }) {
             return Err(Error::config(
                 "已有同名规则集使用不同配置，请先统一标签和来源",
             ));
