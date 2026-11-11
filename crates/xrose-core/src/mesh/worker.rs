@@ -2,9 +2,12 @@
 use super::{
     MeshPhase, MeshProvider, MeshRuntimeView,
     ipc::{Bootstrap, WorkerCommand},
+    platform::NetworkBaseline,
 };
 use crate::{Error, Result};
 use std::io::{BufRead, Read, Write};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 fn publish(state: &MeshRuntimeView) {
     if let Ok(json) = serde_json::to_string(state) {
@@ -31,24 +34,9 @@ pub fn main() -> Result<()> {
     drop(line);
     boot.profile.validate()?;
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-    std::thread::spawn(move || {
-        let mut input = std::io::stdin().lock();
-        loop {
-            let mut line = String::new();
-            if input.by_ref().take(32769).read_line(&mut line).unwrap_or(0) == 0 {
-                break;
-            }
-            if line.len() > 32768 {
-                break;
-            }
-            if let Ok(c) = serde_json::from_str(&line) {
-                if sender.blocking_send(c).is_err() {
-                    return;
-                }
-            }
-        }
-        let _ = sender.blocking_send(WorkerCommand::Stop);
-    });
+    let stopping = CancellationToken::new();
+    let reader_stop = stopping.clone();
+    std::thread::spawn(move || read_commands(std::io::stdin().lock(), sender, reader_stop));
     let mut builder = if boot.profile.provider == MeshProvider::EasyTier
         && !boot.profile.easytier.device.multi_thread
     {
@@ -77,7 +65,7 @@ pub fn main() -> Result<()> {
         let mut dns_warning=None;
         let mut probe=None;
         let mut current_profile = boot.profile.clone();
-        let mut proxy_addresses=boot.baseline.proxy_tun_addresses.clone();
+        let baselines = BaselineReader::new(boot.baseline.proxy_tun_addresses.clone());
         loop {tokio::select!{
             command=receiver.recv()=> match command {
                 Some(WorkerCommand::Stop)|None=>break,
@@ -91,16 +79,24 @@ pub fn main() -> Result<()> {
                     publish(&final_state);
                 }
                 Some(WorkerCommand::Probe{ip})=>{
-                    let result=backend.probe(ip.clone()).await;
+                    let Some(result) = stopping.run_until_cancelled(backend.probe(ip.clone())).await else {
+                        continue;
+                    };
                     probe=Some(match result {Ok(latency_ms)=>super::MeshProbe{ip,success:true,latency_ms,detail:"设备可达".into()},Err(error)=>super::MeshProbe{ip,success:false,latency_ms:None,detail:error.to_string()}});
                     final_state.probe=probe.clone();publish(&final_state);
                 }
             },
-            _=interval.tick()=>{
-                let mut state=backend.snapshot().await?;
+            _ = interval.tick(), if !stopping.is_cancelled() => {
+                let Some(result) = stopping.run_until_cancelled(backend.snapshot()).await else {
+                    continue;
+                };
+                let mut state = result?;
+                let Some(result) = stopping.run_until_cancelled(baselines.read()).await else {
+                    continue;
+                };
+                let current = result?;
                 state.probe=probe.clone();
                 state.forward_update=final_state.forward_update.clone();
-                let current=super::platform::worker_baseline(&mut proxy_addresses)?;
                 if let Some(change)=current.connectivity_change(&boot.baseline){return Err(Error::other(format!("检测到{change}，已停止组网以保护现有联网通道")));}
                 super::coexist::check_networks(&state.routes,&boot.baseline.protected)?;
                 let other_routes=current.mesh_routes.iter().filter(|route| route.interface!=state.interface)
@@ -145,6 +141,63 @@ pub fn main() -> Result<()> {
     final_state.finish(error.map(|e| e.to_string()));
     publish(&final_state);
     Ok(())
+}
+
+// This thread only reads network state. In particular, a Windows TUN query
+// can still be waiting on the helper while StopAll is waiting for us to exit.
+struct BaselineReader {
+    requests: std::sync::mpsc::Sender<oneshot::Sender<Result<NetworkBaseline>>>,
+}
+
+impl BaselineReader {
+    fn new(mut proxy_addresses: Vec<String>) -> Self {
+        let (requests, incoming) = std::sync::mpsc::channel::<oneshot::Sender<_>>();
+        std::thread::spawn(move || {
+            for reply in incoming {
+                if reply
+                    .send(super::platform::worker_baseline(&mut proxy_addresses))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Self { requests }
+    }
+
+    async fn read(&self) -> Result<NetworkBaseline> {
+        let (reply, result) = oneshot::channel();
+        // A closed request channel also drops the reply sender.
+        let _ = self.requests.send(reply);
+        result
+            .await
+            .map_err(|_| Error::other("组网网络状态查询异常，请重新连接"))?
+    }
+}
+
+fn read_commands(
+    mut input: impl BufRead,
+    sender: tokio::sync::mpsc::Sender<WorkerCommand>,
+    stopping: CancellationToken,
+) {
+    loop {
+        let mut line = String::new();
+        if input.by_ref().take(32769).read_line(&mut line).unwrap_or(0) == 0 || line.len() > 32768 {
+            break;
+        }
+        match serde_json::from_str(&line) {
+            Ok(WorkerCommand::Stop) => break,
+            Ok(command) => {
+                if sender.blocking_send(command).is_err() {
+                    return;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    // Wake an in-flight status read or probe. Dropping the sender lets the
+    // command loop finish any queued mutations before it closes the backend.
+    stopping.cancel();
 }
 fn is_link_local(ip: std::net::IpAddr) -> bool {
     match ip {
@@ -253,6 +306,38 @@ impl Backend {
                 }
             }
             Self::Tailscale(t) => t.probe(ip).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_and_pipe_close_interrupt_reads_and_preserve_queued_logout() {
+        for ending in ["{\"action\":\"stop\"}\n{\"action\":\"logout\"}\n", ""] {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+            let stopping = CancellationToken::new();
+            let (requests, incoming) = std::sync::mpsc::channel();
+            let baselines = BaselineReader { requests };
+            let read = stopping.run_until_cancelled(baselines.read());
+            tokio::pin!(read);
+            assert!(futures_util::poll!(&mut read).is_pending());
+            let pending_reply = incoming.try_recv().unwrap();
+
+            let commands = format!("{{\"action\":\"logout\"}}\n{ending}");
+            let reader_stop = stopping.clone();
+            std::thread::spawn(move || read_commands(commands.as_bytes(), sender, reader_stop))
+                .join()
+                .unwrap();
+            assert!(matches!(
+                futures_util::poll!(read),
+                std::task::Poll::Ready(None)
+            ));
+            assert!(matches!(receiver.recv().await, Some(WorkerCommand::Logout)));
+            assert!(receiver.recv().await.is_none());
+            assert!(pending_reply.is_closed());
         }
     }
 }

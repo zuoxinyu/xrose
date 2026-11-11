@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, OnceLock},
+    sync::{Arc, Once, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -93,7 +93,7 @@ struct Worker {
     state: Mutex<MeshRuntimeView>,
     directory: PathBuf,
     owner: super::platform::OwnerProcess,
-    stopping: std::sync::atomic::AtomicBool,
+    stopped: Once,
     user_stopped: std::sync::atomic::AtomicBool,
 }
 impl Worker {
@@ -117,12 +117,9 @@ impl Worker {
             .map_err(|_| Error::other("组网工作进程繁忙或已退出，请稍后重试"))
     }
     fn stop(&self) {
-        if self
-            .stopping
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return;
-        }
+        self.stopped.call_once(|| self.stop_child());
+    }
+    fn stop_child(&self) {
         let _ = self.send(WorkerCommand::Stop);
         let deadline = Instant::now() + Duration::from_secs(4);
         while Instant::now() < deadline {
@@ -149,6 +146,15 @@ impl Worker {
 struct Session {
     pid: u32,
     workers: BTreeMap<MeshProvider, Arc<Worker>>,
+}
+impl Session {
+    fn stop_all(&mut self) {
+        std::thread::scope(|scope| {
+            for (_, worker) in std::mem::take(&mut self.workers) {
+                scope.spawn(move || worker.stop());
+            }
+        });
+    }
 }
 static SESSIONS: OnceLock<Mutex<BTreeMap<String, Session>>> = OnceLock::new();
 
@@ -361,7 +367,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 return Err(Error::other("发送组网启动配置失败"));
             }
             let worker = Arc::new(Worker {
-                stopping: Default::default(),
+                stopped: Once::new(),
                 user_stopped: Default::default(),
                 child: Mutex::new(child),
                 input: command_pipe(input),
@@ -407,18 +413,20 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                     }
                     std::thread::sleep(Duration::from_millis(250));
                 }
-                let expected = matches!(
-                    monitor.state.lock().phase,
-                    MeshPhase::Disconnected | MeshPhase::Stopping
-                );
-                monitor.stop();
-                if !expected {
-                    let mut s = monitor.state.lock();
-                    s.phase = MeshPhase::Failed;
-                    if s.error.is_none() {
-                        s.error = Some("组网工作进程已退出".into());
+                monitor.stopped.call_once(|| {
+                    let expected = matches!(
+                        monitor.state.lock().phase,
+                        MeshPhase::Disconnected | MeshPhase::Stopping
+                    );
+                    monitor.stop_child();
+                    if !expected {
+                        let mut s = monitor.state.lock();
+                        s.phase = MeshPhase::Failed;
+                        if s.error.is_none() {
+                            s.error = Some("组网工作进程已退出".into());
+                        }
                     }
-                }
+                });
             });
             session.workers.insert(profile.provider, worker);
         }
@@ -431,11 +439,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 w.stop();
             }
         }
-        MeshCommand::StopAll => {
-            for (_, w) in std::mem::take(&mut session.workers) {
-                w.stop();
-            }
-        }
+        MeshCommand::StopAll => session.stop_all(),
         MeshCommand::Logout { provider } => {
             if let Some(w) = session.workers.get(provider) {
                 w.send(WorkerCommand::Logout)?;
@@ -537,76 +541,98 @@ mod tests {
         assert!(!format!("{request:?}").contains("fake-key"));
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn unix_stop_reaps_a_stuck_worker_process_group() {
-        use std::os::unix::process::CommandExt;
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 30 & wait"])
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let worker = Worker {
-            input: command_pipe(child.stdin.take().unwrap()),
-            child: Mutex::new(child),
-            state: Mutex::new(MeshRuntimeView {
-                phase: MeshPhase::Connected,
-                ..Default::default()
-            }),
-            directory: directory.path().to_path_buf(),
-            owner: super::super::platform::OwnerProcess::open(std::process::id()).unwrap(),
-            stopping: Default::default(),
-            user_stopped: Default::default(),
+    fn test_worker(
+        directory: &std::path::Path,
+        provider: MeshProvider,
+        script: &str,
+    ) -> Arc<Worker> {
+        #[cfg(unix)]
+        let mut command = {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", script]).process_group(0);
+            cmd
         };
-        let started = Instant::now();
-        worker.stop();
-        worker.stop();
-        assert!(started.elapsed() < Duration::from_secs(7));
-        assert!(worker.child.lock().try_wait().unwrap().is_some());
-        assert_eq!(worker.state.lock().phase, MeshPhase::Disconnected);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn stuck_worker_is_killed_and_stop_is_idempotent() {
-        use std::os::windows::process::CommandExt;
-        let dir = tempfile::tempdir().unwrap();
-        let mut child = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 30",
-            ])
-            .creation_flags(0x08000000)
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut cmd = Command::new("powershell.exe");
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .creation_flags(0x08000000);
+            cmd
+        };
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let input = command_pipe(child.stdin.take().unwrap());
-        let worker = Worker {
+        Arc::new(Worker {
             child: Mutex::new(child),
             input,
             state: Mutex::new(MeshRuntimeView {
+                provider,
                 phase: MeshPhase::Connected,
                 ..Default::default()
             }),
-            directory: dir.path().to_path_buf(),
+            directory: directory.to_path_buf(),
             owner: super::super::platform::OwnerProcess::open(std::process::id()).unwrap(),
-            stopping: Default::default(),
+            stopped: Once::new(),
             user_stopped: Default::default(),
+        })
+    }
+
+    fn stop_two_workers(script: &str, graceful: bool) -> Duration {
+        let dir = tempfile::tempdir().unwrap();
+        let workers = [MeshProvider::EasyTier, MeshProvider::Tailscale].map(|provider| {
+            (
+                provider,
+                test_worker(&dir.path().join(format!("{provider:?}")), provider, script),
+            )
+        });
+        let mut session = Session {
+            pid: std::process::id(),
+            workers: workers.iter().cloned().collect(),
         };
         let started = Instant::now();
-        worker.stop();
-        worker.stop();
-        assert!(started.elapsed() < Duration::from_secs(8));
-        assert!(worker.child.lock().try_wait().unwrap().is_some());
-        assert_eq!(worker.state.lock().phase, MeshPhase::Disconnected);
+        session.stop_all();
+        let elapsed = started.elapsed();
+        assert!(session.workers.is_empty());
+        for (_, worker) in workers {
+            let status = worker
+                .child
+                .lock()
+                .try_wait()
+                .unwrap()
+                .expect("worker reaped");
+            assert_eq!(status.success(), graceful);
+            worker.stop();
+            assert_eq!(worker.state.lock().phase, MeshPhase::Disconnected);
+        }
+        elapsed
+    }
+
+    #[test]
+    fn stop_all_reaps_two_stuck_workers_within_one_grace_period() {
+        #[cfg(unix)]
+        let script = "sleep 30 & wait";
+        #[cfg(windows)]
+        let script = "Start-Sleep -Seconds 30";
+        let elapsed = stop_two_workers(script, false);
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "stop_all took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn stop_all_reaps_responsive_workers_gracefully() {
+        #[cfg(unix)]
+        let script = r#"IFS= read -r cmd && [ "$cmd" = '{"action":"stop"}' ]"#;
+        #[cfg(windows)]
+        let script = r#"if ([Console]::ReadLine() -ne '{"action":"stop"}') { exit 1 }"#;
+        stop_two_workers(script, true);
     }
 
     #[cfg(windows)]

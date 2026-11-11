@@ -485,8 +485,10 @@ pub fn invalidate_status() {
 // Legacy clients only inspect the response status, so the ping can also
 // identify the running executable without a second IPC round trip.
 fn helper_signature() -> String {
+    // Identify helper-only fixes even when the mesh wire protocol stays compatible.
+    const HELPER_REVISION: u32 = 1;
     format!(
-        "pong:{}:{}",
+        "pong:{}:{}:{HELPER_REVISION}",
         env!("CARGO_PKG_VERSION"),
         crate::mesh::PROTOCOL_VERSION
     )
@@ -1986,7 +1988,12 @@ mod tests {
             ping_is_current(&handle_request(HelperRequest::Ping)),
             Some(true)
         );
-        for old in ["pong", "pong:0.0.0:0"] {
+        let previous = format!(
+            "pong:{}:{}",
+            env!("CARGO_PKG_VERSION"),
+            crate::mesh::PROTOCOL_VERSION
+        );
+        for old in ["pong", "pong:0.0.0:0", &previous] {
             assert_eq!(ping_is_current(&HelperResponse::ok(old)), Some(false));
         }
         assert_eq!(ping_is_current(&HelperResponse::error("unavailable")), None);
