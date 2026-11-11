@@ -87,6 +87,8 @@ fn main() {
     println!("cargo:rustc-link-lib=windowscodecs");
     println!("cargo:rustc-link-lib=ole32");
     println!("cargo:rustc-link-lib=comctl32");
+    // The click-through QR finder hides the desktop cursor for its session.
+    println!("cargo:rustc-link-lib=magnification");
     let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if env == "msvc" {
         println!("cargo:rustc-link-arg-bins=/STACK:{STACK_BYTES}");

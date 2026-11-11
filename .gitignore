@@ -1,4 +1,6 @@
 /target
+/dist
+/data
 /.probe
 /.probe2
 /.cargo-home

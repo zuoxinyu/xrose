@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <magnification.h>
 #include <stdbool.h>
 #include <stdlib.h>
 
@@ -20,6 +21,7 @@ enum { ESC_ID = 0x5852, ENTER_ID, SPACE_ID };
 static Scanner *scanners;
 static HHOOK mouse_hook;
 static Scanner *left_owner, *right_owner;
+static bool cursor_hidden;
 
 static Scanner *at(POINT screen, POINT *client) {
     for (Scanner *s = scanners; s; s = s->next) {
@@ -77,6 +79,9 @@ static LRESULT CALLBACK mouse_proc(int code, WPARAM message, LPARAM data) {
 static LRESULT CALLBACK window_proc(HWND w, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id,
                                     DWORD_PTR data) {
     (void)id;
+    // Normalized capture coordinates span the whole monitor, including its edges.
+    // Give GPUI that same client area when SetWindowPos applies the monitor bounds.
+    if (msg == WM_NCCALCSIZE) return 0;
     if (msg == WM_HOTKEY) {
         if (wp == ESC_ID) {
             ((Scanner *)data)->actions |= 2;
@@ -117,6 +122,12 @@ void *xrose_win_begin(HWND w, HMONITOR monitor) {
         RegisterHotKey(w, ESC_ID, MOD_NOREPEAT, VK_ESCAPE);
         RegisterHotKey(w, ENTER_ID, MOD_NOREPEAT, VK_RETURN);
         RegisterHotKey(w, SPACE_ID, MOD_NOREPEAT, VK_SPACE);
+        // The underlying application owns the pointer over a click-through window.
+        // Hide the system cursor once for all overlays sharing this hook.
+        if (MagInitialize()) {
+            cursor_hidden = MagShowSystemCursor(FALSE) != FALSE;
+            if (!cursor_hidden) MagUninitialize();
+        }
     }
     s->next = scanners;
     scanners = s;
@@ -187,6 +198,11 @@ void xrose_win_end(Scanner *s) {
     if (!scanners) {
         UnhookWindowsHookEx(mouse_hook);
         mouse_hook = NULL;
+        if (cursor_hidden) {
+            MagShowSystemCursor(TRUE);
+            MagUninitialize();
+            cursor_hidden = false;
+        }
     }
     if (left_owner == s) left_owner = NULL;
     if (right_owner == s) right_owner = NULL;
