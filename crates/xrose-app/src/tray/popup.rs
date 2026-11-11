@@ -22,6 +22,7 @@ use crate::ui::theme::{SEMANTIC_ALPHA, palette};
 use crate::ui::traffic_label;
 
 const NODE_ROW_HEIGHT: f32 = 38.;
+const NODE_SCROLL_HINT_DELAY: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 pub struct PopupManager {
@@ -92,8 +93,7 @@ impl PopupManager {
                         .position(|node| node.active)
                         .unwrap_or(0);
                     view.scroll.scroll_to_item(view.selected);
-                    view.scroll_hint = NodeScrollHint::Opening;
-                    super::backend::show_popup(window, bounds);
+                    view.show(window, bounds, cx);
                     window.focus(&view.focus, cx);
                     cx.notify();
                 });
@@ -121,8 +121,8 @@ impl PopupManager {
                 is_movable: false,
                 is_resizable: false,
                 is_minimizable: false,
-                focus: !cfg!(windows),
-                show: !cfg!(windows),
+                focus: !cfg!(any(windows, target_os = "macos")),
+                show: !cfg!(any(windows, target_os = "macos")),
                 app_id: Some("io.xrose.Xrose.Tray".into()),
                 window_background: crate::window_effects::window_background(),
                 window_decorations: Some(WindowDecorations::Client),
@@ -136,10 +136,10 @@ impl PopupManager {
             },
         ) {
             Ok((handle, view)) => {
-                #[cfg(windows)]
                 let _ = handle.update(cx, |_, window, cx| {
+                    #[cfg(windows)]
                     crate::window_effects::apply(window, cx);
-                    super::backend::show_popup(window, bounds);
+                    view.update(cx, |view, cx| view.show(window, bounds, cx));
                 });
                 self.window = Some(handle);
                 self.view = Some(view);
@@ -264,10 +264,13 @@ fn mesh_phase_info(
     (color, super::dashboard::mesh_phase_label(phase, lang))
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Default)]
 enum NodeScrollHint {
     #[default]
     Idle,
+    Waiting {
+        _task: Task<()>,
+    },
     Opening,
     AlignSelection,
     Start,
@@ -343,7 +346,7 @@ impl PopupView {
             visible: true,
             deactivated_at: None,
             scroll: ScrollHandle::new(),
-            scroll_hint: NodeScrollHint::Opening,
+            scroll_hint: NodeScrollHint::Idle,
             route_select,
             _subscriptions: vec![activation, appearance, route_selection],
         }
@@ -369,19 +372,47 @@ impl PopupView {
         self.dashboard = dashboard;
     }
 
-    fn advance_scroll_hint(&mut self, window: &Window, cx: &App) {
+    fn show(&mut self, window: &mut Window, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let (shown, completion) = tokio::sync::oneshot::channel();
+        // Dismissing, interacting or reopening drops this opening's pending task.
+        self.scroll_hint = NodeScrollHint::Waiting {
+            _task: cx.spawn(async move |view, cx| {
+                if completion.await.is_ok() {
+                    let _ = view.update(cx, |view, cx| {
+                        view.scroll_hint = NodeScrollHint::Opening;
+                        cx.notify();
+                    });
+                }
+            }),
+        };
+        super::backend::show_popup(window, bounds, shown);
+    }
+
+    fn advance_scroll_hint(&mut self, window: &Window, cx: &mut Context<Self>) {
         use NodeScrollHint::*;
-        if !self.visible {
+        if !self.visible || !window.is_visible() {
             return;
         }
         let offset = self.scroll.offset();
         self.scroll_hint = match self.scroll_hint {
-            Idle => return,
+            Idle | Waiting { .. } => return,
             // First lay out the real viewport, then bring the selected row into view.
             Opening => AlignSelection,
             AlignSelection => {
                 self.scroll.scroll_to_item(self.selected);
-                Start
+                if cx.reduce_motion() || self.scroll.max_offset().y <= Pixels::ZERO {
+                    Idle
+                } else {
+                    Waiting {
+                        _task: cx.spawn(async move |view, cx| {
+                            cx.background_executor().timer(NODE_SCROLL_HINT_DELAY).await;
+                            let _ = view.update(cx, |view, cx| {
+                                view.scroll_hint = Start;
+                                cx.notify();
+                            });
+                        }),
+                    }
+                }
             }
             Start => {
                 let range = self.scroll.max_offset().y;
@@ -436,7 +467,7 @@ impl PopupView {
                 }
             }
         };
-        if !matches!(self.scroll_hint, Idle) {
+        if !matches!(self.scroll_hint, Idle | Waiting { .. }) {
             window.request_animation_frame();
         }
     }

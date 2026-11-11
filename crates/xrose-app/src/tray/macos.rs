@@ -5,6 +5,7 @@ use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::brand_assets::TrayGlyph;
+use block::ConcreteBlock;
 use cocoa::appkit::{NSApplication, NSStatusBar, NSVariableStatusItemLength};
 use cocoa::base::{BOOL, NO, YES, id, nil};
 use cocoa::foundation::{NSAutoreleasePool, NSPoint, NSRect, NSSize, NSString};
@@ -21,7 +22,11 @@ static POPUP_OPS: parking_lot::Mutex<Vec<PopupOp>> = parking_lot::Mutex::new(Vec
 
 enum PopupOp {
     Hide(usize),
-    Show(usize, gpui_kit::Bounds<gpui_kit::Pixels>),
+    Show(
+        usize,
+        gpui_kit::Bounds<gpui_kit::Pixels>,
+        tokio::sync::oneshot::Sender<()>,
+    ),
 }
 
 unsafe fn string(value: &str) -> id {
@@ -50,7 +55,7 @@ extern "C" fn flush_popup(_this: &Object, _sel: Sel, _sender: id) {
                 PopupOp::Hide(native) => {
                     let _: () = msg_send![native as id, orderOut: nil];
                 }
-                PopupOp::Show(native, bounds) => {
+                PopupOp::Show(native, bounds, shown) => {
                     let native = native as id;
                     let screens: id = msg_send![class!(NSScreen), screens];
                     let primary: id = msg_send![screens, objectAtIndex: 0usize];
@@ -67,7 +72,18 @@ extern "C" fn flush_popup(_this: &Object, _sel: Sel, _sender: id) {
                     let _: () = msg_send![native, setFrameOrigin: origin];
                     let app = NSApplication::sharedApplication(nil);
                     let _: () = msg_send![app, activateIgnoringOtherApps: YES];
+                    let shown = std::cell::Cell::new(Some(shown));
+                    let completion = ConcreteBlock::new(move || {
+                        if let Some(shown) = shown.take() {
+                            let _ = shown.send(());
+                        }
+                    })
+                    .copy();
+                    let _: () = msg_send![class!(NSAnimationContext), beginGrouping];
+                    let context: id = msg_send![class!(NSAnimationContext), currentContext];
+                    let _: () = msg_send![context, setCompletionHandler: &*completion];
                     let _: () = msg_send![native, makeKeyAndOrderFront: nil];
+                    let _: () = msg_send![class!(NSAnimationContext), endGrouping];
                 }
             }
         }
@@ -536,9 +552,13 @@ pub fn hide_popup(window: &mut Window) {
     }
 }
 
-pub fn show_popup(window: &mut Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+pub fn show_popup(
+    window: &mut Window,
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    shown: tokio::sync::oneshot::Sender<()>,
+) {
     if let Some(native) = native_window(window) {
-        post_popup(PopupOp::Show(native as usize, bounds));
+        post_popup(PopupOp::Show(native as usize, bounds, shown));
     }
 }
 

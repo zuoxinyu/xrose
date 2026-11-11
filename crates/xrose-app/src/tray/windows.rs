@@ -46,6 +46,7 @@ struct Flyout {
     hwnd: usize,
     placement: Placement,
     motion: Option<Motion>,
+    shown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 static POPUP_OPS: Mutex<Vec<PopupOp>> = Mutex::new(Vec::new());
@@ -60,6 +61,7 @@ enum PopupOp {
         height: i32,
         work: [i32; 4],
         edge: Edge,
+        shown: tokio::sync::oneshot::Sender<()>,
     },
 }
 
@@ -413,6 +415,7 @@ unsafe extern "system" fn wnd_proc(
                         height,
                         work,
                         edge,
+                        shown,
                     } if IsWindow(target as HWND) != 0 => {
                         animate_show(
                             hwnd,
@@ -423,6 +426,7 @@ unsafe extern "system" fn wnd_proc(
                                 work,
                                 edge,
                             },
+                            shown,
                         );
                     }
                     _ => {}
@@ -625,7 +629,11 @@ pub fn hide_popup(window: &mut Window) {
     }
 }
 
-pub fn show_popup(window: &mut Window, bounds: Bounds<gpui_kit::Pixels>) {
+pub fn show_popup(
+    window: &mut Window,
+    bounds: Bounds<gpui_kit::Pixels>,
+    shown: tokio::sync::oneshot::Sender<()>,
+) {
     if let Ok(handle) = HasWindowHandle::window_handle(window) {
         if let RawWindowHandle::Win32(raw) = handle.as_raw() {
             let hwnd = raw.hwnd.get() as HWND;
@@ -685,6 +693,7 @@ pub fn show_popup(window: &mut Window, bounds: Bounds<gpui_kit::Pixels>) {
                     height: (f32::from(bounds.size.height) * scale).round() as i32 + extra_height,
                     work,
                     edge,
+                    shown,
                 });
             }
         }
@@ -704,7 +713,12 @@ fn animations_enabled() -> bool {
     }
 }
 
-unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
+unsafe fn animate_show(
+    owner: HWND,
+    hwnd: usize,
+    placement: Placement,
+    shown: tokio::sync::oneshot::Sender<()>,
+) {
     unsafe {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             HWND_NOTOPMOST, IsWindowVisible, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos,
@@ -724,6 +738,7 @@ unsafe fn animate_show(owner: HWND, hwnd: usize, placement: Placement) {
             hwnd,
             placement,
             motion,
+            shown: Some(shown),
         });
         // Slide below the topmost taskbar rather than painting over its icons.
         SetWindowPos(
@@ -777,6 +792,7 @@ unsafe fn animate_hide(owner: HWND, hwnd: usize) {
             hwnd,
             placement,
             motion,
+            shown: None,
         });
         SetWindowPos(
             hwnd as HWND,
@@ -847,17 +863,19 @@ unsafe fn finish_flyout(owner: HWND, showing: bool) {
             let mut controller = FLYOUT.lock().unwrap_or_else(|e| e.into_inner());
             controller.as_mut().map(|flyout| {
                 flyout.motion = None;
-                (flyout.hwnd, flyout.placement.origin)
+                (flyout.hwnd, flyout.placement.origin, flyout.shown.take())
             })
         };
-        let Some((hwnd, origin)) = target else { return };
+        let Some((hwnd, origin, shown)) = target else {
+            return;
+        };
         if IsWindow(hwnd as HWND) == 0 {
             return;
         }
         if !showing {
             ShowWindow(hwnd as HWND, SW_HIDE);
         }
-        SetWindowPos(
+        let positioned = SetWindowPos(
             hwnd as HWND,
             if showing {
                 HWND_TOPMOST
@@ -869,7 +887,13 @@ unsafe fn finish_flyout(owner: HWND, showing: bool) {
             0,
             0,
             SWP_NOACTIVATE | SWP_NOSIZE,
-        );
+        ) != 0;
+        if positioned
+            && showing
+            && let Some(shown) = shown
+        {
+            let _ = shown.send(());
+        }
         debug_log(&format!("flyout settled ({hwnd}, visible={showing})"));
     }
 }

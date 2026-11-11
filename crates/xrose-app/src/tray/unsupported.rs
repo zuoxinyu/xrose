@@ -38,6 +38,11 @@ pub fn pointer_on_icon() -> bool {
 pub fn hide_popup(window: &mut gpui_kit::Window) {
     window.remove_window();
 }
-pub fn show_popup(window: &mut gpui_kit::Window, _bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+pub fn show_popup(
+    window: &mut gpui_kit::Window,
+    _bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    shown: tokio::sync::oneshot::Sender<()>,
+) {
     window.activate_window();
+    let _ = shown.send(());
 }
