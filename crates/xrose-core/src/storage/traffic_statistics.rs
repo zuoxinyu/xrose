@@ -1,36 +1,13 @@
 //! Encrypted entity metadata and idempotent daily traffic aggregates.
 
 use chrono::NaiveDate;
-use rusqlite::{Transaction, params};
+use rusqlite::params;
 
 use super::Store;
 use crate::error::{Error, Result};
 use crate::model::CoreKind;
 use crate::storage::crypto::SecretBox;
 use crate::traffic_statistics::{TrafficBucket, TrafficBytes, TrafficQuery, TrafficWindow};
-
-pub(super) fn migrate(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS traffic_sessions (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL);
-        CREATE TABLE IF NOT EXISTS traffic_entities (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS traffic_daily (
-            session_id TEXT NOT NULL REFERENCES traffic_sessions(id),
-            day TEXT NOT NULL,
-            core TEXT NOT NULL,
-            dimension TEXT NOT NULL,
-            entity_id TEXT NOT NULL REFERENCES traffic_entities(id),
-            upload INTEGER NOT NULL CHECK(upload >= 0),
-            download INTEGER NOT NULL CHECK(download >= 0),
-            sampled_at INTEGER NOT NULL,
-            has_gaps INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (session_id, day, entity_id)
-        );
-        CREATE INDEX IF NOT EXISTS traffic_daily_range ON traffic_daily(dimension, day);
-    ",
-    )?;
-    Ok(())
-}
 
 impl Store {
     pub(crate) fn write_traffic_statistics(
@@ -227,25 +204,6 @@ mod tests {
                 .read_traffic_statistics(&query, &a.session, day)
                 .unwrap()
                 .is_empty()
-        );
-    }
-    #[test]
-    fn version_seven_migration_preserves_profiles() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = AppPaths::from_root(dir.path());
-        let store = Store::open(&paths).unwrap();
-        let profiles = store.profiles().unwrap();
-        store.conn.lock().execute_batch("DROP TABLE traffic_daily; DROP TABLE traffic_entities; DROP TABLE traffic_sessions; PRAGMA user_version=7;").unwrap();
-        drop(store);
-        let store = Store::open(&paths).unwrap();
-        assert_eq!(store.profiles().unwrap(), profiles);
-        assert_eq!(
-            store
-                .conn
-                .lock()
-                .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            crate::storage::SCHEMA_VERSION
         );
     }
     #[test]

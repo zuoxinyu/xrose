@@ -19,7 +19,9 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 15;
+pub const SCHEMA_VERSION: i64 = 1;
+// Distinguish the release schema from overlapping pre-release version numbers.
+const APPLICATION_ID: i64 = i32::from_be_bytes(*b"XROS") as i64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProfileMeta {
@@ -93,7 +95,7 @@ impl Store {
             db_path,
             backup_dir: paths.backup_dir(),
         };
-        store.migrate(&paths.settings_file())?;
+        store.initialize_schema()?;
         store.seed_default_profile()?;
         Ok(Arc::new(store))
     }
@@ -109,275 +111,37 @@ impl Store {
         Ok(())
     }
 
-    fn migrate(&self, settings_file: &Path) -> Result<()> {
+    fn initialize_schema(&self) -> Result<()> {
         let mut conn = self.conn.lock();
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap_or(0);
-        if version >= SCHEMA_VERSION {
-            return Ok(());
-        }
-        if version > 0 && self.db_path.exists() {
-            self.backup_before_migration(&conn, version)?;
-        }
-        let tx = conn.transaction()?;
-        if version < 1 {
-            tx.execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS profiles (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    id TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL,
-                    sort INTEGER NOT NULL DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS app_state (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                );
-                "#,
-            )?;
-        }
-        if version < 2 {
-            tx.execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS latency (
-                    key TEXT PRIMARY KEY,
-                    delay_ms INTEGER,
-                    checked_at INTEGER NOT NULL,
-                    detail TEXT
-                );
-                "#,
-            )?;
-        }
-        if version < 3 {
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS mesh_profiles (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at INTEGER NOT NULL);")?;
-        }
-        if version < 4 {
-            // The old UI persisted a literal default UA for every subscription.
-            // Empty now means inherit. Preserve custom agents and unknown fields.
-            let mut stmt = tx.prepare("SELECT id, payload FROM subscriptions")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, payload) in rows {
-                let mut sub: serde_json::Value =
-                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                if sub["user_agent"] == crate::subscription::DEFAULT_USER_AGENT {
-                    sub["user_agent"] = "".into();
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&sub)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("订阅加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE subscriptions SET payload = ?1 WHERE id = ?2",
-                        params![encrypted, id],
-                    )?;
-                }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let app_id: i64 = tx.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        match (app_id, version) {
+            (APPLICATION_ID, SCHEMA_VERSION) => return Ok(()),
+            (0, 0) => tx.execute_batch(include_str!("schema_v1.sql"))?,
+            (0, 14 | 15) => {
+                // These builds already use the complete v1 table layout. The two routing
+                // fields introduced in development v15 have serde defaults.
+                // VACUUM INTO needs a separate reader while the transaction holds the write lock.
+                let reader = Connection::open_with_flags(
+                    &self.db_path,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                self.backup_before_migration(&reader, version)?;
             }
-        }
-        if version < 6 {
-            // v5 added per-group policies. v6 makes the built-in proxy group’s manual setting explicit.
-            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            let default = serde_json::to_value(crate::model::NodeSwitchPolicy::default())?;
-            for (id, payload) in rows {
-                let mut model: serde_json::Value =
-                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                let mut changed = false;
-                for group in model["groups"].as_array_mut().into_iter().flatten() {
-                    if group.get("switch_policy").is_none() {
-                        group["switch_policy"] = default.clone();
-                        changed = true;
-                    }
-                    if group["id"] == "proxy"
-                        && group["kind"] == "selector"
-                        && group["switch_policy"]["mode"] == "group_default"
-                    {
-                        group["switch_policy"]["mode"] = "off".into();
-                        changed = true;
-                    }
-                }
-                if changed {
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("配置加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE profiles SET model = ?1 WHERE id = ?2",
-                        params![encrypted, id],
-                    )?;
-                }
+            (0, 1..=13) => {
+                return Err(Error::config(format!(
+                    "开发版数据库 v{version} 需先用支持数据库 v14 或 v15 的开发版 Xrose 打开，或使用新的数据目录"
+                )));
             }
-        }
-        if version < 7 {
-            // Preserve unrecognized fields and keep the original update timestamp.
-            let mut stmt = tx.prepare("SELECT id, payload FROM mesh_profiles")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, payload) in rows {
-                let mut profile: serde_json::Value =
-                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                if profile["provider"] == "easy_tier" && profile.get("easytier").is_none() {
-                    profile["easytier"] =
-                        serde_json::to_value(crate::mesh::EasyTierOptions::default())?;
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&profile)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("组网配置加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE mesh_profiles SET payload=?1 WHERE id=?2",
-                        params![encrypted, id],
-                    )?;
-                }
+            (0 | APPLICATION_ID, _) => {
+                return Err(Error::config(format!(
+                    "此版本的 Xrose 不支持数据库 v{version}，请使用与数据库匹配的版本或新的数据目录"
+                )));
             }
+            _ => return Err(Error::config("数据库标识与 Xrose 不符，请检查数据目录")),
         }
-        if version < 8 {
-            traffic_statistics::migrate(&tx)?;
-        }
-        if version < 13 {
-            let mut stmt = tx.prepare("SELECT id, payload FROM mesh_profiles")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, payload) in rows {
-                let mut profile: serde_json::Value =
-                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                let add_forwards = version < 9 && profile.get("service_forwards").is_none();
-                let add_reconnect = profile.get("auto_reconnect").is_none();
-                if add_forwards || add_reconnect {
-                    if add_forwards {
-                        profile["service_forwards"] = serde_json::json!([]);
-                    }
-                    if add_reconnect {
-                        profile["auto_reconnect"] = true.into();
-                    }
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&profile)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("组网配置加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE mesh_profiles SET payload=?1 WHERE id=?2",
-                        params![encrypted, id],
-                    )?;
-                }
-            }
-        }
-        if version < 11 && settings_file.exists() {
-            // Settings live outside SQLite. Preserve unknown fields and encrypted values.
-            let bytes = std::fs::read(settings_file)?;
-            if let Ok(serde_json::Value::Object(mut settings)) = serde_json::from_slice(&bytes) {
-                let mut changed = settings.remove("minimize_to_tray").is_some();
-                if version < 10 && !settings.contains_key("hot_reload") {
-                    settings.insert("hot_reload".into(), false.into());
-                    changed = true;
-                }
-                if changed {
-                    crate::util::atomic_write_private(
-                        settings_file,
-                        &serde_json::to_vec_pretty(&settings)?,
-                    )?;
-                }
-            }
-        }
-        if version < 12 {
-            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, payload) in rows {
-                let mut model = serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                if migrate_work_mode(&mut model)? {
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("配置加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE profiles SET model = ?1 WHERE id = ?2",
-                        params![encrypted, id],
-                    )?;
-                }
-            }
-        }
-        if version < 14 && settings_file.exists() {
-            // Older configurations with both a path and a version always ran the custom file.
-            let bytes = std::fs::read(settings_file)?;
-            if let Ok(mut settings) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                let mut changed = false;
-                for core in crate::model::CoreKind::all() {
-                    let key = core.as_str();
-                    if settings["binary_paths"][key]
-                        .as_str()
-                        .is_some_and(|p| !p.is_empty())
-                    {
-                        if let Some(versions) = settings
-                            .get_mut("active_versions")
-                            .and_then(|v| v.as_object_mut())
-                        {
-                            changed |= versions.remove(key).is_some();
-                        }
-                    }
-                }
-                if changed {
-                    crate::util::atomic_write_private(
-                        settings_file,
-                        &serde_json::to_vec_pretty(&settings)?,
-                    )?;
-                }
-            }
-        }
-        if version < 15 {
-            // Keep explicit rule-set URLs and all unrelated encrypted profile fields intact.
-            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
-            let rows = stmt
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(stmt);
-            for (id, payload) in rows {
-                let mut model: serde_json::Value =
-                    serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
-                if let Some(route) = model.get_mut("routing").and_then(|v| v.as_object_mut()) {
-                    if route.contains_key("rule_set_source")
-                        && route.contains_key("custom_rule_set_template")
-                    {
-                        continue;
-                    }
-                    route.entry("rule_set_source").or_insert("upstream".into());
-                    route.entry("custom_rule_set_template").or_insert("".into());
-                    let encrypted = self.secrets.encrypt(&serde_json::to_string(&model)?);
-                    if !SecretBox::is_encrypted(&encrypted) {
-                        return Err(Error::other("配置加密失败，请重试迁移"));
-                    }
-                    tx.execute(
-                        "UPDATE profiles SET model=?1 WHERE id=?2",
-                        params![encrypted, id],
-                    )?;
-                }
-            }
-        }
+        tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         Ok(())
@@ -860,397 +624,6 @@ mod tests {
     }
 
     #[test]
-    fn v3_subscriptions_inherit_global_agent_but_keep_custom_overrides() {
-        let (store, dir) = store();
-        for agent in [crate::subscription::DEFAULT_USER_AGENT, "Custom/1"] {
-            let mut s = Subscription::new("fixture", "https://updates.invalid/");
-            s.user_agent = agent.into();
-            store.save_subscription(&s).unwrap();
-        }
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 3)
-            .unwrap();
-        drop(store);
-        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        let subs = reopened.subscriptions().unwrap();
-        assert!(subs[0].user_agent.is_empty());
-        assert_eq!(subs[1].user_agent, "Custom/1");
-    }
-
-    #[test]
-    fn v4_migration_adds_policy_only_and_preserves_custom_group_fields() {
-        let (store, dir) = store();
-        let id = store.active_profile_id().unwrap();
-        let mut profile = serde_json::to_value(AppModel::default()).unwrap();
-        let group = &mut profile["groups"][0];
-        group.as_object_mut().unwrap().remove("switch_policy");
-        group["extra"] = "fixture".into();
-        let mut expected = profile.clone();
-        expected["groups"][0]["switch_policy"] =
-            serde_json::to_value(crate::model::NodeSwitchPolicy::default()).unwrap();
-        expected["groups"][0]["switch_policy"]["mode"] = "off".into();
-        let payload = store.secrets.encrypt(&profile.to_string());
-        store
-            .conn
-            .lock()
-            .execute(
-                "UPDATE profiles SET model=?1 WHERE id=?2",
-                params![payload, id],
-            )
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 4)
-            .unwrap();
-        drop(store);
-        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        let raw: String = reopened
-            .conn
-            .lock()
-            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert!(SecretBox::is_encrypted(&raw));
-        let result: serde_json::Value =
-            serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn v5_migration_preserves_the_routed_group_and_its_policy() {
-        let (store, dir) = store();
-        let id = store.active_profile_id().unwrap();
-        let mut profile = serde_json::to_value(AppModel::default()).unwrap();
-        profile["groups"][0]["switch_policy"]["mode"] = "group_default".into();
-        let mut existing = profile["groups"][0].clone();
-        existing["id"] = "auto".into();
-        existing["kind"] = "url_test".into();
-        existing["switch_policy"] = serde_json::json!({
-            "mode": "throughput", "fallback": "same_region", "consecutive_failures": 3
-        });
-        profile["groups"].as_array_mut().unwrap().push(existing);
-        profile["default_group"] = "auto".into();
-        let payload = store.secrets.encrypt(&profile.to_string());
-        {
-            let conn = store.conn.lock();
-            conn.execute(
-                "UPDATE profiles SET model=?1 WHERE id=?2",
-                params![payload, id],
-            )
-            .unwrap();
-            conn.pragma_update(None, "user_version", 5).unwrap();
-        }
-        drop(store);
-        let reopened = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        let raw: String = reopened
-            .conn
-            .lock()
-            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert!(SecretBox::is_encrypted(&raw));
-        profile["groups"][0]["switch_policy"]["mode"] = "off".into();
-        let actual: serde_json::Value =
-            serde_json::from_str(&reopened.secrets.decrypt(&raw).unwrap()).unwrap();
-        assert_eq!(actual, profile);
-    }
-
-    #[test]
-    fn legacy_work_mode_migration_preserves_encrypted_profiles_and_the_backup() {
-        for version in [9, 10, 11] {
-            let (store, dir) = store();
-            let paths = AppPaths::from_root(dir.path());
-            let mut original = serde_json::to_value(AppModel::default()).unwrap();
-            original.as_object_mut().unwrap().remove("work_mode");
-            original["future"] = serde_json::json!({"nested": [1, 2]});
-            let mut proxy = original.clone();
-            proxy["nodes"] = serde_json::json!([crate::model::Node::new(
-                "fixture",
-                crate::model::Protocol::Http,
-                "192.0.2.1",
-                8080
-            )]);
-            let mut explicit = proxy.clone();
-            explicit["work_mode"] = "direct".into();
-            let profiles = [
-                ("empty", original, "direct"),
-                ("populated", proxy, "proxy"),
-                ("explicit", explicit, "direct"),
-            ];
-            let conn = store.conn.lock();
-            for (id, value, _) in &profiles {
-                let payload = store.secrets.encrypt(&value.to_string());
-                conn.execute(
-                    "INSERT INTO profiles VALUES (?1, 'fixture', ?2, 1, 2)",
-                    params![id, payload],
-                )
-                .unwrap();
-            }
-            conn.pragma_update(None, "user_version", version).unwrap();
-            drop(conn);
-            drop(store);
-
-            let reopened = Store::open(&paths).unwrap();
-            let backups: Vec<_> = std::fs::read_dir(paths.backup_dir())
-                .unwrap()
-                .flatten()
-                .collect();
-            assert_eq!(backups.len(), 1);
-            let backup = Connection::open(backups[0].path()).unwrap();
-            for (id, mut value, mode) in profiles {
-                let saved: String = backup
-                    .query_row("SELECT model FROM profiles WHERE id=?1", [id], |r| r.get(0))
-                    .unwrap();
-                assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(
-                        &reopened.secrets.decrypt(&saved).unwrap()
-                    )
-                    .unwrap(),
-                    value
-                );
-                value["work_mode"] = mode.into();
-                let (payload, updated): (String, i64) = reopened
-                    .conn
-                    .lock()
-                    .query_row(
-                        "SELECT model, updated_at FROM profiles WHERE id=?1",
-                        [id],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .unwrap();
-                assert!(SecretBox::is_encrypted(&payload));
-                assert_eq!(updated, 2);
-                assert_eq!(
-                    serde_json::from_str::<serde_json::Value>(
-                        &reopened.secrets.decrypt(&payload).unwrap()
-                    )
-                    .unwrap(),
-                    value
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn settings_migration_preserves_existing_preferences() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = AppPaths::from_root(dir.path());
-        let store = Store::open(&paths).unwrap();
-        for explicit in [None, Some(true)] {
-            store
-                .conn
-                .lock()
-                .pragma_update(None, "user_version", 9)
-                .unwrap();
-            let mut legacy = serde_json::json!({"theme": "dark", "extra": {"flag": true}});
-            if let Some(enabled) = explicit {
-                legacy["hot_reload"] = enabled.into();
-            }
-            std::fs::write(paths.settings_file(), legacy.to_string()).unwrap();
-            store.migrate(&paths.settings_file()).unwrap();
-            let migrated: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(paths.settings_file()).unwrap()).unwrap();
-            assert_eq!(migrated["hot_reload"], explicit.unwrap_or(false));
-            assert_eq!(migrated["theme"], "dark");
-            assert_eq!(migrated["extra"], legacy["extra"]);
-        }
-    }
-
-    #[test]
-    fn v11_removes_only_the_obsolete_minimize_preference() {
-        let (store, dir) = store();
-        let path = AppPaths::from_root(dir.path()).settings_file();
-        for enabled in [false, true] {
-            store
-                .conn
-                .lock()
-                .pragma_update(None, "user_version", 10)
-                .unwrap();
-            let expected = serde_json::json!({"close_to_tray": !enabled, "start_minimized": enabled, "extra": [1]});
-            let mut old = expected.clone();
-            old["minimize_to_tray"] = enabled.into();
-            std::fs::write(&path, old.to_string()).unwrap();
-            store.migrate(&path).unwrap();
-            let actual: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            assert_eq!(actual, expected);
-        }
-    }
-
-    #[test]
-    fn v15_preserves_per_set_urls_and_initializes_the_upstream_source() {
-        let (store, dir) = store();
-        let paths = AppPaths::from_root(dir.path());
-        let id = store.active_profile_id().unwrap();
-        let mut model = serde_json::to_value(AppModel::default()).unwrap();
-        let routing = model["routing"].as_object_mut().unwrap();
-        routing.remove("rule_set_source");
-        routing.remove("custom_rule_set_template");
-        model["routing"]["rule_sets"][0]["url"] = "https://fixture.example/domains.srs".into();
-        let encrypted = store.secrets.encrypt(&model.to_string());
-        {
-            let conn = store.conn.lock();
-            conn.execute(
-                "UPDATE profiles SET model=?1 WHERE id=?2",
-                params![encrypted, id],
-            )
-            .unwrap();
-            conn.pragma_update(None, "user_version", 14).unwrap();
-        }
-        store.migrate(&paths.settings_file()).unwrap();
-        let migrated = store.load_profile(&id).unwrap().unwrap().model;
-        assert_eq!(
-            migrated.routing.rule_set_source,
-            crate::model::RuleSetSource::Upstream
-        );
-        assert!(migrated.routing.custom_rule_set_template.is_empty());
-        assert_eq!(
-            migrated.routing.rule_sets[0].url,
-            "https://fixture.example/domains.srs"
-        );
-    }
-
-    #[test]
-    fn v14_keeps_previously_effective_binary_sources() {
-        let (store, dir) = store();
-        let path = AppPaths::from_root(dir.path()).settings_file();
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 13)
-            .unwrap();
-        let legacy = serde_json::json!({
-            "binary_paths": {"xray": "fixture-xray"},
-            "active_versions": {"xray": "1.0", "sing-box": "2.0"},
-            "other_setting": true
-        });
-        std::fs::write(&path, legacy.to_string()).unwrap();
-        store.migrate(&path).unwrap();
-        let saved = crate::settings::Settings::load(&path).unwrap();
-        assert_eq!(
-            saved
-                .binary_override(crate::model::CoreKind::Xray)
-                .map(String::as_str),
-            Some("fixture-xray")
-        );
-        assert_eq!(
-            saved
-                .active_version(crate::model::CoreKind::SingBox)
-                .map(String::as_str),
-            Some("2.0")
-        );
-        let json: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(json["other_setting"], true);
-    }
-
-    #[test]
-    fn migrations_set_version() {
-        let (store, _dir) = store();
-        let conn = Connection::open(store.db_path()).unwrap();
-        let version: i64 = conn
-            .query_row("PRAGMA user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-    }
-
-    #[test]
-    fn v9_adds_service_forwards_without_publishing_services_or_changing_identity() {
-        let (store, dir) = store();
-        let profile = crate::mesh::MeshProfile {
-            provider: crate::mesh::MeshProvider::Tailscale,
-            ..Default::default()
-        };
-        let mut legacy = serde_json::to_value(&profile).unwrap();
-        legacy.as_object_mut().unwrap().remove("service_forwards");
-        legacy["extra"] = serde_json::json!("preserve");
-        let encrypted = store.secrets.encrypt(&legacy.to_string());
-        store
-            .conn
-            .lock()
-            .execute(
-                "INSERT INTO mesh_profiles VALUES (?1,?2,17)",
-                params![profile.id, encrypted],
-            )
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 8)
-            .unwrap();
-        drop(store);
-        let store = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        let (payload, stamp): (String, i64) = store
-            .conn
-            .lock()
-            .query_row(
-                "SELECT payload, updated_at FROM mesh_profiles WHERE id=?1",
-                [&profile.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert!(SecretBox::is_encrypted(&payload));
-        assert_eq!(stamp, 17);
-        let value: serde_json::Value =
-            serde_json::from_str(&store.secrets.decrypt(&payload).unwrap()).unwrap();
-        assert_eq!(value["service_forwards"], serde_json::json!([]));
-        assert_eq!(value["extra"], "preserve");
-        assert_eq!(store.mesh_profiles().unwrap(), vec![profile]);
-    }
-
-    #[test]
-    fn v7_migrates_encrypted_easytier_profiles_without_changing_existing_behavior() {
-        use crate::mesh::{MeshProfile, MeshSecret};
-        let (store, dir) = store();
-        let profile = MeshProfile {
-            network_name: "fixture".into(),
-            network_secret: MeshSecret("fixture".into()),
-            peers: vec!["udp://192.0.2.1:11010".into()],
-            ..Default::default()
-        };
-        let mut legacy = serde_json::to_value(&profile).unwrap();
-        legacy.as_object_mut().unwrap().remove("easytier");
-        legacy["extra"] = serde_json::json!("preserve");
-        let ciphertext = store.secrets.encrypt(&legacy.to_string());
-        store
-            .conn
-            .lock()
-            .execute(
-                "INSERT INTO mesh_profiles VALUES (?1,?2,17)",
-                params![profile.id, ciphertext],
-            )
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 6)
-            .unwrap();
-        drop(store);
-        let store = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        let (payload, stamp): (String, i64) = store
-            .conn
-            .lock()
-            .query_row(
-                "SELECT payload, updated_at FROM mesh_profiles WHERE id=?1",
-                [&profile.id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(stamp, 17);
-        assert!(SecretBox::is_encrypted(&payload));
-        let migrated: serde_json::Value =
-            serde_json::from_str(&store.secrets.decrypt(&payload).unwrap()).unwrap();
-        assert_eq!(migrated["extra"], "preserve");
-        assert!(migrated["easytier"].is_object());
-        assert_eq!(store.mesh_profiles().unwrap(), vec![profile]);
-    }
-
-    #[test]
     fn mesh_payload_is_encrypted_and_independent_of_proxy_profile() {
         let (store, _dir) = store();
         let proxy_id = store.active_profile_id();
@@ -1280,83 +653,83 @@ mod tests {
     }
 
     #[test]
-    fn existing_mesh_profiles_enable_reconnect_and_preserve_an_explicit_opt_out() {
-        let (store, dir) = store();
-        let mut expected = Vec::new();
-        for enabled in [true, false] {
-            let p = crate::mesh::MeshProfile::default();
-            let mut value = serde_json::to_value(&p).unwrap();
-            if enabled {
-                value.as_object_mut().unwrap().remove("auto_reconnect");
-            } else {
-                value["auto_reconnect"] = false.into();
+    fn development_databases_are_backed_up_and_rebased_once() {
+        for version in [14, 15] {
+            let (store, dir) = store();
+            let paths = AppPaths::from_root(dir.path());
+            let original = store.profiles().unwrap();
+            let id = store.active_profile_id().unwrap();
+            let mut model = serde_json::to_value(AppModel::default()).unwrap();
+            if version == 14 {
+                let routing = model["routing"].as_object_mut().unwrap();
+                routing.remove("rule_set_source");
+                routing.remove("custom_rule_set_template");
             }
-            value["future_field"] = "preserve".into();
-            let payload = store.secrets.encrypt(&value.to_string());
-            store
-                .conn
-                .lock()
-                .execute(
-                    "INSERT INTO mesh_profiles (id,payload,updated_at) VALUES (?1,?2,0)",
-                    params![p.id, payload],
+            model["routing"]["rule_sets"][0]["url"] = "https://fixture.example/domains.srs".into();
+            let payload = store.secrets.encrypt(&model.to_string());
+            {
+                let conn = store.conn.lock();
+                conn.execute(
+                    "UPDATE profiles SET model=?1 WHERE id=?2",
+                    params![payload, id],
                 )
                 .unwrap();
-            expected.push((p.id, enabled));
-        }
-        store
-            .conn
-            .lock()
-            .pragma_update(None, "user_version", 12)
-            .unwrap();
-        drop(store);
-        let migrated = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        for (id, enabled) in expected {
-            let raw: String = migrated
-                .conn
-                .lock()
-                .query_row(
-                    "SELECT payload FROM mesh_profiles WHERE id=?1",
-                    [&id],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(SecretBox::is_encrypted(&raw));
-            let v: serde_json::Value =
-                serde_json::from_str(&migrated.secrets.decrypt(&raw).unwrap()).unwrap();
-            assert_eq!(v["auto_reconnect"], enabled);
-            assert_eq!(v["future_field"], "preserve");
+                conn.pragma_update(None, "application_id", 0).unwrap();
+                conn.pragma_update(None, "user_version", version).unwrap();
+            }
+            drop(store);
+            for _ in 0..2 {
+                let reopened = Store::open(&paths).unwrap();
+                assert_eq!(reopened.profiles().unwrap(), original);
+                let routing = reopened.load_profile(&id).unwrap().unwrap().model.routing;
+                assert_eq!(
+                    routing.rule_set_source,
+                    crate::model::RuleSetSource::Upstream
+                );
+                assert_eq!(
+                    routing.rule_sets[0].url,
+                    "https://fixture.example/domains.srs"
+                );
+                let conn = reopened.conn.lock();
+                let saved: String = conn
+                    .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert!(saved == payload);
+                assert_eq!(
+                    conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
+            let backups: Vec<_> = std::fs::read_dir(paths.backup_dir()).unwrap().collect();
+            assert_eq!(backups.len(), 1);
+            let backup = Connection::open(backups[0].as_ref().unwrap().path()).unwrap();
+            assert_eq!(
+                backup
+                    .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
         }
     }
 
     #[test]
-    fn upgrades_v2_without_rewriting_proxy_profile() {
-        let (store, dir) = store();
-        let id = store.active_profile_id().unwrap();
-        let before: String = store
-            .conn
-            .lock()
-            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .execute_batch(
-                "DROP TABLE mesh_profiles; PRAGMA user_version=2; PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        drop(store);
-        let upgraded = Store::open(&AppPaths::from_root(dir.path())).unwrap();
-        assert!(upgraded.mesh_profiles().unwrap().is_empty());
-        let after: String = upgraded
-            .conn
-            .lock()
-            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(before, after);
-        assert_eq!(upgraded.active_profile_id(), Some(id));
+    fn unsupported_versions_are_not_relabelled() {
+        for (app_id, version) in [(0, 1), (APPLICATION_ID, 14), (0, 16)] {
+            let (store, dir) = store();
+            let paths = AppPaths::from_root(dir.path());
+            let conn = Connection::open(store.db_path()).unwrap();
+            conn.pragma_update(None, "application_id", app_id).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+            drop(store);
+            assert!(Store::open(&paths).is_err());
+            assert_eq!(
+                conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                version
+            );
+        }
     }
 }

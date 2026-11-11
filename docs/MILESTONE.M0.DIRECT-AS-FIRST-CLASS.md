@@ -4,7 +4,7 @@
 > **里程碑定位（Pre-Xristina M0）**：在启动自研 Rust 统一数据面内核 **Xristina**（参见 [MILESTONE.M1.PROJECT-XRISTINA.md](MILESTONE.M1.PROJECT-XRISTINA.md) 与 M2 方案 [MILESTONE.M2.XRISTINA-LINK.md](MILESTONE.M2.XRISTINA-LINK.md)）之前，先基于现有 `sing-box`（切换为默认内核）与 `AppModel` 完成上层**产品形态转型**与**核心契约解耦**。完成后，Xrose 在零订阅、零代理节点场景下即可作为全天候的**实时流量监控器、连接捕获与轻量应用防火墙、以及网络诊断工具箱**开箱运行，同时为 `CoreKind::Xristina` 锁定稳定的意图、遥测与诊断接口。
 
 
-> **实现说明**：数据库 v10 已用于热重载设置，v11 已用于清理旧的托盘设置。工作模式迁移使用 v12，支持从 v9、v10、v11 升级。新配置使用系统 DNS，广告拦截规则由用户按需启用，因此首次直连启动无需预下载规则集。[架构与迁移](ARCHITECTURE.md#本机直连与迁移)
+> **实现说明**：下文的数据库版本号记录 M0 开发过程。发布基线已统一为 v1，现行建库与升级行为见[存储架构](ARCHITECTURE.md#11-持久化与安全边界)。新配置使用系统 DNS，广告拦截规则由用户按需启用，因此首次直连启动无需预下载规则集。
 
 ---
 

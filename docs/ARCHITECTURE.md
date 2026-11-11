@@ -182,6 +182,6 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 ## 11. 持久化与安全边界
 
-- **加密存储与迁移**：使用 SQLite WAL 模式，当前数据库版本 `SCHEMA_VERSION = 15`。迁移前自动执行数据库备份（`backup_before_migration`），历史演进覆盖多配置与订阅加密（v1–v4）、出站组与 EasyTier 选项补全（v5–v7）、历史流量统计表（v8）、服务端口转发与自动重连字段（v9/v13）、热重载与托盘设置迁移（v10–v11）、工作模式迁移（v12）、自定义内核路径版本清理（v14）以及规则集下载来源（v15）。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
+- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
 - **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
 - **代理崩溃恢复**：应用系统代理前保存状态快照，启动时若检测到异常退出残留则自动还原，防止系统断网。
