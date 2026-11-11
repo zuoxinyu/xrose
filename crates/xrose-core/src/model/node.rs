@@ -434,15 +434,6 @@ impl Node {
         self.id.starts_with("mesh-exit-") && self.tags.iter().any(|t| t == "mesh-exit")
     }
 
-    pub(crate) fn needs_front(&self, front: &Node) -> bool {
-        let local_mesh_exit = self.is_mesh_gateway()
-            && self
-                .server
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback());
-        self.id != front.id && !local_mesh_exit
-    }
-
     pub fn outbound_tag(&self) -> String {
         format!("node-{}", self.id)
     }

@@ -1919,19 +1919,12 @@ impl AppService {
         // Use the applied configuration, not a pending settings edit. A TUN TCP
         // handshake can terminate locally before any remote connection exists.
         let bypass_tun = self.inner.core.native_tun_active();
-        let use_http = force_http || bypass_tun || model.front_proxy.is_some();
+        let use_http = force_http || bypass_tun;
         let settings = self.settings();
         let core = if bypass_tun {
             self.inner.core.state().core.unwrap_or(settings.core)
         } else {
             settings.core
-        };
-        let front = match model.front_node(core) {
-            Ok(front) => front.cloned(),
-            Err(err) => {
-                self.toast(ToastLevel::Error, err.to_string());
-                return;
-            }
         };
         let binary = if use_http {
             match self.inner.core.resolve_binary(core, &settings) {
@@ -1958,12 +1951,11 @@ impl AppService {
             let results: Vec<_> = stream::iter(targets)
                 .map(|node| {
                     let binary = binary.clone();
-                    let front = front.as_ref();
                     let url = settings.urltest_url.clone();
                     async move {
                         let result = if let Some(binary) = binary {
                             match crate::runtime::probe::http_latency(
-                                &binary, core, &node, &url, front, bypass_tun,
+                                &binary, core, &node, &url, bypass_tun,
                             )
                             .await
                             {
@@ -2036,13 +2028,6 @@ impl AppService {
             settings.core
         };
         let model = self.model();
-        let front = match model.front_node(core) {
-            Ok(front) => front.cloned(),
-            Err(err) => {
-                self.toast(ToastLevel::Error, err.to_string());
-                return;
-            }
-        };
         let Some(node) = model.node(node_id).cloned() else {
             return;
         };
@@ -2064,7 +2049,6 @@ impl AppService {
                 core,
                 &node,
                 &settings.urltest_url,
-                front.as_ref(),
                 bypass_tun,
             )
             .await;
@@ -2107,13 +2091,6 @@ impl AppService {
             settings.core
         };
         let model = self.model();
-        let front = match model.front_node(core) {
-            Ok(front) => front.cloned(),
-            Err(err) => {
-                self.toast(ToastLevel::Error, err.to_string());
-                return;
-            }
-        };
         let nodes: Vec<_> = ids
             .iter()
             .filter_map(|id| model.node(id))
@@ -2143,14 +2120,8 @@ impl AppService {
             for node in nodes {
                 service.set_busy(&format!("download:{}", node.id), true);
                 service.inner.downloads.write().remove(&node.id);
-                let result = crate::runtime::probe::download(
-                    &binary,
-                    core,
-                    &node,
-                    front.as_ref(),
-                    bypass_tun,
-                )
-                .await;
+                let result =
+                    crate::runtime::probe::download(&binary, core, &node, bypass_tun).await;
                 service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
                 let entry = match result {
                     Ok(entry) => {
@@ -2348,7 +2319,10 @@ impl AppService {
                 service.start_core();
             }
             if settings.check_app_updates {
-                if settings.startup_proxy && settings.proxy_resource_updates {
+                if settings.startup_proxy
+                    && settings.proxy_resource_updates
+                    && settings.update_proxy.as_str().is_empty()
+                {
                     while service.is_busy("core") {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
@@ -2804,18 +2778,6 @@ impl AppService {
         {
             self.refresh_doctor();
         }
-    }
-
-    pub fn set_front_proxy(&self, id: Option<String>) -> Result<()> {
-        self.commit_model_change(|model| {
-            if model.front_proxy == id {
-                return Ok(false);
-            }
-            model.front_proxy = id;
-            model.front_node(self.settings().core)?;
-            Ok(true)
-        })?;
-        Ok(())
     }
 
     pub fn set_language(&self, language: crate::settings::Language) {

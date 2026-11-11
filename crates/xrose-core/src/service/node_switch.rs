@@ -284,7 +284,6 @@ impl AppService {
         let Some(active) = group.active_node().and_then(|id| model.node(id)) else {
             return Ok(None);
         };
-        let front = model.front_node(core)?;
         let settings = self.settings();
         let url = group.url.as_deref().unwrap_or(&settings.urltest_url);
         let bypass_tun = self.inner.core.native_tun_active();
@@ -292,7 +291,6 @@ impl AppService {
             service: self,
             binary: Path::new(binary),
             core,
-            front,
             url,
             bypass_tun,
             mode: group.switch_mode(),
@@ -384,7 +382,6 @@ struct GroupProbe<'a> {
     service: &'a AppService,
     binary: &'a Path,
     core: CoreKind,
-    front: Option<&'a Node>,
     url: &'a str,
     bypass_tun: bool,
     mode: SwitchMode,
@@ -393,15 +390,8 @@ struct GroupProbe<'a> {
 impl GroupProbe<'_> {
     async fn measure(&self, node: &Node) -> Option<u64> {
         if self.mode == SwitchMode::Throughput {
-            let result = probe::download_sample(
-                self.binary,
-                self.core,
-                node,
-                self.front,
-                self.bypass_tun,
-                true,
-            )
-            .await;
+            let result =
+                probe::download_sample(self.binary, self.core, node, self.bypass_tun, true).await;
             let speed = result
                 .as_ref()
                 .ok()
@@ -421,15 +411,8 @@ impl GroupProbe<'_> {
                 .insert(node.id.clone(), entry);
             speed
         } else {
-            let result = probe::http_latency(
-                self.binary,
-                self.core,
-                node,
-                self.url,
-                self.front,
-                self.bypass_tun,
-            )
-            .await;
+            let result =
+                probe::http_latency(self.binary, self.core, node, self.url, self.bypass_tun).await;
             let ms = result.as_ref().ok().copied();
             let entry = LatencyEntry {
                 key: node.id.clone(),

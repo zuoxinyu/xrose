@@ -21,7 +21,6 @@ pub(super) enum MenuTarget {
     RuleSetSources,
     DefaultOutbound,
     OutboundGroup(String),
-    FrontProxy,
     Node(String),
     Nodes,
     Rule(String, Option<String>),
@@ -50,7 +49,6 @@ pub(super) enum Command {
     EditOutboundGroup(String),
     DeleteOutboundGroup(String),
     NodeOutboundGroups(String),
-    SetFrontProxy(Option<String>),
     EditNode(String),
     TestNode(String),
     DownloadNode(String),
@@ -321,33 +319,6 @@ impl AppView {
                     !busy("mesh") && !busy("mesh-forward") && peer.dial_address(provider).is_some(),
                     Command::AddPeerForward(profile_id, peer_id),
                 ));
-            }
-            MenuTarget::FrontProxy => {
-                let model = &self.snapshot.model;
-                menu = menu.item(
-                    add("关闭", "Off", true, Command::SetFrontProxy(None))
-                        .checked(model.front_proxy.is_none()),
-                );
-                for node in model
-                    .nodes
-                    .iter()
-                    .filter(|n| n.usable_with(self.snapshot.settings.core))
-                {
-                    let name = if self.hide_ips && !node.server.is_empty() {
-                        node.name.replace(&node.server, "•••")
-                    } else {
-                        node.name.clone()
-                    };
-                    menu = menu.item(
-                        item(
-                            &view,
-                            name.into(),
-                            !busy("core"),
-                            Command::SetFrontProxy(Some(node.id.clone())),
-                        )
-                        .checked(model.front_proxy.as_ref() == Some(&node.id)),
-                    );
-                }
             }
             MenuTarget::DefaultOutbound => {
                 let model = &self.snapshot.model;
@@ -1019,11 +990,6 @@ impl AppView {
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
             Command::SetDefaultOutbound(id) => {
                 if let Err(err) = self.service.set_default_outbound_group(&id) {
-                    self.service.toast(ToastLevel::Error, err.to_string());
-                }
-            }
-            Command::SetFrontProxy(id) => {
-                if let Err(err) = self.service.set_front_proxy(id) {
                     self.service.toast(ToastLevel::Error, err.to_string());
                 }
             }

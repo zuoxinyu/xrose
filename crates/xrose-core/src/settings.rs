@@ -140,6 +140,8 @@ pub struct Settings {
     pub proxy_subscription_updates: bool,
     pub proxy_resource_updates: bool,
     pub update_user_agent: String,
+    #[serde(skip)]
+    pub update_proxy: crate::updates::Socks5Proxy,
     pub api_port: u16,
     pub stats_port: u16,
     pub system_proxy: bool,
@@ -201,6 +203,7 @@ impl Default for Settings {
             proxy_subscription_updates: false,
             proxy_resource_updates: false,
             update_user_agent: String::new(),
+            update_proxy: Default::default(),
             api_port: 9090,
             stats_port: 10085,
             system_proxy: false,
@@ -282,6 +285,16 @@ impl Settings {
             let secrets = SecretBox::load_or_create(&path.with_file_name("secrets.key"))?;
             settings.lan_account = serde_json::from_str(&secrets.decrypt(encrypted)?)?;
         }
+        if let Some(value) = value.get("update_proxy") {
+            use crate::storage::crypto::SecretBox;
+            let encrypted = value
+                .as_str()
+                .filter(|s| SecretBox::is_encrypted(s))
+                .ok_or_else(|| crate::Error::config("前置代理数据无效，请重新设置"))?;
+            let secrets = SecretBox::load_or_create(&path.with_file_name("secrets.key"))?;
+            settings.update_proxy =
+                crate::updates::Socks5Proxy::parse(&secrets.decrypt(encrypted)?)?;
+        }
         // Old startup actions implicitly registered the OS login entry. Preserve
         // that effective choice explicitly; new startup actions are independent.
         if value.get("startup_proxy").is_none()
@@ -305,6 +318,15 @@ impl Settings {
                 return Err(crate::Error::config("无法加密局域网账号，请重试"));
             }
             value["lan_credentials"] = encrypted.into();
+        }
+        if !self.update_proxy.as_str().is_empty() {
+            use crate::storage::crypto::SecretBox;
+            let secrets = SecretBox::load_or_create(&path.with_file_name("secrets.key"))?;
+            let encrypted = secrets.encrypt(self.update_proxy.as_str());
+            if !SecretBox::is_encrypted(&encrypted) {
+                return Err(crate::Error::config("无法加密前置代理地址，请重试"));
+            }
+            value["update_proxy"] = encrypted.into();
         }
         atomic_write_private(path, &serde_json::to_vec_pretty(&value)?)
     }

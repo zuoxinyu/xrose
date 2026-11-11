@@ -162,7 +162,6 @@ fn compilation_model(model: &AppModel, warnings: &mut Vec<String>) -> AppModel {
         effective.nodes.clear();
         effective.groups.clear();
         effective.default_group = None;
-        effective.front_proxy = None;
         effective.routing.bypass_lan = false;
         effective.routing.bypass_china_ips = false;
         if effective.dns.enabled {
@@ -315,18 +314,13 @@ static SINGBOX: SingBoxAdapter = SingBoxAdapter;
 
 /// A private HTTP listener routed exclusively through the requested node.
 /// No selectors, TUN, cache file, API ports or user routing are shared.
-pub(crate) fn compile_probe(
-    core: CoreKind,
-    node: &crate::model::Node,
-    port: u16,
-    front: Option<&crate::model::Node>,
-) -> Result<Value> {
-    if !node.usable_with(core) || front.is_some_and(|f| !f.usable_with(core)) {
+pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16) -> Result<Value> {
+    if !node.usable_with(core) {
         return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
     }
     match core {
-        CoreKind::SingBox => singbox::compile_probe(node, port, front),
-        CoreKind::Xray => xray::compile_probe(node, port, front),
+        CoreKind::SingBox => singbox::compile_probe(node, port),
+        CoreKind::Xray => xray::compile_probe(node, port),
     }
 }
 
@@ -762,7 +756,6 @@ mod tests {
             },
             RouteAction::proxy(),
         ));
-        model.front_proxy = Some("missing".into());
         model
             .dns
             .hosts

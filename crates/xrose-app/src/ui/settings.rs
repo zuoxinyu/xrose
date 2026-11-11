@@ -2,7 +2,6 @@ use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
@@ -82,14 +81,6 @@ impl AppView {
         let settings = &self.snapshot.settings;
         let lan_account = self.lan_account_input(cx);
         let lan_port = valid_port(self.lan_port_input.read(cx).value().as_ref());
-        let front_label = match self.snapshot.model.front_node(settings.core) {
-            Ok(Some(node)) if self.hide_ips && !node.server.is_empty() => {
-                node.name.replace(&node.server, "•••").into()
-            }
-            Ok(Some(node)) => node.name.clone().into(),
-            Ok(None) => self.tr("关闭", "Off"),
-            Err(_) => self.tr("重新选择节点", "Choose another node"),
-        };
         div().flex().flex_col().gap_3()
             .when(settings.allow_lan, |card| card
                 .child(setting_row(p, self.tr("第二端口", "Second port"),
@@ -129,10 +120,8 @@ impl AppView {
                                 let account = this.lan_account_input(cx);
                                 this.modify_settings(cx, |s| s.lan_account = account);
                             })))))))
-            .child(setting_row(p, self.tr("前置代理", "Front proxy"),
-                self.tr("通过所选节点连接当前配置中的其他代理节点", "Connect to other proxy nodes in this profile through the selected node"),
-                Button::new("front-proxy").label(front_label).icon(IconName::ChevronDown)
-                    .dropdown_menu(super::menus::builder(cx.entity().downgrade(), super::menus::MenuTarget::FrontProxy))))
+            .when(!settings.allow_lan, |card| card.child(div().text_sm().text_color(p.muted_fg)
+                .child(self.tr("开启局域网连接后可设置独立端口和账号认证。", "Enable LAN connections to configure a separate port and authentication."))))
     }
 
     fn select_settings_tab(
@@ -995,6 +984,8 @@ impl AppView {
             self.tr("启动时检查当前内核", "Check the selected core at startup")
         };
         let is_checking_updates = self.snapshot.busy.iter().any(|b| b.starts_with("updates-"));
+        let input = self.update_proxy_input.read(cx).value();
+        let proxy = xrose_core::updates::Socks5Proxy::parse(input.as_ref());
         let agent = self.update_agent_input.read(cx).value().trim().to_string();
         card(&p)
                 .child(
@@ -1026,9 +1017,22 @@ impl AppView {
                     toggle("proxy-sub-updates", self.tr("使用代理更新订阅", "Update subscriptions through the proxy"), settings.proxy_subscription_updates)
                         .on_change(cx.listener(|this, enabled, _, cx| this.modify_settings(cx, |s| s.proxy_subscription_updates = *enabled)))))
                 .child(setting_row(&p, self.tr("资源下载", "Resources"),
-                    self.tr("适用于版本检查、内核、规则集及组网组件；使用代理时需先启动内核", "Applies to release checks, cores, rule sets and mesh components. Start the core to use the proxy."),
+                    self.tr("适用于版本检查、内核、规则集及组网组件", "Applies to release checks, cores, rule sets and mesh components."),
                     toggle("proxy-resource-updates", self.tr("使用代理更新资源", "Update resources through the proxy"), settings.proxy_resource_updates)
                         .on_change(cx.listener(|this, enabled, _, cx| this.modify_settings(cx, |s| s.proxy_resource_updates = *enabled)))))
+            .child(setting_row(&p, self.tr("前置代理", "Front proxy"),
+                self.tr("用于已启用代理的订阅和资源更新。留空使用运行中的内核。", "SOCKS5 for proxied subscription and resource updates. Leave blank to use the running core."),
+                div().flex().items_center().gap_2()
+                    .child(div().w(px(super::theme::SETTING_LABEL_WIDTH * 2.)).child(Input::new(&self.update_proxy_input)))
+                    .when(input.trim() != settings.update_proxy.as_str(), |d| d.child(Button::new("save-update-proxy")
+                        .label(self.tr("应用", "Apply")).disabled(proxy.is_err())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Ok(proxy) = xrose_core::updates::Socks5Proxy::parse(this.update_proxy_input.read(cx).value().as_ref()) {
+                                this.modify_settings(cx, |s| s.update_proxy = proxy);
+                            }
+                        }))))
+                    .when(proxy.is_err(), |d| d.child(div().text_sm().text_color(p.danger_text)
+                        .child(self.tr("请输入 SOCKS5 地址和端口", "Enter a SOCKS5 address and port"))))))
                 .child(setting_row(&p, "User-Agent",
                     self.tr("用于订阅和资源请求，留空使用默认值", "Used for subscription and resource requests. Leave blank for the default."),
                     div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH * 2.)).child(Input::new(&self.update_agent_input)))

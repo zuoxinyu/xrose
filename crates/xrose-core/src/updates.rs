@@ -70,10 +70,56 @@ impl LocalProxy {
     }
 }
 
-/// A proxied request must fail if the running core has no HTTP listener.
+/// Optional SOCKS5 endpoint for application updates. The URL can contain credentials.
+#[derive(Default, Clone, PartialEq, Eq)]
+pub struct Socks5Proxy(String);
+
+impl std::fmt::Debug for Socks5Proxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Socks5Proxy(..)")
+    }
+}
+
+impl Socks5Proxy {
+    pub fn parse(value: &str) -> Result<Self> {
+        let value = value.trim();
+        let proxy = Self(value.into());
+        if !value.is_empty() {
+            proxy.url()?;
+        }
+        Ok(proxy)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn url(&self) -> Result<reqwest::Url> {
+        let invalid = || Error::config("请输入有效的 SOCKS5 地址和端口");
+        let address = self
+            .0
+            .strip_prefix("socks5://")
+            .or_else(|| self.0.strip_prefix("socks5h://"))
+            .unwrap_or(&self.0);
+        let url = reqwest::Url::parse(&format!("socks5h://{address}")).map_err(|_| invalid())?;
+        if url.host().is_none()
+            || !matches!(url.port(), Some(1..=65535))
+            || !matches!(url.path(), "" | "/")
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || address.chars().any(char::is_whitespace)
+        {
+            return Err(invalid());
+        }
+        Ok(url)
+    }
+}
+
+/// Explicit update routing, independent of the operating system proxy.
 #[derive(Debug, Default, Clone)]
 pub struct UpdateNetwork {
-    pub(crate) via_core: bool,
+    pub(crate) use_proxy: bool,
+    pub(crate) socks5: Socks5Proxy,
     pub(crate) proxy: Option<LocalProxy>,
     pub(crate) user_agent: String,
 }
@@ -82,7 +128,8 @@ impl UpdateNetwork {
     /// CLI operations without a managed core must still honor the resource policy.
     pub fn offline_resources(settings: &crate::Settings) -> Self {
         Self {
-            via_core: settings.proxy_resource_updates,
+            use_proxy: settings.proxy_resource_updates,
+            socks5: settings.update_proxy.clone(),
             user_agent: settings.update_user_agent.clone(),
             proxy: None,
         }
@@ -95,11 +142,14 @@ impl UpdateNetwork {
             &self.user_agent
         };
         let builder = reqwest::Client::builder().no_proxy().user_agent(agent);
-        if self.via_core {
+        if self.use_proxy {
+            if !self.socks5.as_str().is_empty() {
+                let proxy = reqwest::Proxy::all(self.socks5.url()?)
+                    .map_err(|_| Error::config("SOCKS5 代理地址无效"))?;
+                return Ok(builder.proxy(proxy));
+            }
             let proxy = self.proxy.as_ref().ok_or_else(|| {
-                Error::other(
-                    "更新需要代理，请先启动带 HTTP 或混合入站的内核，或关闭相应的更新代理开关",
-                )
+                Error::other("请设置 SOCKS5 前置代理或启动带 HTTP 或混合入站的内核后重试")
             })?;
             Ok(builder.proxy(proxy.http_proxy()?))
         } else {
@@ -624,7 +674,8 @@ mod tests {
             .await
             .unwrap();
         let network = UpdateNetwork {
-            via_core: true,
+            use_proxy: true,
+            socks5: Default::default(),
             proxy: Some(LocalProxy {
                 host: "127.0.0.1".into(),
                 port: listener.local_addr().unwrap().port(),
@@ -724,11 +775,103 @@ mod tests {
         capture.await.unwrap();
         assert!(
             UpdateNetwork {
-                via_core: true,
+                use_proxy: true,
                 ..Default::default()
             }
             .builder("Fixture")
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_socks5_updates_send_hostnames_and_user_agent() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let settings = crate::Settings {
+            proxy_resource_updates: true,
+            update_proxy: Socks5Proxy::parse(&format!(
+                "socks5://{}",
+                listener.local_addr().unwrap()
+            ))
+            .unwrap(),
+            update_user_agent: "Fixture/3".into(),
+            ..Default::default()
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            assert_eq!(socket.read_u8().await.unwrap(), 5);
+            let mut methods = vec![0; usize::from(socket.read_u8().await.unwrap())];
+            socket.read_exact(&mut methods).await.unwrap();
+            assert!(methods.contains(&0));
+            socket.write_all(&[5, 0]).await.unwrap();
+            let mut command = [0; 4];
+            socket.read_exact(&mut command).await.unwrap();
+            assert_eq!(command, [5, 1, 0, 3]);
+            let mut domain = vec![0; usize::from(socket.read_u8().await.unwrap())];
+            socket.read_exact(&mut domain).await.unwrap();
+            assert_eq!(domain, b"asset.invalid");
+            assert_eq!(socket.read_u16().await.unwrap(), 80);
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+            let mut reader = BufReader::new(socket);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line.trim().is_empty() {
+                    break;
+                }
+                lines.push(line.trim().to_ascii_lowercase());
+            }
+            assert!(lines.iter().any(|line| line == "user-agent: fixture/3"));
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let network = UpdateNetwork::offline_resources(&settings);
+        let client = network.client(Duration::from_secs(5)).unwrap();
+        let response = client
+            .get("http://asset.invalid/core")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn update_proxy_validation_and_encryption() {
+        for bad in [
+            "https://example.invalid:1080",
+            "example.invalid",
+            "example.invalid:0",
+            "example.invalid:1080/path",
+            "socks5://example.invalid:1080?x",
+        ] {
+            assert!(Socks5Proxy::parse(bad).is_err());
+        }
+        assert!(Socks5Proxy::parse("[::1]:1080").is_ok());
+        let secret = uuid::Uuid::new_v4().to_string();
+        let proxy = Socks5Proxy::parse(&format!("socks5h://fixture:{secret}@example.invalid:1080"))
+            .unwrap();
+        let settings = crate::Settings {
+            update_proxy: proxy,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        settings.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains(&secret));
+        assert!(!format!("{settings:?}").contains(&secret));
+        assert_eq!(
+            crate::Settings::load(&path).unwrap().update_proxy,
+            settings.update_proxy
         );
     }
 

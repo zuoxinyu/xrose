@@ -12,7 +12,7 @@
 - `routing`：自定义规则分组（`rule_groups`）、规则（`rules`，含 `geosite` / `geoip` / `rule_sets` / `process` 等语义匹配器）与规则集定义。
 - `dns`：上游服务器（`tag` / `address` / `domains` / `detour`）、Fake-IP、Hosts 与 `final` 策略。
 - `inbounds`：mixed / socks / http / TUN / tproxy / redirect。
-- `default_group` / `front_proxy`：默认代理出站组与前置代理节点引用。
+- `default_group` 指定默认代理出站组。
 
 协议字段名（如 `outbounds`、`protocol`、`route`）仅允许出现在 `adapters::xray` 与 `adapters::singbox` 中。UI 层只能通过 `AppService` 同步发起操作，并从 `UiSnapshot` 读取状态，不在 `render` / `tick` 路径中执行磁盘或网络访问。
 
@@ -22,7 +22,7 @@
 
 - **虚拟身份隔离**：常量 `DIRECT_VIRTUAL_NODE_ID`（`__xrose_direct__`）仅用于界面与菜单展示，不写入 `model.nodes`，从而隔离节点计数、分享导出、订阅替换与组网同步。
 - **直连编译策略**：
-  - 省略远端代理出站与前置代理，避免空节点编译报错；所有 `Proxy` 路由动作映射为直连。
+  - 省略远端代理出站，避免空节点编译报错；所有 `Proxy` 路由动作映射为直连。
   - 启用规则中的 `Block` 动作原样保留（sing-box `action: reject` / Xray `blackhole`），组网共建路由与 MagicDNS 照常注入。
   - 若配置的 DNS 上游依赖代理 `detour`，直连编译期跳过该上游及其分域规则并生成中文警告；无剩余可用上游时自动回退系统解析器，防止断网。
   - `required_rule_sets` 仅收集 `Block` 规则及有效直连 DNS 引用的规则集。
@@ -37,7 +37,6 @@
 | --- | --- | --- | --- |
 | mixed 入站 | 无 | 有 | Xray 拆成 SOCKS + HTTP（`port + 1`），界面提示 |
 | 局域网认证与独立端口 | SOCKS 与 HTTP 分别配置账号 | mixed 入站配置账号 | 共用端口时本机也需认证；独立端口模式保留本机回环入口 |
-| 前置代理 | 目标节点 `streamSettings.sockopt.dialerProxy` | 目标出站或 endpoint 的 `detour` | 每个配置保存前置节点 ID；前置节点本身、组网本机出口与直连规则保留原路径 |
 | TUN | 原生（自动路由需 26.6.27+） | 原生 | Xray 生成 `gateway`、`autoSystemRoutingTable` 与 `autoOutboundsInterface`；共享提权启动与进程回收 |
 | AnyTLS | 不支持 | 1.12+ | 密码认证、必选 TLS 与空闲会话参数；Xray 跳过并警告 |
 | OpenVPN | 不支持 | 1.14+ endpoint | TLS 客户端、UDP/TCP、账号密码与 PEM 证书、控制通道密钥、分域 DNS；旧内核跳过并修复组引用 |
@@ -66,7 +65,6 @@
 
 - **AnyTLS / WireGuard**：AnyTLS 字段依据 [sing-box 文档](https://sing-box.sagernet.org/configuration/outbound/anytls/)；WireGuard 依据 [sing-box endpoint](https://sing-box.sagernet.org/configuration/endpoint/wireguard/) 与 [Xray 出站文档](https://xtls.github.io/en/config/outbounds/wireguard.html)，`Credentials.wireguard` 随配置加密保存，`NodeDraft` 统一校验密钥长度与地址格式。
 - **OpenVPN / OpenConnect**：依据 sing-box 1.14.4 类型定义（[OpenVPN](https://sing-box.sagernet.org/configuration/endpoint/openvpn-client/)、[OpenConnect](https://sing-box.sagernet.org/configuration/endpoint/openconnect/)）生成用户态 endpoint，通用 TLS / v2ray 传输层不叠加到 VPN。导入器不执行 `.ovpn` 指令或读取本地外部文件。启动时传入实际内核版本，低于 1.14 时跳过 VPN 节点并在纯 VPN 无法编译时提示升级。
-- **前置代理**：前置节点失效时编译提示重选。独立 HTTP 延迟与下载测速复用同一前置节点；启用前置代理时批量测速切为 HTTP 模式，Xray TUN 下单独为首跳解析地址并绑定上联网卡（参见 [Xray Sockopt](https://xtls.github.io/config/transports/sockopt.html) 与 [sing-box 拨号字段](https://sing-box.sagernet.org/configuration/shared/dial/)）。
 - **Xray TUN**：依据 [Xray TUN 文档](https://xtls.github.io/en/config/inbounds/tun.html) 与 [v26.6.27 定义](https://github.com/XTLS/Xray-core/blob/v26.6.27/infra/conf/tun.go)，通过 CIDR 差集排除用户与组网网段，DNS 劫持规则先于 LAN 绕过并将系统解析器替换为显式上游以防回环；`strict_route` 与网络栈不映射并提示警告。Linux/macOS 不自动接管系统 DNS，Windows 配置 TUN 接口 DNS。
 
 ## 4. 出站组、节点切换与测速
@@ -100,7 +98,7 @@
 1. `fetch_subscription`：发送条件请求（`ETag` / `If-Modified-Since`）并解析 `subscription-userinfo`。
 2. `parse_subscription`：自动识别 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON。
 3. **合并与去重**：按订阅 ID 替换旧节点（保留其他订阅），按指纹去重；Clash `proxy-groups` 按名称合并，新节点加入默认出站组。更换订阅 URL 会清理旧缓存验证信息，跨来源更换清除自定义请求头。
-4. **更新代理策略**：订阅更新与资源下载（版本检查、内核包、规则集、地理数据、组网组件）各自按配置开关决定直连或经运行中内核的 HTTP/mixed 入站访问。
+4. **更新代理策略** 订阅更新与资源下载各有独立开关。启用时优先使用设置中的 SOCKS5 前置代理，由代理解析目标域名。前置代理留空时使用运行中内核的 HTTP 或混合入站。关闭时请求直接连接。两类请求均支持自定义 User-Agent。
 
 ### 链接与二维码导入、分享
 
@@ -147,7 +145,7 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 | 设置项 | 生效方式 |
 | --- | --- |
 | 内核类型、当前内核版本或自定义路径 | 下次启动生效；运行时按热重载设置应用 |
-| 已启用入站端口、监听地址、局域网配置、前置代理 | 校验并重载内核后生效 |
+| 已启用入站端口、监听地址、局域网配置 | 校验并重载内核后生效 |
 | TUN 开关与严格路由 | 运行时校验并重启内核；停止时仅保存 |
 | 内核日志级别、sing-box API 端口、Xray 统计端口 | 对应内核重载后生效 |
 | 默认测速地址 / 间隔 | 自动出站组或 Xray observatory 需重载；手动测速即时读取 |
@@ -184,6 +182,6 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 ## 11. 持久化与安全边界
 
-- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
+- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
 - **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
 - **代理崩溃恢复**：应用系统代理前保存状态快照，启动时若检测到异常退出残留则自动还原，防止系统断网。

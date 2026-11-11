@@ -296,6 +296,7 @@ pub struct AppView {
     lan_port_input: Entity<InputState>,
     lan_user_input: Entity<InputState>,
     lan_password_input: Entity<InputState>,
+    update_proxy_input: Entity<InputState>,
     update_agent_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
@@ -372,6 +373,12 @@ impl AppView {
             InputState::new(window, cx)
                 .masked(true)
                 .default_value(snapshot.settings.lan_account.password.clone())
+        });
+        let update_proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .masked(true)
+                .placeholder("socks5://host:port")
+                .default_value(snapshot.settings.update_proxy.as_str().to_owned())
         });
         let update_agent_input = cx.new(|cx| {
             InputState::new(window, cx).default_value(snapshot.settings.update_user_agent.clone())
@@ -476,6 +483,7 @@ impl AppView {
             lan_port_input,
             lan_user_input,
             lan_password_input,
+            update_proxy_input,
             update_agent_input,
             trace_input,
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),

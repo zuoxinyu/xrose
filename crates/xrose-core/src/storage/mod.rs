@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 // Distinguish the release schema from overlapping pre-release version numbers.
 const APPLICATION_ID: i64 = i32::from_be_bytes(*b"XROS") as i64;
 
@@ -118,6 +118,9 @@ impl Store {
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         match (app_id, version) {
             (APPLICATION_ID, SCHEMA_VERSION) => return Ok(()),
+            // Old profile JSON may contain a chained node ID. Serde drops it when saving;
+            // the application-level SOCKS5 endpoint starts empty in the separate settings file.
+            (APPLICATION_ID, 1) => {}
             (0, 0) => tx.execute_batch(include_str!("schema_v1.sql"))?,
             (0, 14 | 15) => {
                 // These builds already use the complete v1 table layout. The two routing
@@ -700,7 +703,7 @@ mod tests {
                 assert_eq!(
                     conn.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
                         .unwrap(),
-                    1
+                    SCHEMA_VERSION
                 );
             }
             let backups: Vec<_> = std::fs::read_dir(paths.backup_dir()).unwrap().collect();
@@ -713,6 +716,43 @@ mod tests {
                 version
             );
         }
+    }
+
+    #[test]
+    fn v1_profiles_drop_the_obsolete_chained_node_on_save() {
+        let (store, dir) = store();
+        let paths = AppPaths::from_root(dir.path());
+        let id = store.active_profile_id().unwrap();
+        let mut profile = serde_json::to_value(AppModel::default()).unwrap();
+        profile["front_proxy"] = "obsolete-node".into();
+        let encrypted = store.secrets.encrypt(&profile.to_string());
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "UPDATE profiles SET model=?1 WHERE id=?2",
+                params![encrypted, id],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        drop(store);
+        let reopened = Store::open(&paths).unwrap();
+        let profile = reopened.load_profile(&id).unwrap().unwrap();
+        reopened.save_profile_with_id(&id, &profile.model).unwrap();
+        let raw: String = reopened
+            .conn
+            .lock()
+            .query_row("SELECT model FROM profiles WHERE id=?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            !reopened
+                .secrets
+                .decrypt(&raw)
+                .unwrap()
+                .contains("front_proxy")
+        );
     }
 
     #[test]

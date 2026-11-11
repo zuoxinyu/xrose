@@ -136,11 +136,12 @@ impl CoreManager {
     pub(crate) fn update_network(
         &self,
         settings: &Settings,
-        via_core: bool,
+        use_proxy: bool,
     ) -> crate::updates::UpdateNetwork {
         crate::updates::UpdateNetwork {
-            via_core,
-            proxy: if via_core {
+            use_proxy,
+            socks5: settings.update_proxy.clone(),
+            proxy: if use_proxy && settings.update_proxy.as_str().is_empty() {
                 self.active_proxy("http")
             } else {
                 None
