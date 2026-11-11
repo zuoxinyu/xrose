@@ -387,6 +387,7 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_3()
+            .pb_1()
             .child(div().flex().flex_col().gap_1()
                 .child(div().text_sm().child(self.tr("转发方向", "Direction")))
                 .child(direction))

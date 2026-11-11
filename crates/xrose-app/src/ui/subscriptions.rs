@@ -1,19 +1,19 @@
 use super::menus::{self, MenuTarget};
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::subscription::Subscription;
 use xrose_core::util::format_bytes;
 
-use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
+use super::AppView;
 
 impl AppView {
     pub(super) fn open_edit_subscription(
@@ -40,6 +40,7 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_2()
+                    .pb_1()
                     .child(this.tr("名称", "Name"))
                     .child(Input::new(&name))
                     .child(this.tr("订阅地址", "Subscription URL"))

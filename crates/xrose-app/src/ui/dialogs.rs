@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::Node;
 use xrose_core::service::ToastLevel;
 
-use super::{AppView, theme::palette, widgets::ChoiceGroup};
+use super::{theme::palette, widgets::ChoiceGroup, AppView};
 
 /// Shared motion policy for form, detail, and confirmation dialogs.
 pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
@@ -28,6 +28,7 @@ pub(super) fn dialog_scroll_body(
     div().mx_neg_1().child(
         div()
             .px_1()
+            .pb_1()
             .max_h(max_height)
             .child(body)
             .overflow_y_scrollbar()
@@ -150,6 +151,7 @@ impl AppView {
                         .flex()
                         .flex_col()
                         .gap_3()
+                        .pb_1()
                         .child(Input::new(&self.sub_name))
                         .child(Input::new(&self.sub_url))
                         .when_some(self.manual_error.clone(), |d, message| {
@@ -196,7 +198,7 @@ impl AppView {
             let empty = self.import_input.read(cx).value().trim().is_empty();
             dialog
                 .child(
-                    div().flex().flex_col().gap_3().min_w(px(0.))
+                    div().flex().flex_col().gap_3().min_w(px(0.)).pb_1()
                         .capture_action(cx.listener(|this, _: &gpui_base::input::Paste, window, cx| {
                             if this.paste_into_import(window,cx) { cx.stop_propagation(); }
                         }))
@@ -213,7 +215,7 @@ impl AppView {
                     div().flex().flex_wrap().justify_end().gap_2()
                         .child(self.scan_button(cx))
                         .child(Button::new("import-clipboard")
-                            .icon(IconName::Copy)
+                            .icon(IconName::ClipboardPaste)
                             .label(self.tr("从剪贴板粘贴", "Paste from clipboard"))
                             .tooltip(if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" })
                             .on_click(cx.listener(|this, _, window, cx| {

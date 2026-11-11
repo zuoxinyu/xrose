@@ -1,7 +1,7 @@
 use gpui_kit::assets::IconName;
-use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{
@@ -29,7 +29,7 @@ impl AppView {
         window.open_dialog(cx, move |dialog, window, cx| {
             let p = palette(cx);
             let tr = |zh, en| super::tr(lang, zh, en);
-            let form = div().flex().flex_col().gap_2()
+            let form = div().flex().flex_col().gap_2().pb_1()
                 .child(tr("下载目录或 URL 模板", "Download directory or URL template"))
                 .child(Input::new(&input))
                 .child(div().text_xs().text_color(p.muted_fg).child(tr(
@@ -109,6 +109,7 @@ impl AppView {
                         .flex()
                         .flex_col()
                         .gap_2()
+                        .pb_1()
                         .child(Input::new(&name))
                         .when_some(error.read(cx).clone(), |d, message| {
                             d.child(div().text_sm().text_color(p.danger_text).child(message))
