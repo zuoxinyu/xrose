@@ -47,6 +47,8 @@ Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 
 
 ## 快速开始
 
+首次安装可下载 **full** 包，内含 sing-box、五个规则集和 xrose-cli。已有安装可用 **lite** 更新应用。各平台的包格式与安装方式见[发布说明](docs/RELEASE.md)。
+
 ### 运行环境与构建
 
 - **环境要求**：Rust 1.95+，Windows、macOS 或 Linux 桌面。

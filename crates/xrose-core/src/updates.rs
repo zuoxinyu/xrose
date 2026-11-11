@@ -329,6 +329,30 @@ pub struct AppUpdate {
     pub published_at: String,
 }
 
+fn lite_asset_name(version: &str) -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return None,
+    };
+    let platform = std::env::consts::OS;
+    let ext = match platform {
+        "macos" => "dmg",
+        "windows" => "zip",
+        "linux" => {
+            let executable = std::env::current_exe().ok()?;
+            let format = executable.parent()?.join("../share/xrose/package-format");
+            match std::fs::read_to_string(format).unwrap_or_default().trim() {
+                "deb" => "deb",
+                "arch" => "pkg.tar.zst",
+                _ => "AppImage",
+            }
+        }
+        _ => return None,
+    };
+    Some(format!("Xrose-{version}-{platform}-{arch}-lite.{ext}"))
+}
+
 pub async fn check_app_update(
     repository: &str,
     current: &str,
@@ -339,27 +363,23 @@ pub async fn check_app_update(
     if !is_newer(&release.version, current) {
         return Ok(None);
     }
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| {
-            a.name.ends_with(".zip")
-                || a.name.ends_with(".AppImage")
-                || a.name.ends_with(".dmg")
-                || a.name.ends_with(".exe")
+    let url = lite_asset_name(&release.version)
+        .and_then(|name| {
+            release
+                .assets
+                .iter()
+                .find(|asset| asset.name == name)
+                .map(|asset| asset.url.clone())
         })
-        .cloned()
-        .unwrap_or_else(|| ReleaseAsset {
-            name: "release".into(),
-            url: format!(
+        .unwrap_or_else(|| {
+            format!(
                 "https://github.com/{repository}/releases/tag/{}",
                 release.tag
-            ),
-            size: 0,
+            )
         });
     Ok(Some(AppUpdate {
         version: release.version,
-        url: asset.url,
+        url,
         notes: release.notes,
         published_at: release.published_at,
     }))

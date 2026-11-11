@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{io_context, Result};
+use crate::error::{Result, io_context};
 
 /// All on-disk locations Xrose uses. Binaries live outside the app bundle so
 /// app updates never replace a working core and vice versa.
@@ -19,6 +19,25 @@ impl AppPaths {
         if let Ok(home) = std::env::var("XROSE_HOME") {
             let root = PathBuf::from(home);
             return Self::from_root(&root);
+        }
+        #[cfg(windows)]
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                // The portable GUI and the CLI copied into XroseData/data/bin share a profile.
+                for base in [
+                    Some(dir),
+                    dir.ends_with("XroseData/data/bin")
+                        .then(|| dir.ancestors().nth(3))
+                        .flatten(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if base.join("xrose.portable").is_file() {
+                        return Self::from_root(&base.join("XroseData"));
+                    }
+                }
+            }
         }
         match directories::ProjectDirs::from("io", "xrose", "Xrose") {
             Some(dirs) => Self {

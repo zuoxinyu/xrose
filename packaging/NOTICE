@@ -1,0 +1,7 @@
+Xrose is distributed under GPL-3.0-or-later. See the LICENSE file in the Xrose source release.
+The unmodified sing-box distribution contains its upstream license. Corresponding source:
+https://github.com/SagerNet/sing-box/tree/v1.14.4
+Rule set sources and revisions are recorded in resources.lock.json:
+https://github.com/SagerNet/sing-geoip
+https://github.com/SagerNet/sing-geosite
+https://github.com/MetaCubeX/meta-rules-dat

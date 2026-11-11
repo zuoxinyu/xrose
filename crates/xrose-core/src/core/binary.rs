@@ -137,8 +137,7 @@ struct Manifest {
     binaries: Vec<BinaryRecord>,
 }
 
-/// Owns downloaded cores. Binaries are never bundled with the desktop app:
-/// this is what makes "app update" and "core update" independent.
+/// Owns installed cores independently of desktop application updates.
 pub struct BinaryManager {
     root: PathBuf,
     manifest_file: PathBuf,
@@ -303,7 +302,11 @@ impl BinaryManager {
             version: version.trim_start_matches('v').to_string(),
             platform: platform.into(),
             arch: arch.into(),
-            relative_path: path.to_string_lossy().to_string(),
+            relative_path: path
+                .strip_prefix(&self.root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned(),
             sha256: sha256_file(path)?,
             size: fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             installed_at: now_unix(),

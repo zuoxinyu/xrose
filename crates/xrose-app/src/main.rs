@@ -38,6 +38,13 @@ fn main() {
         .find(|args| args[0] == "--home")
         .map(|args| xrose_core::paths::AppPaths::from_root(std::path::Path::new(&args[1])))
         .unwrap_or_else(xrose_core::paths::AppPaths::discover);
+    if let Err(error) = xrose_core::bundled::prepare(&paths) {
+        eprintln!("初始化随附资源失败：{error}");
+        std::process::exit(1);
+    }
+    if args.iter().any(|arg| arg == "--prepare-resources") {
+        return;
+    }
     let service = match AppService::with_paths(paths) {
         Ok(service) => service,
         Err(err) => {

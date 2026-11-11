@@ -6,6 +6,7 @@
 //! very different wire formats of Xray and sing-box.
 
 pub mod adapters;
+pub mod bundled;
 pub mod core;
 pub mod diagnostics;
 pub mod dns;

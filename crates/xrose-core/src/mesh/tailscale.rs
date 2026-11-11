@@ -13,7 +13,7 @@ use std::{
 use tonic::{Request, client::Grpc, transport::Channel};
 use tonic_prost::ProstCodec;
 
-fn release() -> Result<(&'static str, &'static str)> {
+pub(crate) fn release() -> Result<(&'static str, &'static str)> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => Ok((
             "sing-box-1.14.4-windows-amd64.zip",
@@ -86,7 +86,7 @@ pub async fn install(
         .map_err(|_| Error::binary("无法创建组网组件目录"))?;
     crate::util::atomic_write(&target, &data)
 }
-fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
+pub(crate) fn unpack(archive: &Path, directory: &Path) -> Result<PathBuf> {
     let data = verified_bytes(archive)?;
     let executable = directory.join(if cfg!(windows) {
         "sing-box.exe"

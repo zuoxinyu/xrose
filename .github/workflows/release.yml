@@ -1,0 +1,122 @@
+name: Build and publish desktop releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, system: macos, arch: arm64 }
+          - { runner: macos-15-intel, system: macos, arch: amd64 }
+          - { runner: windows-2025, system: windows, arch: amd64 }
+          - { runner: windows-11-arm, system: windows, arch: arm64 }
+          - { runner: ubuntu-24.04, system: linux, arch: amd64 }
+          - { runner: ubuntu-24.04-arm, system: linux, arch: arm64 }
+    name: ${{ matrix.system }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      XROSE_GITHUB_REPOSITORY: ${{ github.repository }}
+      XROSE_BUILD_ARCH: ${{ matrix.arch }}
+      CARGO_INCREMENTAL: '0'
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Set up Rust
+        run: rustup update stable --no-self-update
+      - run: rustup default stable
+      - name: Install Linux build and packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake clang libclang-dev pkg-config protobuf-compiler \
+            libgtk-3-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libfontconfig-dev \
+            libpipewire-0.3-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxcb-shape0-dev libxrandr-dev libdbus-1-dev libgbm-dev libegl-dev libasound2-dev \
+            libudev-dev libssl-dev libzstd-dev libdrm-dev libxdo-dev libx11-xcb-dev \
+            dpkg-dev patchelf desktop-file-utils squashfs-tools zstd libfuse2t64
+      - name: Install macOS prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          command -v protoc || brew install protobuf
+          xcrun -f metal >/dev/null || xcodebuild -downloadComponent MetalToolchain
+      - name: Configure optional Developer ID signing and notarization
+        if: runner.os == 'macOS'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_PASSWORD }}
+          APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          APP_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          if [[ -z "$CERTIFICATE" ]]; then exit 0; fi
+          keychain="$RUNNER_TEMP/xrose-signing.keychain-db"
+          password="$(openssl rand -hex 32)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          cert="$RUNNER_TEMP/signing.p12"
+          trap 'rm -f "$cert"' EXIT
+          printf '%s' "$CERTIFICATE" | base64 -D > "$cert"
+          security import "$cert" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk '/"Developer ID Application:/ { print $2; exit }')
+          test -n "$identity"
+          echo "XROSE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "XROSE_MAC_DISTRIBUTION=1" >> "$GITHUB_ENV"
+          if [[ -n "$APPLE_ID" || -n "$TEAM_ID" || -n "$APP_PASSWORD" ]]; then
+            security default-keychain -d user -s "$keychain"
+            xcrun notarytool store-credentials xrose-notary --apple-id "$APPLE_ID" --team-id "$TEAM_ID" --password "$APP_PASSWORD"
+            echo "XROSE_NOTARY_PROFILE=xrose-notary" >> "$GITHUB_ENV"
+          fi
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        run: scripts/release-macos.sh
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        run: scripts/release-linux.sh
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        run: ./scripts/build-windows.ps1 -Action release
+      - name: Verify full and lite packages
+        run: python scripts/verify_release.py dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xrose-${{ matrix.system }}-${{ matrix.arch }}
+          path: dist/Xrose-*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Xrose-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish verified packages and checksums
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum Xrose-* > SHA256SUMS
+          flags=()
+          if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$TAG" "${flags[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Xrose ${TAG#v}" Xrose-* SHA256SUMS

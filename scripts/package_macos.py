@@ -57,7 +57,7 @@ def build(profile):
     raise ValueError("Cargo 未返回 xrose-app 的构建路径")
 
 
-def assemble(app, binary, version, identity):
+def assemble(app, binary, version, identity, seed=None, distribution=False):
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True)
     (contents / "Resources").mkdir()
@@ -80,13 +80,20 @@ def assemble(app, binary, version, identity):
         run("iconutil", "-c", "icns", icons, "-o", icon)
         shutil.copyfile(icon, contents / "Resources/Xrose.icns")
 
+    if seed is not None:
+        shutil.copytree(seed, contents / "Resources/xrose-seed")
     with (contents / "Info.plist").open("wb") as plist:
         plistlib.dump(dict(CFBundleInfoDictionaryVersion="6.0", CFBundleIdentifier=BUNDLE_ID,
                            CFBundleName="Xrose", CFBundleDisplayName="Xrose",
                            CFBundleExecutable="xrose-app", CFBundlePackageType="APPL",
                            CFBundleVersion=version, CFBundleShortVersionString=version,
                            CFBundleIconFile="Xrose.icns", NSHighResolutionCapable=True), plist)
-    run("codesign", "--force", "--sign", identity, "--identifier", BUNDLE_ID, app)
+    sign = ["codesign", "--force", "--sign", identity]
+    if distribution:
+        sign += ["--options", "runtime", "--timestamp"]
+        if seed is not None:
+            run(*sign, contents / "Resources/xrose-seed/xrose-cli")
+    run(*sign, "--identifier", BUNDLE_ID, app)
 
 
 def publish(prepared, dest):

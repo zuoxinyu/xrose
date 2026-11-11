@@ -163,6 +163,8 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 
 ## 10. 托盘、窗口材质与发布选项
 
+桌面发布分 full 与 lite。full 在启动 GUI 前调用 `bundled::prepare`，将已校验的离线资源安装到用户数据目录，通过 `BinaryManager` 注册 sing-box。完成标记按数据目录保存。应用更新按当前平台、架构和格式匹配 lite 产物。资源布局与工作流见[发布说明](RELEASE.md)。
+
 ```
 Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
                           │ 回调仅排队 TrayCommand

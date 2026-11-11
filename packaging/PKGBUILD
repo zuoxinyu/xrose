@@ -1,0 +1,11 @@
+pkgname=xrose
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc="Xray and sing-box desktop client"
+arch=('x86_64')
+license=('GPL-3.0-or-later')
+depends=('glibc' 'gcc-libs' 'gtk3' 'libxkbcommon-x11' 'libpipewire' 'libxcb' 'libxrandr' 'mesa' 'wayland' 'openssl')
+options=('!strip' '!debug')
+package() {
+    cp -a "$startdir/root/usr" "$pkgdir/"
+}

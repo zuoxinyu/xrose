@@ -1,4 +1,4 @@
-param([ValidateSet('build','check','test')][string]$Action = 'build')
+param([ValidateSet('build','check','test','release')][string]$Action = 'build')
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $workspace
@@ -22,6 +22,7 @@ try {
         $env:PATH = "$sevenZip;$env:PATH"
     }
     switch ($Action) {
+        'release' { python (Join-Path $PSScriptRoot 'release.py') }
         'build' { cargo build --workspace --locked }
         'check' { cargo check --workspace --locked }
         'test' { cargo test -p xrose-core --locked -- --skip second_acquire_fails }

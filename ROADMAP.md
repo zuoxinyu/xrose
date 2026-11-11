@@ -35,7 +35,7 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 ### 构建与发布
 
 - [ ] CI：GitHub Actions 在 Windows / macOS / Linux 上构建、运行 `cargo test -p xrose-core`、检查格式与 clippy。
-- [ ] 打包发布：Windows 安装包、macOS `.app` / dmg、Linux AppImage / deb。
+- [x] 发布打包脚本与工作流：macOS DMG、Windows 便携 ZIP、Linux AppImage / deb、Arch Linux 原生包，均提供 full 与 lite。见[发布说明](docs/RELEASE.md)。
 
 ---
 
