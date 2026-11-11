@@ -56,6 +56,10 @@ smoltcp.workspace = true
 tokio-util.workspace = true
 socket2.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration.workspace = true
+dispatch2.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 widestring.workspace = true
 winreg.workspace = true

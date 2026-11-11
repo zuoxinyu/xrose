@@ -37,6 +37,7 @@ pub struct Dashboard {
     pub tailscale: DashboardMeshStatus,
     pub proxy_address: String,
     pub system_proxy: bool,
+    pub system_proxy_status: Option<xrose_core::system::proxy::SystemProxyStatus>,
     pub tun_enabled: bool,
     pub tun_supported: bool,
     pub route_preset: RoutePreset,
@@ -45,6 +46,7 @@ pub struct Dashboard {
     pub total: String,
     pub core_name: String,
     pub busy_core: bool,
+    pub busy_proxy: bool,
     pub busy_latency: bool,
 }
 
@@ -223,6 +225,7 @@ pub fn build(service: &AppService) -> Dashboard {
         down_speed: snapshot.runtime.down_speed,
         up_speed: snapshot.runtime.up_speed,
         system_proxy: snapshot.system_proxy_active,
+        system_proxy_status: snapshot.system_proxy_status,
         tun_enabled: snapshot.settings.effective_tun(),
         tun_supported: snapshot.settings.core.capabilities().native_tun,
         route_preset: snapshot.model.routing.preset,
@@ -233,6 +236,7 @@ pub fn build(service: &AppService) -> Dashboard {
                 .saturating_add(snapshot.runtime.up_total),
         ),
         core_name: snapshot.settings.core.display_name().to_string(),
+        busy_proxy: snapshot.busy.iter().any(|key| key == "proxy"),
         busy_core: snapshot.busy.iter().any(|key| key == "core"),
         busy_latency: snapshot
             .busy
@@ -247,7 +251,7 @@ pub enum TrayAction {
     TestAll,
     SelectMode(WorkMode),
     SelectNode { group_id: String, node_id: String },
-    ToggleSystemProxy,
+    SetSystemProxy(bool),
     ToggleTun,
     SetRoutePreset(RoutePreset),
     ShowWindow,
@@ -292,10 +296,7 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
         TrayAction::SelectNode { group_id, node_id } => {
             service.select_node(&group_id, &node_id);
         }
-        TrayAction::ToggleSystemProxy => {
-            let enabled = service.settings().system_proxy;
-            service.set_system_proxy(!enabled);
-        }
+        TrayAction::SetSystemProxy(enabled) => service.set_system_proxy(enabled),
         TrayAction::ToggleTun => service.set_tun_enabled(!service.settings().effective_tun()),
         TrayAction::SetRoutePreset(preset) => service.switch_route_preset(preset),
         TrayAction::ShowWindow => return Some(TrayCommand::ShowWindow),

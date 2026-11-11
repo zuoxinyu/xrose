@@ -11,6 +11,27 @@ pub fn tr(lang: Language, zh: &'static str, en: &'static str) -> SharedString {
     })
 }
 
+pub(crate) fn proxy_status_label(
+    lang: Language,
+    status: xrose_core::system::proxy::SystemProxyStatus,
+) -> Option<SharedString> {
+    use xrose_core::system::proxy::SystemProxyStatus::*;
+    match status {
+        External => Some(tr(
+            lang,
+            "系统代理由外部设置",
+            "Externally configured proxy",
+        )),
+        Partial => Some(tr(lang, "部分代理设置使用 Xrose", "Partially using Xrose")),
+        Unknown => Some(tr(
+            lang,
+            "无法读取系统代理状态",
+            "System proxy state unavailable",
+        )),
+        Off | Xrose => None,
+    }
+}
+
 pub fn outbound_group_label(
     lang: Language,
     group: &xrose_core::model::OutboundGroup,

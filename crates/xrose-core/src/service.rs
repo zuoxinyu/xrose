@@ -10,6 +10,7 @@ mod node_switch;
 mod outbound_groups;
 mod reload;
 mod routing_transfer;
+mod system_proxy;
 mod traffic_statistics;
 mod tray;
 pub use tray::{TrayIndicator, TrayStatus};
@@ -209,6 +210,8 @@ pub struct UiSnapshot {
     pub nat_probe: Option<system::nat::NatProbe>,
     pub updates: UpdateStatus,
     pub system_proxy_active: bool,
+    #[serde(default)]
+    pub system_proxy_status: Option<system::proxy::SystemProxyStatus>,
     pub pac_url: Option<String>,
     #[serde(default)]
     pub active_proxy_addresses: Vec<String>,
@@ -365,6 +368,10 @@ struct Inner {
     busy: RwLock<BTreeSet<String>>,
     toasts: Mutex<Vec<Toast>>,
     proxy: Mutex<ProxyManager>,
+    proxy_backend: system::ProxyBackend,
+    #[cfg(target_os = "macos")]
+    proxy_observation: Arc<RwLock<system::proxy::observer::Observation>>,
+    proxy_requests: Mutex<system_proxy::Requests>,
     pac: Mutex<Option<PacServer>>,
     validation: RwLock<Option<ValidationReport>>,
     compiled: RwLock<Option<CompiledConfig>>,
@@ -488,7 +495,11 @@ impl AppService {
             node_locations: RwLock::new(BTreeMap::new()),
             busy: RwLock::new(BTreeSet::new()),
             toasts: Mutex::new(Vec::new()),
+            proxy_backend: proxy.backend(),
+            #[cfg(target_os = "macos")]
+            proxy_observation: Default::default(),
             proxy: Mutex::new(proxy),
+            proxy_requests: Default::default(),
             pac: Mutex::new(None),
             validation: RwLock::new(None),
             compiled: RwLock::new(None),
@@ -521,21 +532,6 @@ impl AppService {
         let service = Self {
             inner: inner.clone(),
         };
-
-        if let Some(snapshot) = inner.proxy.lock().recover_after_crash() {
-            let settings = inner.settings.read().clone();
-            if settings.system_proxy {
-                let mut updated = settings;
-                updated.system_proxy = false;
-                let _ = updated.save(&inner.paths.settings_file());
-                *inner.settings.write() = updated;
-            }
-            *inner.recovery_note.write() = Some(format!(
-                "上次退出时系统代理未还原（{}），已自动恢复",
-                snapshot.backend
-            ));
-            service.toast(ToastLevel::Warning, "已恢复上次异常退出时的系统代理设置");
-        }
 
         if std::env::var_os("XROSE_DEBUG").is_some() {
             eprintln!("[debug] runtime ready");
@@ -612,7 +608,7 @@ impl AppService {
         let (up_total, down_total, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
         let history = self.inner.traffic.lock().samples();
         let pac_url = self.inner.pac.lock().as_ref().map(|p| p.info.url.clone());
-        let proxy_backend = self.inner.proxy.lock().backend().label().to_string();
+        let proxy_backend = self.inner.proxy_backend.label().to_string();
         let doctor = self.inner.doctor.read().clone();
         let validation = self.inner.validation.read().clone();
         let helper = self.inner.helper.read().clone();
@@ -638,7 +634,16 @@ impl AppService {
             error: None,
         };
         let updates = self.inner.updates.lock().clone();
-        let system_proxy_active = settings.system_proxy;
+        let system_proxy_status = self.system_proxy_status();
+        let system_proxy_active = match system_proxy_status {
+            Some(
+                system::proxy::SystemProxyStatus::Off | system::proxy::SystemProxyStatus::External,
+            ) => false,
+            Some(
+                system::proxy::SystemProxyStatus::Xrose | system::proxy::SystemProxyStatus::Partial,
+            ) => true,
+            _ => settings.system_proxy,
+        };
         UiSnapshot {
             nat_probe: self
                 .inner
@@ -695,6 +700,7 @@ impl AppService {
             dns_comparison: self.inner.dns_comparison.read().clone(),
             updates,
             system_proxy_active,
+            system_proxy_status,
             pac_url,
             active_proxy_addresses: self.inner.core.active_proxy_addresses(),
             active_tun_interface: self.inner.core.active_tun_interface(),
@@ -1007,16 +1013,19 @@ impl AppService {
             return Ok(());
         }
         let restart_required = settings.requires_core_restart(&old, &self.inner.model.read());
-        settings.save(&self.inner.paths.settings_file())?;
         {
             let mut current = self.inner.settings.write();
+            let mut saved = settings.clone();
+            // Only the proxy worker commits the state of the OS operation.
+            saved.system_proxy = current.system_proxy;
+            saved.save(&self.inner.paths.settings_file())?;
             let mut updates = self.inner.updates.lock();
             for core in CoreKind::all() {
                 if !Self::same_binary(core, &current, settings) {
                     updates.cores.remove(core.as_str());
                 }
             }
-            *current = settings.clone();
+            *current = saved;
         }
         if settings.hot_reload != old.hot_reload {
             self.reload_preference_changed();
@@ -2309,9 +2318,21 @@ impl AppService {
         if self.inner.startup_started.swap(true, Ordering::SeqCst) {
             return;
         }
-        let settings = self.settings();
         let service = self.clone();
+        // Begin crash recovery after the GUI has acquired its single-instance lock.
+        let recovering = self.inner.paths.proxy_snapshot().exists();
+        if recovering {
+            self.set_system_proxy(false);
+        }
         self.spawn(async move {
+            while service.is_busy("proxy") {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            if recovering && !service.inner.paths.proxy_snapshot().exists() {
+                *service.inner.recovery_note.write() =
+                    Some("已恢复上次异常退出时的系统代理设置".into());
+            }
+            let settings = service.settings();
             if settings.hot_reload {
                 service.check_helper_update().await;
             }
@@ -2436,9 +2457,7 @@ impl AppService {
             self.inner.connections.write().clear();
             *self.inner.proxies.write() = Default::default();
             self.finish_config_apply(&model, &settings);
-            if self.inner.settings.read().system_proxy {
-                self.enable_system_proxy();
-            }
+            self.reapply_system_proxy();
             self.toast(
                 ToastLevel::Success,
                 format!(
@@ -2460,12 +2479,12 @@ impl AppService {
             return;
         }
         self.inner.reload.lock().due = None;
+        self.stop_managed_proxy();
         let service = self.clone();
         self.spawn(async move {
             service.poll_traffic_statistics().await;
             service.flush_traffic_statistics().await;
             let result = service.inner.core.stop().await;
-            service.set_busy("core", false);
             service.cleanup_tun_via_helper().await;
             match result {
                 Ok(()) => {
@@ -2473,12 +2492,11 @@ impl AppService {
                     service.inner.connections.write().clear();
                     *service.inner.proxies.write() = Default::default();
                     service.toast(ToastLevel::Success, "core 已停止");
-                    if service.inner.settings.read().system_proxy {
-                        service.disable_system_proxy();
-                    }
                 }
                 Err(err) => service.toast(ToastLevel::Error, format!("停止失败：{err}")),
             }
+            service.finish_core_stop();
+            service.set_busy("core", false);
         });
     }
 
@@ -2580,9 +2598,7 @@ impl AppService {
                         service.inner.connections.write().clear();
                         *service.inner.proxies.write() = Default::default();
                         service.finish_config_apply(&model, &settings);
-                        if service.inner.settings.read().system_proxy {
-                            service.enable_system_proxy();
-                        }
+                        service.reapply_system_proxy();
                         if previous_mode.is_some_and(|mode| mode != model.work_mode) {
                             service.notify_work_mode(model.work_mode);
                         } else {
@@ -2773,9 +2789,7 @@ impl AppService {
                 format!("{} 不支持 TUN，请更新内核", new.core.display_name()),
             );
         }
-        if new.requires_core_restart(&old, &self.inner.model.read())
-            || new.system_proxy != old.system_proxy
-        {
+        if new.requires_core_restart(&old, &self.inner.model.read()) {
             self.refresh_doctor();
         }
     }
@@ -3200,148 +3214,6 @@ impl AppService {
     // ------------------------------------------------------------------
     // System proxy / PAC
     // ------------------------------------------------------------------
-
-    pub fn set_system_proxy(&self, enabled: bool) {
-        if enabled {
-            self.enable_system_proxy();
-        } else {
-            self.disable_system_proxy();
-        }
-    }
-
-    fn enable_system_proxy(&self) {
-        if self.is_busy("proxy") {
-            return;
-        }
-        self.set_busy("proxy", true);
-        let service = self.clone();
-        self.spawn(async move {
-            let settings = service.inner.settings.read().clone();
-            let applied = service.inner.core.applied_model();
-            let tun_enabled = if applied.is_some() {
-                service.inner.core.native_tun_active()
-            } else {
-                settings.tun_enabled
-            };
-            let model = applied.unwrap_or_else(|| service.model());
-            let running_proxy = service.inner.core.active_proxy("http");
-            if service.is_running() && running_proxy.is_none() {
-                service.toast(
-                    ToastLevel::Error,
-                    "请先启用 HTTP 或 Mixed 入站，再开启系统代理",
-                );
-                service.set_busy("proxy", false);
-                return;
-            }
-            let compiled_http_port = running_proxy
-                .as_ref()
-                .map(|p| p.port)
-                .or_else(|| {
-                    service
-                        .inner
-                        .compiled
-                        .read()
-                        .as_ref()
-                        .map(|c| c.http_port())
-                })
-                .unwrap_or(settings.mixed_port);
-            let proxy_host = running_proxy
-                .as_ref()
-                .map_or("127.0.0.1", |p| p.host.as_str());
-            let pac_url =
-                if system::pac::use_pac(settings.pac_enabled, model.work_mode, tun_enabled) {
-                    let mut direct_domains = Vec::new();
-                    let mut direct_cidrs = vec![
-                        "10.0.0.0/8".to_string(),
-                        "172.16.0.0/12".to_string(),
-                        "192.168.0.0/16".to_string(),
-                    ];
-                    for rule in model.routing.effective_rules() {
-                        if rule.action.kind == crate::model::RouteActionKind::Direct {
-                            direct_domains.extend(rule.matchers.domains.iter().cloned());
-                            direct_domains.extend(rule.matchers.domain_suffixes.iter().cloned());
-                            direct_cidrs.extend(rule.matchers.ip_cidrs.iter().cloned());
-                        }
-                    }
-                    let pac = system::build_pac(
-                        proxy_host,
-                        compiled_http_port,
-                        &direct_domains,
-                        &direct_cidrs,
-                    );
-                    let mut running = service.inner.pac.lock();
-                    let plan = service.inner.core.mesh_plan();
-                    if let Some(server) = running
-                        .as_mut()
-                        .filter(|s| s.info.port == settings.pac_port)
-                    {
-                        server.update_script(pac, &plan);
-                        Some(server.info.url.clone())
-                    } else {
-                        match PacServer::start(pac, settings.pac_port) {
-                            Ok(server) => {
-                                server.update_mesh(&plan);
-                                let url = server.info.url.clone();
-                                *running = Some(server);
-                                Some(url)
-                            }
-                            Err(err) => {
-                                service
-                                    .toast(ToastLevel::Error, format!("PAC 服务启动失败：{err}"));
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    *service.inner.pac.lock() = None;
-                    None
-                };
-            let result = service.inner.proxy.lock().apply(
-                proxy_host,
-                compiled_http_port,
-                pac_url.as_deref(),
-            );
-            service.set_busy("proxy", false);
-            match result {
-                Ok(_) => {
-                    let mut settings = service.inner.settings.read().clone();
-                    settings.system_proxy = true;
-                    let _ = service.save_settings(&settings);
-                    service.toast(
-                        ToastLevel::Success,
-                        format!("系统代理已开启（{proxy_host}:{compiled_http_port}）"),
-                    );
-                }
-                Err(err) => {
-                    *service.inner.pac.lock() = None;
-                    let mut settings = service.inner.settings.read().clone();
-                    settings.system_proxy = false;
-                    let _ = service.save_settings(&settings);
-                    service.toast(ToastLevel::Error, format!("设置系统代理失败：{err}"));
-                }
-            }
-        });
-    }
-
-    fn disable_system_proxy(&self) {
-        if self.is_busy("proxy") {
-            return;
-        }
-        self.set_busy("proxy", true);
-        let service = self.clone();
-        self.spawn(async move {
-            let result = service.inner.proxy.lock().restore();
-            *service.inner.pac.lock() = None;
-            let mut settings = service.inner.settings.read().clone();
-            settings.system_proxy = false;
-            let _ = service.save_settings(&settings);
-            service.set_busy("proxy", false);
-            match result {
-                Ok(()) => service.toast(ToastLevel::Info, "系统代理已关闭并还原"),
-                Err(err) => service.toast(ToastLevel::Warning, format!("还原系统代理失败：{err}")),
-            }
-        });
-    }
 
     // ------------------------------------------------------------------
     // Privilege helper
@@ -4747,13 +4619,7 @@ impl AppService {
         });
         self.inner.mesh.shutdown();
         let _ = self.persist_model();
-        if self.inner.settings.read().system_proxy {
-            let _ = self.inner.proxy.lock().restore();
-            let mut settings = self.inner.settings.read().clone();
-            settings.system_proxy = false;
-            let _ = settings.save(&self.inner.paths.settings_file());
-        }
-        *self.inner.pac.lock() = None;
+        self.close_system_proxy();
         let core = self.inner.core.clone();
         let _ = self.inner.rt.block_on(async move {
             let _ = core.stop().await;
@@ -4765,26 +4631,6 @@ impl AppService {
             };
             let _ = privilege::call_with_timeout(&request, std::time::Duration::from_secs(1));
         }
-    }
-
-    /// Re-applies the system proxy with the current PAC/port settings.
-    /// Disabling and re-enabling is sequenced on the runtime so the two
-    /// command sequences can never interleave.
-    pub fn reapply_system_proxy(&self) {
-        if !self.inner.settings.read().system_proxy || self.is_busy("proxy") {
-            return;
-        }
-        self.disable_system_proxy();
-        let service = self.clone();
-        self.spawn(async move {
-            for _ in 0..100 {
-                if !service.is_busy("proxy") {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            service.enable_system_proxy();
-        });
     }
 
     pub fn export_backup(&self) -> Result<String> {
@@ -4929,7 +4775,7 @@ impl AppService {
     }
 
     pub fn platform_proxy_backend(&self) -> String {
-        self.inner.proxy.lock().backend().label().to_string()
+        self.inner.proxy_backend.label().to_string()
     }
 }
 

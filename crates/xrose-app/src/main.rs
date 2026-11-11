@@ -71,6 +71,8 @@ fn main() {
         None
     };
 
+    #[cfg(target_os = "macos")]
+    let _proxy_observer = service.observe_system_proxy();
     let theme_mode = service.settings().theme;
     window_effects::set_follow_system(matches!(theme_mode, ThemeMode::System));
     let start_minimized =

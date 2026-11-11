@@ -16,6 +16,8 @@ freedesktop-icons = "0.4"
 freedesktop-desktop-entry = { version = "0.8", default-features = false }
 resvg = { version = "0.46", default-features = false }
 netdev = "0.31"
+system-configuration = "0.7"
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 gethostname = "1.1"
 hickory-proto = "0.25"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

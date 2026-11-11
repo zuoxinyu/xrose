@@ -1046,11 +1046,23 @@ impl Render for PopupView {
                         "系统代理",
                         "System proxy",
                     )))
-                    .child(Switch::new("tray-proxy").checked(d.system_proxy).on_change(
-                        cx.listener(|this, _, window, cx| {
-                            this.action(TrayAction::ToggleSystemProxy, window, cx)
-                        }),
-                    )),
+                    .when_some(
+                        d.system_proxy_status
+                            .filter(|_| !d.busy_proxy)
+                            .and_then(|status| crate::i18n::proxy_status_label(lang, status)),
+                        |row, label| row.child(div().text_xs().text_color(p.muted_fg).child(label)),
+                    )
+                    .when(d.busy_proxy, |row| {
+                        row.child(gpui_kit::component::spinner::Spinner::new().small())
+                    })
+                    .child(
+                        Switch::new("tray-proxy")
+                            .checked(d.system_proxy)
+                            .disabled(d.busy_proxy)
+                            .on_change(cx.listener(|this, checked, window, cx| {
+                                this.action(TrayAction::SetSystemProxy(*checked), window, cx)
+                            })),
+                    ),
             )
             .child(
                 div()

@@ -11,13 +11,28 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, io_context};
-use crate::util::{atomic_write_json, now_unix};
+use crate::util::now_unix;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemProxyStatus {
+    Unknown,
+    Off,
+    Xrose,
+    Partial,
+    External,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProxySnapshot {
     pub backend: String,
     /// Raw backend values captured before applying (gsettings/kreadconfig/registry).
     pub entries: BTreeMap<String, String>,
+    // Per-service values written by Xrose. During a transition either side
+    // of a write may be present after a crash.
+    #[cfg(target_os = "macos")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    macos_writes: BTreeMap<String, Vec<macos::Value>>,
     pub applied_at: i64,
     pub http_host: String,
     pub http_port: u16,
@@ -93,7 +108,7 @@ fn command_ok(program: &str, args: &[&str]) -> bool {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn run(program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
@@ -306,136 +321,9 @@ fn kde_restore(entries: &BTreeMap<String, String>) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
-fn macos_network_services() -> Result<Vec<String>> {
-    let output = run("networksetup", &["-listallnetworkservices"])?;
-    Ok(output
-        .lines()
-        .skip(1)
-        .map(|line| line.trim().trim_start_matches('*').trim().to_string())
-        .filter(|line| !line.is_empty() && !line.contains("denotes"))
-        .collect())
-}
-
+mod macos;
 #[cfg(target_os = "macos")]
-fn macos_capture() -> Result<BTreeMap<String, String>> {
-    let mut entries = BTreeMap::new();
-    for service in macos_network_services()? {
-        for (key, args) in [
-            ("webproxy", vec!["-getwebproxy"]),
-            ("securewebproxy", vec!["-getsecurewebproxy"]),
-            ("socksproxy", vec!["-getsocksfirewallproxy"]),
-            ("autoproxy", vec!["-getautoproxyurl"]),
-        ] {
-            let mut args = args;
-            args.push(&service);
-            if let Ok(value) = run("networksetup", &args) {
-                entries.insert(format!("{service}/{key}"), value);
-            }
-        }
-    }
-    Ok(entries)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_apply(host: &str, port: u16, pac_url: Option<&str>) -> Result<()> {
-    let services = macos_network_services()?;
-    let port = port.to_string();
-    for service in services {
-        match pac_url {
-            Some(url) => {
-                run("networksetup", &["-setautoproxyurl", &service, url])?;
-                run("networksetup", &["-setautoproxystate", &service, "on"])?;
-                let _ = run("networksetup", &["-setwebproxystate", &service, "off"]);
-                let _ = run(
-                    "networksetup",
-                    &["-setsecurewebproxystate", &service, "off"],
-                );
-                let _ = run(
-                    "networksetup",
-                    &["-setsocksfirewallproxystate", &service, "off"],
-                );
-            }
-            None => {
-                // A previous PAC selection must no longer bypass the local monitor.
-                run("networksetup", &["-setautoproxystate", &service, "off"])?;
-                run("networksetup", &["-setwebproxy", &service, host, &port])?;
-                run(
-                    "networksetup",
-                    &["-setsecurewebproxy", &service, host, &port],
-                )?;
-                run(
-                    "networksetup",
-                    &["-setsocksfirewallproxy", &service, host, &port],
-                )?;
-                let _ = run("networksetup", &["-setwebproxystate", &service, "on"]);
-                let _ = run("networksetup", &["-setsecurewebproxystate", &service, "on"]);
-                let _ = run(
-                    "networksetup",
-                    &["-setsocksfirewallproxystate", &service, "on"],
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn macos_restore(entries: &BTreeMap<String, String>) -> Result<()> {
-    for (key, raw) in entries {
-        let Some((service, kind)) = key.split_once('/') else {
-            continue;
-        };
-        let host = raw
-            .lines()
-            .find_map(|l| l.strip_prefix("Server: ").map(|s| s.trim().to_string()));
-        let port = raw
-            .lines()
-            .find_map(|l| l.strip_prefix("Port: ").map(|s| s.trim().to_string()));
-        let enabled = raw
-            .lines()
-            .find_map(|l| l.strip_prefix("Enabled: ").map(|s| s.trim() == "Yes"))
-            .unwrap_or(false);
-        match kind {
-            "webproxy" | "securewebproxy" | "socksproxy" => {
-                let state_arg = match kind {
-                    "webproxy" => "-setwebproxystate",
-                    "securewebproxy" => "-setsecurewebproxystate",
-                    _ => "-setsocksfirewallproxystate",
-                };
-                let _ = run(
-                    "networksetup",
-                    &[state_arg, service, if enabled { "on" } else { "off" }],
-                );
-                if let (Some(host), Some(port)) = (&host, &port) {
-                    let set_arg = match kind {
-                        "webproxy" => "-setwebproxy",
-                        "securewebproxy" => "-setsecurewebproxy",
-                        _ => "-setsocksfirewallproxy",
-                    };
-                    let _ = run("networksetup", &[set_arg, service, host, port]);
-                }
-            }
-            "autoproxy" => {
-                let url = raw
-                    .lines()
-                    .find_map(|l| l.strip_prefix("URL: ").map(|s| s.trim().to_string()));
-                if let Some(url) = url {
-                    let _ = run("networksetup", &["-setautoproxyurl", service, &url]);
-                }
-                let _ = run(
-                    "networksetup",
-                    &[
-                        "-setautoproxystate",
-                        service,
-                        if enabled { "on" } else { "off" },
-                    ],
-                );
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
+pub(crate) mod observer;
 
 // ---------------------------------------------------------------------------
 // Windows
@@ -566,6 +454,12 @@ impl ProxyManager {
         self.snapshot_path.exists()
     }
 
+    fn read_snapshot(&self) -> Result<ProxySnapshot> {
+        Ok(serde_json::from_slice(&std::fs::read(
+            &self.snapshot_path,
+        )?)?)
+    }
+
     pub fn load_snapshot(&self) -> Option<ProxySnapshot> {
         std::fs::read(&self.snapshot_path)
             .ok()
@@ -593,7 +487,7 @@ impl ProxyManager {
             ProxyBackend::MacOs => {
                 #[cfg(target_os = "macos")]
                 {
-                    return macos_capture();
+                    return macos::capture();
                 }
                 #[allow(unreachable_code)]
                 Ok(BTreeMap::new())
@@ -614,22 +508,53 @@ impl ProxyManager {
 
     /// Applies the system proxy, snapshotting the previous state first.
     pub fn apply(&self, host: &str, port: u16, pac_url: Option<&str>) -> Result<ProxySnapshot> {
-        let entries = if let Some(existing) = self.load_snapshot() {
-            existing.entries
+        self.apply_endpoints(host, port, Some((host, port)), pac_url, false)
+    }
+
+    pub(crate) fn apply_endpoints(
+        &self,
+        host: &str,
+        port: u16,
+        _socks: Option<(&str, u16)>,
+        pac_url: Option<&str>,
+        _refresh: bool,
+    ) -> Result<ProxySnapshot> {
+        let entries = self.capture()?;
+        let snapshot = if self.has_snapshot() {
+            let mut snapshot = self.read_snapshot()?;
+            for (key, raw) in &entries {
+                snapshot
+                    .entries
+                    .entry(key.clone())
+                    .or_insert_with(|| raw.clone());
+            }
+            snapshot
         } else {
-            let entries = self.capture()?;
-            let snapshot = ProxySnapshot {
+            ProxySnapshot {
+                #[cfg(target_os = "macos")]
+                macos_writes: Default::default(),
                 backend: self.backend.label().into(),
                 entries: entries.clone(),
                 applied_at: now_unix(),
                 http_host: host.into(),
                 http_port: port,
                 pac_url: pac_url.map(str::to_string),
-            };
-            atomic_write_json(&self.snapshot_path, &snapshot)?;
-            entries
+            }
         };
-        let _ = entries;
+        #[cfg(target_os = "macos")]
+        if self.backend == ProxyBackend::MacOs {
+            let mut snapshot = snapshot;
+            let targets = macos::targets(host, port, _socks, pac_url);
+            macos::apply(
+                &entries,
+                &mut snapshot,
+                &targets,
+                _refresh,
+                &self.snapshot_path,
+            )?;
+            return Ok(snapshot);
+        }
+        crate::util::atomic_write_private(&self.snapshot_path, &serde_json::to_vec(&snapshot)?)?;
         match self.backend {
             ProxyBackend::Gnome => {
                 #[cfg(target_os = "linux")]
@@ -639,10 +564,7 @@ impl ProxyManager {
                 #[cfg(target_os = "linux")]
                 kde_apply(host, port, pac_url)?;
             }
-            ProxyBackend::MacOs => {
-                #[cfg(target_os = "macos")]
-                macos_apply(host, port, pac_url)?;
-            }
+            ProxyBackend::MacOs => unreachable!("macOS has its own snapshot transaction"),
             ProxyBackend::Windows => {
                 #[cfg(target_os = "windows")]
                 windows_impl::apply(host, port, pac_url)?;
@@ -651,15 +573,15 @@ impl ProxyManager {
                 return Err(Error::other("未检测到支持的桌面环境"));
             }
         }
-        self.load_snapshot()
-            .ok_or_else(|| Error::other("保存系统代理快照失败"))
+        Ok(snapshot)
     }
 
     /// Restores the snapshot and removes it.
     pub fn restore(&self) -> Result<()> {
-        let Some(snapshot) = self.load_snapshot() else {
+        if !self.has_snapshot() {
             return Ok(());
-        };
+        }
+        let snapshot = self.read_snapshot()?;
         match self.backend {
             ProxyBackend::Gnome => {
                 #[cfg(target_os = "linux")]
@@ -671,7 +593,7 @@ impl ProxyManager {
             }
             ProxyBackend::MacOs => {
                 #[cfg(target_os = "macos")]
-                macos_restore(&snapshot.entries)?;
+                macos::restore(snapshot, &self.snapshot_path)?;
             }
             ProxyBackend::Windows => {
                 #[cfg(target_os = "windows")]
@@ -688,7 +610,7 @@ impl ProxyManager {
     /// the proxy on, so restore it before showing the window.
     pub fn recover_after_crash(&self) -> Option<ProxySnapshot> {
         let snapshot = self.load_snapshot()?;
-        let _ = self.restore();
+        self.restore().ok()?;
         Some(snapshot)
     }
 }
@@ -702,10 +624,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn corrupt_snapshot_remains_available_after_failed_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("snapshot.json");
+        std::fs::write(&path, b"{").unwrap();
+        assert!(ProxyManager::new(path.clone()).restore().is_err());
+        assert!(path.exists());
+    }
+
+    #[test]
     fn snapshot_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("snapshot.json");
         let snap = ProxySnapshot {
+            #[cfg(target_os = "macos")]
+            macos_writes: Default::default(),
             backend: "GNOME (gsettings)".into(),
             entries: BTreeMap::from([("org.gnome.system.proxy/mode".into(), "'none'".into())]),
             applied_at: now_unix(),
@@ -713,7 +646,7 @@ mod tests {
             http_port: 7890,
             pac_url: None,
         };
-        atomic_write_json(&path, &snap).unwrap();
+        crate::util::atomic_write_json(&path, &snap).unwrap();
         let loaded: ProxySnapshot = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(loaded, snap);
     }

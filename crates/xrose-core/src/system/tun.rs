@@ -110,9 +110,9 @@ pub(crate) fn diagnose_for_process(
             checks.push(DoctorCheck::ok("权限", "已具备提升权限或助手可用"));
         }
         if tun.map(|i| i.tun.auto_route).unwrap_or(false) && settings.system_proxy {
-            checks.push(DoctorCheck::warn(
-                "路由冲突",
-                "TUN（auto_route）与系统代理同时开启可能造成回环，建议只启用一个",
+            checks.push(DoctorCheck::ok(
+                "流量接管",
+                "系统代理和 TUN 自动路由均已启用。关闭系统代理后，TUN 仍会接管流量。",
             ));
         }
     }
