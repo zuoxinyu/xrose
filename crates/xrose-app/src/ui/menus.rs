@@ -19,7 +19,6 @@ pub(super) enum MenuTarget {
     ServiceForward(String, ServiceForward),
     RoutingFiles,
     RuleSetSources,
-    NodeSelector,
     DefaultOutbound,
     OutboundGroup(String),
     FrontProxy,
@@ -106,10 +105,11 @@ pub(super) fn builder(
         };
         let handle = cx.entity().downgrade();
         view.update(cx, |this, cx| {
-            if this
-                .action_menu
-                .as_ref()
-                .is_some_and(|old| old.entity_id() != handle.entity_id())
+            if this.node_selector.is_some()
+                || this
+                    .action_menu
+                    .as_ref()
+                    .is_some_and(|old| old.entity_id() != handle.entity_id())
             {
                 this.dismiss_action_menu(cx);
             }
@@ -148,6 +148,9 @@ impl AppView {
     }
 
     pub(super) fn dismiss_action_menu(&mut self, cx: &mut Context<Self>) {
+        if self.node_selector.take().is_some() {
+            cx.notify();
+        }
         if let Some(menu) = self.action_menu.take() {
             let _ = menu.update(cx, |_, cx| cx.emit(DismissEvent));
         }
@@ -415,84 +418,6 @@ impl AppView {
                         ),
                     };
                     menu = menu.label(reason);
-                }
-            }
-            MenuTarget::NodeSelector => {
-                let direct = self.snapshot.model.work_mode == WorkMode::Direct;
-                menu = menu
-                    .item(
-                        add(
-                            "本机直连",
-                            "Direct",
-                            !busy("core"),
-                            Command::SelectWorkMode(WorkMode::Direct),
-                        )
-                        .checked(direct),
-                    )
-                    .separator();
-                let group = self
-                    .snapshot
-                    .model
-                    .default_group_id()
-                    .and_then(|id| self.snapshot.model.group(&id));
-                let Some(group) = group else {
-                    return menu.label(tr(lang, "请先添加节点", "Add a node first"));
-                };
-                let automatic = !group.manually_selectable();
-                if automatic
-                    && self
-                        .snapshot
-                        .model
-                        .has_usable_default_group(self.snapshot.settings.core)
-                {
-                    let label = format!(
-                        "{} ({})",
-                        tr(lang, "自动选择", "Automatic"),
-                        self.outbound_group_label(group)
-                    );
-                    menu = menu.item(
-                        item(
-                            &view,
-                            label.into(),
-                            !busy("core"),
-                            Command::SelectWorkMode(WorkMode::Proxy),
-                        )
-                        .checked(!direct),
-                    );
-                }
-                let selected = self.snapshot.selected_node(Some(&group.id));
-                for id in &group.members {
-                    let Some(node) = self.snapshot.model.node(id) else {
-                        continue;
-                    };
-                    let name = if self.hide_ips && !node.server.is_empty() {
-                        node.name.replace(&node.server, "•••")
-                    } else {
-                        node.name.clone()
-                    };
-                    menu = menu.item(
-                        item(
-                            &view,
-                            format!(
-                                "{name}  {}",
-                                super::theme::latency_label(
-                                    self.snapshot.latency.get(&node.id),
-                                    busy("latency") && self.latency_pending.contains(&node.id),
-                                    lang,
-                                )
-                            )
-                            .into(),
-                            !busy("core")
-                                && group.enabled
-                                && node.usable_with(self.snapshot.settings.core)
-                                && !automatic,
-                            Command::SelectNode(group.id.clone(), node.id.clone()),
-                        )
-                        .checked(selected.is_some_and(|n| n.id == node.id)),
-                    );
-                }
-                if group.members.is_empty() {
-                    menu = menu.label(tr(lang, "此出站组暂无节点", "No nodes in this group"));
                 }
             }
             MenuTarget::Node(id) => {

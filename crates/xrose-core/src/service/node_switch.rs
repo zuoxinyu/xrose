@@ -246,7 +246,7 @@ impl AppService {
             Ok(true) => {
                 self.inner.traffic.lock().reset();
                 self.inner.connections.write().clear();
-                self.inner.proxies.write().clear();
+                *self.inner.proxies.write() = Default::default();
                 self.toast(
                     ToastLevel::Success,
                     if recover {

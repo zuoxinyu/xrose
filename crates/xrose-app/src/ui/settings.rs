@@ -20,10 +20,10 @@ use super::widgets::*;
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum SettingsTab {
     Appearance,
+    Startup,
     Core,
     #[default]
     Network,
-    Startup,
     Updates,
     Helper,
 }
@@ -31,9 +31,9 @@ pub(super) enum SettingsTab {
 impl SettingsTab {
     const ALL: [Self; 6] = [
         Self::Appearance,
+        Self::Startup,
         Self::Core,
         Self::Network,
-        Self::Startup,
         Self::Updates,
         Self::Helper,
     ];
@@ -41,7 +41,7 @@ impl SettingsTab {
     fn label(self, lang: Language) -> SharedString {
         match self {
             Self::Appearance => super::tr(lang, "外观", "Appearance"),
-            Self::Core => "Core".into(),
+            Self::Core => super::tr(lang, "内核", "Core"),
             Self::Network => super::tr(lang, "网络与代理", "Network & proxy"),
             Self::Startup => super::tr(lang, "启动与窗口", "Startup & window"),
             Self::Updates => super::tr(lang, "更新与备份", "Updates & backups"),
@@ -942,23 +942,6 @@ impl AppView {
                 ))
                 .child(setting_row(
                     &p,
-                    if cfg!(target_os = "macos") {
-                        self.tr("菜单栏图标", "Menu bar icon")
-                    } else {
-                        self.tr("托盘图标", "Tray icon")
-                    },
-                    "",
-                    toggle(
-                        "show-tray-indicator",
-                        self.tr("显示运行状态指示灯", "Show status indicator"),
-                        settings.show_tray_indicator,
-                    )
-                    .on_change(cx.listener(|this, checked, _, cx| {
-                        this.modify_settings(cx, |s| s.show_tray_indicator = *checked)
-                    })),
-                ))
-                .child(setting_row(
-                    &p,
                     self.tr("网速显示", "Traffic speed"),
                     "",
                     toggle(
@@ -1516,6 +1499,8 @@ mod tests {
         use super::SettingsTab;
         assert!(SettingsTab::Appearance.keyboard_target("left") == Some(SettingsTab::Helper));
         assert!(SettingsTab::Helper.keyboard_target("right") == Some(SettingsTab::Appearance));
+        assert!(SettingsTab::Appearance.keyboard_target("right") == Some(SettingsTab::Startup));
+        assert!(SettingsTab::Startup.keyboard_target("right") == Some(SettingsTab::Core));
         assert!(SettingsTab::Core.keyboard_target("right") == Some(SettingsTab::Network));
         assert!(SettingsTab::Network.keyboard_target("home") == Some(SettingsTab::Appearance));
         assert!(SettingsTab::Network.keyboard_target("end") == Some(SettingsTab::Helper));

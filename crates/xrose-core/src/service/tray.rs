@@ -71,17 +71,7 @@ impl AppService {
             return None;
         }
         let epoch = CoreEpoch::from_state(&process)?;
-        let node = self.inner.core.applied_proxy_node(|tag| {
-            let proxies = self.inner.proxies.read();
-            Some(
-                proxies
-                    .get(tag)?
-                    .now
-                    .as_deref()?
-                    .strip_prefix("node-")?
-                    .to_owned(),
-            )
-        })?;
+        let node = self.running_proxy_node(process.phase)?;
         Some(ProbeTarget { epoch, node })
     }
 
@@ -96,13 +86,12 @@ impl AppService {
 
     pub fn tray_status(&self) -> TrayStatus {
         let process = self.process_state();
-        let (language, core, show_speed, show_indicator) = {
+        let (language, core, show_speed) = {
             let s = self.inner.settings.read();
             (
                 s.language,
                 process.core.unwrap_or(s.core),
                 s.show_tray_speed,
-                s.show_tray_indicator,
             )
         };
         let easytier = self.inner.mesh.phase(MeshProvider::EasyTier);
@@ -126,7 +115,8 @@ impl AppService {
             easytier,
             tailscale,
             show_speed,
-            show_indicator,
+            // Keep the icon monochrome while the status indicator artwork is being revised.
+            show_indicator: false,
             up_speed,
             down_speed,
             total_bytes: up.saturating_add(down),
@@ -138,10 +128,11 @@ impl AppService {
 mod tests {
     use super::*;
     #[test]
-    fn failed_start_without_a_process_turns_the_idle_icon_red() {
+    fn failed_start_reports_unavailable_even_with_the_icon_indicator_hidden() {
         let dir = tempfile::tempdir().unwrap();
         let service = AppService::with_paths(AppPaths::from_root(dir.path())).unwrap();
         let mut settings = service.settings();
+        settings.show_tray_indicator = true;
         settings.binary_paths.insert(
             settings.core.as_str().into(),
             dir.path()
@@ -162,6 +153,7 @@ mod tests {
         }
         assert_eq!(service.tray_status().phase, ProcessPhase::Stopped);
         assert_eq!(service.tray_status().indicator, TrayIndicator::Unavailable);
+        assert!(!service.tray_status().show_indicator);
     }
 
     #[test]

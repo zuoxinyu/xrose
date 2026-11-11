@@ -228,7 +228,7 @@ impl Default for Settings {
             check_app_updates: true,
             last_update_check: None,
             show_tray_speed: true,
-            show_tray_indicator: true,
+            show_tray_indicator: false,
             privacy_mode: true,
             traffic_statistics_enabled: false,
             active_versions: BTreeMap::new(),
@@ -510,16 +510,16 @@ mod tests {
     }
 
     #[test]
-    fn tray_indicator_defaults_on_for_existing_settings_and_can_be_disabled() {
+    fn tray_indicator_defaults_off_for_existing_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, r#"{"show_tray_speed":false}"#).unwrap();
         let mut settings = Settings::load(&path).unwrap();
-        assert!(settings.show_tray_indicator);
-        settings.show_tray_indicator = false;
+        assert!(!settings.show_tray_indicator);
+        settings.show_tray_indicator = true;
         settings.save(&path).unwrap();
         let loaded = Settings::load(&path).unwrap();
-        assert!(!loaded.show_tray_indicator && !loaded.show_tray_speed);
+        assert!(loaded.show_tray_indicator && !loaded.show_tray_speed);
     }
 
     #[test]

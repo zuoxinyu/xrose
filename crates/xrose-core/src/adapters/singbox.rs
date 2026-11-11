@@ -580,6 +580,7 @@ impl CoreAdapter for SingBoxAdapter {
             json: Value::Object(root),
             warnings,
             inbounds: compiled_inbounds,
+            default_proxy: super::CompiledProxySelection::from_model(model, CoreKind::SingBox),
             managed_groups: model.managed_route_groups(),
             core_version: ctx.core_version.clone(),
             rule_sets: model.routing.rule_sets.clone(),
@@ -1469,6 +1470,7 @@ mod tests {
         assert!(probe["outbounds"].as_array().unwrap().is_empty());
         ctx.core_version = Some(semver::Version::new(1, 13, 0));
         let degraded = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(degraded.default_proxy.node.as_ref(), Some(&existing));
         assert!(
             degraded
                 .warnings
@@ -1490,6 +1492,7 @@ mod tests {
         let xray = crate::adapters::XrayAdapter
             .compile(&model, &settings, &ctx)
             .unwrap();
+        assert_eq!(xray.default_proxy.node.as_ref(), Some(&existing));
         assert!(xray.warnings.iter().any(|s| s.contains("OpenConnect")));
         assert!(
             !xray

@@ -1,6 +1,6 @@
 //! GPUI Kit flyout, independent of the native tray backend and main window.
 
-use gpui_base::Disableable;
+use gpui_base::{Disableable, Scrollbar, ScrollbarMode};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
@@ -20,6 +20,8 @@ use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
 use crate::ui::theme::{SEMANTIC_ALPHA, palette};
 use crate::ui::traffic_label;
+
+const NODE_ROW_HEIGHT: f32 = 38.;
 
 #[derive(Default)]
 pub struct PopupManager {
@@ -71,7 +73,8 @@ impl PopupManager {
                 point(px(0.), px(0.)),
                 size(px(1280.), px(800.)),
             ));
-        let desired_height = 452. + (dashboard.nodes.len().min(4) as f32 * 38.).max(76.);
+        let desired_height =
+            452. + (dashboard.nodes.len().min(4) as f32 * NODE_ROW_HEIGHT).max(76.);
         let bounds = popup_bounds(
             anchor.map(|a| a.position),
             work_area,
@@ -89,6 +92,7 @@ impl PopupManager {
                         .position(|node| node.active)
                         .unwrap_or(0);
                     view.scroll.scroll_to_item(view.selected);
+                    view.scroll_hint = NodeScrollHint::Opening;
                     super::backend::show_popup(window, bounds);
                     window.focus(&view.focus, cx);
                     cx.notify();
@@ -260,6 +264,21 @@ fn mesh_phase_info(
     (color, super::dashboard::mesh_phase_label(phase, lang))
 }
 
+#[derive(Clone, Copy, Default)]
+enum NodeScrollHint {
+    #[default]
+    Idle,
+    Opening,
+    AlignSelection,
+    Start,
+    Moving {
+        began: Instant,
+        origin: Pixels,
+        distance: Pixels,
+        last: Pixels,
+    },
+}
+
 pub struct PopupView {
     service: AppService,
     dashboard: Dashboard,
@@ -268,6 +287,7 @@ pub struct PopupView {
     visible: bool,
     deactivated_at: Option<Instant>,
     scroll: ScrollHandle,
+    scroll_hint: NodeScrollHint,
     route_select: Entity<SelectState<Vec<RouteOption>>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -323,6 +343,7 @@ impl PopupView {
             visible: true,
             deactivated_at: None,
             scroll: ScrollHandle::new(),
+            scroll_hint: NodeScrollHint::Opening,
             route_select,
             _subscriptions: vec![activation, appearance, route_selection],
         }
@@ -348,7 +369,86 @@ impl PopupView {
         self.dashboard = dashboard;
     }
 
+    fn advance_scroll_hint(&mut self, window: &Window, cx: &App) {
+        use NodeScrollHint::*;
+        if !self.visible {
+            return;
+        }
+        let offset = self.scroll.offset();
+        self.scroll_hint = match self.scroll_hint {
+            Idle => return,
+            // First lay out the real viewport, then bring the selected row into view.
+            Opening => AlignSelection,
+            AlignSelection => {
+                self.scroll.scroll_to_item(self.selected);
+                Start
+            }
+            Start => {
+                let range = self.scroll.max_offset().y;
+                let row = px(NODE_ROW_HEIGHT);
+                if cx.reduce_motion() || range <= Pixels::ZERO {
+                    Idle
+                } else {
+                    let down = (range + offset.y).min(row);
+                    // At the bottom, reveal the preceding row and return to the same origin.
+                    let distance = if down > Pixels::ZERO {
+                        -down
+                    } else {
+                        (-offset.y).min(row)
+                    };
+                    Moving {
+                        began: Instant::now(),
+                        origin: offset.y,
+                        distance,
+                        last: offset.y,
+                    }
+                }
+            }
+            Moving {
+                began,
+                origin,
+                distance,
+                last,
+            } => {
+                if offset.y != last {
+                    Idle
+                } else {
+                    let elapsed = began.elapsed().as_secs_f32();
+                    // A cosine round trip has zero velocity at the start, turn and finish.
+                    let progress = (elapsed / 0.36).min(1.);
+                    let finished = progress >= 1. || cx.reduce_motion();
+                    let y = if finished {
+                        origin
+                    } else {
+                        origin + distance * (0.5 - 0.5 * (progress * std::f32::consts::TAU).cos())
+                    };
+                    self.scroll.set_offset(point(offset.x, y));
+                    if finished {
+                        Idle
+                    } else {
+                        Moving {
+                            began,
+                            origin,
+                            distance,
+                            last: y,
+                        }
+                    }
+                }
+            }
+        };
+        if !matches!(self.scroll_hint, Idle) {
+            window.request_animation_frame();
+        }
+    }
+
     fn dismiss(&mut self, window: &mut Window) {
+        if let NodeScrollHint::Moving { origin, last, .. } = self.scroll_hint {
+            let offset = self.scroll.offset();
+            if offset.y == last {
+                self.scroll.set_offset(point(offset.x, origin));
+            }
+        }
+        self.scroll_hint = NodeScrollHint::Idle;
         self.visible = false;
         self.deactivated_at = None;
         super::backend::hide_popup(window);
@@ -394,6 +494,7 @@ impl PopupView {
 
 impl Render for PopupView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.advance_scroll_hint(window, cx);
         let p = palette(cx);
         let d = &self.dashboard;
         let lang = d.language;
@@ -419,7 +520,7 @@ impl Render for PopupView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .h(px(38.))
+                    .h(px(NODE_ROW_HEIGHT))
                     .px_2()
                     .rounded_md()
                     .bg(if node.active {
@@ -506,7 +607,11 @@ impl Render for PopupView {
             )
             .text_color(p.fg)
             .text_xs()
+            .capture_any_mouse_down(
+                cx.listener(|this, _, _, _| this.scroll_hint = NodeScrollHint::Idle),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.scroll_hint = NodeScrollHint::Idle;
                 match event.keystroke.key.as_str() {
                     "escape" => this.dismiss(window),
                     "down" if this.focus.is_focused(window) => {
@@ -854,6 +959,11 @@ impl Render for PopupView {
                     .child(
                         div()
                             .id("tray-node-scroll")
+                            .on_scroll(
+                                cx.listener(|this, _, _, _| {
+                                    this.scroll_hint = NodeScrollHint::Idle
+                                }),
+                            )
                             .track_scroll(&self.scroll)
                             .flex_1()
                             .min_h(px(0.))
@@ -875,7 +985,10 @@ impl Render for PopupView {
                                         })),
                                 )
                             }),
-                    ),
+                    )
+                    .when(cx.reduce_motion(), |card| {
+                        card.child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always))
+                    }),
             )
             .child(
                 div()

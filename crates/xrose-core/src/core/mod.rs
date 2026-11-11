@@ -609,26 +609,12 @@ impl CoreManager {
         live_node: impl FnOnce(&str) -> Option<String>,
     ) -> Option<String> {
         let applied = self.applied.lock();
-        let a = applied.as_ref()?;
-        if a.model.work_mode != crate::model::WorkMode::Proxy {
-            return None;
-        }
-        let group = a.model.group(&a.model.default_group_id()?)?;
-        if let Some(managed) = a.compiled.managed_groups.iter().find(|g| g.id == group.id) {
-            return managed.active_node().cloned();
-        }
-        if a.core == CoreKind::SingBox
-            && let Some(id) = live_node(&group.tag())
-        {
-            return Some(id);
-        }
-        // Native automatic groups (including Xray balancers) have no reliable
-        // selected node until the core reports one. A failed member alone does
-        // not imply the default route is unavailable.
-        if !group.manually_selectable() {
-            return None;
-        }
-        group.active_node().cloned()
+        let selection = &applied.as_ref()?.compiled.default_proxy;
+        selection
+            .live_group
+            .as_deref()
+            .and_then(live_node)
+            .or_else(|| selection.node.clone())
     }
 
     pub(crate) fn applied_work_mode(&self) -> Option<crate::model::WorkMode> {

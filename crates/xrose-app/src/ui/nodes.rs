@@ -296,6 +296,8 @@ impl AppView {
                                     node,
                                     lang,
                                     selected: active_node.as_deref() == Some(node.id.as_str()),
+                                    running: this.snapshot.runtime.running_proxy_node.as_deref()
+                                        == Some(node.id.as_str()),
                                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
                                     latency: this.snapshot.latency.get(&node.id),
                                     location: this.snapshot.node_location(node),
@@ -662,23 +664,31 @@ impl AppView {
                                             .disabled(selected_count == 0)
                                             .label(self.tr("批量启用", "Enable selected"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                for id in &sel {
-                                                    this.service.set_node_enabled(id, true);
-                                                }
+                                                this.service.set_nodes_enabled(
+                                                    sel.iter().map(String::as_str),
+                                                    true,
+                                                );
                                                 this.sync(cx);
                                             }))
                                     })
                                     .child({
-                                        let sel = selected_ids.clone();
+                                        let running =
+                                            self.snapshot.runtime.running_proxy_node.as_ref();
+                                        let sel: Vec<_> = selected_ids
+                                            .iter()
+                                            .filter(|id| Some(*id) != running)
+                                            .cloned()
+                                            .collect();
                                         Button::new("batch-disable")
                                             .compact()
                                             .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                            .disabled(selected_count == 0)
+                                            .disabled(sel.is_empty())
                                             .label(self.tr("批量停用", "Disable selected"))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                for id in &sel {
-                                                    this.service.set_node_enabled(id, false);
-                                                }
+                                                this.service.set_nodes_enabled(
+                                                    sel.iter().map(String::as_str),
+                                                    false,
+                                                );
                                                 this.sync(cx);
                                             }))
                                     })
@@ -791,7 +801,7 @@ impl AppView {
                                 .get(id)
                                 .map(|&name| name.to_owned())
                                 .unwrap_or_else(|| {
-                                    self.tr("订阅节点", "Subscription nodes").to_string()
+                                    self.tr("独立节点", "Standalone nodes").to_string()
                                 }),
                             NodeSection::Manual => self
                                 .tr("手动导入 / 未分类", "Manual / Uncategorized")
@@ -1009,6 +1019,7 @@ struct RowProps<'a> {
     node: &'a Node,
     lang: Language,
     selected: bool,
+    running: bool,
     fastest: bool,
     latency: Option<&'a LatencyEntry>,
     location: Option<&'a xrose_core::runtime::location::NodeLocation>,
@@ -1086,6 +1097,7 @@ fn render_node_row(
         node,
         lang,
         selected,
+        running,
         fastest: is_fastest,
         latency,
         location,
@@ -1516,11 +1528,20 @@ fn render_node_row(
                                 "",
                                 node.enabled,
                             )
-                            .tooltip(super::tr(
-                                lang,
-                                "允许此节点参与连接与自动选择",
-                                "Allow this node for connections and automatic selection",
-                            ))
+                            .disabled(running)
+                            .tooltip(if running {
+                                super::tr(
+                                    lang,
+                                    "节点正在使用，请先切换节点或停止内核",
+                                    "Switch nodes or stop the core before disabling this node",
+                                )
+                            } else {
+                                super::tr(
+                                    lang,
+                                    "允许此节点参与连接与自动选择",
+                                    "Allow this node for connections and automatic selection",
+                                )
+                            })
                             .accessibility_label(super::tr(lang, "启用节点", "Enable node"))
                             .on_change(cx.listener(
                                 move |this, checked, _, cx| {

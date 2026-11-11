@@ -477,6 +477,7 @@ impl CoreAdapter for XrayAdapter {
             json: Value::Object(root),
             warnings,
             inbounds: compiled_inbounds,
+            default_proxy: super::CompiledProxySelection::from_model(model, CoreKind::Xray),
             managed_groups: model.managed_route_groups(),
             core_version: ctx.core_version.clone(),
             rule_sets: model.routing.rule_sets.clone(),

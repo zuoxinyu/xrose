@@ -239,9 +239,33 @@ pub struct CompiledConfig {
     pub inbounds: Vec<CompiledInbound>,
     pub rule_sets: Vec<RuleSet>,
     pub default_outbound: String,
+    pub(crate) default_proxy: CompiledProxySelection,
     /// Managed groups after removing nodes that this core could not compile.
     pub(crate) managed_groups: Vec<crate::model::OutboundGroup>,
     pub(crate) core_version: Option<semver::Version>,
+}
+
+/// Selection after the adapter has removed unsupported nodes and repaired the default group.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CompiledProxySelection {
+    pub node: Option<String>,
+    pub live_group: Option<String>,
+}
+
+impl CompiledProxySelection {
+    fn from_model(model: &AppModel, core: CoreKind) -> Self {
+        let Some(group) = model.default_group_id().and_then(|id| model.group(&id)) else {
+            return Self::default();
+        };
+        Self {
+            node: if group.manually_selectable() || group.managed() {
+                group.active_node().cloned()
+            } else {
+                None
+            },
+            live_group: (core == CoreKind::SingBox && !group.managed()).then(|| group.tag()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

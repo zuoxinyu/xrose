@@ -233,13 +233,20 @@ impl MeshForm {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MeshTextKind {
+    Plain,
+    Address,
+    Routes,
+}
+
 impl AppView {
     fn mesh_text(
         &self,
         id: String,
         label: &str,
         values: Vec<String>,
-        monospace: bool,
+        kind: MeshTextKind,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -278,6 +285,36 @@ impl AppView {
         )
         .absolute()
         .size_full();
+        let mut disclosure = overflow.then(|| {
+            let id = id.clone();
+            let label = if expanded {
+                self.tr("收起", "Collapse")
+            } else {
+                self.tr("展开", "Expand")
+            };
+            Button::new(SharedString::from(format!("{id}-expand")))
+                .compact()
+                .ghost()
+                .w(px(26.))
+                .h(px(26.))
+                .icon(if expanded {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .text_color(p.muted_fg)
+                .flex_shrink_0()
+                .accessibility_label(label.clone())
+                .tooltip(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.mesh_expanded.remove(&id) {
+                        this.mesh_expanded.insert(id.clone());
+                    }
+                    cx.notify();
+                }))
+        });
+        // Give the route text the same column in both states so the trailing button stays put.
+        let fill_width = expanded || (kind == MeshTextKind::Routes && overflow);
         let content =
             div()
                 .id(SharedString::from(format!("{id}-content")))
@@ -287,41 +324,13 @@ impl AppView {
                 .gap_1()
                 .max_w_full()
                 .min_w(px(0.))
-                .when(expanded, |d| d.w_full())
-                .when(overflow, |d| {
-                    let id = id.clone();
-                    d.child(
-                        Button::new(SharedString::from(format!("{id}-expand")))
-                            .compact()
-                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                            .ghost()
-                            .w(px(26.))
-                            .h(px(26.))
-                            .icon(if expanded {
-                                IconName::ChevronDown
-                            } else {
-                                IconName::ChevronRight
-                            })
-                            .text_color(p.muted_fg)
-                            .flex_shrink_0()
-                            .tooltip(if expanded {
-                                self.tr("收起", "Collapse")
-                            } else {
-                                self.tr("展开", "Expand")
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.mesh_expanded.remove(&id) {
-                                    this.mesh_expanded.insert(id.clone());
-                                }
-                                cx.notify();
-                            })),
-                    )
-                })
+                .when(fill_width, |d| d.w_full())
+                .children(disclosure.take_if(|_| kind != MeshTextKind::Routes))
                 .child(
                     div()
                         .min_w(px(0.))
                         .py_1()
-                        .when(expanded, |d| d.flex_1())
+                        .when(fill_width, |d| d.flex_1())
                         .when(!expanded, |d| d.truncate().child(summary))
                         .when(expanded, |d| {
                             d.flex().flex_col().gap_1().children(
@@ -336,6 +345,7 @@ impl AppView {
                             )
                         }),
                 )
+                .children(disclosure)
                 .child(
                     Button::new(SharedString::from(format!("{id}-copy")))
                         .compact()
@@ -361,7 +371,7 @@ impl AppView {
             .flex_1()
             .w_full()
             .min_w(px(0.))
-            .when(monospace, |d| {
+            .when(kind != MeshTextKind::Plain, |d| {
                 d.font_family(cx.theme().mono_font_family.clone())
             })
             .child(measure)
@@ -1023,7 +1033,7 @@ impl AppView {
                     format!("mesh-{}-local-name", profile.id),
                     &self.tr("本机设备名", "Local device name"),
                     vec![local_name.clone()],
-                    false,
+                    MeshTextKind::Plain,
                     &p,
                     cx,
                 ));
@@ -1077,7 +1087,11 @@ impl AppView {
                         format!("mesh-{}-{key}", profile.id),
                         &label,
                         values,
-                        matches!(key, "addresses" | "routes"),
+                        match key {
+                            "routes" => MeshTextKind::Routes,
+                            "addresses" => MeshTextKind::Address,
+                            _ => MeshTextKind::Plain,
+                        },
                         &p,
                         cx,
                     ));
@@ -1213,7 +1227,7 @@ impl AppView {
                                                 peer_id.clone(),
                                                 "",
                                                 peer.addresses,
-                                                true,
+                                                MeshTextKind::Address,
                                                 &p,
                                                 cx,
                                             ),

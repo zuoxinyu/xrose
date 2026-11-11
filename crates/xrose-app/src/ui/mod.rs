@@ -8,6 +8,7 @@ mod menus;
 mod mesh;
 mod mesh_sync;
 mod network_diagnostics;
+mod node_selector;
 mod nodes;
 mod process_icons;
 mod qr;
@@ -32,7 +33,6 @@ use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
@@ -273,6 +273,7 @@ pub struct AppView {
     pub(crate) rule_group_id: Option<String>,
     route_drag_epoch: u64,
     route_scroll_running: bool,
+    node_selector: Option<Entity<node_selector::NodeSelector>>,
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
     sidebar_view: Entity<WindowRegion>,
@@ -453,6 +454,7 @@ impl AppView {
             route_drag_epoch: 0,
             route_scroll_running: false,
             action_menu: None,
+            node_selector: None,
             active_route_drag: None,
             trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
             sidebar_view: WindowRegion::new(Region::Sidebar, cx),
@@ -982,84 +984,85 @@ impl AppView {
                     .border_1()
                     .border_color(p.border)
                     .child(
-                        Button::new("header-node-selector")
-                            .compact()
-                            .ghost()
-                            // The dropdown wrapper sizes to its trigger, so give
-                            // the button the capsule's full inner height explicitly.
-                            .h(px(theme::STATUS_HEIGHT - 2.))
-                            .w(px(theme::STATUS_NODE_WIDTH))
-                            .rounded(gpui_kit::component::button::ButtonRounded::None)
-                            .rounded_tl(px(theme::STATUS_END_RADIUS))
-                            .rounded_bl(px(theme::STATUS_END_RADIUS))
-                            .disabled(core_busy)
-                            .accessibility_label(if direct {
-                                node_name.clone()
-                            } else {
-                                format!(
-                                    "{}: {node_name}, {node_delay}",
-                                    self.tr("切换节点", "Switch node")
-                                )
-                            })
-                            .tooltip(node_tip)
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .w_full()
-                                    .min_w(px(0.))
-                                    .child(if core_busy {
-                                        Spinner::new().into_any_element()
-                                    } else {
-                                        dot(if failed {
-                                            p.danger_text
-                                        } else if running {
-                                            p.ok_text
-                                        } else {
-                                            p.muted_fg
-                                        })
-                                        .into_any_element()
-                                    })
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .truncate()
-                                            .text_xs()
-                                            .child(node_name),
+                        self.node_selector_popover(
+                            Button::new("header-node-selector")
+                                .compact()
+                                .ghost()
+                                // The dropdown wrapper sizes to its trigger, so give
+                                // the button the capsule's full inner height explicitly.
+                                .h(px(theme::STATUS_HEIGHT - 2.))
+                                .w(px(theme::STATUS_NODE_WIDTH))
+                                .rounded(gpui_kit::component::button::ButtonRounded::None)
+                                .rounded_tl(px(theme::STATUS_END_RADIUS))
+                                .rounded_bl(px(theme::STATUS_END_RADIUS))
+                                .disabled(core_busy)
+                                .accessibility_label(if direct {
+                                    node_name.clone()
+                                } else {
+                                    format!(
+                                        "{}: {node_name}, {node_delay}",
+                                        self.tr("切换节点", "Switch node")
                                     )
-                                    .when(node.is_some(), |d| {
-                                        d.child(
+                                })
+                                .tooltip(node_tip)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .w_full()
+                                        .min_w(px(0.))
+                                        .child(if core_busy {
+                                            Spinner::new().into_any_element()
+                                        } else {
+                                            dot(if failed {
+                                                p.danger_text
+                                            } else if running {
+                                                p.ok_text
+                                            } else {
+                                                p.muted_fg
+                                            })
+                                            .into_any_element()
+                                        })
+                                        .child(
                                             div()
-                                                .flex_shrink_0()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .truncate()
                                                 .text_xs()
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .text_color(if testing {
-                                                    p.muted_fg
-                                                } else {
-                                                    theme::latency_color(&p, latency)
-                                                })
-                                                .when(
-                                                    latency.is_some_and(|entry| {
-                                                        theme::latency_age_secs(entry)
-                                                            > theme::LATENCY_STALE_SECS
-                                                    }),
-                                                    |d| d.opacity(theme::DISABLED_OPACITY),
-                                                )
-                                                .child(node_delay),
+                                                .child(node_name),
                                         )
-                                    })
-                                    .child(
-                                        Icon::new(IconName::ChevronDown)
-                                            .size(px(theme::ICON_SIZE))
-                                            .flex_shrink_0(),
-                                    ),
-                            )
-                            .dropdown_menu(menus::builder(
-                                cx.entity().downgrade(),
-                                menus::MenuTarget::NodeSelector,
-                            )),
+                                        .when(node.is_some(), |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_xs()
+                                                    .font_family(
+                                                        cx.theme().mono_font_family.clone(),
+                                                    )
+                                                    .text_color(if testing {
+                                                        p.muted_fg
+                                                    } else {
+                                                        theme::latency_color(&p, latency)
+                                                    })
+                                                    .when(
+                                                        latency.is_some_and(|entry| {
+                                                            theme::latency_age_secs(entry)
+                                                                > theme::LATENCY_STALE_SECS
+                                                        }),
+                                                        |d| d.opacity(theme::DISABLED_OPACITY),
+                                                    )
+                                                    .child(node_delay),
+                                            )
+                                        })
+                                        .child(
+                                            Icon::new(IconName::ChevronDown)
+                                                .size(px(theme::ICON_SIZE))
+                                                .flex_shrink_0(),
+                                        ),
+                                ),
+                            cx,
+                        ),
                     )
                     .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
                     .child(

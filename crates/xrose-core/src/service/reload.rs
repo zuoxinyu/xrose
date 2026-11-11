@@ -194,7 +194,10 @@ exec sleep 90
         service.update_settings(settings);
         service
             .commit_model_change(|model| {
-                model.add_nodes([Node::new("Example", Protocol::Socks, "example.test", 1080)]);
+                model.add_nodes([
+                    Node::new("Example", Protocol::Socks, "example.test", 1080),
+                    Node::new("Other", Protocol::Socks, "other.test", 1080),
+                ]);
                 Ok(true)
             })
             .unwrap();
@@ -210,6 +213,17 @@ exec sleep 90
         });
         assert_ne!(service.process_state().pid, direct_pid);
         assert_eq!(service.tray_status().indicator, TrayIndicator::Proxy);
+        assert_eq!(
+            service.snapshot().runtime.running_proxy_node.as_ref(),
+            Some(&node_id)
+        );
+        service.set_node_enabled(&node_id, false);
+        assert!(service.model().node(&node_id).unwrap().enabled);
+        assert!(!service.snapshot().config_dirty);
+        let other_id = service.model().nodes[1].id.clone();
+        service.set_nodes_enabled([node_id.as_str(), other_id.as_str()], false);
+        assert!(service.model().node(&node_id).unwrap().enabled);
+        assert!(!service.model().node(&other_id).unwrap().enabled);
         let measured = service.tray_probe_target().unwrap();
         service.record_proxy_probe(Some(&measured), "another-node", false);
         assert_eq!(service.tray_status().indicator, TrayIndicator::Proxy);
@@ -228,6 +242,9 @@ exec sleep 90
         );
         service.record_proxy_probe(Some(&measured), &node_id, false);
         assert_eq!(service.tray_status().indicator, TrayIndicator::Direct);
+        assert!(service.snapshot().runtime.running_proxy_node.is_none());
+        service.set_node_enabled(&node_id, false);
+        assert!(!service.model().node(&node_id).unwrap().enabled);
         let original_pid = service.process_state().pid;
         let mut settings = service.settings();
         settings.mixed_port = 17442;

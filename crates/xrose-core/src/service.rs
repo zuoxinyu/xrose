@@ -25,7 +25,7 @@ use tokio::runtime::Runtime;
 
 use crate::adapters::{CompiledConfig, ValidationReport};
 use crate::core::logs::{LogBus, LogEntry, LogFilter, LogStream};
-use crate::core::{BinaryRecord, CoreManager, ProcessState, StartOutcome};
+use crate::core::{BinaryRecord, CoreManager, ProcessPhase, ProcessState, StartOutcome};
 use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarget};
 use crate::dns::{self, DnsPreset};
 use crate::error::{Error, Result};
@@ -42,6 +42,7 @@ use crate::subscription::{Subscription, SubscriptionUsage, parse_subscription, q
 use crate::system::privilege::{self, HelperRequest, HelperStatus};
 use crate::system::{self, DoctorCheck, PacServer, ProxyManager};
 use crate::trace::{self, TraceSession};
+use crate::traffic_statistics::CoreEpoch;
 use crate::updates::{self, AppUpdate, RuleSetUpdate, UpdateCandidate};
 use crate::util::now_unix;
 
@@ -146,6 +147,9 @@ pub struct CoreUpdateStatus {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeView {
+    /// Default proxy node actually in use, including live selector changes.
+    #[serde(default)]
+    pub running_proxy_node: Option<String>,
     #[serde(default)]
     pub managed_nodes: BTreeMap<String, String>,
     pub connections: Arc<Vec<ClashConnection>>,
@@ -354,7 +358,7 @@ struct Inner {
         Option<crate::traffic_statistics::CoreEpoch>,
         crate::flow::FlowRateTracker,
     )>,
-    proxies: RwLock<BTreeMap<String, ClashProxy>>,
+    proxies: RwLock<Arc<BTreeMap<String, ClashProxy>>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
     downloads: RwLock<BTreeMap<String, crate::runtime::probe::DownloadResult>>,
     node_locations: RwLock<BTreeMap<String, NodeLocation>>,
@@ -478,7 +482,7 @@ impl AppService {
             traffic: Mutex::new(TrafficHistory::new(180)),
             connections: Default::default(),
             rate_tracker: Default::default(),
-            proxies: RwLock::new(BTreeMap::new()),
+            proxies: Default::default(),
             latency: RwLock::new(latency),
             downloads: RwLock::new(BTreeMap::new()),
             node_locations: RwLock::new(BTreeMap::new()),
@@ -617,6 +621,7 @@ impl AppService {
             (state.rows.clone(), state.live.clone())
         };
         let runtime = RuntimeView {
+            running_proxy_node: self.running_proxy_node(process.phase),
             managed_nodes: if process.phase.is_alive() {
                 self.inner.core.managed_selections()
             } else {
@@ -624,7 +629,7 @@ impl AppService {
             },
             connections,
             live_traffic,
-            proxies: self.inner.proxies.read().clone(),
+            proxies: self.inner.proxies.read().as_ref().clone(),
             up_total,
             down_total,
             up_speed,
@@ -1706,10 +1711,20 @@ impl AppService {
             // sing-box's selector supports instant switching through Clash API.
             let client = ClashClient::new(settings.api_port, "");
             let tag = node.outbound_tag();
+            let epoch = CoreEpoch::from_state(&self.process_state());
             let service = self.clone();
             self.spawn(async move {
                 match client.select(&group_tag, &tag).await {
                     Ok(()) => {
+                        if epoch.is_some()
+                            && epoch == CoreEpoch::from_state(&service.process_state())
+                        {
+                            let mut proxies = service.inner.proxies.write();
+                            Arc::make_mut(&mut proxies)
+                                .entry(group_tag)
+                                .or_default()
+                                .now = Some(tag);
+                        }
                         service.toast(ToastLevel::Success, format!("已切换到“{}”", node.name))
                     }
                     Err(err) => {
@@ -1731,17 +1746,48 @@ impl AppService {
         }
     }
 
-    pub fn set_node_enabled(&self, node_id: &str, enabled: bool) {
-        {
-            let mut model = self.inner.model.write();
-            let Some(node) = model.node_mut(node_id) else {
-                return;
-            };
-            node.enabled = enabled;
+    fn running_proxy_node(&self, phase: ProcessPhase) -> Option<String> {
+        if !phase.is_alive() {
+            return None;
         }
-        let _ = self.persist_model();
-        self.refresh_doctor();
-        self.mark_dirty();
+        self.inner.core.applied_proxy_node(|tag| {
+            let proxies = self.inner.proxies.read();
+            Some(
+                proxies
+                    .get(tag)?
+                    .now
+                    .as_deref()?
+                    .strip_prefix("node-")?
+                    .to_owned(),
+            )
+        })
+    }
+
+    pub fn set_node_enabled(&self, node_id: &str, enabled: bool) {
+        self.set_nodes_enabled([node_id], enabled);
+    }
+
+    pub fn set_nodes_enabled<'a>(&self, ids: impl IntoIterator<Item = &'a str>, enabled: bool) {
+        let ids: BTreeSet<_> = ids.into_iter().collect();
+        let result = self.commit_model_change(|model| {
+            let running = self.running_proxy_node(self.process_state().phase);
+            let mut changed = false;
+            for node in &mut model.nodes {
+                if ids.contains(node.id.as_str())
+                    && node.enabled != enabled
+                    && running.as_deref() != Some(node.id.as_str())
+                {
+                    node.enabled = enabled;
+                    changed = true;
+                }
+            }
+            Ok(changed)
+        });
+        match result {
+            Ok(true) => self.refresh_doctor(),
+            Ok(false) => {}
+            Err(error) => self.toast(ToastLevel::Error, format!("保存节点启用状态失败：{error}")),
+        }
     }
 
     pub fn delete_node(&self, node_id: &str) {
@@ -2414,7 +2460,7 @@ impl AppService {
         if started {
             self.inner.traffic.lock().reset();
             self.inner.connections.write().clear();
-            self.inner.proxies.write().clear();
+            *self.inner.proxies.write() = Default::default();
             self.finish_config_apply(&model, &settings);
             if self.inner.settings.read().system_proxy {
                 self.enable_system_proxy();
@@ -2451,7 +2497,7 @@ impl AppService {
                 Ok(()) => {
                     service.inner.traffic.lock().reset();
                     service.inner.connections.write().clear();
-                    service.inner.proxies.write().clear();
+                    *service.inner.proxies.write() = Default::default();
                     service.toast(ToastLevel::Success, "core 已停止");
                     if service.inner.settings.read().system_proxy {
                         service.disable_system_proxy();
@@ -2558,6 +2604,7 @@ impl AppService {
                     if was_running && ok {
                         service.inner.traffic.lock().reset();
                         service.inner.connections.write().clear();
+                        *service.inner.proxies.write() = Default::default();
                         service.finish_config_apply(&model, &settings);
                         if service.inner.settings.read().system_proxy {
                             service.enable_system_proxy();
@@ -4044,7 +4091,7 @@ impl AppService {
                 chrono::Utc::now(),
             )
         };
-        if epoch != crate::traffic_statistics::CoreEpoch::from_state(&self.process_state()) {
+        if epoch != CoreEpoch::from_state(&self.process_state()) {
             return;
         }
         let mut current = self.inner.connections.write();
@@ -4189,7 +4236,7 @@ impl AppService {
     }
 
     fn close_live_connections(&self, id: Option<String>) {
-        let epoch = crate::traffic_statistics::CoreEpoch::from_state(&self.process_state());
+        let epoch = CoreEpoch::from_state(&self.process_state());
         if epoch
             .as_ref()
             .is_none_or(|epoch| epoch.core != CoreKind::SingBox)
@@ -4205,9 +4252,7 @@ impl AppService {
         self.spawn(async move {
             let result = async {
                 let (_, settings, _) = service.inner.core.statistics_context()?;
-                if epoch
-                    != crate::traffic_statistics::CoreEpoch::from_state(&service.process_state())
-                {
+                if epoch != CoreEpoch::from_state(&service.process_state()) {
                     return None;
                 }
                 let client = ClashClient::new(settings.api_port, "");
@@ -4679,10 +4724,18 @@ impl AppService {
                 if tick % 5 == 0 {
                     if let Some((_, settings, _)) = service.inner.core.statistics_context() {
                         if state.core == Some(CoreKind::SingBox) {
-                            if let Ok(proxies) =
+                            let previous = inner.proxies.read().clone();
+                            if let Ok(response) =
                                 ClashClient::new(settings.api_port, "").proxies().await
                             {
-                                *inner.proxies.write() = proxies.proxies;
+                                let mut proxies = inner.proxies.write();
+                                // A hot switch or reload may have completed while the poll was in flight.
+                                if Arc::ptr_eq(&previous, &proxies)
+                                    && CoreEpoch::from_state(&state)
+                                        == CoreEpoch::from_state(&service.process_state())
+                                {
+                                    *proxies = Arc::new(response.proxies);
+                                }
                             }
                         }
                     }
