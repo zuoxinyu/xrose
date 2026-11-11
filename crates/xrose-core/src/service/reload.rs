@@ -120,6 +120,10 @@ mod tests {
             detail: String::new(),
             executable: None,
         };
+        assert!(service.settings().hot_reload);
+        let mut settings = service.settings();
+        settings.hot_reload = false;
+        service.update_settings(settings);
         assert!(!service.claim_helper_update(&status));
         let mut settings = service.settings();
         settings.hot_reload = true;
@@ -188,6 +192,7 @@ exec sleep 90
         }
         let mut settings = service.settings();
         settings.core = CoreKind::Xray;
+        settings.hot_reload = false;
         settings
             .binary_paths
             .insert("xray".into(), binary.display().to_string());
@@ -311,11 +316,9 @@ exec sleep 90
         service.apply_config();
         wait(|| !service.is_busy("core"));
         assert!(!service.snapshot().config_dirty);
-        assert!(
-            fs::read_to_string(config)
-                .unwrap()
-                .contains("\"port\": 17445")
-        );
+        assert!(fs::read_to_string(config)
+            .unwrap()
+            .contains("\"port\": 17445"));
         // Changing the selected core must validate the new format and publish
         // its own runtime file, even though the old process used a different one.
         let sets = service.paths().rule_sets_dir();

@@ -222,7 +222,7 @@ impl Default for Settings {
             log_level: LogLevel::Info,
             log_max_bytes: 10 * 1024 * 1024,
             log_keep: 5,
-            hot_reload: false,
+            hot_reload: true,
             watchdog: true,
             watchdog_max_retries: 5,
             urltest_url: "https://www.gstatic.com/generate_204".into(),
@@ -701,20 +701,16 @@ mod tests {
         assert!(!saved.contains(&account.username) && !saved.contains(&account.password));
         assert_eq!(Settings::load(&path).unwrap(), settings);
         assert!(account.valid());
-        assert!(
-            !ProxyAccount {
-                username: "bad:name".into(),
-                ..account.clone()
-            }
-            .valid()
-        );
-        assert!(
-            !ProxyAccount {
-                password: "x".repeat(256),
-                ..account
-            }
-            .valid()
-        );
+        assert!(!ProxyAccount {
+            username: "bad:name".into(),
+            ..account.clone()
+        }
+        .valid());
+        assert!(!ProxyAccount {
+            password: "x".repeat(256),
+            ..account
+        }
+        .valid());
     }
 
     #[test]
