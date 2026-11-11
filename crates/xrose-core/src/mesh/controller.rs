@@ -66,6 +66,21 @@ impl MeshController {
             supported: cfg!(any(windows, target_os = "macos", target_os = "linux")),
         }
     }
+
+    pub(crate) fn add_log_redactions(&self, rules: &mut crate::core::logs::redact::RedactionRules) {
+        rules.secret(&self.session.0);
+        rules.secret(&self.sync_password.0);
+        for profile in self.profiles.read().iter() {
+            rules.mesh_profile(profile);
+        }
+        for network in self.networks.read().iter() {
+            for peer in &network.peers {
+                for address in &peer.addresses {
+                    rules.peer_address(address);
+                }
+            }
+        }
+    }
     pub fn save(&self, mut profile: MeshProfile) -> Result<String> {
         if self.networks.read().iter().any(|n| {
             n.profile_id == profile.id

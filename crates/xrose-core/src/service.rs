@@ -26,6 +26,10 @@ use tokio::runtime::Runtime;
 
 use crate::adapters::{CompiledConfig, ValidationReport};
 use crate::core::logs::{LogBus, LogEntry, LogFilter, LogStream};
+use crate::core::logs::{
+    LogPrivacy,
+    redact::{LogRedactor, RedactionRules},
+};
 use crate::core::{BinaryRecord, CoreManager, ProcessPhase, ProcessState, StartOutcome};
 use crate::diagnostics::{DiagnosticRecording, DiagnosticRuleKind, DiagnosticTarget};
 use crate::dns::{self, DnsPreset};
@@ -3832,16 +3836,77 @@ impl AppService {
         self.toast(ToastLevel::Info, "日志已清空（磁盘日志仍保留）");
     }
 
+    fn log_redactor(&self, privacy: LogPrivacy) -> Result<Option<LogRedactor>> {
+        if privacy == LogPrivacy::Original {
+            return Ok(None);
+        }
+        let mut rules = RedactionRules::default();
+        {
+            let model = self.inner.model.read();
+            if model.dns.enabled && model.dns.fake_ip {
+                rules.fake_ip = model.dns.fake_ip_range.trim().parse().ok();
+            }
+            for node in &model.nodes {
+                rules.node(node);
+            }
+        }
+        for sub in self.inner.subs.read().iter() {
+            rules.subscription(sub);
+        }
+        self.inner.mesh.add_log_redactions(&mut rules);
+        rules.secret(&self.inner.settings.read().lan_account.password);
+        let paths = &self.inner.paths;
+        rules.path(&paths.data_dir, "$XROSE_HOME");
+        rules.path(&paths.config_dir, "$XROSE_HOME/config");
+        rules.path(&paths.cache_dir, "$XROSE_HOME/cache");
+        rules.path(&paths.runtime_dir, "$XROSE_HOME/run");
+        for var in ["HOME", "USERPROFILE"] {
+            if let Some(home) = std::env::var_os(var) {
+                rules.path(std::path::Path::new(&home), "~");
+            }
+        }
+        rules.build().map(Some)
+    }
+
+    /// Formats the selected rows in display order, preserving their original timestamps.
+    pub fn logs_for_clipboard(&self, entries: &[LogEntry], privacy: LogPrivacy) -> Result<String> {
+        use std::fmt::Write as _;
+        let redactor = self.log_redactor(privacy)?;
+        let mut text = String::new();
+        for entry in entries {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            let message = redactor.as_ref().map(|r| r.message(&entry.message));
+            write!(
+                text,
+                "{} {} {} {}",
+                entry.timestamp,
+                entry.level.as_str().to_ascii_uppercase(),
+                entry.stream.label(),
+                message.as_deref().unwrap_or(&entry.message)
+            )
+            .expect("writing to a String cannot fail");
+        }
+        Ok(text)
+    }
+
     /// Exports the in-memory log buffer to `logs/exports/`.
     pub fn export_logs(&self) -> Result<String> {
+        self.export_logs_with_privacy(LogPrivacy::Original)
+    }
+
+    pub fn export_logs_with_privacy(&self, privacy: LogPrivacy) -> Result<String> {
+        let redactor = self.log_redactor(privacy)?;
+        let suffix = if redactor.is_some() { "-redacted" } else { "" };
         let dir = self.inner.paths.logs_dir().join("exports");
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::other(format!("创建日志目录失败：{e}")))?;
         let path = dir.join(format!(
-            "xrose-log-{}.log",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            "xrose-log-{}{suffix}.log",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
         ));
-        self.inner.core.logs().export_to(&path)?;
+        self.logs().export_with(&path, redactor.as_ref())?;
         self.toast(
             ToastLevel::Success,
             format!("日志已导出：{}", path.display()),
@@ -5680,6 +5745,55 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         let service = AppService::with_paths(paths).unwrap();
         (service, dir)
+    }
+
+    #[test]
+    fn log_sharing_preserves_metadata_and_keeps_raw_and_redacted_exports_separate() {
+        let (service, _dir) = service();
+        service.logs().clear();
+        service.inner.model.write().nodes.push(Node::new(
+            "Fixture",
+            crate::model::Protocol::Vless,
+            "edge.example",
+            443,
+        ));
+        service
+            .logs()
+            .push(LogStream::Stdout, LogLevel::Warn, "dial edge.example:443");
+        service
+            .logs()
+            .push(LogStream::Stderr, LogLevel::Error, "retry token=fixture");
+        let mut entries = service.logs().recent(2, LogLevel::Trace, "");
+        entries.reverse();
+        let raw = service
+            .logs_for_clipboard(&entries[..1], LogPrivacy::Original)
+            .unwrap();
+        let shared = service
+            .logs_for_clipboard(&entries[..1], LogPrivacy::Redacted)
+            .unwrap();
+        assert_eq!(
+            raw,
+            format!("{} ERROR stderr retry token=fixture", entries[0].timestamp)
+        );
+        assert_eq!(
+            shared,
+            format!("{} ERROR stderr retry token=***", entries[0].timestamp)
+        );
+        let public_file = service
+            .export_logs_with_privacy(LogPrivacy::Redacted)
+            .unwrap();
+        let original_file = service.export_logs().unwrap();
+        assert_ne!(public_file, original_file);
+        let shared = std::fs::read_to_string(public_file).unwrap();
+        assert_eq!(
+            shared,
+            format!(
+                "{} [warning] stdout dial <node-server>:443\n{} [error] stderr retry token=***\n",
+                entries[1].timestamp, entries[0].timestamp
+            )
+        );
+        let raw = std::fs::read_to_string(original_file).unwrap();
+        assert!(raw.contains("dial edge.example:443") && raw.contains("retry token=fixture"));
     }
 
     #[test]

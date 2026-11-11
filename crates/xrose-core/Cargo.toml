@@ -39,6 +39,7 @@ snow.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
+aho-corasick.workspace = true
 semver.workspace = true
 qrcode.workspace = true
 interprocess.workspace = true

@@ -7,17 +7,26 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::*;
-use xrose_core::core::logs::{LogFilter, LogSourceFilter};
+use xrose_core::core::logs::{LogFilter, LogPrivacy, LogSourceFilter};
 use xrose_core::core::{LogEntry, LogStream};
+use xrose_core::service::ToastLevel;
 use xrose_core::settings::LogLevel;
 
 use super::AppView;
-use super::menus::Command;
+use super::menus::{self, Command, MenuTarget};
 use super::theme::{Palette, palette};
 use super::widgets::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LogAction {
+    Copy,
+    Export,
+}
+
 pub(super) struct LogListState {
+    sharing: Option<LogAction>,
     revision: Option<u64>,
     list: ListState,
     rows: Rc<Vec<LogRow>>,
@@ -47,6 +56,7 @@ fn same_entry(a: &LogEntry, b: &LogEntry) -> bool {
 impl LogListState {
     pub(super) fn new() -> Self {
         Self {
+            sharing: None,
             revision: None,
             list: ListState::new(0, ListAlignment::Top, px(128.))
                 .with_uniform_item_height(LOG_ROW_HEIGHT_HINT),
@@ -153,6 +163,70 @@ impl LogListState {
 }
 
 impl AppView {
+    pub(super) fn can_share_logs(&self, action: LogAction) -> bool {
+        self.log_list.sharing.is_none()
+            && (action == LogAction::Export || !self.log_list.rows.is_empty())
+    }
+
+    pub(super) fn share_logs(
+        &mut self,
+        action: LogAction,
+        privacy: LogPrivacy,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_share_logs(action) {
+            return;
+        }
+        let selected = (action == LogAction::Copy).then(|| {
+            self.log_list
+                .rows
+                .iter()
+                .map(|row| row.entry.clone())
+                .collect::<Vec<_>>()
+        });
+        self.log_list.sharing = Some(action);
+        cx.notify();
+        let service = self.service.clone();
+        let work = cx.background_executor().spawn(async move {
+            match selected {
+                Some(rows) => service.logs_for_clipboard(&rows, privacy).map(Some),
+                None => service.export_logs_with_privacy(privacy).map(|_| None),
+            }
+        });
+        cx.spawn(async move |view, cx| {
+            let result = work.await;
+            let _ = view.update(cx, |this, cx| {
+                this.log_list.sharing = None;
+                match result {
+                    Ok(Some(text)) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                        let label = match privacy {
+                            LogPrivacy::Original => {
+                                this.tr("已复制原始日志", "Original logs copied")
+                            }
+                            LogPrivacy::Redacted => {
+                                this.tr("已复制脱敏日志", "Redacted logs copied")
+                            }
+                        };
+                        this.service
+                            .local_toast(ToastLevel::Success, label.to_string());
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        let label = match action {
+                            LogAction::Copy => this.tr("复制日志失败", "Could not copy logs"),
+                            LogAction::Export => this.tr("导出日志失败", "Could not export logs"),
+                        };
+                        this.service
+                            .toast(ToastLevel::Error, format!("{label}: {err}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn page_logs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let query = self.log_search.read(cx).value();
@@ -168,7 +242,10 @@ impl AppView {
             self.log_list.revision = Some(revision);
         }
         let rows = self.log_list.rows.clone();
-        let visible_rows = rows.clone();
+        let share_tip = self.tr(
+            "日志中可能包含敏感信息，请谨慎分享原始日志",
+            "Logs may contain sensitive information. Take care when sharing original logs.",
+        );
         let mono = cx.theme().mono_font_family.clone();
 
         let mut body = div().flex().flex_col().gap_4().size_full().min_h(px(0.));
@@ -183,14 +260,14 @@ impl AppView {
                         .justify_between()
                         .gap_3()
                         .flex_wrap()
-                        .child(section_title(
+                        .child(div().flex_1().min_w(px(220.)).child(section_title(
                             &p,
                             self.tr("实时日志", "Live logs"),
                             self.tr(
-                                "按来源、级别和关键词筛选运行记录",
-                                "Filter runtime logs by source, level, and keyword",
+                                "按来源、级别和关键词筛选运行记录。日志中可能包含敏感信息，请谨慎将日志原文分享给他人。",
+                                "Filter runtime logs by source, level, and keyword. Logs may contain sensitive information. Take care when sharing original logs with others.",
                             ),
-                        ))
+                        )))
                         .child(
                             div()
                                 .flex()
@@ -202,34 +279,20 @@ impl AppView {
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .icon(IconName::Copy)
                                         .label(self.tr("复制日志", "Copy logs"))
-                                        .disabled(visible_rows.is_empty())
-                                        .on_click(move |_, _, cx| {
-                                            let text = visible_rows
-                                                .iter()
-                                                .map(|row| {
-                                                    let entry = &row.entry;
-                                                    format!(
-                                                        "{} {} {} {}",
-                                                        entry.timestamp,
-                                                        entry.level.as_str().to_uppercase(),
-                                                        entry.stream.label(),
-                                                        entry.message
-                                                    )
-                                                })
-                                                .collect::<Vec<_>>()
-                                                .join("\n");
-                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                        }),
+                                        .tooltip(share_tip.clone())
+                                        .loading(self.log_list.sharing == Some(LogAction::Copy))
+                                        .disabled(!self.can_share_logs(LogAction::Copy))
+                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::Logs(LogAction::Copy))),
                                 )
                                 .child(
                                     Button::new("export-logs")
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("导出", "Export"))
-                                        .tooltip(self.tr("导出全部日志", "Export all logs"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            let _ = this.service.export_logs();
-                                        })),
+                                        .tooltip(share_tip)
+                                        .loading(self.log_list.sharing == Some(LogAction::Export))
+                                        .disabled(!self.can_share_logs(LogAction::Export))
+                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::Logs(LogAction::Export))),
                                 )
                                 .child(
                                     Button::new("clear-logs")

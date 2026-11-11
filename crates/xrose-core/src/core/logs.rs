@@ -1,3 +1,5 @@
+pub(crate) mod redact;
+
 use std::collections::{BTreeSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -52,6 +54,12 @@ pub enum LogSourceFilter {
     All,
     App,
     Core,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LogPrivacy {
+    Original,
+    Redacted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,17 +255,30 @@ impl LogBus {
     }
 
     pub fn export_to(&self, path: &std::path::Path) -> crate::Result<()> {
+        self.export_with(path, None)
+    }
+
+    pub(crate) fn export_with(
+        &self,
+        path: &std::path::Path,
+        redactor: Option<&redact::LogRedactor>,
+    ) -> crate::Result<()> {
+        use std::fmt::Write as _;
+        let entries = self.recent(self.max_entries, LogLevel::Trace, "");
         let mut out = String::new();
-        for entry in self.inner.lock().entries.iter() {
-            out.push_str(&format!(
-                "{} [{}] {} {}\n",
+        for entry in entries {
+            let message = redactor.map(|r| r.message(&entry.message));
+            writeln!(
+                out,
+                "{} [{}] {} {}",
                 entry.timestamp,
                 entry.level.as_str(),
                 entry.stream.label(),
-                entry.message
-            ));
+                message.as_deref().unwrap_or(&entry.message)
+            )
+            .expect("writing to a String cannot fail");
         }
-        crate::util::atomic_write(path, out.as_bytes())
+        crate::util::atomic_write_private(path, out.as_bytes())
     }
 }
 

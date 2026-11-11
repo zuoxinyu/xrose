@@ -1,9 +1,11 @@
 //! Shared menu descriptions for button and context-menu entry points.
+use super::logs::LogAction;
 use super::{AppView, tr};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
+use xrose_core::core::logs::LogPrivacy;
 use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xrose_core::model::WorkMode;
@@ -12,6 +14,7 @@ use xrose_core::service::{LatencyScope, ShareTarget, ToastLevel};
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
+    Logs(LogAction),
     BatchTests(Vec<String>),
     Mesh(String),
     MeshPeer(String, String),
@@ -35,6 +38,7 @@ pub(super) enum MenuTarget {
 
 #[derive(Clone)]
 pub(super) enum Command {
+    ShareLogs(LogAction, LogPrivacy),
     BatchTcp(Vec<String>),
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
@@ -173,6 +177,7 @@ impl AppView {
                         | Command::ShowQr(_)
                         | Command::BatchNodes
                         | Command::ClearLogs
+                        | Command::ShareLogs(..)
                         | Command::ClearRecording
                 );
             item(&view, tr(lang, zh, en), enabled && available, command)
@@ -188,6 +193,25 @@ impl AppView {
                 .item(add("二维码", "QR code", true, Command::ShowQr(target)))
         };
         match target {
+            MenuTarget::Logs(action) => {
+                let available = self.can_share_logs(action);
+                let labels = match action {
+                    LogAction::Copy => [
+                        ("复制原始日志", "Copy original logs"),
+                        ("复制脱敏日志", "Copy redacted logs"),
+                    ],
+                    LogAction::Export => [
+                        ("导出原始日志", "Export original logs"),
+                        ("导出脱敏日志", "Export redacted logs"),
+                    ],
+                };
+                for ((zh, en), privacy) in labels
+                    .into_iter()
+                    .zip([LogPrivacy::Original, LogPrivacy::Redacted])
+                {
+                    menu = menu.item(add(zh, en, available, Command::ShareLogs(action, privacy)));
+                }
+            }
             MenuTarget::BatchTests(ids) => {
                 let available =
                     !ids.is_empty() && !busy("latency") && !busy("download") && !busy("auto-probe");
@@ -878,6 +902,7 @@ impl AppView {
                 | Command::ShowQr(_)
                 | Command::BatchNodes
                 | Command::ClearLogs
+                | Command::ShareLogs(..)
                 | Command::ClearRecording
                 | Command::ToggleProcessIcons
                 | Command::EditForward(_, _)
@@ -1247,6 +1272,7 @@ impl AppView {
             Command::ClearRecording => self.service.clear_recording(),
             Command::ClearTrafficStatistics => self.service.clear_traffic_statistics(),
             Command::ClearLogs => self.service.clear_logs(),
+            Command::ShareLogs(action, privacy) => self.share_logs(action, privacy, cx),
         }
         self.sync(cx);
     }
