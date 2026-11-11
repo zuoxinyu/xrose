@@ -130,10 +130,7 @@ impl Inbound {
                 Ok(Vec::new())
             }
             InboundKind::Mixed if core == super::CoreKind::Xray => {
-                let http = self.port.checked_add(1).ok_or_else(|| {
-                    crate::Error::config("Xray 混合端口需小于 65535，以便分配 HTTP 端口")
-                })?;
-                Ok(vec![self.port, http])
+                Ok(vec![self.port, mixed_http_port(core, self.port)?])
             }
             _ => Ok(vec![self.port]),
         }
@@ -147,6 +144,15 @@ impl Inbound {
         } else {
             &self.listen
         }
+    }
+}
+
+pub(crate) fn mixed_http_port(core: super::CoreKind, port: u16) -> crate::Result<u16> {
+    match core {
+        super::CoreKind::SingBox => Ok(port),
+        super::CoreKind::Xray => port
+            .checked_add(1)
+            .ok_or_else(|| crate::Error::config("Xray 混合端口需小于 65535，以便分配 HTTP 端口")),
     }
 }
 

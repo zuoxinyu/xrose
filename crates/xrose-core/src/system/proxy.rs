@@ -4,6 +4,8 @@
 //! `proxy-snapshot.json`. If the app crashes while the proxy is on, the next
 //! launch restores that snapshot before doing anything else.
 
+pub mod shell;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,6 +58,48 @@ impl ProxyBackend {
             ProxyBackend::MacOs => "macOS networksetup",
             ProxyBackend::Windows => "Windows Internet Settings",
             ProxyBackend::None => "未检测到",
+        }
+    }
+
+    pub(crate) async fn open_settings(&self) -> bool {
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::MacOs => {
+                let url = if Path::new("/System/Applications/System Settings.app").is_dir() {
+                    "x-apple.systempreferences:com.apple.Network-Settings.extension?Proxies"
+                } else {
+                    "x-apple.systempreferences:com.apple.preference.network?Proxies"
+                };
+                super::open_url(url).await
+            }
+            #[cfg(target_os = "windows")]
+            Self::Windows => super::open_url("ms-settings:network-proxy").await,
+            #[cfg(target_os = "linux")]
+            Self::Kde | Self::Gnome => {
+                let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let panels: &[(&str, &[&str])] = match self {
+                    Self::Kde => &[("kcmshell6", &["kcm_proxy"]), ("kcmshell5", &["proxy"])],
+                    _ if desktop.contains("cinnamon") => &[("cinnamon-settings", &["network"])],
+                    _ => &[
+                        ("gnome-control-center", &["network", "configure-proxy"]),
+                        ("gnome-control-center", &["network"]),
+                    ],
+                };
+                for (program, args) in panels {
+                    if tokio::process::Command::new(program)
+                        .args(*args)
+                        .status()
+                        .await
+                        .is_ok_and(|s| s.success())
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
         }
     }
 }

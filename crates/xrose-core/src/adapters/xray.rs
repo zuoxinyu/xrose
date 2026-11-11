@@ -70,12 +70,8 @@ impl CoreAdapter for XrayAdapter {
                 InboundKind::Mixed => {
                     // Xray has no "mixed" inbound. SOCKS and HTTP must use
                     // different ports, so we allocate port+1 for HTTP.
-                    let http_port = inbound.port.saturating_add(1);
-                    if inbound.port >= 65535 {
-                        return Err(Error::config(
-                            "mixed 入站端口过大，无法为 HTTP 分配相邻端口",
-                        ));
-                    }
+                    let http_port =
+                        crate::model::inbound::mixed_http_port(CoreKind::Xray, inbound.port)?;
                     inbounds.push(socks_inbound(inbound, account)?);
                     inbounds.push(http_inbound(inbound, http_port, account)?);
                     compiled_inbounds.push(CompiledInbound {

@@ -788,6 +788,31 @@ impl AppView {
             });
         let port_dirty = port_raw.trim() != settings.mixed_port.to_string();
         let port_valid = valid_port(&port_raw);
+        let open_proxy_settings = icon_button(
+            "open-system-proxy-settings",
+            IconName::ExternalLink,
+            self.tr("打开系统代理设置", "Open system proxy settings"),
+        )
+        .on_click(cx.listener(|this, _, _, _| this.service.open_system_proxy_settings()));
+        let copy_proxy_env = icon_button("copy-proxy-env", IconName::Copy,
+            self.tr("复制代理环境变量命令", "Copy proxy environment commands"))
+            .disabled(port_dirty)
+            .when(port_dirty, |button| button.tooltip(self.tr("请先应用端口修改", "Apply the port change first")))
+            .on_click(cx.listener(|this, _, _, cx| {
+                match this.service.proxy_env_command() {
+                    Ok(command) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(command.text));
+                        let message = if command.requires_credentials {
+                            this.tr("命令已复制，请将 USER 和 PASSWORD 替换为 URL 编码后的用户名和密码",
+                                "Commands copied. Replace USER and PASSWORD with your URL-encoded credentials.")
+                        } else {
+                            this.tr("代理环境变量命令已复制", "Proxy environment commands copied")
+                        };
+                        this.service.toast(ToastLevel::Success, message);
+                    }
+                    Err(error) => this.service.toast(ToastLevel::Error, error.to_string()),
+                }
+            }));
         let advanced_toggle = Button::new("network-advanced")
             .ghost()
             .compact()
@@ -816,11 +841,13 @@ impl AppView {
                 div().flex().items_center().gap_2()
                     .child(toggle("system-proxy", self.tr("由 Xrose 设置系统代理", "Let Xrose manage the system proxy"), self.snapshot.system_proxy_active)
                         .disabled(proxy_busy).on_change(cx.listener(|this, checked, _, cx| { this.service.set_system_proxy(*checked); this.sync(cx); })))
+                    .child(open_proxy_settings)
                     .when(proxy_busy, |row| row.child(gpui_kit::component::spinner::Spinner::new()).child(div().text_xs().text_color(p.muted_fg).child(self.tr("正在应用…", "Applying…"))))))
             .child(setting_row(&p, "PAC", self.tr("根据路由规则自动选择代理", "Choose the proxy automatically using routing rules"),
                 toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).disabled(proxy_busy).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
             .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重载", "Apply after editing; reload required"),
                 div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.port_input)))
+                    .child(copy_proxy_env)
                     .when(port_dirty, |d| d.child(Button::new("save-ports").primary().label(self.tr("应用", "Apply")).disabled(port_valid.is_none())
                         .on_click(cx.listener(|this, _, _, cx| { if let Some(port) = valid_port(this.port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.mixed_port = port); } }))))))
             .when(port_dirty && port_valid.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text).child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))

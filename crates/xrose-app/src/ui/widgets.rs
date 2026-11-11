@@ -201,11 +201,19 @@ pub fn start_button(cx: &App) -> ButtonCustomVariant {
 }
 
 pub fn more_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
+    icon_button(id, IconName::Ellipsis, label)
+}
+
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    label: impl Into<SharedString>,
+) -> Button {
     let label = label.into();
     Button::new(id)
         .compact()
         .ghost()
-        .icon(IconName::Ellipsis)
+        .icon(icon)
         .w(px(ICON_BUTTON_SIZE))
         .h(px(ICON_BUTTON_SIZE))
         .accessibility_label(label.clone())

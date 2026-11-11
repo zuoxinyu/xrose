@@ -18,6 +18,22 @@ pub(super) struct Requests {
 }
 
 impl AppService {
+    pub fn open_system_proxy_settings(&self) {
+        let service = self.clone();
+        self.spawn(async move {
+            if !service.inner.proxy_backend.open_settings().await {
+                service.toast(ToastLevel::Error, match service.settings().language {
+                    crate::settings::Language::Zh => "无法打开系统代理页面，请从系统网络设置中查看",
+                    crate::settings::Language::En => "Could not open proxy settings. Open the network settings for this device.",
+                });
+            }
+        });
+    }
+
+    pub fn proxy_env_command(&self) -> crate::Result<system::proxy::shell::ProxyEnvCommand> {
+        system::proxy::shell::for_default_shell(&self.inner.settings.read())
+    }
+
     pub fn set_system_proxy(&self, enabled: bool) {
         let mut requests = self.inner.proxy_requests.lock();
         self.queue_proxy(

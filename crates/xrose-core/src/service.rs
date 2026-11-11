@@ -4730,35 +4730,7 @@ impl AppService {
     pub fn open_url(&self, url: &str) {
         let url = url.to_string();
         self.spawn(async move {
-            #[cfg(target_os = "linux")]
-            let program = "xdg-open";
-            #[cfg(target_os = "macos")]
-            let program = "open";
-            #[cfg(target_os = "windows")]
-            {
-                // Authentication URLs can contain shell metacharacters. Send
-                // the URL directly to Windows instead of passing it through cmd.
-                use std::os::windows::ffi::OsStrExt;
-                let target: Vec<u16> = std::ffi::OsStr::new(&url)
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect();
-                let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-                unsafe {
-                    windows_sys::Win32::UI::Shell::ShellExecuteW(
-                        std::ptr::null_mut(),
-                        verb.as_ptr(),
-                        target.as_ptr(),
-                        std::ptr::null(),
-                        std::ptr::null(),
-                        1,
-                    );
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            let args = vec![url];
-            #[cfg(not(target_os = "windows"))]
-            let _ = tokio::process::Command::new(program).args(args).spawn();
+            let _ = system::open_url(&url).await;
         });
     }
 
