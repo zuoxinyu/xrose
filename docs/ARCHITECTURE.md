@@ -98,7 +98,7 @@
 1. `fetch_subscription`：发送条件请求（`ETag` / `If-Modified-Since`）并解析 `subscription-userinfo`。
 2. `parse_subscription`：自动识别 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON。
 3. **合并与去重**：按订阅 ID 替换旧节点（保留其他订阅），按指纹去重；Clash `proxy-groups` 按名称合并，新节点加入默认出站组。更换订阅 URL 会清理旧缓存验证信息，跨来源更换清除自定义请求头。
-4. **更新代理策略** 订阅更新与资源下载各有独立开关。启用时优先使用设置中的 SOCKS5 前置代理，由代理解析目标域名。前置代理留空时使用运行中内核的 HTTP 或混合入站。关闭时请求直接连接。两类请求均支持自定义 User-Agent。
+4. **更新代理策略**：订阅更新与资源下载各有独立开关。启用时优先使用设置中的 SOCKS5 前置代理，由代理解析目标域名。前置代理留空时使用运行中内核的 HTTP 或混合入站。关闭时请求直接连接。两类请求均支持自定义 User-Agent。
 
 ### 链接与二维码导入、分享
 
@@ -140,7 +140,7 @@ UI 操作 ──▶ AppModel 变更 ──▶ SQLite(加密) ──▶ config_di
 
 ### 配置热重载与设置生效范围
 
-「设置 → Core → 热重载」默认开启。开启时，服务防抖合并连续配置编辑，在运行中先校验候选配置，再替换内核进程，失败时尝试恢复原配置并保留待应用标记。`AppService::save_settings` 仅在影响当前内核运行的参数变更时标记 `config_dirty`：
+「设置 → Core → 热重载」默认开启。开启时，服务防抖合并连续配置编辑，在运行中先校验候选配置，再替换内核进程，失败时尝试恢复原配置并保留待应用标记；应用更新后若检测到已安装的提权助手需要更新，也会按需自动触发更新。`AppService::save_settings` 仅在影响当前内核运行的参数变更时标记 `config_dirty`：
 
 | 设置项 | 生效方式 |
 | --- | --- |
@@ -175,7 +175,7 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 - **托盘浮窗**：三端共用 `tray::popup` 渲染与 `tray::dashboard` 快照，包含状态、直连/节点切换、路由预设下拉、TUN 开关、组网状态与测速入口；Windows 按显示器 DPI 定位并在任务栏方向执行 250ms/167ms 非阻塞滑入动画，遵循系统动态效果开关；Linux D-Bus 注册在独立线程完成，无宿主时 `available()` 返回 `false`，关闭窗口直接退出。主窗口句柄独立跟踪，浮窗复用不影响主窗口隐藏恢复。Wayland 通过 xdg-output 的逻辑坐标选择显示器，支持 layer-shell 时沿托盘所在面板的边缘定位，否则使用普通浮窗。
 - **关闭到托盘**：Windows 和 macOS 隐藏主窗口。KDE 撤下主窗口及其任务栏条目，服务和托盘继续运行。从托盘恢复时重建控件并恢复页面和筛选条件。托盘宿主离线时自动恢复隐藏的主窗口。其他 Linux 桌面最小化主窗口。
-- **窗口材质**：`Settings.backdrop` 仅影响客户端外观，主题切换后重新执行 `window_effects::make_surface_translucent`；Windows 切换时清理旧 accent policy 并重设 DWM 客户区扩展，Wayland 按合成器公布的模糊能力提供毛玻璃，X11 与不支持模糊的环境使用纯色面板。
+- **窗口材质**：`Settings.backdrop` 仅影响客户端外观，主题切换后重新执行 `window_effects::make_surface_translucent`；Windows 切换时清理旧 accent policy 并重设 DWM 客户区扩展（支持 Mica / Mica Alt / Acrylic），macOS 提供 vibrancy 毛玻璃，Wayland 按合成器公布的模糊能力（`ext-background-effect-v1` / KWin blur）为侧栏与托盘浮窗提供毛玻璃，X11 与不支持模糊的环境使用纯色面板。
 - **调试与发布变量**：
   - 发布构建设置 `XROSE_GITHUB_REPOSITORY=<owner>/<repo>` 可启用「关于」页项目链接与客户端版本检查；未配置仍可检查内核更新。
   - 开发验证可在隔离 `XROSE_HOME` 下设置 `XROSE_TRAY_PREVIEW=1` 自动弹出托盘浮窗（debug 构建主窗口支持 `Ctrl/Cmd+Shift+T` 复现打开）。
@@ -183,5 +183,5 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 ## 11. 持久化与安全边界
 
 - **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
-- **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
-- **系统代理还原** 在修改网络设置前保存快照。macOS 分别使用内核实际监听的 HTTP 和 SOCKS 端口，还原时先写地址，再还原启用状态并回读验证。设置页与菜单栏浮窗订阅 macOS 当前网络的代理变更，显示 Xrose、部分使用或外部代理状态。自动重载和退出还原会跳过用户或其他应用已修改的条目。还原失败会保留快照供重试，GUI 在获得单实例锁后执行崩溃恢复。
+- **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则，通过 `Ping` 校验应用版本、组网协议版本与助手修订号。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
+- **系统代理还原**：在修改网络设置前保存快照。macOS 分别使用内核实际监听的 HTTP 和 SOCKS 端口，还原时先写地址，再还原启用状态并回读验证。设置页与菜单栏浮窗订阅 macOS 当前网络的代理变更，显示 Xrose、部分使用或外部代理状态。自动重载和退出还原会跳过用户或其他应用已修改的条目。还原失败会保留快照供重试，GUI 在获得单实例锁后执行崩溃恢复。

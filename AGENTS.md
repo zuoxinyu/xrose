@@ -53,13 +53,13 @@ Xrose 是 Project Xristina 旗下的 Xray / sing-box 跨平台桌面客户端，
 
 ## 平台注意
 
-- 托盘仅 macOS / Windows；其他平台 `available()` 必须为 false，不得强制为 true。
-- 修改 `Theme::change` / `Theme::sync_system_appearance` 的调用处后，需重新执行 `window_effects::make_surface_translucent`。
+- 托盘支持 macOS、Windows 与 Linux（`StatusNotifierItem`）；Linux 无托盘宿主或其他未实现平台时 `available()` 必须为 false，不得强制为 true。
+- 窗口材质支持 macOS vibrancy、Windows Mica / Mica Alt / Acrylic 与 Linux Wayland 毛玻璃（`ext-background-effect-v1` / KWin blur）；X11 及不支持模糊的合成器自动回退为纯色。修改 `Theme::change` / `Theme::sync_system_appearance` 的调用处后，需重新执行 `window_effects::make_surface_translucent`。
 - Windows：保留 `crates/xrose-app/build.rs` 中的图标资源与主线程栈设置；已知失败测试 `second_acquire_fails` 可用 `-- --skip second_acquire_fails` 跳过。
 - Windows：GUI 进程完整性级别须不低于 shell，否则 `Shell_NotifyIconW` 失败；若工作区目录带 Low 完整性标签，用 `icacls <workspace> /setintegritylevel (OI)(CI)M` 恢复。
 - Windows：`build.rs` 将图标嵌入为资源 ID 1，并把主线程栈提升至 16 MiB，修改构建时两者都要保留。
 - `objc` 宏依赖 `crates/xrose-app/Cargo.toml` 中 `[lints.rust]` 的 `cfg(feature = "cargo-clippy")` 条目；不得整体放行 `unexpected_cfgs`。
-- `vendor/block` 是通过 `[patch.crates-io]` 引入的 `block 0.1.6` 补丁版本，上游修复后移除。
+- `vendor/block`（`block 0.1.6` 静态类型修复）及 `vendor/gpui-pre`、`vendor/gpui-pre-windows`（Windows 字号与 DirectWrite 渲染调整）通过 `[patch.crates-io]` 引入。
 - 注册表、`networksetup`、GNOME/KDE 等平台代码主要在 Linux 上验证过；声称平台修复有效前，先运行 `xrose-cli doctor` / `check`。
 
 ## 修改入口

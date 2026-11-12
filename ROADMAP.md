@@ -41,7 +41,7 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 
 ## 已知限制
 
-- **Linux 托盘**：需要 StatusNotifierItem 宿主（如 KDE Plasma 或 GNOME AppIndicator 扩展）；Wayland 下浮窗位置由合成器决定；无宿主时关闭窗口即退出。
+- **Linux 托盘**：需要 StatusNotifierItem 宿主（如 KDE Plasma 或 GNOME AppIndicator 扩展）；不支持 layer-shell 的 Wayland 合成器下浮窗位置由合成器决定，非 KDE 桌面「关闭到系统托盘」以最小化主窗口实现；无宿主时关闭窗口即退出。
 - **Windows 托盘**：进程完整性级别低于任务栏时托盘注册失败，应用退化为关闭即退出。可将程序置于常规目录，或执行 `icacls <目录> /setintegritylevel (OI)(CI)M` 恢复目录完整性标签。
 - **提权助手**：Linux tproxy 规则与 macOS `networksetup` DNS 路径尚未在真机端到端验证。
 - **系统代理**：仅支持 GNOME / KDE、macOS 与 Windows；其他桌面环境会明确报错。

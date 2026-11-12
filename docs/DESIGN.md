@@ -19,7 +19,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 
 性质：**工具型、信息密集、低频配置 + 高频看状态**。
 
-气质：克制、冷灰底 + 白卡片、单一蓝绿 accent、系统字体、macOS 原生感（侧栏 vibrancy）。
+气质：克制、冷灰底 + 白卡片、单一蓝绿 accent、系统字体、原生窗口材质（侧栏半透明 / 模糊材质）。
 
 禁止：渐变（§4.4 托盘运行状态和 §5.13 取景框除外）、装饰插画、营销式大标题、纯装饰动效、饱和度高的大色块。
 
@@ -73,7 +73,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
   --data-up:   hsl(262 83% 58%);   /* #7c3bed ⚠K24 */
 
   /* 侧栏（有模糊背景时） */
-  --sidebar: hsl(210 30% 98% / .28);  /* 无模糊背景时回退为 --surface；Windows Mica 为透明 */
+  --sidebar: hsl(210 30% 98% / .28);  /* 无模糊背景时回退为 --surface；Windows Mica 为透明；Linux Wayland 模糊为 --surface 87% 不透明度 */
 }
 ```
 
@@ -118,7 +118,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 - **红色只表示 danger / 阻止 / 错误 / 高延迟**。accent 不得使用红色色相（避免与 danger 混淆）。
 - 语义色做**浅底 + 深色文字**，不要实心饱和底 + 白字。 `⚠K04`
 - **暗色**：每个颜色 token 必须有暗色值；surface 比 bg-app 亮一档；soft 色用 alpha 叠加。暗色值已在上方列出，**改动后必须在暗色下截图自检**。
-- 延迟分级（`theme.rs`）：<120ms `--success-text`；<250ms 正文色；<500ms `--warning-text`；≥500ms `--danger-text`；未测 `--text-2`；探测失败 `--danger-text`；超过 10 分钟的结果调淡。
+- 延迟分级（`theme.rs`）：<120ms `--success-text`；<500ms 正文色；<1000ms `--warning-text`；≥1000ms `--danger-text`；未测 `--text-2`；探测失败 `--danger-text`；超过 10 分钟的结果调淡。
 
 ### 3.2 字体
 
@@ -205,7 +205,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 
 ### 4.1 侧栏
 
-- 展开宽 220，全高；macOS 用 vibrancy，内容区用实色。
+- 展开宽 220，全高；启用模糊窗口材质时侧栏使用半透明模糊材质（macOS vibrancy、Windows Mica / Acrylic、Linux Wayland 毛玻璃），内容区用实色。
 - 项高 40，图标 18px，**统一图标集（gpui-kit `IconName`）**；选中 = `--accent-soft` 底 + accent 图标与文字。
 - 导航保持左对齐，不显示分割线；侧栏与内容区也不增加描边。
 - 底部：实时下行 / 上行与累计流量，下面是 `关于` + 版本号。三行与托盘浮窗共用 `ArrowDown`、`ArrowUp`、`Sigma` 矢量图标，图形等高，在 12px 方形内居中，标签左对齐。停止时流量文字降为次级色；运行状态只在标题栏胶囊表达。
@@ -234,7 +234,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 
 | 区域 | 内容 | 规则 |
 |---|---|---|
-| 两侧空白 | 窗口拖拽区域 | 左右留足空间；Windows 右侧保留窗口控件 |
+| 两侧空白 | 窗口拖拽区域 | 左右留足空间；Windows 与 Linux 右侧保留窗口控件 |
 | 中 | `节点名称 · 延迟 ▾｜▷ / □` 胶囊 | 节点名下拉可切换默认代理出站中的手动节点；长名称截断，延迟保持可见，tooltip 显示全文与状态 |
 
 - 实时速率及累计流量位于侧栏 `关于` 上方，标题栏不重复展示。
@@ -470,7 +470,7 @@ Core 页为 sing-box 和 Xray 分别列出一行「自定义路径」和各已�
 // 延迟分级（默认值，可调）；未测 / 超时必须单独表达
 type Latency = { state: 'idle' } | { state: 'testing' } | { state: 'timeout' } | { state: 'ok'; ms: number };
 
-const tier = (ms: number) => (ms < 120 ? 'good' : ms < 250 ? 'normal' : ms < 500 ? 'warning' : 'bad');
+const tier = (ms: number) => (ms < 120 ? 'good' : ms < 500 ? 'normal' : ms < 1000 ? 'warning' : 'bad');
 
 // idle    → "—"（--text-2）
 // testing → spinner
@@ -506,7 +506,7 @@ new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-3, 'minute') //
 | 项 | macOS | Windows | Linux |
 |---|---|---|---|
 | 窗口控件 | 左上红绿灯，`--tl-inset` | 右上，`--ctrl-inset-right` | 客户端装饰，右上使用应用窗口控件 |
-| 窗口材质 | vibrancy（侧栏） | Mica / 纯色 | 支持模糊的 Wayland 会话提供自动、毛玻璃和纯色 |
+| 窗口材质 | 自动 / 毛玻璃（vibrancy） / 纯色 | 自动 / Mica / Mica Alt / Acrylic / 纯色 | 支持模糊的 Wayland 会话提供自动、毛玻璃和纯色 |
 | 常驻入口术语 | 菜单栏 | 系统托盘 | 系统托盘 |
 | 字体回退 | SF / PingFang | Segoe UI / Microsoft YaHei UI | system-ui |
 
@@ -560,7 +560,7 @@ new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-3, 'minute') //
 | K25 | 已修复 | 页面 CTA 近黑 / 暗色高对比；药丸启动图标蓝绿、停止图标红色；托盘浮窗的停止按钮为红色实心；药丸内部垂直分割，左侧为节点下拉 |
 | K26 | 部分完成 | 侧栏保持左对齐，去掉分割线，底部显示流量；本轮不新增收起功能 |
 | K27 | 部分完成 | 已检查主窗口中英文与浅暗色、菜单和拖拽；完整实机矩阵见 §13，不将未验证项标为完成 |
-| K28 | 已完成 | Token 表已随实现更新；延迟分级保留源码的 120 / 250 / 500ms |
+| K28 | 已完成 | Token 表已随实现更新；延迟分级对齐源码的 120 / 500 / 1000ms |
 
 ### 11.1 路由排序与菜单约束
 
@@ -583,7 +583,7 @@ new Intl.RelativeTimeFormat(locale, { numeric: 'auto' }).format(-3, 'minute') //
 - [ ] 键盘可完成全部操作；焦点环可见；仅图标按钮有 `aria-label` + tooltip。
 - [ ] 文字 ≥4.5:1、组件边界 ≥3:1；信息不只靠颜色。
 - [ ] 浅色 + 暗色各一张截图；若涉及 macOS，再检查红绿灯区与全屏。
-- [ ] Windows 布局（窗口控件在右）没有被 macOS 假设破坏。
+- [ ] Windows / Linux 布局（窗口控件在右）没有被 macOS 假设破坏。
 - [ ] 破坏性操作可撤销或有确认；被引用项不可删。
 - [ ] 所有字符串走 i18n；相对时间 / 单位使用本地化格式化函数。
 - [ ] 若修复了 §11 某项，在 PR 中写明 `Fixes K##`，并更新本文。
