@@ -380,16 +380,6 @@ impl AppView {
                                 .ml_auto()
                                 .gap_2()
                                 .child(
-                                    Button::new("create-rule-group")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .icon(IconName::Plus)
-                                        .label(self.tr("添加分组", "Add group"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.open_rule_group_dialog(None, window, cx);
-                                        })),
-                                )
-                                .child(
                                     Button::new("route-files").compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                         .label(self.tr("导入 / 导出", "Import / Export"))
                                         .loading(self.snapshot.busy.iter().any(|b| b == "route-file"))
@@ -403,6 +393,16 @@ impl AppView {
                                         .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
                                         .on_click(cx.listener(|this, _, _, _| {
                                             this.service.validate_config();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("create-rule-group")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("添加分组", "Add group"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_rule_group_dialog(None, window, cx);
                                         })),
                                 )
                                 .child(
