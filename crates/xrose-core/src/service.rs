@@ -2267,7 +2267,15 @@ impl AppService {
     async fn ensure_core_binary(&self, settings: &mut Settings) -> Result<()> {
         let _install = self.inner.install_lock.lock().await;
         match self.inner.core.resolve_binary(settings.core, settings) {
-            Ok(_) => return Ok(()),
+            Ok(binary) => {
+                if settings.active_version(settings.core).is_none() {
+                    self.inner
+                        .core
+                        .binaries()
+                        .register_local(settings.core, &binary)?;
+                }
+                return Ok(());
+            }
             Err(error)
                 if settings.binary_override(settings.core).is_some()
                     || settings.active_version(settings.core).is_none() =>
@@ -3580,11 +3588,15 @@ impl AppService {
             if !row.same_file(&current) {
                 *row = current;
             }
-            if !self.inner.startup_started.load(Ordering::Acquire)
-                || !row.available
-                || row.probing
-                || row.info.is_some()
+            if !self.inner.startup_started.load(Ordering::Acquire) || !row.available {
+                continue;
+            }
+            if settings.active_version(core).is_none()
+                && let Some(path) = row.path.as_deref()
             {
+                let _ = self.inner.core.binaries().register_local(core, path);
+            }
+            if row.probing || row.info.is_some() {
                 continue;
             }
             let Some(path) = row.path.clone() else {
@@ -3607,9 +3619,6 @@ impl AppService {
 
     pub fn select_local_binary(&self, core: CoreKind) -> Result<()> {
         let mut settings = self.settings();
-        if settings.active_version(core).is_none() {
-            return Ok(());
-        }
         let local = crate::core::binary::LocalBinaryStatus::discover(
             core,
             settings.local_binary_path(core),
@@ -3618,6 +3627,12 @@ impl AppService {
             return Err(Error::binary(
                 "找不到可执行文件，请先选择文件或将内核加入 PATH",
             ));
+        }
+        if let Some(path) = local.path.as_deref() {
+            self.inner.core.binaries().register_local(core, path)?;
+        }
+        if settings.active_version(core).is_none() {
+            return Ok(());
         }
         settings.active_versions.remove(core.as_str());
         self.save_settings(&settings)
@@ -3631,10 +3646,18 @@ impl AppService {
             if !file.is_absolute() || !crate::core::binary::is_executable(file) {
                 return Err(Error::binary("请选择存在且可执行的内核文件"));
             }
+            self.inner.core.binaries().register_local(core, file)?;
             settings.binary_paths.insert(core.as_str().into(), path);
             settings.active_versions.remove(core.as_str());
         } else {
             settings.binary_paths.remove(core.as_str());
+            if settings.active_version(core).is_none()
+                && let Some(path) = crate::core::binary::path_binary(core)
+            {
+                let _ = self.inner.core.binaries().register_local(core, &path);
+            } else {
+                let _ = self.inner.core.binaries().unregister_local(core);
+            }
         }
         self.save_settings(&settings)?;
         self.refresh_local_binaries();
@@ -6835,6 +6858,51 @@ proxy-groups:
                 .nodes_of_subscription(&subscription.id)
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn selecting_local_binary_registers_it_for_helper_without_managed_row() {
+        let (service, dir) = service();
+        let ext = std::env::consts::EXE_SUFFIX;
+        let external = dir.path().join(format!("sing-box{ext}"));
+        std::fs::write(&external, b"custom-sing-box").unwrap();
+        crate::util::set_executable(&external).unwrap();
+
+        service
+            .set_binary_override(
+                CoreKind::SingBox,
+                Some(external.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        assert!(service.snapshot().binaries.is_empty());
+        let registered = service
+            .core()
+            .binaries()
+            .find_registered(&external)
+            .expect("custom binary should be registered for helper");
+        assert!(registered.local);
+        assert!(service.core().binaries().verify(&registered).unwrap());
+
+        service
+            .core()
+            .binaries()
+            .unregister_local(CoreKind::SingBox)
+            .unwrap();
+        assert!(
+            service
+                .core()
+                .binaries()
+                .find_registered(&external)
+                .is_none()
+        );
+        service.select_local_binary(CoreKind::SingBox).unwrap();
+        assert!(
+            service
+                .core()
+                .binaries()
+                .find_registered(&external)
+                .is_some()
         );
     }
 }

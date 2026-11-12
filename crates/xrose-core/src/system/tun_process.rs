@@ -139,59 +139,157 @@ pub fn stop_all() {
     }
 }
 
-#[cfg(not(unix))]
-fn resolve_paths(_: &std::path::Path, _: &std::path::Path) -> AppPaths {
-    AppPaths::discover()
-}
-
-#[cfg(unix)]
 fn resolve_paths(binary: &std::path::Path, config: &std::path::Path) -> AppPaths {
-    let mut paths = AppPaths::discover();
-    if !binary.starts_with(&paths.data_dir) {
-        use std::os::unix::fs::MetadataExt;
+    let paths = AppPaths::discover();
+    let binary_canon = binary.canonicalize().ok();
+    let config_canon = config.canonicalize().ok();
+    let Some(bin) = binary_canon.as_deref() else {
+        return paths;
+    };
+    if crate::core::BinaryManager::new(&paths)
+        .find_registered(bin)
+        .is_some()
+        && config_canon
+            .as_deref()
+            .and_then(|cfg| {
+                paths
+                    .runtime_dir
+                    .canonicalize()
+                    .ok()
+                    .map(|rt| cfg.starts_with(rt))
+            })
+            .unwrap_or(false)
+    {
+        return paths;
+    }
+    let Some(cfg) = config_canon.as_deref() else {
+        return paths;
+    };
+    #[cfg(unix)]
+    let uid_ok = |uid: u32| {
         let allowed = super::privilege::allowed_uid();
-        let uid_ok = |uid: u32| uid == 0 || Some(uid) == allowed;
-        let binary_canon = binary.canonicalize().ok();
-        let config_canon = config.canonicalize().ok();
-        if let (Some(bin), Some(cfg)) = (binary_canon.as_deref(), config_canon.as_deref()) {
-            for ancestor in bin.ancestors() {
-                if ancestor.join("cores").join("manifest.json").is_file() {
-                    let dir_ok = std::fs::metadata(ancestor)
-                        .map(|m| uid_ok(m.uid()))
-                        .unwrap_or(false);
-                    let cfg_ok = std::fs::metadata(cfg)
-                        .map(|m| uid_ok(m.uid()))
-                        .unwrap_or(false);
-                    if dir_ok && cfg_ok {
-                        paths.data_dir = ancestor.to_path_buf();
-                        paths.config_dir = ancestor.to_path_buf();
-                        paths.cache_dir = ancestor.join("cache");
-                        let data_run = ancestor.join("run");
-                        if cfg.starts_with(&data_run) {
-                            paths.runtime_dir = data_run;
-                        } else if let Some(root_run) = ancestor.parent().map(|p| p.join("run")) {
-                            if cfg.starts_with(&root_run) {
-                                paths.runtime_dir = root_run;
-                            } else if let Some(parent) = cfg.parent() {
-                                let parent_ok = std::fs::metadata(parent)
-                                    .map(|m| uid_ok(m.uid()))
-                                    .unwrap_or(false)
-                                    && parent
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .is_some_and(|n| n == "xrose" || n.starts_with("xrose-"));
-                                if parent_ok {
-                                    paths.runtime_dir = parent.to_path_buf();
-                                }
-                            }
-                        }
-                    }
-                    break;
+        uid == 0 || Some(uid) == allowed
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !std::fs::metadata(cfg)
+            .map(|m| uid_ok(m.uid()))
+            .unwrap_or(false)
+        {
+            return paths;
+        }
+    }
+    let mut candidates = Vec::new();
+    for ancestor in cfg.ancestors().chain(bin.ancestors()) {
+        candidates.push(ancestor.to_path_buf());
+        candidates.push(ancestor.join("data"));
+        candidates.push(ancestor.join(".local").join("share").join("xrose"));
+        candidates.push(
+            ancestor
+                .join("Library")
+                .join("Application Support")
+                .join("io.xrose.Xrose"),
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut uids = Vec::new();
+        if let Some(uid) = super::privilege::allowed_uid() {
+            uids.push(uid);
+        }
+        if let Ok(meta) = std::fs::metadata(cfg)
+            && uid_ok(meta.uid())
+            && !uids.contains(&meta.uid())
+        {
+            uids.push(meta.uid());
+        }
+        if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+            for line in passwd.lines() {
+                let mut parts = line.split(':');
+                let (Some(_name), Some(_pw), Some(uid_str), Some(_gid), Some(_gecos), Some(home)) = (
+                    parts.next(),
+                    parts.next(),
+                    parts.next(),
+                    parts.next(),
+                    parts.next(),
+                    parts.next(),
+                ) else {
+                    continue;
+                };
+                if let Ok(uid) = uid_str.parse::<u32>()
+                    && uids.contains(&uid)
+                {
+                    let home = std::path::PathBuf::from(home);
+                    candidates.push(home.join(".local").join("share").join("xrose"));
+                    candidates.push(
+                        home.join("Library")
+                            .join("Application Support")
+                            .join("io.xrose.Xrose"),
+                    );
                 }
             }
         }
     }
-    paths
+    let mut fallback = None;
+    for data_dir in candidates {
+        if !data_dir.join("cores").join("manifest.json").is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !std::fs::metadata(&data_dir)
+                .map(|m| uid_ok(m.uid()))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+        }
+        let mut resolved = paths.clone();
+        resolved.data_dir = data_dir.clone();
+        resolved.config_dir = data_dir.clone();
+        resolved.cache_dir = data_dir.join("cache");
+        let data_run = data_dir.join("run");
+        if cfg.starts_with(&data_run) {
+            resolved.runtime_dir = data_run;
+        } else if let Some(root_run) = data_dir.parent().map(|p| p.join("run"))
+            && cfg.starts_with(&root_run)
+        {
+            resolved.runtime_dir = root_run;
+        } else if let Some(parent) = cfg.parent() {
+            #[cfg(unix)]
+            let parent_ok = {
+                use std::os::unix::fs::MetadataExt;
+                std::fs::metadata(parent)
+                    .map(|m| uid_ok(m.uid()))
+                    .unwrap_or(false)
+                    && parent
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n == "xrose" || n.starts_with("xrose-"))
+            };
+            #[cfg(not(unix))]
+            let parent_ok = parent
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n == "xrose" || n.starts_with("xrose-") || n == "run");
+            if parent_ok {
+                resolved.runtime_dir = parent.to_path_buf();
+            }
+        }
+        if crate::core::BinaryManager::new(&resolved)
+            .find_registered(bin)
+            .is_some()
+        {
+            return resolved;
+        }
+        if fallback.is_none() {
+            fallback = Some(resolved);
+        }
+    }
+    fallback.unwrap_or(paths)
 }
 
 fn validate_start(
@@ -203,18 +301,11 @@ fn validate_start(
         .canonicalize()
         .map_err(|_| Error::binary("TUN 核心文件不存在"))?;
     let manager = crate::core::BinaryManager::new(paths);
-    let record = manager
-        .list()
-        .into_iter()
-        .find(|r| {
-            r.matches_platform()
-                && r.absolute_path(&manager).canonicalize().ok().as_ref() == Some(&binary)
-        })
-        .ok_or_else(|| {
-            Error::binary(
-                "TUN 代启仅支持 Xrose 已安装并登记的内核，请选择已下载的版本，或先用 xrose-cli core install 登记此文件",
-            )
-        })?;
+    let record = manager.find_registered(&binary).ok_or_else(|| {
+        Error::binary(
+            "TUN 代启仅支持 Xrose 已安装并登记的内核，请选择已下载的版本，或先用 xrose-cli core install 登记此文件",
+        )
+    })?;
     if !manager.verify(&record)? {
         return Err(Error::binary("TUN 核心摘要不匹配，请重新安装内核"));
     }
@@ -709,5 +800,16 @@ mod tests {
             .unwrap();
         let resolved = resolve_paths(&binary, &config);
         assert!(validate_start(&resolved, &binary, &config).is_ok());
+
+        let external_dir = tempfile::tempdir().unwrap();
+        let ext = std::env::consts::EXE_SUFFIX;
+        let external_bin = external_dir.path().join(format!("sing-box{ext}"));
+        std::fs::write(&external_bin, b"custom local core").unwrap();
+        crate::util::set_executable(&external_bin).unwrap();
+        crate::core::BinaryManager::new(&paths)
+            .register_local(crate::model::CoreKind::SingBox, &external_bin)
+            .unwrap();
+        let resolved_external = resolve_paths(&external_bin, &config);
+        assert!(validate_start(&resolved_external, &external_bin, &config).is_ok());
     }
 }

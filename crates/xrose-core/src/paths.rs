@@ -23,10 +23,11 @@ impl AppPaths {
         #[cfg(windows)]
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                // The portable GUI and the CLI copied into XroseData/data/bin share a profile.
+                // The portable GUI, the CLI in XroseData/data/bin, and the helper in
+                // XroseData/data/helper share a profile.
                 for base in [
                     Some(dir),
-                    dir.ends_with("XroseData/data/bin")
+                    (dir.ends_with("XroseData/data/bin") || dir.ends_with("XroseData/data/helper"))
                         .then(|| dir.ancestors().nth(3))
                         .flatten(),
                 ]

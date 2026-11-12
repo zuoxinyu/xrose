@@ -118,6 +118,9 @@ pub struct BinaryRecord {
     pub installed_at: i64,
     #[serde(default)]
     pub source_url: Option<String>,
+    /// True for a custom path or system `PATH` binary registered for the TUN helper.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local: bool,
 }
 
 impl BinaryRecord {
@@ -170,7 +173,12 @@ impl BinaryManager {
     }
 
     pub fn list(&self) -> Vec<BinaryRecord> {
-        let mut list = self.load().binaries;
+        let mut list: Vec<BinaryRecord> = self
+            .load()
+            .binaries
+            .into_iter()
+            .filter(|b| !b.local)
+            .collect();
         list.sort_by(|a, b| {
             a.core
                 .as_str()
@@ -270,13 +278,15 @@ impl BinaryManager {
             size: fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0),
             installed_at: now_unix(),
             source_url,
+            local: false,
         };
         let mut manifest = self.load();
         manifest.binaries.retain(|b| {
-            !(b.core == core
-                && b.version == record.version
-                && b.platform == record.platform
-                && b.arch == record.arch)
+            b.local
+                || !(b.core == core
+                    && b.version == record.version
+                    && b.platform == record.platform
+                    && b.arch == record.arch)
         });
         manifest.binaries.push(record.clone());
         self.save(&manifest)?;
@@ -311,6 +321,7 @@ impl BinaryManager {
             size: fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             installed_at: now_unix(),
             source_url: None,
+            local: false,
         };
         let mut manifest = self.load();
         manifest.binaries.push(record.clone());
@@ -318,11 +329,78 @@ impl BinaryManager {
         Ok(record)
     }
 
+    /// Registers the active custom path or system `PATH` binary for the TUN helper
+    /// without listing it as a managed version in the UI.
+    pub fn register_local(&self, core: CoreKind, path: &Path) -> Result<BinaryRecord> {
+        if !is_executable(path) {
+            return Err(Error::binary(format!(
+                "找不到可执行文件：{}",
+                path.display()
+            )));
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let (platform, arch) = platform_arch();
+        let relative_path = canonical
+            .strip_prefix(&self.root)
+            .unwrap_or(&canonical)
+            .to_string_lossy()
+            .into_owned();
+        let sha256 = sha256_file(&canonical)?;
+        let size = fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        let mut manifest = self.load();
+        if let Some(existing) = manifest.binaries.iter().find(|b| {
+            b.local
+                && b.core == core
+                && b.platform == platform
+                && b.arch == arch
+                && b.relative_path == relative_path
+                && b.sha256 == sha256
+                && b.size == size
+        }) {
+            return Ok(existing.clone());
+        }
+        let record = BinaryRecord {
+            core,
+            version: "local".into(),
+            platform: platform.into(),
+            arch: arch.into(),
+            relative_path,
+            sha256,
+            size,
+            installed_at: now_unix(),
+            source_url: None,
+            local: true,
+        };
+        manifest.binaries.retain(|b| !(b.local && b.core == core));
+        manifest.binaries.push(record.clone());
+        self.save(&manifest)?;
+        Ok(record)
+    }
+
+    pub fn unregister_local(&self, core: CoreKind) -> Result<()> {
+        let mut manifest = self.load();
+        let before = manifest.binaries.len();
+        manifest.binaries.retain(|b| !(b.local && b.core == core));
+        if manifest.binaries.len() != before {
+            self.save(&manifest)?;
+        }
+        Ok(())
+    }
+
+    /// Finds any registered binary (managed or local) matching the canonical path on this platform.
+    pub fn find_registered(&self, binary: &Path) -> Option<BinaryRecord> {
+        let canonical = binary.canonicalize().ok()?;
+        self.load().binaries.into_iter().find(|r| {
+            r.matches_platform()
+                && r.absolute_path(self).canonicalize().ok().as_ref() == Some(&canonical)
+        })
+    }
+
     pub fn remove(&self, core: CoreKind, version: &str) -> Result<()> {
         let mut manifest = self.load();
         manifest
             .binaries
-            .retain(|b| !(b.core == core && b.version == version));
+            .retain(|b| b.local || !(b.core == core && b.version == version));
         self.save(&manifest)?;
         let dir = self.root.join(core.as_str()).join(version);
         if dir.exists() {
@@ -612,6 +690,31 @@ mod tests {
             .install_file(CoreKind::Xray, "1.0.0", &file, Some("deadbeef"), None)
             .unwrap_err();
         assert!(err.to_string().contains("SHA-256"));
+    }
+
+    #[test]
+    fn registers_local_binary_for_helper_without_polluting_managed_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(tmp.path());
+        paths.ensure().unwrap();
+        let manager = BinaryManager::new(&paths);
+        let ext = std::env::consts::EXE_SUFFIX;
+        let external = tmp.path().join(format!("sing-box{ext}"));
+        fs::write(&external, b"custom-sing-box").unwrap();
+        set_executable(&external).unwrap();
+
+        let record = manager
+            .register_local(CoreKind::SingBox, &external)
+            .unwrap();
+        assert!(record.local);
+        assert!(manager.list().is_empty());
+        assert!(manager.resolve(CoreKind::SingBox, None).is_none());
+        let found = manager.find_registered(&external).unwrap();
+        assert_eq!(found.core, CoreKind::SingBox);
+        assert!(manager.verify(&found).unwrap());
+
+        manager.unregister_local(CoreKind::SingBox).unwrap();
+        assert!(manager.find_registered(&external).is_none());
     }
 }
 

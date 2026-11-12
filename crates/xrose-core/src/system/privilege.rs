@@ -486,7 +486,7 @@ pub fn invalidate_status() {
 // identify the running executable without a second IPC round trip.
 fn helper_signature() -> String {
     // Identify helper-only fixes even when the mesh wire protocol stays compatible.
-    const HELPER_REVISION: u32 = 1;
+    const HELPER_REVISION: u32 = 2;
     format!(
         "pong:{}:{}:{HELPER_REVISION}",
         env!("CARGO_PKG_VERSION"),

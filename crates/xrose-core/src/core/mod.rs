@@ -271,6 +271,14 @@ impl CoreManager {
         Ok(path)
     }
 
+    fn resolve_and_register_binary(&self, core: CoreKind, settings: &Settings) -> Result<PathBuf> {
+        let binary = self.resolve_binary(core, settings)?;
+        if settings.active_version(core).is_none() {
+            self.binaries.register_local(core, &binary)?;
+        }
+        Ok(binary)
+    }
+
     pub fn set_watchdog(&self, config: WatchdogConfig) {
         self.supervisor.set_watchdog(config);
         if let Some(applied) = self.applied.lock().as_mut() {
@@ -316,7 +324,7 @@ impl CoreManager {
         core: CoreKind,
         config_path: PathBuf,
     ) -> Result<StartOutcome> {
-        let binary = self.resolve_binary(core, settings)?;
+        let binary = self.resolve_and_register_binary(core, settings)?;
         let mut detected_version = None;
         if model.work_mode == crate::model::WorkMode::Proxy
             && core == CoreKind::SingBox
@@ -362,12 +370,12 @@ impl CoreManager {
                 &self.update_network(settings, settings.proxy_resource_updates),
             )
             .await?;
-            crate::mesh::driver::unpack(
-                &archive,
-                binary
-                    .parent()
-                    .ok_or_else(|| Error::binary("TUN 核心路径无效"))?,
-            )?;
+            let dir = binary
+                .parent()
+                .ok_or_else(|| Error::binary("TUN 核心路径无效"))?;
+            if crate::mesh::driver::unpack(&archive, dir).is_err() {
+                crate::mesh::driver::unpack(&archive, &self.paths.data_dir)?;
+            }
         }
         let mut ctx = adapters::CompileContext::new(
             settings,
@@ -430,7 +438,7 @@ impl CoreManager {
         if !outcome.report.ok {
             return Ok(outcome);
         }
-        let binary = self.resolve_binary(core, settings)?;
+        let binary = self.resolve_and_register_binary(core, settings)?;
         let args = run_args(core, &outcome.config_path);
         let mut spec = SpawnSpec::new(core, binary.clone());
         spec.args = args;
@@ -705,7 +713,7 @@ impl CoreManager {
         let compiled = adapters::adapter_for(old.core).compile(&model, &old.settings, &ctx)?;
         let candidate = self.paths.runtime_dir.join("runtime-candidate.json");
         atomic_write_private(&candidate, compiled.to_pretty_string()?.as_bytes())?;
-        let binary = self.resolve_binary(old.core, &old.settings)?;
+        let binary = self.resolve_and_register_binary(old.core, &old.settings)?;
         let validation = adapters::validate(old.core, &binary, &candidate).await;
         let _ = std::fs::remove_file(&candidate);
         let report = validation?;
@@ -740,7 +748,7 @@ impl CoreManager {
         )?;
         let mut spec = SpawnSpec::new(
             applied.core,
-            self.resolve_binary(applied.core, &applied.settings)?,
+            self.resolve_and_register_binary(applied.core, &applied.settings)?,
         );
         spec.args = run_args(applied.core, &applied.path);
         spec.workdir = Some(self.paths.data_dir.clone());
