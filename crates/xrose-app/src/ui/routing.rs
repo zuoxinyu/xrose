@@ -1,7 +1,7 @@
 use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{
@@ -354,34 +354,77 @@ impl AppView {
                 ),
         );
 
-        // Custom groups survive preset changes and precede the ungrouped rules.
+        // Rules.
         body = body.child(
             card(&p)
                 .child(
                     div()
                         .flex()
                         .items_center()
-                        .justify_between()
                         .flex_wrap()
-                        .gap_2()
-                        .child(section_title(
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().child(section_title(
                             &p,
-                            self.tr("规则分组", "Rule groups"),
+                            self.tr("路由规则", "Rules"),
                             self.tr(
-                                "自定义分组按顺序优先匹配，随后匹配未分组与预设规则",
-                                "Custom groups run in order before ungrouped and preset rules",
+                                "按分组顺序匹配，再匹配未分组与预设规则，命中即停",
+                                "Groups are checked in order, then ungrouped and preset rules. The first match wins.",
                             ),
-                        ))
+                        )))
                         .child(
-                            Button::new("create-rule-group")
-                                .compact()
-                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .primary()
-                                .icon(IconName::Plus)
-                                .label(self.tr("添加分组", "Add group"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_rule_group_dialog(None, window, cx);
-                                })),
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .flex_wrap()
+                                .ml_auto()
+                                .gap_2()
+                                .child(
+                                    Button::new("create-rule-group")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("添加分组", "Add group"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_rule_group_dialog(None, window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("route-files").compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .label(self.tr("导入 / 导出", "Import / Export"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "route-file"))
+                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RoutingFiles)),
+                                )
+                                .child(
+                                    Button::new("validate-route")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .label(self.tr("校验", "Validate"))
+                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
+                                        .on_click(cx.listener(|this, _, _, _| {
+                                            this.service.validate_config();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("toggle-rule-form")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .primary()
+                                        .icon(if self.show_rule_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
+                                        .label(if self.show_rule_form {
+                                            self.tr("收起", "Close")
+                                        } else {
+                                            self.tr("添加规则", "Add rule")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_rule_form = !this.show_rule_form;
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 )
                 .child(
@@ -454,68 +497,6 @@ impl AppView {
                                     this.rule_group_id = None;
                                     this.sync(cx);
                                 })),
-                        ),
-                ),
-        );
-
-        // Rules.
-        body = body.child(
-            card(&p)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("路由规则", "Rules"),
-                            self.tr(
-                                "按顺序匹配，命中即停",
-                                "Evaluated top-down, first match wins",
-                            ),
-                        ))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_end()
-                                .gap_2()
-                                .child(
-                                    Button::new("route-files").compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("导入 / 导出", "Import / Export"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "route-file"))
-                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RoutingFiles)),
-                                )
-                                .child(
-                                    Button::new("validate-route")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("校验", "Validate"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.validate_config();
-                                        })),
-                                )
-                                .child(
-                                    Button::new("toggle-rule-form")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .primary()
-                                        .icon(if self.show_rule_form {
-                                            IconName::X
-                                        } else {
-                                            IconName::Plus
-                                        })
-                                        .label(if self.show_rule_form {
-                                            self.tr("收起", "Close")
-                                        } else {
-                                            self.tr("添加规则", "Add rule")
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show_rule_form = !this.show_rule_form;
-                                            cx.notify();
-                                        })),
-                                ),
                         ),
                 )
                 .when_some(self.snapshot.route_import.clone(), |d, (id, report)| {
@@ -707,7 +688,11 @@ impl AppView {
                 .when(visible_rules.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,
-                        self.tr("当前模板没有额外规则", "No extra rules in this preset"),
+                        if selected_group.is_some() {
+                            self.tr("此分组暂无规则", "No rules in this group")
+                        } else {
+                            self.tr("当前模板没有额外规则", "No extra rules in this preset")
+                        },
                     ))
                 })
                 .children(visible_rules.iter().map(|rule| {
