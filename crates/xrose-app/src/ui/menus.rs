@@ -33,7 +33,6 @@ pub(super) enum MenuTarget {
     Host(String),
     Connections,
     ConnectionRules(DiagnosticTarget),
-    TrafficStatistics,
 }
 
 #[derive(Clone)]
@@ -730,14 +729,6 @@ impl AppView {
                     Command::DeleteHost(id),
                 ))
             }
-            MenuTarget::TrafficStatistics => {
-                menu = menu.item(add(
-                    "清空统计",
-                    "Clear statistics",
-                    !self.snapshot.busy.iter().any(|key| key == "traffic-clear"),
-                    Command::ClearTrafficStatistics,
-                ));
-            }
             MenuTarget::ConnectionRules(target) => {
                 for (kind, zh, en) in [
                     (DiagnosticRuleKind::Domain, "阻止此域名", "Block domain"),
@@ -832,6 +823,7 @@ impl AppView {
                     g.enabled && g.manually_selectable() && g.members.contains(node_id)
                 }) && self.snapshot.model.node(node_id).is_some_and(|n| n.enabled)
             }
+            Command::ClearTrafficStatistics => !busy("traffic-clear"),
             Command::UninstallHelper => self.snapshot.platform.helper_installed && !busy("helper"),
             Command::SetRuleSetSource(_) | Command::EditRuleSetSource => !busy("rulesets"),
             Command::DeleteVersion(core, version) => {

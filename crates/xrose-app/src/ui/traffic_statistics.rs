@@ -2,11 +2,11 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_base::Disableable;
+use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::*;
 use xrose_core::traffic_statistics::{
@@ -14,7 +14,7 @@ use xrose_core::traffic_statistics::{
 };
 use xrose_core::util::format_bytes;
 
-use super::menus::{self, MenuTarget};
+use super::menus::Command;
 use super::theme::{self, Palette};
 use super::widgets::*;
 use super::{AppView, Page, text_input};
@@ -95,92 +95,82 @@ impl AppView {
         }
     }
 
-    pub(super) fn traffic_statistics_card(
-        &mut self,
-        p: &Palette,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    pub(super) fn traffic_statistics_controls(&self, cx: &mut Context<Self>) -> Div {
         let expanded = self.traffic_ui.expanded;
-        let enabled = self.snapshot.settings.traffic_statistics_enabled;
-        let view = self.snapshot.traffic_statistics.clone();
-        let mut panel = card(p).flex_shrink_0().child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .flex_wrap()
-                .child(
-                    Button::new("traffic-expand")
-                        .ghost()
-                        .icon(if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        })
-                        .label(self.tr("流量统计", "Traffic statistics"))
-                        .accessibility_label(if expanded {
-                            self.tr("收起流量统计", "Collapse traffic statistics")
-                        } else {
-                            self.tr("展开流量统计", "Expand traffic statistics")
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.traffic_ui.expanded = !this.traffic_ui.expanded;
-                            if this.traffic_ui.expanded {
-                                if !this.traffic_ui.dimension_chosen {
-                                    let core = this
-                                        .snapshot
-                                        .process
-                                        .core
-                                        .unwrap_or(this.snapshot.settings.core);
-                                    this.traffic_ui.query.dimension =
-                                        if core.capabilities().clash_connections
-                                            && this.snapshot.model.work_mode
-                                                == xrose_core::model::WorkMode::Direct
-                                        {
-                                            TrafficDimension::Process
-                                        } else {
-                                            TrafficDimension::Node
-                                        };
-                                }
-                                this.refresh_statistics(false, cx);
+        let visibility_tip = if expanded {
+            self.tr("隐藏流量统计", "Hide traffic statistics")
+        } else {
+            self.tr("显示流量统计", "Show traffic statistics")
+        };
+        let collection_label = self.tr("启用流量统计", "Collect traffic statistics");
+        div()
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .ml_auto()
+            .gap_2()
+            .child(
+                icon_button("traffic-expand", IconName::ChartColumn, visibility_tip)
+                    .selected(expanded)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.traffic_ui.expanded = !this.traffic_ui.expanded;
+                        if this.traffic_ui.expanded {
+                            if !this.traffic_ui.dimension_chosen {
+                                let core = this
+                                    .snapshot
+                                    .process
+                                    .core
+                                    .unwrap_or(this.snapshot.settings.core);
+                                this.traffic_ui.query.dimension =
+                                    if core.capabilities().clash_connections
+                                        && this.snapshot.model.work_mode
+                                            == xrose_core::model::WorkMode::Direct
+                                    {
+                                        TrafficDimension::Process
+                                    } else {
+                                        TrafficDimension::Node
+                                    };
                             }
+                            this.refresh_statistics(false, cx);
+                        } else {
                             cx.notify();
-                        })),
+                        }
+                    })),
+            )
+            .child(
+                danger_icon_button(
+                    "traffic-clear",
+                    IconName::Eraser,
+                    self.tr("清空流量统计", "Clear traffic statistics"),
+                    cx,
                 )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            more_button(
-                                "traffic-actions",
-                                self.tr("统计操作", "Statistics actions"),
-                            )
-                            .dropdown_menu(menus::builder(
-                                cx.entity().downgrade(),
-                                MenuTarget::TrafficStatistics,
-                            )),
-                        )
-                        .child(
-                            toggle(
-                                "traffic-enabled",
-                                self.tr("启用统计", "Collect statistics"),
-                                enabled,
-                            )
-                            .disabled(self.snapshot.busy.iter().any(|b| b == "traffic-setting"))
-                            .on_change(cx.listener(
-                                |this, checked, _, _| {
-                                    this.service.set_traffic_statistics_enabled(*checked)
-                                },
-                            )),
-                        ),
-                ),
-        );
-        if !expanded {
-            return panel;
-        }
+                .disabled(self.snapshot.busy.iter().any(|key| key == "traffic-clear"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.run_command(Command::ClearTrafficStatistics, false, window, cx);
+                })),
+            )
+            .child(
+                Switch::new("traffic-enabled")
+                    .accessibility_label(collection_label.clone())
+                    .label(self.tr("统计", "Statistics"))
+                    .tooltip(collection_label)
+                    .checked(self.snapshot.settings.traffic_statistics_enabled)
+                    .disabled(
+                        self.snapshot
+                            .busy
+                            .iter()
+                            .any(|key| key == "traffic-setting"),
+                    )
+                    .on_change(cx.listener(|this, checked, _, _| {
+                        this.service.set_traffic_statistics_enabled(*checked)
+                    })),
+            )
+    }
+
+    pub(super) fn traffic_statistics_content(&self, p: &Palette, cx: &mut Context<Self>) -> Div {
+        let enabled = self.snapshot.settings.traffic_statistics_enabled;
+        let view = &self.snapshot.traffic_statistics;
+        let mut panel = div().flex().flex_col().gap_3();
         panel = panel.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
             "记录内核处理的代理和直连流量，关闭后保留历史。",
             "Records proxy and direct traffic handled by the core. History is retained when collection is off.")));

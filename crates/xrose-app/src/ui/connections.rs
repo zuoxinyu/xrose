@@ -130,7 +130,7 @@ impl AppView {
         let has_hint = !self.show_recorded_connections && (!supported || !running) || count == 0;
         let has_footer = count > shown || limit > CONNECTIONS_PAGE_STEP;
         let panel_count = usize::from(has_hint) + shown + usize::from(has_footer);
-        let item_count = 2 + panel_count;
+        let item_count = 1 + panel_count;
         let old_count = self.connection_list.item_count();
         if old_count != item_count {
             self.connection_list.splice(
@@ -143,33 +143,28 @@ impl AppView {
             self.connection_list.clone(),
             cx.processor(move |this, index: usize, _, cx| {
                 let pad = px(super::theme::PAGE_PAD);
-                if index == 0 {
-                    return div()
-                        .px(pad)
-                        .pt(pad)
-                        .pb_4()
+                let first = index == 0;
+                let last = index + 1 == item_count;
+                let content = if first {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
                         .child(
                             this.connection_header(processes, supported, running, count, total, cx),
                         )
-                        .into_any_element();
-                }
-                if index == 1 {
-                    return div()
-                        .px(pad)
-                        .pb_4()
-                        .child(this.traffic_statistics_card(&p, cx))
-                        .into_any_element();
-                }
-                let panel_index = index - 2;
-                let last = panel_index + 1 == panel_count;
-                let content = if has_hint && panel_index == 0 {
+                        .when(this.traffic_ui.expanded, |panel| {
+                            panel.child(this.traffic_statistics_content(&p, cx))
+                        })
+                        .into_any_element()
+                } else if has_hint && index == 1 {
                     this.connection_hint(supported, running, filtered, count, &p, cx)
                         .into_any_element()
                 } else if last && has_footer {
                     this.connection_footer(count, shown, limit, &p, cx)
                         .into_any_element()
                 } else {
-                    let i = visible[panel_index - usize::from(has_hint)];
+                    let i = visible[index - 1 - usize::from(has_hint)];
                     let row = if this.show_recorded_connections {
                         let r = &this.snapshot.recording.connections[i];
                         MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
@@ -197,6 +192,7 @@ impl AppView {
                 };
                 div()
                     .px(pad)
+                    .when(first, |d| d.pt(pad))
                     .when(last, |d| d.pb(pad))
                     .child(
                         div()
@@ -204,8 +200,9 @@ impl AppView {
                             .border_x_1()
                             .bg(p.panel)
                             .border_color(p.border)
-                            .when(panel_index == 0, |d| d.pt_4().border_t_1().rounded_t_lg())
-                            .when(!last, |d| d.pb_2())
+                            .when(first, |d| d.pt_4().border_t_1().rounded_t_lg())
+                            .when(first && !last, |d| d.pb_3())
+                            .when(!first && !last, |d| d.pb_2())
                             .when(last, |d| d.pb_4().border_b_1().rounded_b_lg())
                             .child(content),
                     )
@@ -247,6 +244,7 @@ impl AppView {
             ],
             usize::from(processes),
         )
+        .small()
         .disabled(self.show_recorded_connections)
         .on_change(cx.listener(|this, index, window, cx| {
             this.show_live_processes = *index == 1;
@@ -273,6 +271,7 @@ impl AppView {
                 ConnectionSort::Total => 2,
             },
         )
+        .small()
         .on_change(cx.listener(|this, index, _, cx| {
             this.connection_sort = [
                 ConnectionSort::Newest,
@@ -285,8 +284,37 @@ impl AppView {
         let limited_capture = running
             && self.snapshot.model.work_mode == WorkMode::Direct
             && !self.snapshot.settings.tun_enabled;
+        let recording_status = if recording_active {
+            self.tr("录制中", "Recording")
+        } else {
+            self.tr("录制已停止", "Recording off")
+        };
+        let title = div()
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                div()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.fg)
+                    .child(self.tr("连接", "Connections")),
+            )
+            .child(pill(
+                format!("{active_conn_len} {}", self.tr("活动连接", "active")),
+                p.primary,
+                p.accent,
+            ))
+            .child(div().text_xs().text_color(p.muted_fg).child(format!(
+                "{recording_status} · {recorded_trace_len} {} · {count} / {total}",
+                self.tr("次测试", "tests"),
+            )));
 
-        card(&p)
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(
                 div()
                     .flex()
@@ -294,14 +322,17 @@ impl AppView {
                     .justify_between()
                     .gap_3()
                     .flex_wrap()
-                    .child(section_title(
-                        &p,
-                        self.tr("连接", "Connections"),
-                        self.tr(
-                            "查看连接详情，录制后可查看已结束的连接",
-                            "Inspect connections and record them for later review",
-                        ),
-                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(title)
+                            .child(div().text_sm().text_color(p.muted_fg).child(self.tr(
+                                "查看连接详情，录制后可查看已结束的连接",
+                                "Inspect connections and record them for later review",
+                            ))),
+                    )
                     .child(
                         div()
                             .flex()
@@ -356,7 +387,7 @@ impl AppView {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         ChoiceGroup::new(
                             "connection-view",
@@ -367,6 +398,7 @@ impl AppView {
                             ],
                             usize::from(self.show_recorded_connections),
                         )
+                        .small()
                         .on_change(cx.listener(|this, index, window, cx| {
                             this.show_recorded_connections = *index == 1;
                             let placeholder = this.connection_search_placeholder();
@@ -376,20 +408,10 @@ impl AppView {
                         })),
                     )
                     .child(view_choice)
-                    .child(pill(
-                        format!("{active_conn_len} {}", self.tr("活动连接", "active")),
-                        p.primary,
-                        p.accent,
-                    ))
-                    .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                        "{} · {recorded_trace_len} {} · {count} / {total}",
-                        if recording_active {
-                            self.tr("录制中", "Recording")
-                        } else {
-                            self.tr("录制已停止", "Recording off")
-                        },
-                        self.tr("次测试", "tests")
-                    ))),
+                    .when(!self.show_recorded_connections && !processes && supported, |d| {
+                        d.child(sort_choice)
+                    })
+                    .child(self.traffic_statistics_controls(cx)),
             )
             .child(
                 div()
@@ -447,11 +469,6 @@ impl AppView {
                             })),
                     ),
             )
-            .when(!self.show_recorded_connections && !processes && supported, |d| {
-                d.child(div().flex().items_center().gap_2()
-                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr("排序", "Sort by")))
-                    .child(sort_choice))
-            })
             .when(limited_capture, |d| {
                 let hint = self.tr(
                     "当前仅捕获系统代理流量；开启 TUN 模式可监控本机全部进程连接",
