@@ -445,7 +445,11 @@ pub(crate) fn collect(
     let mut rows = network_rows(settings.language, mesh);
     let mut ports = Vec::new();
     let mut proxy_ports = Vec::new();
-    for inbound in effective_inbounds(model, settings) {
+    let inbounds = effective_inbounds(model, settings);
+    let tun_enabled = inbounds
+        .iter()
+        .any(|i| i.kind == crate::model::InboundKind::Tun);
+    for inbound in inbounds {
         for port in inbound.listen_ports(settings.core).unwrap_or_default() {
             if let Ok(ip) = inbound.listen_address().parse::<IpAddr>() {
                 if matches!(
@@ -470,13 +474,8 @@ pub(crate) fn collect(
         manager.backend().label().into(),
     ));
     rows.push(ReportRow::plain(
-        t("提权状态", "Process privileges"),
-        if helper.elevated {
-            t("已提权", "Elevated")
-        } else {
-            t("标准权限", "Standard")
-        }
-        .into(),
+        t("权限", "Privileges"),
+        privilege::describe_privileges(helper, tun_enabled, settings.language).1,
     ));
     rows.extend(proxy_rows(
         manager,
@@ -558,6 +557,26 @@ pub(crate) fn collect(
     rows.push(ReportRow::plain(
         t("提权助手", "Privilege helper"),
         format!("{helper_label} · Xrose {}", env!("CARGO_PKG_VERSION")),
+    ));
+    rows.push(ReportRow::plain(
+        t("TUN 助手协议版本", "TUN helper protocol"),
+        privilege::format_protocol_version(
+            crate::system::tun_process::VERSION,
+            helper.running,
+            helper.needs_update,
+            helper.running_tun_protocol,
+            settings.language,
+        ),
+    ));
+    rows.push(ReportRow::plain(
+        t("Mesh 协议版本", "Mesh protocol"),
+        privilege::format_protocol_version(
+            crate::mesh::PROTOCOL_VERSION,
+            helper.running,
+            helper.needs_update,
+            helper.running_mesh_protocol,
+            settings.language,
+        ),
     ));
     NetworkReport { rows }
 }

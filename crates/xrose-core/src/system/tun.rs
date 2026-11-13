@@ -66,6 +66,8 @@ pub(crate) fn diagnose_for_process(
 ) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let caps = settings.core.capabilities();
+    let lang = settings.language;
+    let helper = super::privilege::status();
 
     let tun = model
         .inbounds
@@ -74,13 +76,25 @@ pub(crate) fn diagnose_for_process(
     if tun.is_some() {
         if caps.native_tun {
             checks.push(DoctorCheck::ok(
-                "TUN 支持",
-                format!("{} 内建 TUN", settings.core.display_name()),
+                localize(lang, "TUN 支持", "TUN support"),
+                format!(
+                    "{} {}",
+                    settings.core.display_name(),
+                    localize(lang, "内建 TUN", "built-in TUN")
+                ),
             ));
         } else {
             checks.push(DoctorCheck::error(
-                "TUN 支持",
-                format!("{} 不支持 TUN，请更新内核", settings.core.display_name()),
+                localize(lang, "TUN 支持", "TUN support"),
+                format!(
+                    "{} {}",
+                    settings.core.display_name(),
+                    localize(
+                        lang,
+                        "不支持 TUN，请更新内核",
+                        "does not support TUN; update the core"
+                    )
+                ),
             ));
         }
         #[cfg(target_os = "linux")]
@@ -101,20 +115,15 @@ pub(crate) fn diagnose_for_process(
                 "启动 TUN 前自动校验并部署驱动，由提权助手代启核心",
             ));
         }
-        if !super::privilege::is_elevated() && !super::privilege::helper_available() {
-            checks.push(DoctorCheck::warn(
-                "权限",
-                "TUN 路由通常需要管理员/root 权限，或安装 Xrose 提权助手",
-            ));
-        } else {
-            checks.push(DoctorCheck::ok("权限", "已具备提升权限或助手可用"));
-        }
+        checks.push(privilege_check(&helper, true, lang));
         if tun.map(|i| i.tun.auto_route).unwrap_or(false) && settings.system_proxy {
             checks.push(DoctorCheck::ok(
                 "流量接管",
                 "系统代理和 TUN 自动路由均已启用。关闭系统代理后，TUN 仍会接管流量。",
             ));
         }
+    } else {
+        checks.push(privilege_check(&helper, false, lang));
     }
 
     // Take one socket-table snapshot for all occupied ports. Use the helper's
@@ -148,7 +157,6 @@ pub(crate) fn diagnose_for_process(
         };
         check_port(&name, endpoint, owner.as_ref(), conflict, settings.language)
     };
-    let lang = settings.language;
     for inbound in crate::model::inbound::effective_inbounds(model, settings) {
         let ports = match inbound.listen_ports(settings.core) {
             Ok(ports) => ports,
@@ -230,6 +238,20 @@ pub(crate) fn diagnose_for_process(
 
 fn localize<'a>(language: Language, zh: &'a str, en: &'a str) -> &'a str {
     if language == Language::En { en } else { zh }
+}
+
+pub(crate) fn privilege_check(
+    helper: &super::privilege::HelperStatus,
+    tun_enabled: bool,
+    language: Language,
+) -> DoctorCheck {
+    let name = localize(language, "权限", "Permissions");
+    let (warn, detail) = super::privilege::describe_privileges(helper, tun_enabled, language);
+    if warn {
+        DoctorCheck::warn(name, detail)
+    } else {
+        DoctorCheck::ok(name, detail)
+    }
 }
 
 #[derive(Default)]
@@ -410,5 +432,40 @@ mod tests {
         let unknown = checked(api, &owner(None));
         assert_eq!(unknown.level, CheckLevel::Warn);
         assert!(unknown.detail.contains("更新提权助手"));
+    }
+
+    #[test]
+    fn privilege_check_clarifies_gui_and_helper_permissions() {
+        let running = crate::system::privilege::HelperStatus {
+            supported: true,
+            installed: true,
+            running: true,
+            needs_update: false,
+            elevated: false,
+            detail: String::new(),
+            executable: None,
+            running_tun_protocol: Some(1),
+            running_mesh_protocol: Some(1),
+        };
+        let check = privilege_check(&running, true, Language::Zh);
+        assert_eq!(check.name, "权限");
+        assert_eq!(check.level, CheckLevel::Ok);
+        assert!(check.detail.contains("GUI 程序未提权"));
+        assert!(check.detail.contains("提权助手：运行中"));
+
+        let stopped = crate::system::privilege::HelperStatus {
+            running: false,
+            running_tun_protocol: None,
+            running_mesh_protocol: None,
+            ..running
+        };
+        assert_eq!(
+            privilege_check(&stopped, true, Language::Zh).level,
+            CheckLevel::Warn
+        );
+        assert_eq!(
+            privilege_check(&stopped, false, Language::En).level,
+            CheckLevel::Ok
+        );
     }
 }

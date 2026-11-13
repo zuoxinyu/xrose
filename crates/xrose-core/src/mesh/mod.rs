@@ -18,8 +18,8 @@ pub mod worker;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-// Require workers with live updates in both forwarding directions.
-pub const PROTOCOL_VERSION: u32 = 11;
+/// IPC protocol version between the client and the privileged mesh helper.
+pub const PROTOCOL_VERSION: u32 = 1;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {

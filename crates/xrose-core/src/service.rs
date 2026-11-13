@@ -130,6 +130,14 @@ pub struct PlatformInfo {
     pub helper_supported: bool,
     pub helper_detail: String,
     pub helper_path: Option<String>,
+    #[serde(default)]
+    pub helper_tun_protocol: u32,
+    #[serde(default)]
+    pub helper_running_tun_protocol: Option<u32>,
+    #[serde(default)]
+    pub mesh_protocol: u32,
+    #[serde(default)]
+    pub helper_running_mesh_protocol: Option<u32>,
     pub log_dir: String,
     pub data_dir: String,
 }
@@ -696,6 +704,10 @@ impl AppService {
                 helper_supported: helper.supported,
                 helper_detail: helper.detail.clone(),
                 helper_path: helper.executable.clone(),
+                helper_tun_protocol: system::tun_process::VERSION,
+                helper_running_tun_protocol: helper.running_tun_protocol,
+                mesh_protocol: crate::mesh::PROTOCOL_VERSION,
+                helper_running_mesh_protocol: helper.running_mesh_protocol,
                 log_dir: self.inner.paths.logs_dir().display().to_string(),
                 data_dir: self.inner.paths.data_dir.display().to_string(),
             },
@@ -2801,15 +2813,20 @@ impl AppService {
                 format!("{} 不支持 TUN，请更新内核", new.core.display_name()),
             );
         }
-        if new.requires_core_restart(&old, &self.inner.model.read()) {
+        if new.requires_core_restart(&old, &self.inner.model.read()) || new.language != old.language
+        {
             self.refresh_doctor();
         }
     }
 
     pub fn set_language(&self, language: crate::settings::Language) {
         let mut settings = self.settings();
+        let changed = settings.language != language;
         settings.language = language;
         let _ = self.save_settings(&settings);
+        if changed {
+            self.refresh_doctor();
+        }
     }
 
     pub fn set_theme(&self, theme: crate::settings::ThemeMode) {
@@ -3239,12 +3256,15 @@ impl AppService {
 
     /// Re-probes the helper in the background and updates the snapshot.
     pub fn refresh_helper_status(&self) {
+        privilege::invalidate_status();
+        self.set_busy("doctor", true);
         let service = self.clone();
         self.spawn(async move {
             let status = tokio::task::spawn_blocking(privilege::status).await;
             if let Ok(status) = status {
                 *service.inner.helper.write() = status;
             }
+            service.refresh_doctor();
         });
     }
 
@@ -4601,7 +4621,15 @@ impl AppService {
                 // the cache expired.
                 if tick % 3 == 0 {
                     if let Ok(status) = tokio::task::spawn_blocking(privilege::status).await {
-                        *inner.helper.write() = status;
+                        let changed = {
+                            let mut guard = inner.helper.write();
+                            let diff = *guard != status;
+                            *guard = status;
+                            diff
+                        };
+                        if changed {
+                            service.refresh_doctor();
+                        }
                     }
                 }
                 if tick % 2 == 0 && !service.is_busy("core") {
@@ -5355,6 +5383,7 @@ mod tests {
         let (service, _dir) = service();
         let mut settings = service.settings();
         settings.check_app_updates = false;
+        settings.hot_reload = false;
         settings.startup_proxy = true;
         settings.startup_tailscale = Some("missing-fixture".into());
         settings.tun_enabled = true;

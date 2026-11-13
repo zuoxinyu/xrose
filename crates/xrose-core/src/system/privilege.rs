@@ -138,6 +138,8 @@ pub struct HelperStatus {
     pub elevated: bool,
     pub detail: String,
     pub executable: Option<String>,
+    pub running_tun_protocol: Option<u32>,
+    pub running_mesh_protocol: Option<u32>,
 }
 
 impl HelperStatus {
@@ -458,6 +460,8 @@ pub fn initial_status() -> HelperStatus {
         executable: std::env::current_exe()
             .ok()
             .map(|path| path.display().to_string()),
+        running_tun_protocol: None,
+        running_mesh_protocol: None,
     }
 }
 
@@ -482,20 +486,57 @@ pub fn invalidate_status() {
     *STATUS_CACHE.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// Revision number bumped when helper behavior changes without a wire protocol bump.
+pub const HELPER_REVISION: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedHelperSignature {
+    tun_protocol: Option<u32>,
+    mesh_protocol: Option<u32>,
+}
+
 // Legacy clients only inspect the response status, so the ping can also
 // identify the running executable without a second IPC round trip.
 fn helper_signature() -> String {
-    // Identify helper-only fixes even when the mesh wire protocol stays compatible.
-    const HELPER_REVISION: u32 = 2;
     format!(
-        "pong:{}:{}:{HELPER_REVISION}",
+        "pong:{}:{}:{}:{HELPER_REVISION}",
         env!("CARGO_PKG_VERSION"),
+        super::tun_process::VERSION,
         crate::mesh::PROTOCOL_VERSION
     )
 }
 
+fn parse_helper_signature(message: &str) -> Option<ParsedHelperSignature> {
+    let mut parts = message.split(':');
+    if parts.next()? != "pong" {
+        return None;
+    }
+    let rest: Vec<&str> = parts.collect();
+    match rest.as_slice() {
+        [] => Some(ParsedHelperSignature {
+            tun_protocol: None,
+            mesh_protocol: None,
+        }),
+        [_, mesh] | [_, mesh, _] => Some(ParsedHelperSignature {
+            tun_protocol: None,
+            mesh_protocol: mesh.parse().ok(),
+        }),
+        [_, tun, mesh, _] => Some(ParsedHelperSignature {
+            tun_protocol: tun.parse().ok(),
+            mesh_protocol: mesh.parse().ok(),
+        }),
+        _ => None,
+    }
+}
+
 fn probe_helper(timeout: Duration) -> Option<bool> {
     ping_is_current(&call_with_timeout(&HelperRequest::Ping, timeout).ok()?)
+}
+
+fn probe_helper_details(timeout: Duration) -> Option<(bool, Option<ParsedHelperSignature>)> {
+    let reply = call_with_timeout(&HelperRequest::Ping, timeout).ok()?;
+    let current = ping_is_current(&reply)?;
+    Some((current, parse_helper_signature(reply.message())))
 }
 
 fn ping_is_current(reply: &HelperResponse) -> Option<bool> {
@@ -504,9 +545,15 @@ fn ping_is_current(reply: &HelperResponse) -> Option<bool> {
 
 fn compute_status() -> HelperStatus {
     let supported = supported();
-    let current = probe_helper(Duration::from_millis(1500));
-    let running = current.is_some();
-    let needs_update = current == Some(false);
+    let probe = probe_helper_details(Duration::from_millis(1500));
+    let running = probe.is_some();
+    let needs_update = probe.as_ref().is_some_and(|(current, _)| !*current);
+    let running_tun_protocol = probe
+        .as_ref()
+        .and_then(|(_, sig)| sig.as_ref().and_then(|s| s.tun_protocol));
+    let running_mesh_protocol = probe
+        .as_ref()
+        .and_then(|(_, sig)| sig.as_ref().and_then(|s| s.mesh_protocol));
     // A running helper necessarily means it was installed (or started by a
     // privileged user); skipping the task/service query keeps the 400 ms UI
     // poll from spawning `schtasks`/`systemctl` continuously.
@@ -532,7 +579,115 @@ fn compute_status() -> HelperStatus {
         executable: std::env::current_exe()
             .ok()
             .map(|path| path.display().to_string()),
+        running_tun_protocol,
+        running_mesh_protocol,
     }
+}
+
+/// Formats a protocol version string (`vN`), annotating mismatches when a
+/// running helper reports a different version or omits it.
+pub fn format_protocol_version(
+    expected: u32,
+    helper_running: bool,
+    helper_needs_update: bool,
+    running: Option<u32>,
+    language: crate::settings::Language,
+) -> String {
+    let en = language == crate::settings::Language::En;
+    if !helper_running || running == Some(expected) {
+        return format!("v{expected}");
+    }
+    if let Some(actual) = running {
+        return if en {
+            format!("v{expected} (running helper: v{actual}; update required)")
+        } else {
+            format!("v{expected}（运行中助手为 v{actual}，需更新）")
+        };
+    }
+    if helper_needs_update {
+        if en {
+            format!("v{expected} (not reported by running helper; update required)")
+        } else {
+            format!("v{expected}（运行中助手未上报，需更新）")
+        }
+    } else {
+        format!("v{expected}")
+    }
+}
+
+/// Summarizes GUI process and privilege helper permissions, returning `(warn, text)`
+/// where `warn` is true when TUN is enabled without an elevated GUI or running helper.
+pub fn describe_privileges(
+    status: &HelperStatus,
+    tun_enabled: bool,
+    language: crate::settings::Language,
+) -> (bool, String) {
+    let en = language == crate::settings::Language::En;
+    let gui = match (en, status.elevated) {
+        (true, true) => "GUI process: elevated (admin/root)",
+        (true, false) => "GUI process: standard (not elevated)",
+        (false, true) => "GUI 程序已提权（管理员/root）",
+        (false, false) => "GUI 程序未提权（标准权限）",
+    };
+    let helper = if !status.supported {
+        if en {
+            "Helper: unsupported"
+        } else {
+            "提权助手：当前平台不支持"
+        }
+    } else if status.running {
+        if status.needs_update {
+            if en {
+                "Helper: running (admin/root, update required)"
+            } else {
+                "提权助手：运行中（管理员/root 权限，需更新）"
+            }
+        } else if en {
+            "Helper: running (admin/root)"
+        } else {
+            "提权助手：运行中（管理员/root 权限）"
+        }
+    } else if status.installed {
+        if en {
+            "Helper: installed, stopped"
+        } else {
+            "提权助手：已安装但未运行"
+        }
+    } else if en {
+        "Helper: not installed"
+    } else {
+        "提权助手：未安装"
+    };
+    let warn = !status.elevated && !status.running && tun_enabled;
+    let suffix = if warn {
+        if !status.supported {
+            if en {
+                "; TUN requires admin/root rights"
+            } else {
+                "；TUN 需以管理员/root 权限运行"
+            }
+        } else if status.installed {
+            if en {
+                "; start helper for TUN & mesh"
+            } else {
+                "；TUN 与组网需启动提权助手"
+            }
+        } else if en {
+            "; install helper or run as admin/root for TUN"
+        } else {
+            "；TUN 与组网需安装提权助手或管理员/root 权限"
+        }
+    } else if status.elevated && !status.running && status.supported {
+        if en {
+            " (TUN uses GUI rights; mesh needs helper)"
+        } else {
+            "（TUN 可使用 GUI 权限；组网仍需助手）"
+        }
+    } else {
+        ""
+    };
+    let sep = if en { "; " } else { "；" };
+    (warn, format!("{gui}{sep}{helper}{suffix}"))
 }
 
 pub fn supported() -> bool {
@@ -794,6 +949,10 @@ fn status_json(status: &HelperStatus) -> serde_json::Value {
         "label": status.label(),
         "detail": status.detail,
         "executable": status.executable,
+        "tun_protocol": super::tun_process::VERSION,
+        "mesh_protocol": crate::mesh::PROTOCOL_VERSION,
+        "running_tun_protocol": status.running_tun_protocol,
+        "running_mesh_protocol": status.running_mesh_protocol,
     })
 }
 
@@ -1988,15 +2147,75 @@ mod tests {
             ping_is_current(&handle_request(HelperRequest::Ping)),
             Some(true)
         );
-        let previous = format!(
-            "pong:{}:{}",
+        let legacy_three_part = format!(
+            "pong:{}:{}:{HELPER_REVISION}",
             env!("CARGO_PKG_VERSION"),
             crate::mesh::PROTOCOL_VERSION
         );
-        for old in ["pong", "pong:0.0.0:0", &previous] {
+        let wrong_mesh = format!(
+            "pong:{}:{}:{}:{HELPER_REVISION}",
+            env!("CARGO_PKG_VERSION"),
+            crate::system::tun_process::VERSION,
+            crate::mesh::PROTOCOL_VERSION + 1
+        );
+        for old in ["pong", "pong:0.0.0:0", &legacy_three_part, &wrong_mesh] {
             assert_eq!(ping_is_current(&HelperResponse::ok(old)), Some(false));
         }
         assert_eq!(ping_is_current(&HelperResponse::error("unavailable")), None);
+        assert_eq!(
+            parse_helper_signature(handle_request(HelperRequest::Ping).message()),
+            Some(ParsedHelperSignature {
+                tun_protocol: Some(crate::system::tun_process::VERSION),
+                mesh_protocol: Some(crate::mesh::PROTOCOL_VERSION),
+            })
+        );
+        assert_eq!(
+            parse_helper_signature("pong:0.1.0:11:2"),
+            Some(ParsedHelperSignature {
+                tun_protocol: None,
+                mesh_protocol: Some(11),
+            })
+        );
+    }
+
+    #[test]
+    fn protocol_formatting_and_privilege_descriptions_cover_mismatch_and_roles() {
+        use crate::settings::Language;
+        assert_eq!(
+            format_protocol_version(1, true, false, Some(1), Language::Zh),
+            "v1"
+        );
+        assert!(format_protocol_version(1, true, true, Some(11), Language::Zh).contains("v11"));
+        assert!(
+            format_protocol_version(1, true, true, None, Language::En).contains("not reported")
+        );
+        let running = HelperStatus {
+            supported: true,
+            installed: true,
+            running: true,
+            needs_update: false,
+            elevated: false,
+            detail: String::new(),
+            executable: None,
+            running_tun_protocol: Some(1),
+            running_mesh_protocol: Some(1),
+        };
+        let (warn, text) = describe_privileges(&running, true, Language::Zh);
+        assert!(!warn);
+        assert!(text.contains("GUI 程序未提权"));
+        assert!(text.contains("提权助手：运行中（管理员/root 权限）"));
+
+        let stopped = HelperStatus {
+            running: false,
+            running_tun_protocol: None,
+            running_mesh_protocol: None,
+            ..running
+        };
+        let (warn, text) = describe_privileges(&stopped, true, Language::Zh);
+        assert!(warn);
+        assert!(text.contains("TUN 与组网需启动提权助手"));
+        let (warn_no_tun, _) = describe_privileges(&stopped, false, Language::Zh);
+        assert!(!warn_no_tun);
     }
 
     #[test]
@@ -2034,6 +2253,8 @@ mod tests {
             elevated: false,
             detail: String::new(),
             executable: None,
+            running_tun_protocol: None,
+            running_mesh_protocol: None,
         };
         assert_eq!(base.label(), "未安装");
         assert_eq!(

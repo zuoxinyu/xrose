@@ -119,6 +119,8 @@ mod tests {
             elevated: false,
             detail: String::new(),
             executable: None,
+            running_tun_protocol: None,
+            running_mesh_protocol: None,
         };
         assert!(service.settings().hot_reload);
         let mut settings = service.settings();
@@ -316,9 +318,11 @@ exec sleep 90
         service.apply_config();
         wait(|| !service.is_busy("core"));
         assert!(!service.snapshot().config_dirty);
-        assert!(fs::read_to_string(config)
-            .unwrap()
-            .contains("\"port\": 17445"));
+        assert!(
+            fs::read_to_string(config)
+                .unwrap()
+                .contains("\"port\": 17445")
+        );
         // Changing the selected core must validate the new format and publish
         // its own runtime file, even though the old process used a different one.
         let sets = service.paths().rule_sets_dir();

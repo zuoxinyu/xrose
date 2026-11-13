@@ -1294,9 +1294,6 @@ impl AppView {
                 )
                 .child({
                     let mut items: Vec<String> = vec![platform.helper_detail.clone()];
-                    if let Some(path) = platform.helper_path.as_ref().filter(|_| !self.snapshot.settings.privacy_mode) {
-                        items.push(format!("{}: {path}", self.tr("可执行文件", "Executable")));
-                    }
                     if !platform.elevated {
                         items.push(
                             self.tr(
@@ -1405,7 +1402,6 @@ impl AppView {
                                 .loading(doctor_busy || helper_busy)
                                 .label(self.tr("重新检查", "Re-check"))
                                 .on_click(cx.listener(|this, _, _, cx| {
-                                    this.service.refresh_doctor();
                                     this.service.refresh_helper_status();
                                     this.sync(cx);
                                 })),
@@ -1433,27 +1429,50 @@ impl AppView {
                 })
                 .child(divider(&p))
                 .child({
-                    let env_items = [
+                    let lang = self.snapshot.settings.language;
+                    let colon = self.tr("：", ": ");
+                    let privacy = self.snapshot.settings.privacy_mode;
+                    let mut env_items = vec![
                         format!(
-                            "{}：{}",
+                            "{}{colon}{}",
                             self.tr("系统代理后端", "Proxy backend"),
                             platform.proxy_backend
                         ),
                         format!(
-                            "{}：{}",
-                            self.tr("提权状态", "Elevated"),
-                            if platform.elevated {
-                                self.tr("已提权", "yes")
-                            } else {
-                                self.tr("未提权", "no")
-                            }
+                            "{}{colon}{}",
+                            self.tr("TUN 助手协议版本", "TUN helper protocol"),
+                            xrose_core::system::privilege::format_protocol_version(
+                                platform.helper_tun_protocol,
+                                platform.helper_available,
+                                platform.helper_needs_update,
+                                platform.helper_running_tun_protocol,
+                                lang,
+                            )
                         ),
                         format!(
-                            "{}：{}",
-                            self.tr("日志目录", "Log dir"),
-                            if self.snapshot.settings.privacy_mode { "•••".into() } else { platform.log_dir.clone() }
+                            "{}{colon}{}",
+                            self.tr("Mesh 协议版本", "Mesh protocol"),
+                            xrose_core::system::privilege::format_protocol_version(
+                                platform.mesh_protocol,
+                                platform.helper_available,
+                                platform.helper_needs_update,
+                                platform.helper_running_mesh_protocol,
+                                lang,
+                            )
                         ),
                     ];
+                    if let Some(path) = &platform.helper_path {
+                        env_items.push(format!(
+                            "{}{colon}{}",
+                            self.tr("可执行程序", "Executable"),
+                            if privacy { "•••" } else { path.as_str() }
+                        ));
+                    }
+                    env_items.push(format!(
+                        "{}{colon}{}",
+                        self.tr("日志目录", "Log dir"),
+                        if privacy { "•••" } else { platform.log_dir.as_str() }
+                    ));
                     div()
                         .flex()
                         .flex_col()
@@ -1481,10 +1500,17 @@ impl AppView {
                         .gap_2()
                         .text_xs()
                         .child(dot(color))
-                        .child(div().w(px(110.)).text_color(p.fg).child(check.name.clone()))
+                        .child(
+                            div()
+                                .w(px(110.))
+                                .flex_shrink_0()
+                                .text_color(p.fg)
+                                .child(check.name.clone()),
+                        )
                         .child(
                             div()
                                 .flex_1()
+                                .min_w(px(0.))
                                 .text_color(p.muted_fg)
                                 .child(check.detail.clone()),
                         )

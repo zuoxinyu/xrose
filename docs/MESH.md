@@ -40,7 +40,7 @@ powershell -NoProfile -File scripts/build-windows.ps1 -Action test
 
 ### 提权助手与初始化
 
-组网操作由提权助手统一执行（当前组网助手协议版本为 **v11**）。首次使用或升级 Xrose 后，请先在「设置 → 提权助手」或「测试」页安装或更新助手，再发起组网连接。
+组网操作由提权助手统一执行（当前组网助手协议版本为 **v1**）。首次使用或升级 Xrose 后，请先在「设置 → 提权助手」或「测试」页安装或更新助手，再发起组网连接。
 
 - **Windows 权限隔离**：GUI 保持普通权限，计划任务绑定当前安装用户 SID（`InteractiveToken` + `HighestAvailable`），后台静默运行且不弹出命令行窗口；安装器仅对数据目录中的 `helper/xrose-helper.exe` 副本设置 High 完整性标签，权限检测同时校验管理员身份与 High 完整性。
 - **设备名称**：新建 EasyTier 或 Tailscale 网络时，设备名默认使用 `xrose-{hostname}`（`hostname` 为本机短主机名），保存前可修改。

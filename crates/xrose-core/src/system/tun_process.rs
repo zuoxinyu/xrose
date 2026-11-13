@@ -9,7 +9,8 @@ use std::{
     time::Duration,
 };
 
-const VERSION: u32 = 1;
+/// IPC protocol version for `HelperRequest::TunCore`.
+pub const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
