@@ -1254,7 +1254,10 @@ impl AppView {
             }
             Command::ClearRecording => self.service.clear_recording(),
             Command::ClearTrafficStatistics => self.service.clear_traffic_statistics(),
-            Command::ClearLogs => self.service.clear_logs(),
+            Command::ClearLogs => {
+                self.service.clear_logs();
+                self.log_list.clear();
+            }
             Command::ShareLogs(action, privacy) => self.share_logs(action, privacy, cx),
         }
         self.sync(cx);

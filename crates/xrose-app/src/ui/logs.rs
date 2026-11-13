@@ -28,6 +28,7 @@ pub(super) enum LogAction {
 pub(super) struct LogListState {
     sharing: Option<LogAction>,
     revision: Option<u64>,
+    frozen_entries: Option<Vec<LogEntry>>,
     list: ListState,
     rows: Rc<Vec<LogRow>>,
     filter: LogFilter,
@@ -35,6 +36,7 @@ pub(super) struct LogListState {
     newest_first: bool,
 }
 
+const MAX_VISIBLE_LOGS: usize = 400;
 // One line plus row padding. Wrapped rows replace this estimate as they are measured.
 const LOG_ROW_HEIGHT_HINT: Pixels = px(22.);
 
@@ -53,17 +55,81 @@ fn same_entry(a: &LogEntry, b: &LogEntry) -> bool {
         && a.message == b.message
 }
 
+fn filter_entries(
+    entries: &[LogEntry],
+    filter: &LogFilter,
+    query: &str,
+    limit: usize,
+) -> Vec<LogEntry> {
+    let query = query.trim().to_ascii_lowercase();
+    let mut out: Vec<LogEntry> = entries
+        .iter()
+        .rev()
+        .filter(|entry| filter.matches(entry))
+        .filter(|entry| query.is_empty() || entry.message.to_ascii_lowercase().contains(&query))
+        .take(limit)
+        .cloned()
+        .collect();
+    out.reverse();
+    out
+}
+
 impl LogListState {
     pub(super) fn new() -> Self {
         Self {
             sharing: None,
             revision: None,
+            frozen_entries: None,
             list: ListState::new(0, ListAlignment::Top, px(128.))
                 .with_uniform_item_height(LOG_ROW_HEIGHT_HINT),
             rows: Rc::new(Vec::new()),
             filter: LogFilter::default(),
             query: String::new(),
             newest_first: true,
+        }
+    }
+
+    pub(super) fn paused(&self) -> bool {
+        self.frozen_entries.is_some()
+    }
+
+    fn pause(&mut self, entries: Vec<LogEntry>) {
+        self.frozen_entries = Some(entries);
+    }
+
+    fn resume(&mut self) {
+        self.frozen_entries = None;
+        self.revision = None;
+    }
+
+    pub(super) fn clear(&mut self) {
+        if let Some(frozen) = &mut self.frozen_entries {
+            frozen.clear();
+        }
+        self.revision = None;
+        self.rows = Rc::new(Vec::new());
+        self.reset_at_latest(0);
+    }
+
+    fn sync(
+        &mut self,
+        revision: u64,
+        filter: &LogFilter,
+        query: String,
+        fetch_live: impl FnOnce(&str) -> Vec<LogEntry>,
+    ) {
+        let filter_changed = &self.filter != filter || self.query != query;
+        if let Some(frozen) = self.frozen_entries.as_deref() {
+            if filter_changed {
+                let logs = filter_entries(frozen, filter, &query, MAX_VISIBLE_LOGS);
+                self.update(logs, filter, query);
+            }
+            return;
+        }
+        if self.revision != Some(revision) || filter_changed {
+            let logs = fetch_live(&query);
+            self.update(logs, filter, query);
+            self.revision = Some(revision);
         }
     }
 
@@ -163,6 +229,17 @@ impl LogListState {
 }
 
 impl AppView {
+    fn toggle_log_pause(&mut self, cx: &mut Context<Self>) {
+        if self.log_list.paused() {
+            self.log_list.resume();
+            self.refresh_snapshot();
+        } else {
+            let entries = self.service.logs().recent(usize::MAX, LogLevel::Trace, "");
+            self.log_list.pause(entries);
+        }
+        cx.notify();
+    }
+
     pub(super) fn can_share_logs(&self, action: LogAction) -> bool {
         self.log_list.sharing.is_none()
             && (action == LogAction::Export || !self.log_list.rows.is_empty())
@@ -229,18 +306,14 @@ impl AppView {
 
     pub(crate) fn page_logs(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let query = self.log_search.read(cx).value();
+        let query = self.log_search.read(cx).value().to_string();
+        let filter = &self.log_filter;
+        let service = &self.service;
         // Sample arriving logs on the data poll, independently of scroll frame rate.
-        let revision = self.log_revision;
-        if self.log_list.revision != Some(revision)
-            || self.log_list.filter != self.log_filter
-            || self.log_list.query != query.as_ref()
-        {
-            let logs = self.service.logs_matching(&self.log_filter, &query, 400);
-            self.log_list
-                .update(logs, &self.log_filter, query.to_string());
-            self.log_list.revision = Some(revision);
-        }
+        self.log_list
+            .sync(self.log_revision, filter, query, |query| {
+                service.logs_matching(filter, query, MAX_VISIBLE_LOGS)
+            });
         let rows = self.log_list.rows.clone();
         let share_tip = self.tr(
             "日志中可能包含敏感信息，请谨慎分享原始日志",
@@ -348,19 +421,30 @@ impl AppView {
                                 ));
                             })),
                         )
-                        .child(
-                            toolbar_icon_button(
-                                "copy-log-dir",
-                                IconName::Copy,
-                                self.tr("复制日志目录", "Copy log folder"),
+                        .child({
+                            let paused = self.log_list.paused();
+                            icon_button_toggled(
+                                toolbar_icon_button(
+                                    "logs-pause-toggle",
+                                    if paused {
+                                        IconName::Play
+                                    } else {
+                                        IconName::Pause
+                                    },
+                                    if paused {
+                                        self.tr("恢复刷新日志", "Resume log updates")
+                                    } else {
+                                        self.tr("暂停刷新日志", "Pause log updates")
+                                    },
+                                    cx,
+                                ),
+                                paused,
                                 cx,
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                    this.snapshot.platform.log_dir.clone(),
-                                ));
-                            })),
-                        )
+                                this.toggle_log_pause(cx);
+                            }))
+                        })
                         .child(
                             toolbar_icon_button(
                                 "logs-scroll-top",
@@ -887,5 +971,56 @@ mod tests {
         state.update(logs, &LogFilter::default(), String::new());
         assert_eq!(state.rows[1].key, keys[0]);
         assert_eq!(state.rows[2].key, keys[1]);
+    }
+
+    #[test]
+    fn pause_freezes_live_updates_and_filters_snapshot_until_resume() {
+        let mut state = LogListState::new();
+        let filter = LogFilter::default();
+        state.sync(1, &filter, String::new(), |_| entries(0..5));
+        assert!(!state.paused());
+        assert_eq!(state.rows.len(), 5);
+        assert_eq!(state.rows[0].entry.unix_ms, 4);
+
+        state.pause(entries(0..5));
+        assert!(state.paused());
+
+        // New revisions must not overwrite the paused UI list.
+        let mut fetched_while_paused = false;
+        state.sync(2, &filter, String::new(), |_| {
+            fetched_while_paused = true;
+            entries(0..10)
+        });
+        assert!(!fetched_while_paused);
+        assert_eq!(state.rows.len(), 5);
+        assert_eq!(state.rows[0].entry.unix_ms, 4);
+
+        // Filtering while paused operates only on the frozen snapshot.
+        state.sync(2, &filter, "log 3".into(), |_| {
+            panic!("paused filtering must not pull live logs");
+        });
+        assert_eq!(state.rows.len(), 1);
+        assert_eq!(state.rows[0].entry.unix_ms, 3);
+
+        state.sync(2, &filter, String::new(), |_| {
+            panic!("paused filtering must not pull live logs");
+        });
+        assert_eq!(state.rows.len(), 5);
+        assert_eq!(state.rows[0].entry.unix_ms, 4);
+
+        // Clearing while paused keeps the paused state empty until resumed.
+        state.clear();
+        assert!(state.paused());
+        assert!(state.rows.is_empty());
+        state.sync(3, &filter, String::new(), |_| {
+            panic!("cleared paused view must stay frozen until resumed");
+        });
+        assert!(state.rows.is_empty());
+
+        state.resume();
+        assert!(!state.paused());
+        state.sync(3, &filter, String::new(), |_| entries(0..10));
+        assert_eq!(state.rows.len(), 10);
+        assert_eq!(state.rows[0].entry.unix_ms, 9);
     }
 }
