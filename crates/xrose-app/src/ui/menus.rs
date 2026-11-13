@@ -20,7 +20,7 @@ pub(super) enum MenuTarget {
     MeshPeer(String, String),
     Forward(String, PortForward),
     ServiceForward(String, ServiceForward),
-    RoutingFiles,
+    RoutingRules,
     RuleSetSources,
     DefaultOutbound,
     OutboundGroup(String),
@@ -42,6 +42,7 @@ pub(super) enum Command {
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
     ImportRoute,
+    ValidateConfig,
     SetRuleSetSource(xrose_core::model::RuleSetSource),
     EditRuleSetSource,
     ExportRoute(ExportScope),
@@ -538,27 +539,35 @@ impl AppView {
                         ));
                 }
             }
-            MenuTarget::RoutingFiles => {
-                let ready = !busy("route-file");
+            MenuTarget::RoutingRules => {
+                let file_ready = !busy("route-file") && !busy("core");
+                let validate_ready = !busy("validate") && !busy("core");
                 menu = menu
                     .item(add(
                         "导入规则文件…",
                         "Import rule file…",
-                        ready,
+                        file_ready,
                         Command::ImportRoute,
                     ))
                     .separator()
                     .item(add(
                         "导出全部规则与规则集…",
                         "Export rules and rule sets…",
-                        ready,
+                        file_ready,
                         Command::ExportRoute(ExportScope::All),
                     ))
                     .item(add(
                         "仅导出规则集…",
                         "Export rule sets only…",
-                        ready,
+                        file_ready,
                         Command::ExportRoute(ExportScope::RuleSets),
+                    ))
+                    .separator()
+                    .item(add(
+                        "校验配置",
+                        "Validate configuration",
+                        validate_ready,
+                        Command::ValidateConfig,
                     ));
             }
             MenuTarget::Rule(id, group) => {
@@ -987,6 +996,7 @@ impl AppView {
             }
             Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
+            Command::ValidateConfig => self.service.validate_config(),
             Command::SetRuleSetSource(source) => {
                 if let Err(error) = self.service.set_rule_set_source(source, None) {
                     self.service.toast(ToastLevel::Error, error.to_string());

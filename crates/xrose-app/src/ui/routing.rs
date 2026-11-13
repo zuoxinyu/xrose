@@ -355,6 +355,11 @@ impl AppView {
         );
 
         // Rules.
+        let rules_menu_busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|b| b == "route-file" || b == "validate");
         body = body.child(
             card(&p)
                 .child(
@@ -380,20 +385,16 @@ impl AppView {
                                 .ml_auto()
                                 .gap_2()
                                 .child(
-                                    Button::new("route-files").compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("导入 / 导出", "Import / Export"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "route-file"))
-                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RoutingFiles)),
-                                )
-                                .child(
-                                    Button::new("validate-route")
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("校验", "Validate"))
-                                        .loading(self.snapshot.busy.iter().any(|b| b == "validate"))
-                                        .on_click(cx.listener(|this, _, _, _| {
-                                            this.service.validate_config();
-                                        })),
+                                    more_button(
+                                        "route-rules-actions",
+                                        self.tr("更多操作", "More actions"),
+                                        cx,
+                                    )
+                                    .loading(rules_menu_busy)
+                                    .dropdown_menu(menus::builder(
+                                        cx.entity().downgrade(),
+                                        MenuTarget::RoutingRules,
+                                    )),
                                 )
                                 .child(
                                     Button::new("create-rule-group")

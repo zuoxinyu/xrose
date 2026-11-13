@@ -868,12 +868,17 @@ impl AppView {
             .flex_col()
             .gap_4()
             .w_full()
-            .child(inspector)
             .child(
                 div()
                     .id("trace-section")
                     .anchor_scroll(Some(self.trace_anchor.clone()))
                     .child(self.trace_card(cx)),
+            )
+            .child(
+                div()
+                    .id("inspector-section")
+                    .anchor_scroll(Some(self.inspector_anchor.clone()))
+                    .child(inspector),
             )
             .child(self.dns_comparison_card(cx))
             .child(self.system_report_card(cx))
@@ -1051,10 +1056,8 @@ impl AppView {
                                     .icon(IconName::Route)
                                     .tooltip(inspect_tip.clone())
                                     .accessibility_label(inspect_tip)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.selected_connection = Some(inspect.clone());
-                                        this.page = Page::Diagnostics;
-                                        cx.notify();
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.inspect_connection(inspect.clone(), window, cx);
                                     })),
                             )
                             .child(
@@ -1564,18 +1567,39 @@ impl AppView {
             )
     }
 
+    fn inspect_connection(
+        &mut self,
+        connection: ClashConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected_connection = Some(connection);
+        self.page = Page::Diagnostics;
+        self.scroll_diagnostics_to(|view| &view.inspector_anchor, window, cx);
+        cx.notify();
+    }
+
     fn replay_connection(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.trace_input.update(cx, |input, cx| {
             input.set_value(target.to_owned(), window, cx)
         });
         self.run_trace(target, cx);
-        // The list shortcut first mounts Diagnostics. Let the new trace card lay out before scrolling.
+        self.scroll_diagnostics_to(|view| &view.trace_anchor, window, cx);
+    }
+
+    fn scroll_diagnostics_to(
+        &self,
+        anchor: fn(&Self) -> &ScrollAnchor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The list shortcut first mounts Diagnostics; let the target card lay out before scrolling.
         let view = cx.entity().downgrade();
         window.on_next_frame(move |window, cx| {
             if let Some(view) = view.upgrade() {
                 let view = view.read(cx);
                 if view.page == Page::Diagnostics {
-                    view.trace_anchor.clone().scroll_to(window, cx);
+                    anchor(view).clone().scroll_to(window, cx);
                 }
             }
         });
