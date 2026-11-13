@@ -74,7 +74,6 @@ pub(super) enum Command {
     DeleteSubscription(String),
     DeleteDns(String),
     DeleteHost(String),
-    RefreshConnections,
     BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
     CloseConnections,
     UninstallHelper,
@@ -761,13 +760,6 @@ impl AppView {
                         .is_some_and(|core| core.capabilities().clash_connections);
                 menu = menu
                     .item(add(
-                        "刷新",
-                        "Refresh",
-                        available && !self.service.is_busy("connections-refresh"),
-                        Command::RefreshConnections,
-                    ))
-                    .separator()
-                    .item(add(
                         "全部断开",
                         "Close all connections",
                         available
@@ -1239,7 +1231,6 @@ impl AppView {
             Command::BlockConnection(target, kind) => {
                 self.service.block_connection_target(target, kind)
             }
-            Command::RefreshConnections => self.service.refresh_connections(),
             Command::UninstallHelper => self.service.uninstall_helper(),
             Command::CloseConnections => {
                 if self.snapshot.process.phase.is_alive()

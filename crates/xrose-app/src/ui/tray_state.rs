@@ -10,11 +10,9 @@ pub(crate) struct TrayWindowState {
     hide_traffic_chart: bool,
     sort_by_latency: bool,
     group_by_subscription: bool,
-    connection_filter: ConnectionFilterKind,
     exact_process_filter: Option<String>,
     connection_sort: xrose_core::flow::ConnectionSort,
     connections_tab: connections::ConnectionsTab,
-    show_live_processes: bool,
     content_offset: Point<Pixels>,
     connection_list: ListState,
     connections_limit: usize,
@@ -59,10 +57,8 @@ impl AppView {
             hide_traffic_chart: self.hide_traffic_chart,
             sort_by_latency: self.sort_by_latency,
             group_by_subscription: self.group_by_subscription,
-            connection_filter: self.connection_filter,
             connection_sort: self.connection_sort,
             connections_tab: self.connections_tab,
-            show_live_processes: self.show_live_processes,
             log_filter: self.log_filter.clone(),
             rule_group_id: self.rule_group_id.clone(),
             collapsed_subs: self.collapsed_subs.clone(),
@@ -96,10 +92,8 @@ impl AppView {
         self.hide_traffic_chart = state.hide_traffic_chart;
         self.sort_by_latency = state.sort_by_latency;
         self.group_by_subscription = state.group_by_subscription;
-        self.connection_filter = state.connection_filter;
         self.connection_sort = state.connection_sort;
         self.connections_tab = state.connections_tab;
-        self.show_live_processes = state.show_live_processes;
         for (field, value) in self.page_inputs().into_iter().zip(state.page_inputs) {
             field.update(cx, |input, cx| input.set_value(value, window, cx));
         }

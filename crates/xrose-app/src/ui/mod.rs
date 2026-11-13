@@ -39,7 +39,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::AppService;
 use xrose_core::core::logs::LogFilter;
-use xrose_core::diagnostics::{ConnectionFilterKind, DiagnosticRuleKind};
+use xrose_core::diagnostics::DiagnosticRuleKind;
 use xrose_core::model::{RouteActionKind, RoutePreset};
 use xrose_core::service::UiSnapshot;
 use xrose_core::settings::Language;
@@ -302,9 +302,7 @@ pub struct AppView {
     update_agent_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
-    pub(crate) connection_filter: ConnectionFilterKind,
     pub(crate) connections_tab: connections::ConnectionsTab,
-    show_live_processes: bool,
     process_icons: Option<process_icons::ProcessIcons>,
     connection_sort: xrose_core::flow::ConnectionSort,
     exact_process_filter: Option<String>,
@@ -490,10 +488,8 @@ impl AppView {
             update_proxy_input,
             update_agent_input,
             trace_input,
-            connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
-            connection_filter: ConnectionFilterKind::All,
+            connection_search: text_input(window, cx, "搜索域名、IP、端口、进程或规则…"),
             connections_tab: connections::ConnectionsTab::default(),
-            show_live_processes: false,
             process_icons: None,
             connection_sort: Default::default(),
             exact_process_filter: None,

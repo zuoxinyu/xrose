@@ -1251,10 +1251,17 @@ impl AppView {
                     div()
                         .text_sm()
                         .text_color(p.muted_fg)
-                        .child(self.tr(
-                            "支持多网并存与代理分流联动；主窗口关闭至托盘时保持连接，退出应用时自动断开。",
-                            "Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.",
-                        )),
+                        .child(if cfg!(target_os = "macos") {
+                            self.tr(
+                                "支持多网并存与代理分流联动；主窗口关闭至菜单栏时保持连接，退出应用时自动断开。",
+                                "Supports concurrent connections and proxy bypass integration. Connections stay active in the menu bar and disconnect on exit.",
+                            )
+                        } else {
+                            self.tr(
+                                "支持多网并存与代理分流联动；主窗口关闭至托盘时保持连接，退出应用时自动断开。",
+                                "Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.",
+                            )
+                        }),
                 )
                 .when(forward_busy, |d| {
                     d.child(

@@ -317,7 +317,7 @@ impl AppView {
         let mut core_card = card(&p)
             .child(section_title(
                 &p,
-                self.tr("Core", "Core"),
+                self.tr("内核", "Core"),
                 self.tr(
                     "内核选择、版本与运行选项",
                     "Core selection, versions and runtime options",

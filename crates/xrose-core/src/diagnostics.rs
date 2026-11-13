@@ -10,31 +10,60 @@ use crate::model::Matchers;
 use crate::runtime::ClashConnection;
 use crate::trace::TraceSession;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ConnectionFilterKind {
-    #[default]
-    All,
-    Domain,
-    Ip,
-    Process,
-}
-
-impl ConnectionFilterKind {
-    pub fn matches(self, connection: &ClashConnection, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        let m = &connection.metadata;
-        let contains = |value: &str| value.to_lowercase().contains(&query);
-        let domain = contains(&m.host) || contains(&m.sniff_host);
-        let ip = contains(&m.source_ip) || contains(&m.destination_ip);
-        let process = contains(&m.process) || contains(&m.process_path);
-        query.is_empty()
-            || match self {
-                Self::All => domain || ip || process,
-                Self::Domain => domain,
-                Self::Ip => ip,
-                Self::Process => process,
-            }
+/// Matches a connection against a whitespace-tokenized omni search query across
+/// domain, IP, port, protocol, process, rule, and outbound chain metadata.
+pub fn connection_matches_query(connection: &ClashConnection, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
     }
+    let m = &connection.metadata;
+    let host_port = if m.host.is_empty() || m.destination_port.is_empty() {
+        None
+    } else {
+        Some(format!("{}:{}", m.host, m.destination_port).to_lowercase())
+    };
+    let sniff_port = if m.sniff_host.is_empty() || m.destination_port.is_empty() {
+        None
+    } else {
+        Some(format!("{}:{}", m.sniff_host, m.destination_port).to_lowercase())
+    };
+    let dest_port = if m.destination_ip.is_empty() || m.destination_port.is_empty() {
+        None
+    } else {
+        Some(format!("{}:{}", m.destination_ip, m.destination_port).to_lowercase())
+    };
+    let fields = [
+        m.host.to_lowercase(),
+        m.sniff_host.to_lowercase(),
+        m.source_ip.to_lowercase(),
+        m.destination_ip.to_lowercase(),
+        m.source_port.to_lowercase(),
+        m.destination_port.to_lowercase(),
+        m.process.to_lowercase(),
+        m.process_path.to_lowercase(),
+        m.network.to_lowercase(),
+        m.kind.to_lowercase(),
+        connection.rule.to_lowercase(),
+        connection.rule_payload.to_lowercase(),
+    ];
+    let chains: Vec<String> = connection.chains.iter().map(|c| c.to_lowercase()).collect();
+
+    query.split_whitespace().all(|token| {
+        fields.iter().any(|field| field.contains(token))
+            || chains.iter().any(|chain| chain.contains(token))
+            || token.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty() && m.destination_port.to_lowercase().contains(port)
+            })
+            || [
+                host_port.as_deref(),
+                sniff_port.as_deref(),
+                dest_port.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|endpoint| endpoint.contains(token))
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -249,13 +278,23 @@ mod tests {
     }
 
     #[test]
-    fn filters_scope_case_and_sniffed_domains() {
-        let c = connection("a");
-        assert!(ConnectionFilterKind::Domain.matches(&c, " CDN.EXAMPLE "));
-        assert!(!ConnectionFilterKind::Domain.matches(&c, "Browser"));
-        assert!(ConnectionFilterKind::Process.matches(&c, "browser.exe"));
-        assert!(ConnectionFilterKind::Ip.matches(&c, "db8"));
-        assert!(ConnectionFilterKind::All.matches(&c, "Browser"));
+    fn omni_search_matches_domains_ips_ports_processes_and_rules() {
+        let mut c = connection("a");
+        c.metadata.network = "tcp".into();
+        c.metadata.kind = "tun/tun-in".into();
+        c.rule = "RuleSet".into();
+        c.rule_payload = "geosite-cn".into();
+        c.chains = vec!["ProxyGroup".into(), "HK-01".into()];
+
+        assert!(connection_matches_query(&c, ""));
+        assert!(connection_matches_query(&c, " CDN.EXAMPLE "));
+        assert!(connection_matches_query(&c, "browser.exe"));
+        assert!(connection_matches_query(&c, "db8"));
+        assert!(connection_matches_query(&c, ":443"));
+        assert!(connection_matches_query(&c, "example.com:443"));
+        assert!(connection_matches_query(&c, "browser hk-01 443"));
+        assert!(connection_matches_query(&c, "geosite-cn tcp"));
+        assert!(!connection_matches_query(&c, "browser udp"));
     }
 
     #[test]
