@@ -335,57 +335,61 @@ impl AppView {
                             self.tr("条", "entries")
                         )))
                         .child(
-                            Button::new("open-log-dir")
-                                .ghost()
-                                .icon(IconName::FolderOpen)
-                                .tooltip(self.tr("打开日志目录", "Open log folder"))
-                                .accessibility_label(self.tr("打开日志目录", "Open log folder"))
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.service.open_url(&format!(
-                                        "file://{}",
-                                        this.snapshot.platform.log_dir
-                                    ));
-                                })),
+                            toolbar_icon_button(
+                                "open-log-dir",
+                                IconName::FolderOpen,
+                                self.tr("打开日志目录", "Open log folder"),
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _, _| {
+                                this.service.open_url(&format!(
+                                    "file://{}",
+                                    this.snapshot.platform.log_dir
+                                ));
+                            })),
                         )
                         .child(
-                            Button::new("copy-log-dir")
-                                .ghost()
-                                .icon(IconName::Copy)
-                                .tooltip(self.tr("复制日志目录", "Copy log folder"))
-                                .accessibility_label(self.tr("复制日志目录", "Copy log folder"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(
-                                        this.snapshot.platform.log_dir.clone(),
-                                    ));
-                                })),
+                            toolbar_icon_button(
+                                "copy-log-dir",
+                                IconName::Copy,
+                                self.tr("复制日志目录", "Copy log folder"),
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                    this.snapshot.platform.log_dir.clone(),
+                                ));
+                            })),
                         )
                         .child(
-                            Button::new("logs-scroll-top")
-                                .ghost()
-                                .icon(IconName::ArrowUpToLine)
-                                .tooltip(self.tr("滚动到顶部", "Scroll to top"))
-                                .accessibility_label(self.tr("滚动到顶部", "Scroll to top"))
-                                .disabled(rows.is_empty())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.log_list.list.scroll_to(ListOffset::default());
-                                    cx.notify();
-                                })),
+                            toolbar_icon_button(
+                                "logs-scroll-top",
+                                IconName::ArrowUpToLine,
+                                self.tr("滚动到顶部", "Scroll to top"),
+                                cx,
+                            )
+                            .disabled(rows.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.log_list.list.scroll_to(ListOffset::default());
+                                cx.notify();
+                            })),
                         )
                         .child(
-                            Button::new("logs-scroll-bottom")
-                                .ghost()
-                                .icon(IconName::ArrowDownToLine)
-                                .tooltip(self.tr("滚动到底部", "Scroll to bottom"))
-                                .accessibility_label(self.tr("滚动到底部", "Scroll to bottom"))
-                                .disabled(rows.is_empty())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if this.log_list.newest_first {
-                                        this.log_list.list.scroll_to_end();
-                                    } else {
-                                        this.log_list.list.set_follow_mode(FollowMode::Tail);
-                                    }
-                                    cx.notify();
-                                })),
+                            toolbar_icon_button(
+                                "logs-scroll-bottom",
+                                IconName::ArrowDownToLine,
+                                self.tr("滚动到底部", "Scroll to bottom"),
+                                cx,
+                            )
+                            .disabled(rows.is_empty())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.log_list.newest_first {
+                                    this.log_list.list.scroll_to_end();
+                                } else {
+                                    this.log_list.list.set_follow_mode(FollowMode::Tail);
+                                }
+                                cx.notify();
+                            })),
                         )
                         .child(
                             Button::new("logs-order")

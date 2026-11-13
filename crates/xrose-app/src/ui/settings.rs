@@ -694,35 +694,33 @@ impl AppView {
                 .gap_2()
                 .on_click(|_, _, cx| cx.stop_propagation())
                 .child(
-                    Button::new(SharedString::from(format!("browse-binary-{core:?}")))
-                        .compact()
-                        .ghost()
-                        .size(px(super::theme::ICON_BUTTON_SIZE))
-                        .icon(IconName::FolderOpen)
-                        .tooltip(browse.clone())
-                        .accessibility_label(browse)
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.pick_core_binary(core, cx);
-                        })),
+                    icon_button(
+                        SharedString::from(format!("browse-binary-{core:?}")),
+                        IconName::FolderOpen,
+                        browse,
+                        cx,
+                    )
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.pick_core_binary(core, cx);
+                    })),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("clear-binary-{core:?}")))
-                        .compact()
-                        .ghost()
-                        .size(px(super::theme::ICON_BUTTON_SIZE))
-                        .icon(IconName::Eraser)
-                        .tooltip(clear.clone())
-                        .accessibility_label(clear)
-                        .disabled(busy || custom.is_none())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Err(err) = this.service.set_binary_override(core, None) {
-                                this.service.toast(ToastLevel::Error, err.to_string());
-                            }
-                            this.sync(cx);
-                        })),
+                    icon_button(
+                        SharedString::from(format!("clear-binary-{core:?}")),
+                        IconName::Eraser,
+                        clear,
+                        cx,
+                    )
+                    .disabled(busy || custom.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Err(err) = this.service.set_binary_override(core, None) {
+                            this.service.toast(ToastLevel::Error, err.to_string());
+                        }
+                        this.sync(cx);
+                    })),
                 ),
         )
     }
@@ -792,10 +790,15 @@ impl AppView {
             "open-system-proxy-settings",
             IconName::ExternalLink,
             self.tr("打开系统代理设置", "Open system proxy settings"),
+            cx,
         )
         .on_click(cx.listener(|this, _, _, _| this.service.open_system_proxy_settings()));
-        let copy_proxy_env = icon_button("copy-proxy-env", IconName::Copy,
-            self.tr("复制代理环境变量命令", "Copy proxy environment commands"))
+        let copy_proxy_env = icon_button(
+            "copy-proxy-env",
+            IconName::Copy,
+            self.tr("复制代理环境变量命令", "Copy proxy environment commands"),
+            cx,
+        )
             .disabled(port_dirty)
             .when(port_dirty, |button| button.tooltip(self.tr("请先应用端口修改", "Apply the port change first")))
             .on_click(cx.listener(|this, _, _, cx| {

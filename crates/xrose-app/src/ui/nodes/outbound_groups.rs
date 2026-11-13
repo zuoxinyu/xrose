@@ -119,6 +119,7 @@ impl AppView {
                                 more_button(
                                     SharedString::from(format!("outbound-group-menu-{}", group.id)),
                                     this.tr("出站组操作", "Group actions"),
+                                    cx,
                                 )
                                 .dropdown_menu(menus::builder(
                                     cx.entity().downgrade(),

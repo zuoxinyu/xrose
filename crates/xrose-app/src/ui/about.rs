@@ -379,7 +379,7 @@ impl AppView {
                     Button::new(SharedString::from(format!("credit-{}", item.name)))
                         .compact()
                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                        .ghost()
+                        .custom(icon_button_style(p, false, cx))
                         .icon(IconName::ExternalLink)
                         .accessibility_label(format!("{} {}", self.tr("打开", "Open"), item.name))
                         .tooltip(url)

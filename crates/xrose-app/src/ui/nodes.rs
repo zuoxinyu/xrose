@@ -5,7 +5,7 @@ mod switching;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use gpui_base::{Disableable, Selectable};
+use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -412,6 +412,7 @@ impl AppView {
                                     more_button(
                                         "toolbar-more",
                                         self.tr("更多操作", "More actions"),
+                                        cx,
                                     )
                                     .dropdown_menu(
                                         menus::builder(cx.entity().downgrade(), MenuTarget::Nodes),
@@ -470,14 +471,16 @@ impl AppView {
                                     .child(Input::new(&self.node_search)),
                             )
                             .child(
-                                Button::new("test-all")
-                                    .ghost()
-                                    .icon(IconName::Gauge)
-                                    .tooltip(self.tr("全部节点测速", "Test all nodes"))
-                                    .accessibility_label(self.tr("全部节点测速", "Test all nodes"))
-                                    .disabled(tests_busy)
-                                    .loading(latency_busy)
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                toolbar_icon_button(
+                                    "test-all",
+                                    IconName::Gauge,
+                                    self.tr("全部节点测速", "Test all nodes"),
+                                    cx,
+                                )
+                                .disabled(tests_busy)
+                                .loading(latency_busy)
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.latency_pending = this
                                             .snapshot
                                             .model
@@ -488,72 +491,82 @@ impl AppView {
                                             .collect();
                                         this.service.test_latency(LatencyScope::All);
                                         this.sync(cx);
-                                    })),
+                                    },
+                                )),
                             )
                             .child(
-                                Button::new("locate-all")
-                                    .ghost()
-                                    .icon(IconName::MapPin)
-                                    .tooltip(self.tr(
-                                        "探测全部启用节点的服务器归属地",
-                                        "Locate servers for all enabled nodes",
-                                    ))
-                                    .accessibility_label(
-                                        self.tr("全部探测归属地", "Locate all nodes"),
-                                    )
-                                    .disabled(
-                                        this_busy(&self.snapshot.busy, "node-locations")
-                                            || !model.nodes.iter().any(|node| node.enabled),
-                                    )
-                                    .loading(this_busy(&self.snapshot.busy, "node-locations"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                toolbar_icon_button(
+                                    "locate-all",
+                                    IconName::MapPin,
+                                    self.tr("全部探测归属地", "Locate all nodes"),
+                                    cx,
+                                )
+                                .tooltip(self.tr(
+                                    "探测全部启用节点的服务器归属地",
+                                    "Locate servers for all enabled nodes",
+                                ))
+                                .disabled(
+                                    this_busy(&self.snapshot.busy, "node-locations")
+                                        || !model.nodes.iter().any(|node| node.enabled),
+                                )
+                                .loading(this_busy(&self.snapshot.busy, "node-locations"))
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.service.request_all_node_locations();
                                         this.sync(cx);
-                                    })),
+                                    },
+                                )),
                             )
-                            .child(
-                                Button::new("toggle-traffic-chart")
-                                    .ghost()
-                                    .selected(self.hide_traffic_chart)
-                                    .icon(IconName::ChartLine)
-                                    .tooltip(if self.hide_traffic_chart {
-                                        self.tr("显示流量折线图", "Show traffic chart")
-                                    } else {
-                                        self.tr("隐藏流量折线图", "Hide traffic chart")
-                                    })
-                                    .accessibility_label(if self.hide_traffic_chart {
-                                        self.tr("显示流量折线图", "Show traffic chart")
-                                    } else {
-                                        self.tr("隐藏流量折线图", "Hide traffic chart")
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                            .child({
+                                let chart_label = if self.hide_traffic_chart {
+                                    self.tr("显示流量折线图", "Show traffic chart")
+                                } else {
+                                    self.tr("隐藏流量折线图", "Hide traffic chart")
+                                };
+                                icon_button_toggled(
+                                    toolbar_icon_button(
+                                        "toggle-traffic-chart",
+                                        IconName::ChartLine,
+                                        chart_label,
+                                        cx,
+                                    ),
+                                    !self.hide_traffic_chart,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.hide_traffic_chart = !this.hide_traffic_chart;
                                         cx.notify();
-                                    })),
-                            )
+                                    },
+                                ))
+                            })
                             .child(
-                                Button::new("toggle-privacy")
-                                    .ghost()
-                                    .selected(hide_ips)
-                                    .icon(if hide_ips {
-                                        IconName::EyeOff
-                                    } else {
-                                        IconName::Eye
-                                    })
-                                    .tooltip(
-                                        self.tr(
-                                            "隐藏服务器地址与位置",
-                                            "Hide addresses and location",
-                                        ),
-                                    )
-                                    .accessibility_label(self.tr("隐私模式", "Privacy mode"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                icon_button_toggled(
+                                    toolbar_icon_button(
+                                        "toggle-privacy",
+                                        if hide_ips {
+                                            IconName::EyeOff
+                                        } else {
+                                            IconName::Eye
+                                        },
+                                        self.tr("隐私模式", "Privacy mode"),
+                                        cx,
+                                    ),
+                                    hide_ips,
+                                    cx,
+                                )
+                                .tooltip(
+                                    self.tr("隐藏服务器地址与位置", "Hide addresses and location"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
                                         this.hide_ips = !this.hide_ips;
                                         let mut settings = this.snapshot.settings.clone();
                                         settings.privacy_mode = this.hide_ips;
                                         this.service.update_settings(settings);
                                         this.sync(cx);
-                                    })),
+                                    },
+                                )),
                             ),
                     )
                 })
@@ -1481,7 +1494,7 @@ fn render_node_row(
                                     Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .ghost()
+                                        .custom(icon_button_style(&p, false, cx))
                                         .icon(IconName::Gauge)
                                         .tooltip(super::tr(lang, "测速", "Test latency"))
                                         .accessibility_label(super::tr(
@@ -1506,6 +1519,7 @@ fn render_node_row(
                             more_button(
                                 SharedString::from(format!("more-{}", node.id)),
                                 super::tr(lang, "更多操作", "More actions"),
+                                cx,
                             )
                             .dropdown_menu(menus::builder(
                                 cx.entity().downgrade(),

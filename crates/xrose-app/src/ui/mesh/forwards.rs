@@ -201,6 +201,7 @@ impl AppView {
                             more_button(
                                 SharedString::from(format!("{id}-menu")),
                                 self.tr("转发操作", "Forward actions"),
+                                cx,
                             )
                             .dropdown_menu(menu.clone()),
                         )

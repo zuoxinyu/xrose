@@ -248,7 +248,7 @@ impl AppView {
                                 .when(is_final, |d| d.child(pill(self.tr("默认", "Default"), p.primary, p.panel))))
                             .when(!server.is_fakeip(), |d| d.child(div().text_sm().text_color(p.muted_fg).truncate().child(server.display_address())))
                             .child(div().text_xs().text_color(p.muted_fg).truncate().child(if server.is_fakeip() { self.tr("用于 Fake-IP 解析", "Used for Fake-IP resolution").to_string() } else if server.domains.is_empty() { self.tr("匹配所有域名", "All domains").to_string() } else { server.domains.join(", ") })))
-                        .child(more_button(SharedString::from(format!("dns-menu-{}", server.tag)), self.tr("服务器操作", "Server actions"))
+                        .child(more_button(SharedString::from(format!("dns-menu-{}", server.tag)), self.tr("服务器操作", "Server actions"), cx)
                             .on_click(|_, _, cx| cx.stop_propagation())
                             .dropdown_menu(menus::builder(cx.entity().downgrade(), menu_target.clone())))
                         .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
@@ -372,6 +372,7 @@ impl AppView {
                             more_button(
                                 SharedString::from(format!("host-menu-{domain}")),
                                 self.tr("静态解析操作", "Host mapping actions"),
+                                cx,
                             )
                             .dropdown_menu(menus::builder(cx.entity().downgrade(), target.clone())),
                         )

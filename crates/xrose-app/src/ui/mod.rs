@@ -25,7 +25,7 @@ mod traffic_statistics;
 mod tray_state;
 #[cfg(target_os = "linux")]
 pub(crate) use tray_state::TrayWindowState;
-mod widgets;
+pub(crate) mod widgets;
 
 use std::time::Duration;
 
@@ -1295,7 +1295,7 @@ impl AppView {
                                 Button::new(SharedString::from(format!("toast-{id}")))
                                     .compact()
                                     .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .ghost()
+                                    .custom(icon_button_style(&p, false, cx))
                                     .icon(IconName::X)
                                     .flex_shrink_0()
                                     .on_click(cx.listener(move |this, _, _, _| {

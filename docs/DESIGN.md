@@ -288,6 +288,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 | icon | 32×32，必有 tooltip + `aria-label` | 工具栏、行内 |
 
 - **ghost 必须有 hover 底色与 `cursor:pointer`**，否则不像按钮（`清空` / `重置` / `设为 final` 当前像纯文字 `⚠K13`）。
+- **icon 按钮**：hover 时使用中性灰底；启用/开关态（如隐私模式、流量图/统计显隐）与其他启用状态一致，采用 `--accent-soft` 底色与 `--primary` 图标色、无描边。
 - **disabled**：`opacity: .45` + `cursor: not-allowed`，**不改变底色色相**（`全部断开` 当前禁用态仍带粉色 `⚠K14`）。
 - **loading**：spinner 替换图标，宽度不变，禁止重复点击。
 - 同一页头内最多出现 **两种** 按钮变体。日志页当前有三种 `⚠K13`。

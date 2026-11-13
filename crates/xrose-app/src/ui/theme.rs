@@ -87,6 +87,24 @@ impl Palette {
             hsl(210., 0.30, 0.98).opacity(0.28)
         }
     }
+
+    /// Neutral gray hover background for icon buttons in both light and dark themes.
+    pub fn neutral_hover(&self) -> Hsla {
+        if self.is_dark {
+            hsl(0., 0., 0.32).opacity(0.65)
+        } else {
+            hsl(210., 0.16, 0.91).opacity(0.85)
+        }
+    }
+
+    /// Slightly stronger neutral gray fill when pressing an inactive icon button or holding its menu open.
+    pub fn neutral_active(&self) -> Hsla {
+        if self.is_dark {
+            hsl(0., 0., 0.36).opacity(0.78)
+        } else {
+            hsl(210., 0.16, 0.87).opacity(0.92)
+        }
+    }
 }
 
 pub fn palette(cx: &App) -> Palette {
@@ -282,5 +300,20 @@ mod tests {
 
         // None: 未测速 (muted_fg)
         assert_eq!(latency_color_ms(&p, None), p.muted_fg);
+    }
+
+    #[test]
+    fn test_neutral_hover_is_distinct_from_dark_panel_and_accent() {
+        let mut p = dummy_palette();
+        p.panel = hsl(0., 0., 0.15);
+        p.accent = interaction_tint(false);
+        assert_ne!(p.neutral_hover(), p.accent);
+        assert_ne!(p.neutral_hover(), p.neutral_active());
+
+        p.is_dark = true;
+        p.accent = interaction_tint(true);
+        assert_ne!(p.neutral_hover(), p.panel);
+        assert_ne!(p.neutral_hover(), p.accent);
+        assert_ne!(p.neutral_hover(), p.neutral_active());
     }
 }

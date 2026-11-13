@@ -1,5 +1,5 @@
 use super::theme::*;
-use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode};
+use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode, Selectable};
 use gpui_kit::App;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
@@ -200,24 +200,69 @@ pub fn start_button(cx: &App) -> ButtonCustomVariant {
         .shadow(false)
 }
 
-pub fn more_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Button {
-    icon_button(id, IconName::Ellipsis, label)
+/// Icon-only button colors: neutral gray hover/press when inactive, and `--accent-soft` + `--primary` when active.
+pub fn icon_button_colors(p: &Palette, active: bool) -> (Hsla, Hsla, Hsla) {
+    if active {
+        (p.primary, p.neutral_hover(), p.accent)
+    } else {
+        (p.fg, p.neutral_hover(), p.neutral_active())
+    }
+}
+
+/// Custom variant for icon-only buttons so enabled toggles use cyan and hover stays gray.
+pub fn icon_button_style(p: &Palette, active: bool, cx: &App) -> ButtonCustomVariant {
+    let (fg, hover, active_bg) = icon_button_colors(p, active);
+    ButtonCustomVariant::new(cx)
+        .foreground(fg)
+        .hover(hover)
+        .active(active_bg)
+}
+
+pub fn more_button(id: impl Into<ElementId>, label: impl Into<SharedString>, cx: &App) -> Button {
+    icon_button(id, IconName::Ellipsis, label, cx)
 }
 
 pub fn icon_button(
     id: impl Into<ElementId>,
     icon: IconName,
     label: impl Into<SharedString>,
+    cx: &App,
 ) -> Button {
     let label = label.into();
+    let p = palette(cx);
     Button::new(id)
         .compact()
-        .ghost()
+        .custom(icon_button_style(&p, false, cx))
         .icon(icon)
         .w(px(ICON_BUTTON_SIZE))
         .h(px(ICON_BUTTON_SIZE))
         .accessibility_label(label.clone())
         .tooltip(label)
+}
+
+/// Standard 32×32 toolbar icon button with neutral gray hover.
+pub fn toolbar_icon_button(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    label: impl Into<SharedString>,
+    cx: &App,
+) -> Button {
+    let label = label.into();
+    let p = palette(cx);
+    Button::new(id)
+        .custom(icon_button_style(&p, false, cx))
+        .icon(icon)
+        .accessibility_label(label.clone())
+        .tooltip(label)
+}
+
+/// Applies cyan enabled state (`--accent-soft` fill + `--primary` icon) or gray hover state to an icon button.
+pub fn icon_button_toggled(button: Button, active: bool, cx: &App) -> Button {
+    let p = palette(cx);
+    button
+        .custom(icon_button_style(&p, active, cx))
+        .selected(active)
+        .toggled(active)
 }
 
 /// Inline outcomes remain visible in forms even when system notifications are enabled.
@@ -516,5 +561,53 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             );
         }
         group
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_palette(is_dark: bool) -> Palette {
+        let (primary, primary_fg) = interaction(is_dark);
+        Palette {
+            bg: hsl(210., 0.4, if is_dark { 0.09 } else { 0.975 }),
+            panel: hsl(0., 0., if is_dark { 0.15 } else { 1.0 }),
+            panel_alt: hsl(210., 0.3, if is_dark { 0.15 } else { 0.94 }),
+            fg: hsl(0., 0., if is_dark { 0.98 } else { 0.04 }),
+            muted_fg: hsl(0., 0., if is_dark { 0.65 } else { 0.42 }),
+            border: hsl(0., 0., 0.5),
+            accent: interaction_tint(is_dark),
+            primary,
+            primary_fg,
+            danger: hsl(0., 0.8, 0.5),
+            success: hsl(140., 0.7, 0.45),
+            warning: hsl(40., 0.9, 0.5),
+            info: hsl(190., 0.8, 0.5),
+            data_down: primary,
+            data_up: primary,
+            ok_text: hsl(140., 0.7, 0.4),
+            warn_text: hsl(40., 0.9, 0.4),
+            danger_text: hsl(0., 0.8, 0.5),
+            is_dark,
+        }
+    }
+
+    #[test]
+    fn icon_button_colors_use_cyan_when_active_and_gray_on_hover() {
+        for is_dark in [false, true] {
+            let p = test_palette(is_dark);
+
+            let (fg_active, hover_active, bg_active) = icon_button_colors(&p, true);
+            assert_eq!(fg_active, p.primary);
+            assert_eq!(bg_active, p.accent);
+            assert_eq!(hover_active, p.neutral_hover());
+
+            let (fg_idle, hover_idle, bg_idle) = icon_button_colors(&p, false);
+            assert_eq!(fg_idle, p.fg);
+            assert_eq!(hover_idle, p.neutral_hover());
+            assert_eq!(bg_idle, p.neutral_active());
+            assert_ne!(hover_idle, p.accent);
+        }
     }
 }

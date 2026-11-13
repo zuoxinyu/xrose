@@ -294,7 +294,7 @@ impl AppView {
             };
             Button::new(SharedString::from(format!("{id}-expand")))
                 .compact()
-                .ghost()
+                .custom(icon_button_style(p, false, cx))
                 .w(px(26.))
                 .h(px(26.))
                 .icon(if expanded {
@@ -350,7 +350,7 @@ impl AppView {
                     Button::new(SharedString::from(format!("{id}-copy")))
                         .compact()
                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                        .ghost()
+                        .custom(icon_button_style(p, false, cx))
                         .w(px(26.))
                         .h(px(26.))
                         .icon(IconName::Copy)
@@ -955,6 +955,7 @@ impl AppView {
                                 more_button(
                                     SharedString::from(format!("mesh-menu-{id}")),
                                     tr(lang, "组网操作", "Network actions"),
+                                    cx,
                                 )
                                 .dropdown_menu(menus::builder(
                                     cx.entity().downgrade(),
@@ -1276,6 +1277,7 @@ impl AppView {
                                 more_button(
                                     SharedString::from(format!("{peer_id}-menu")),
                                     tr(lang, "设备操作", "Device actions"),
+                                    cx,
                                 )
                                 .dropdown_menu(menu.clone()),
                             )

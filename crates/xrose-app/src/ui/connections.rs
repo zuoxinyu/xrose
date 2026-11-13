@@ -374,6 +374,7 @@ impl AppView {
                                 more_button(
                                     "connection-actions",
                                     self.tr("连接操作", "Connection actions"),
+                                    cx,
                                 )
                                 .dropdown_menu(menus::builder(
                                     cx.entity().downgrade(),
@@ -862,7 +863,7 @@ impl AppView {
                             .child(
                                 Button::new(SharedString::from(format!("inspect-{id}")))
                                     .compact()
-                                    .ghost()
+                                    .custom(icon_button_style(p, false, cx))
                                     .icon(IconName::Route)
                                     .tooltip(inspect_tip.clone())
                                     .accessibility_label(inspect_tip)
@@ -875,7 +876,7 @@ impl AppView {
                             .child(
                                 Button::new(SharedString::from(format!("test-{id}")))
                                     .compact()
-                                    .ghost()
+                                    .custom(icon_button_style(p, false, cx))
                                     .icon(IconName::Radar)
                                     .tooltip(test_tip.clone())
                                     .accessibility_label(test_tip)
@@ -911,6 +912,7 @@ impl AppView {
                                         connection.id
                                     )),
                                     self.tr("防火墙规则", "Firewall rules"),
+                                    cx,
                                 )
                                 .dropdown_menu(menus::builder(
                                     cx.entity().downgrade(),
@@ -1210,7 +1212,7 @@ impl AppView {
                                 Button::new("close-connection-inspector")
                                     .compact()
                                     .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .ghost()
+                                    .custom(icon_button_style(&p, false, cx))
                                     .icon(IconName::X)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.selected_connection = None;

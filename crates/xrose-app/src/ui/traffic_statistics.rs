@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_base::{Disableable, Selectable};
+use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
@@ -110,32 +110,35 @@ impl AppView {
             .ml_auto()
             .gap_2()
             .child(
-                icon_button("traffic-expand", IconName::ChartColumn, visibility_tip)
-                    .selected(expanded)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.traffic_ui.expanded = !this.traffic_ui.expanded;
-                        if this.traffic_ui.expanded {
-                            if !this.traffic_ui.dimension_chosen {
-                                let core = this
-                                    .snapshot
-                                    .process
-                                    .core
-                                    .unwrap_or(this.snapshot.settings.core);
-                                this.traffic_ui.query.dimension =
-                                    if core.capabilities().clash_connections
-                                        && this.snapshot.model.work_mode
-                                            == xrose_core::model::WorkMode::Direct
-                                    {
-                                        TrafficDimension::Process
-                                    } else {
-                                        TrafficDimension::Node
-                                    };
-                            }
-                            this.refresh_statistics(false, cx);
-                        } else {
-                            cx.notify();
+                icon_button_toggled(
+                    icon_button("traffic-expand", IconName::ChartColumn, visibility_tip, cx),
+                    expanded,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.traffic_ui.expanded = !this.traffic_ui.expanded;
+                    if this.traffic_ui.expanded {
+                        if !this.traffic_ui.dimension_chosen {
+                            let core = this
+                                .snapshot
+                                .process
+                                .core
+                                .unwrap_or(this.snapshot.settings.core);
+                            this.traffic_ui.query.dimension =
+                                if core.capabilities().clash_connections
+                                    && this.snapshot.model.work_mode
+                                        == xrose_core::model::WorkMode::Direct
+                                {
+                                    TrafficDimension::Process
+                                } else {
+                                    TrafficDimension::Node
+                                };
                         }
-                    })),
+                        this.refresh_statistics(false, cx);
+                    } else {
+                        cx.notify();
+                    }
+                })),
             )
             .child(
                 danger_icon_button(
@@ -256,16 +259,17 @@ impl AppView {
                     .gap_2()
                     .flex_wrap()
                     .child(
-                        Button::new("traffic-previous")
-                            .ghost()
-                            .icon(IconName::ChevronLeft)
-                            .tooltip(self.tr("上一周期", "Previous period"))
-                            .accessibility_label(self.tr("上一周期", "Previous period"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.traffic_ui.query =
-                                    this.traffic_ui.query.shifted(false, stats::today());
-                                this.refresh_statistics(true, cx);
-                            })),
+                        toolbar_icon_button(
+                            "traffic-previous",
+                            IconName::ChevronLeft,
+                            self.tr("上一周期", "Previous period"),
+                            cx,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.traffic_ui.query =
+                                this.traffic_ui.query.shifted(false, stats::today());
+                            this.refresh_statistics(true, cx);
+                        })),
                     )
                     .child(div().text_sm().child(if start == end {
                         start.to_string()
@@ -273,17 +277,18 @@ impl AppView {
                         format!("{start} — {end}")
                     }))
                     .child(
-                        Button::new("traffic-next")
-                            .ghost()
-                            .icon(IconName::ChevronRight)
-                            .disabled(end >= today)
-                            .tooltip(self.tr("下一周期", "Next period"))
-                            .accessibility_label(self.tr("下一周期", "Next period"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.traffic_ui.query =
-                                    this.traffic_ui.query.shifted(true, stats::today());
-                                this.refresh_statistics(true, cx);
-                            })),
+                        toolbar_icon_button(
+                            "traffic-next",
+                            IconName::ChevronRight,
+                            self.tr("下一周期", "Next period"),
+                            cx,
+                        )
+                        .disabled(end >= today)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.traffic_ui.query =
+                                this.traffic_ui.query.shifted(true, stats::today());
+                            this.refresh_statistics(true, cx);
+                        })),
                     )
                     .child(
                         Button::new("traffic-current")

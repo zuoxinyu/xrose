@@ -477,6 +477,7 @@ impl AppView {
                                     more_button(
                                         SharedString::from(format!("group-menu-{}", group.id)),
                                         self.tr("分组操作", "Group actions"),
+                                        cx,
                                     )
                                     .dropdown_menu(
                                         menus::builder(
@@ -785,6 +786,7 @@ impl AppView {
                             more_button(
                                 SharedString::from(format!("rule-menu-{id}")),
                                 self.tr("规则操作", "Rule actions"),
+                                cx,
                             )
                             .dropdown_menu(menus::builder(
                                 cx.entity().downgrade(),
@@ -834,8 +836,15 @@ impl AppView {
                                 .items_center()
                                 .gap_2()
                                 .child(
-                                    more_button("rule-set-sources", self.tr("切换规则源", "Change rule set source"))
-                                        .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::RuleSetSources)),
+                                    more_button(
+                                        "rule-set-sources",
+                                        self.tr("切换规则源", "Change rule set source"),
+                                        cx,
+                                    )
+                                    .dropdown_menu(menus::builder(
+                                        cx.entity().downgrade(),
+                                        MenuTarget::RuleSetSources,
+                                    )),
                                 )
                                 .child(
                                     Button::new("sync-rulesets")

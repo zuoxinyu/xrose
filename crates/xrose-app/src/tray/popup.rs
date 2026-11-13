@@ -20,6 +20,7 @@ use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
 use crate::ui::theme::{SEMANTIC_ALPHA, palette};
 use crate::ui::traffic_label;
+use crate::ui::widgets::icon_button_style;
 
 const NODE_ROW_HEIGHT: f32 = 38.;
 const NODE_SCROLL_HINT_DELAY: Duration = Duration::from_millis(150);
@@ -680,7 +681,7 @@ impl Render for PopupView {
                     .child(
                         Button::new("tray-test")
                             .compact()
-                            .ghost()
+                            .custom(icon_button_style(&p, false, cx))
                             .icon(IconName::Gauge)
                             .tooltip(tr(lang, "全部节点测速", "Test all nodes"))
                             .disabled(d.busy_latency)
@@ -691,7 +692,7 @@ impl Render for PopupView {
                     .child(
                         Button::new("tray-settings")
                             .compact()
-                            .ghost()
+                            .custom(icon_button_style(&p, false, cx))
                             .icon(IconName::Settings)
                             .tooltip(tr(lang, "设置", "Settings"))
                             .on_click(cx.listener(|this, _, window, cx| {
