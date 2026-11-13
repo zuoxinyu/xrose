@@ -107,11 +107,11 @@ impl ProxyBackend {
 pub fn detect_backend() -> ProxyBackend {
     #[cfg(target_os = "macos")]
     {
-        return ProxyBackend::MacOs;
+        ProxyBackend::MacOs
     }
     #[cfg(target_os = "windows")]
     {
-        return ProxyBackend::Windows;
+        ProxyBackend::Windows
     }
     #[cfg(target_os = "linux")]
     {

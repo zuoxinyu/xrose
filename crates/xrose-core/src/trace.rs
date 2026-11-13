@@ -757,7 +757,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         TraceProtocol::Icmp => icmp_test(&target, running, &model).await,
     };
     publish(service, session)?;
-    if service.is_trace_current(id) == false {
+    if !service.is_trace_current(id) {
         return Err("cancelled".into());
     }
 
@@ -1684,7 +1684,6 @@ async fn socks5_udp_associate(
                 .map_err(|e| e.to_string())?;
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&buf[..16]);
-            IpAddr::V6(std::net::Ipv6Addr::from(octets));
             let port = u16::from_be_bytes([buf[16], buf[17]]);
             let addr =
                 std::net::SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::from(octets)), port);

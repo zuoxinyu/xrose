@@ -314,7 +314,6 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
                         .try_into()
                         .map_err(|_| "WireGuard reserved 必须包含三个字节".to_string())?
                 },
-                ..Default::default()
             };
             wg.validate().map_err(|e| e.to_string())?;
             node.credentials.wireguard = Some(wg);

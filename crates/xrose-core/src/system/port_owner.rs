@@ -142,7 +142,7 @@ fn proc_address(field: &str) -> Option<SocketAddr> {
         8 => IpAddr::from(word(ip)?),
         32 => {
             let mut octets = [0; 16];
-            for (index, dst) in octets.chunks_exact_mut(4).enumerate() {
+            for (index, dst) in octets.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 dst.copy_from_slice(&word(ip.get(index * 8..index * 8 + 8)?)?);
             }
             IpAddr::from(octets)

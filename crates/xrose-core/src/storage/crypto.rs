@@ -13,7 +13,7 @@ use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 
-use crate::error::{io_context, Error, Result};
+use crate::error::{Error, Result, io_context};
 
 const PREFIX: &str = "enc:v1:";
 
@@ -44,7 +44,7 @@ impl SecretBox {
             let mut file = options
                 .open(key_path)
                 .map_err(|e| io_context(key_path, e))?;
-            file.write_all(hex::encode(&key).as_bytes())
+            file.write_all(hex::encode(key).as_bytes())
                 .map_err(|e| io_context(key_path, e))?;
             key
         };

@@ -358,6 +358,58 @@ impl OwnerProcess {
     }
 }
 
+#[cfg(unix)]
+pub struct OwnerProcess(i32);
+/// Workers own a process group so a stuck worker cannot orphan its VPN child.
+#[cfg(unix)]
+pub fn kill_worker_group(pid: u32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if let Ok(pid) = i32::try_from(pid) {
+        if pid > 1 {
+            unsafe {
+                kill(-pid, 9);
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl OwnerProcess {
+    pub fn open(pid: u32) -> Result<Self> {
+        let pid = i32::try_from(pid)
+            .ok()
+            .filter(|&p| p > 0)
+            .ok_or_else(|| Error::other("所属进程无效"))?;
+        let owner = Self(pid);
+        if !owner.alive() {
+            return Err(Error::other("所属进程已退出或不可访问"));
+        }
+        Ok(owner)
+    }
+    pub fn alive(&self) -> bool {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        if unsafe { kill(self.0, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(1)
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+pub struct OwnerProcess;
+#[cfg(not(any(windows, unix)))]
+impl OwnerProcess {
+    pub fn open(_: u32) -> Result<Self> {
+        Err(Error::other("当前平台不支持进程归属检测"))
+    }
+    pub fn alive(&self) -> bool {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,56 +495,5 @@ mod tests {
         assert!(set_dns(root.path(), "test", "ts.net", "127.0.0.153").is_err());
         assert!(set_dns(root.path(), "test", "test.ts.net", "10.10.10.1").is_err());
         assert!(!root.path().join("dns-owner.json").exists());
-    }
-}
-#[cfg(unix)]
-pub struct OwnerProcess(i32);
-/// Workers own a process group so a stuck worker cannot orphan its VPN child.
-#[cfg(unix)]
-pub fn kill_worker_group(pid: u32) {
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    if let Ok(pid) = i32::try_from(pid) {
-        if pid > 1 {
-            unsafe {
-                kill(-pid, 9);
-            }
-        }
-    }
-}
-#[cfg(unix)]
-impl OwnerProcess {
-    pub fn open(pid: u32) -> Result<Self> {
-        let pid = i32::try_from(pid)
-            .ok()
-            .filter(|&p| p > 0)
-            .ok_or_else(|| Error::other("所属进程无效"))?;
-        let owner = Self(pid);
-        if !owner.alive() {
-            return Err(Error::other("所属进程已退出或不可访问"));
-        }
-        Ok(owner)
-    }
-    pub fn alive(&self) -> bool {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        if unsafe { kill(self.0, 0) } == 0 {
-            return true;
-        }
-        std::io::Error::last_os_error().raw_os_error() == Some(1)
-    }
-}
-
-#[cfg(not(any(windows, unix)))]
-pub struct OwnerProcess;
-#[cfg(not(any(windows, unix)))]
-impl OwnerProcess {
-    pub fn open(_: u32) -> Result<Self> {
-        Err(Error::other("当前平台不支持进程归属检测"))
-    }
-    pub fn alive(&self) -> bool {
-        false
     }
 }

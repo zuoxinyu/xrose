@@ -514,7 +514,7 @@ impl CoreAdapter for SingBoxAdapter {
                 }));
                 vpn_rules.push(json!({"preferred_by":tag,"action":"route","server":tag}));
             }
-            vpn_rules.extend(dns_section["rules"].as_array_mut().unwrap().drain(..));
+            vpn_rules.append(dns_section["rules"].as_array_mut().unwrap());
             dns_section["rules"] = json!(vpn_rules);
         } else if !ctx.mesh.dns.is_empty() {
             route["default_domain_resolver"] = json!("local");
@@ -1042,14 +1042,14 @@ fn resolve_detour(model: &AppModel, raw: &str, default_group: &str) -> Option<St
 
 fn split_server_address(address: &str, default_port: u16) -> (String, u16) {
     let address = address.trim();
-    if address.starts_with('[') {
-        if let Some((host, tail)) = address[1..].split_once(']') {
-            let port = tail
-                .strip_prefix(':')
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(default_port);
-            return (host.to_string(), port);
-        }
+    if let Some(rest) = address.strip_prefix('[')
+        && let Some((host, tail)) = rest.split_once(']')
+    {
+        let port = tail
+            .strip_prefix(':')
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(default_port);
+        return (host.to_string(), port);
     }
     if address.matches(':').count() == 1 {
         if let Some((host, port)) = address.rsplit_once(':') {

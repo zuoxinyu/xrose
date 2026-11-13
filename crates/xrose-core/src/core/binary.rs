@@ -199,7 +199,7 @@ impl BinaryManager {
             .into_iter()
             .filter(|b| b.matches_platform())
             .collect();
-        candidates.sort_by(|a, b| version_key(&b.version).cmp(&version_key(&a.version)));
+        candidates.sort_by_key(|c| std::cmp::Reverse(version_key(&c.version)));
         if let Some(version) = preferred_version {
             return candidates.into_iter().find(|b| b.version == version);
         }

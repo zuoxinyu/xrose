@@ -4613,13 +4613,13 @@ impl AppService {
                 let service = AppService {
                     inner: inner.clone(),
                 };
-                if tick % 10 == 0 {
+                if tick.is_multiple_of(10) {
                     service.refresh_local_binaries();
                 }
                 // Probe the privilege helper off the UI thread. The status is
                 // cached inside `privilege::status`, so this is cheap unless
                 // the cache expired.
-                if tick % 3 == 0 {
+                if tick.is_multiple_of(3) {
                     if let Ok(status) = tokio::task::spawn_blocking(privilege::status).await {
                         let changed = {
                             let mut guard = inner.helper.write();
@@ -4632,7 +4632,7 @@ impl AppService {
                         }
                     }
                 }
-                if tick % 2 == 0 && !service.is_busy("core") {
+                if tick.is_multiple_of(2) && !service.is_busy("core") {
                     if let Ok(_guard) = inner.mesh.operation.try_lock() {
                         if inner.mesh.refresh().await.is_err()
                             && inner
@@ -4671,7 +4671,7 @@ impl AppService {
                     continue;
                 }
                 service.poll_traffic_statistics().await;
-                if tick % 5 == 0 {
+                if tick.is_multiple_of(5) {
                     if let Some((_, settings, _)) = service.inner.core.statistics_context() {
                         if state.core == Some(CoreKind::SingBox) {
                             let previous = inner.proxies.read().clone();
@@ -4737,7 +4737,7 @@ impl AppService {
         let _ = self.persist_model();
         self.close_system_proxy();
         let core = self.inner.core.clone();
-        let _ = self.inner.rt.block_on(async move {
+        self.inner.rt.block_on(async move {
             let _ = core.stop().await;
         });
         self.inner.rt.block_on(self.flush_traffic_statistics());

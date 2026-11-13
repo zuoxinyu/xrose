@@ -285,7 +285,7 @@ async fn run_loop(mut ctx: RunContext) {
                 };
                 ctx.logs
                     .push(LogStream::App, LogLevel::Error, reason.reason.clone());
-                fail_or_retry(&ctx, reason, &mut attempt).await.map(|_| ());
+                fail_or_retry(&ctx, reason, &mut attempt).await;
                 return;
             }
         };
@@ -361,7 +361,7 @@ async fn run_loop(mut ctx: RunContext) {
         let watchdog = *ctx.watchdog.lock();
         if watchdog.enabled && attempt < watchdog.max_retries {
             attempt += 1;
-            let backoff = Duration::from_millis(500 * 2u64.min(attempt as u64).pow(2) as u64);
+            let backoff = Duration::from_millis(500 * 2u64.min(attempt as u64).pow(2));
             ctx.logs.push(
                 LogStream::App,
                 LogLevel::Warn,

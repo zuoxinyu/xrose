@@ -32,10 +32,9 @@ pub(crate) fn default_rule_set(tag: &str) -> Option<RuleSet> {
         format!(
             "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-{name}.srs"
         )
-    } else if let Some(code) = tag.strip_prefix("geoip-") {
-        format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs")
     } else {
-        return None;
+        let code = tag.strip_prefix("geoip-")?;
+        format!("https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-{code}.srs")
     };
     Some(RuleSet {
         tag: tag.into(),

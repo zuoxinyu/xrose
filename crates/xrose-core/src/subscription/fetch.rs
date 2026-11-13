@@ -15,9 +15,10 @@ pub struct FetchRequest {
     pub last_modified: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FetchStatus {
+    #[default]
     Ok,
     NotModified,
 }
@@ -31,12 +32,6 @@ pub struct FetchResponse {
     pub userinfo: Option<SubscriptionUserInfo>,
     pub title: Option<String>,
     pub update_interval_hours: Option<u64>,
-}
-
-impl Default for FetchStatus {
-    fn default() -> Self {
-        FetchStatus::Ok
-    }
 }
 
 pub const DEFAULT_USER_AGENT: &str = "Xrose/0.1.0 (v2rayN; sing-box)";

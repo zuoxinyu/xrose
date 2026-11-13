@@ -76,7 +76,7 @@ impl Observation {
 
 fn effective_proxies(dict: &CFDictionary<CFString, CFType>) -> Proxies {
     let enabled = |key: &str| {
-        dict.find(&CFString::from(key)).is_some_and(|v| {
+        dict.find(CFString::from(key)).is_some_and(|v| {
             v.downcast::<CFNumber>()
                 .and_then(|n| n.to_i32())
                 .is_some_and(|n| n != 0)
@@ -84,12 +84,12 @@ fn effective_proxies(dict: &CFDictionary<CFString, CFType>) -> Proxies {
         })
     };
     let string = |key: &str| {
-        dict.find(&CFString::from(key))
+        dict.find(CFString::from(key))
             .and_then(|v| v.downcast::<CFString>())
             .map(|s| s.to_string())
     };
     let port = |key: &str| {
-        dict.find(&CFString::from(key))
+        dict.find(CFString::from(key))
             .and_then(|v| v.downcast::<CFNumber>())
             .and_then(|n| n.to_i32())
             .map(|n| n.to_string())

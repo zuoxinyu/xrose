@@ -134,11 +134,7 @@ impl Subscription {
                         "{}://{}{}",
                         url.scheme(),
                         url.host_str().unwrap_or_default(),
-                        if url.path().is_empty() {
-                            "/..."
-                        } else {
-                            "/..."
-                        }
+                        "/..."
                     )
                 } else {
                     "（无效地址）".into()

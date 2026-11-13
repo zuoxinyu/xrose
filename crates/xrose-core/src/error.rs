@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 
 /// Errors surfaced by the core. UI-facing messages are intentionally kept
 /// human readable: the app shows `to_string()` directly.
@@ -83,6 +83,6 @@ pub fn io_context(path: &std::path::Path, err: std::io::Error) -> Error {
 }
 
 /// Convenience for callers that need to report a path in an otherwise opaque error.
-pub fn path_display(path: &PathBuf) -> String {
+pub fn path_display(path: &Path) -> String {
     path.display().to_string()
 }

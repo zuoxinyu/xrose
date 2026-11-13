@@ -56,7 +56,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
         } else if path.exists() {
             std::fs::remove_file(&path).map_err(|e| io_context(&path, e))?;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "macos")]
     {
@@ -93,7 +93,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
                 std::fs::remove_file(&path).map_err(|e| io_context(&path, e))?;
             }
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
@@ -115,7 +115,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
         } else {
             let _ = key.delete_value("Xrose");
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {

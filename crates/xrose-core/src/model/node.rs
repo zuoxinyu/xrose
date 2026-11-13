@@ -185,9 +185,10 @@ pub struct TlsOptions {
     pub reality: Option<RealityOptions>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Transport {
+    #[default]
     Tcp,
     WebSocket {
         #[serde(default = "default_ws_path")]
@@ -222,12 +223,6 @@ pub enum Transport {
 
 fn default_ws_path() -> String {
     "/".into()
-}
-
-impl Default for Transport {
-    fn default() -> Self {
-        Transport::Tcp
-    }
 }
 
 impl Transport {
@@ -269,10 +264,11 @@ impl Credentials {
     /// Hash of the secret material, used for de-duplication without leaking it.
     pub fn secret_fingerprint(&self) -> String {
         let mut secret = String::new();
-        for v in [&self.uuid, &self.password, &self.username, &self.method] {
-            if let Some(v) = v {
-                secret.push_str(v);
-            }
+        for v in [&self.uuid, &self.password, &self.username, &self.method]
+            .into_iter()
+            .flatten()
+        {
+            secret.push_str(v);
         }
         if let Some(wg) = &self.wireguard {
             secret.push_str(&serde_json::to_string(wg).unwrap_or_default());
