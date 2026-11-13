@@ -905,13 +905,13 @@ fn seed_demo(args: &[String]) -> Result<(), String> {
     let (_, _, home, _) = parse_args(args);
     let service = service(home)?;
     let content = r#"
-vless://11111111-2222-3333-4444-555555555555@hk.example.com:443?encryption=none&security=tls&sni=hk.example.com&type=ws&path=%2Fws#🇭🇰 香港 01
-vless://11111111-2222-3333-4444-555555555555@jp.example.com:443?encryption=none&security=reality&sni=www.microsoft.com&type=grpc&serviceName=grpc&pbk=ml58sJg9puxNs502V-apSbKQGLslmU4T3W6btDPizWI&sid=abcd1234&flow=xtls-rprx-vision#🇯🇵 东京 Reality
+vless://11111111-2222-3333-4444-555555555555@hk.example.com:443?encryption=none&security=tls&sni=hk.example.com&type=ws&path=%2Fws#香港 01
+vless://11111111-2222-3333-4444-555555555555@jp.example.com:443?encryption=none&security=reality&sni=www.microsoft.com&type=grpc&serviceName=grpc&pbk=ml58sJg9puxNs502V-apSbKQGLslmU4T3W6btDPizWI&sid=abcd1234&flow=xtls-rprx-vision#东京 Reality
 vmess://eyJ2IjoiMiIsInBzIjoi5paw5Yqg5Z2hIDAyIiwiYWRkIjoic2cuaG9zdC5leGFtcGxlLmNvbSIsInBvcnQiOiI0NDMiLCJpZCI6IjExMTExMTExLTIyMjItMzMzMy00NDQ0LTU1NTU1NTU1NTU1NSIsImFpZCI6IjAiLCJuZXQiOiJ3cyIsImhvc3QiOiJzZy5ob3N0LmV4YW1wbGUuY29tIiwicGF0aCI6Ii93cyIsInRscyI6InRscyIsInNuaSI6InNnLmhvc3QuZXhhbXBsZS5jb20ifQ==
-trojan://password123@us.example.com:443?security=tls&sni=us.example.com&type=ws&path=%2Ftj#🇺🇸 洛杉矶 Trojan
-ss://YWVzLTI1Ni1nY206c2VjcmV0MTIz@tw.example.com:8388#🇹🇼 台北 SS
-hysteria2://hy2pass@de.example.com:8443?sni=de.example.com&insecure=1&obfs=salamander&obfs-password=obfs#🇩🇪 法兰克福 HY2
-tuic://11111111-2222-3333-4444-555555555555:tuicpass@kr.example.com:443?congestion_control=bbr&sni=kr.example.com#🇰🇷 首尔 TUIC
+trojan://password123@us.example.com:443?security=tls&sni=us.example.com&type=ws&path=%2Ftj#洛杉矶 Trojan
+ss://YWVzLTI1Ni1nY206c2VjcmV0MTIz@tw.example.com:8388#台北 SS
+hysteria2://hy2pass@de.example.com:8443?sni=de.example.com&insecure=1&obfs=salamander&obfs-password=obfs#法兰克福 HY2
+tuic://11111111-2222-3333-4444-555555555555:tuicpass@kr.example.com:443?congestion_control=bbr&sni=kr.example.com#首尔 TUIC
 "#;
     let added = service.import_content(content);
     service.select_proxy_mode().map_err(|e| e.to_string())?;
