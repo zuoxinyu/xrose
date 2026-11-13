@@ -23,6 +23,8 @@ pub(crate) struct TrayWindowState {
     rule_group_id: Option<String>,
     collapsed_subs: std::collections::HashSet<String>,
     mesh_expanded: std::collections::HashSet<String>,
+    mesh_card_tabs: std::collections::HashMap<String, mesh::MeshCardTab>,
+    collapsed_mesh_sections: std::collections::HashSet<String>,
 }
 
 impl AppView {
@@ -65,6 +67,8 @@ impl AppView {
             rule_group_id: self.rule_group_id.clone(),
             collapsed_subs: self.collapsed_subs.clone(),
             mesh_expanded: self.mesh_expanded.clone(),
+            mesh_card_tabs: self.mesh_card_tabs.clone(),
+            collapsed_mesh_sections: self.collapsed_mesh_sections.clone(),
         }
     }
 
@@ -81,6 +85,8 @@ impl AppView {
         self.rule_group_id = state.rule_group_id;
         self.collapsed_subs = state.collapsed_subs;
         self.mesh_expanded = state.mesh_expanded;
+        self.mesh_card_tabs = state.mesh_card_tabs;
+        self.collapsed_mesh_sections = state.collapsed_mesh_sections;
         self.connection_list = state.connection_list;
         self.connections_limit = state.connections_limit;
         self.content_scroll.set_offset(state.content_offset);

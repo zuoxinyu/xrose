@@ -34,183 +34,155 @@ pub(in crate::ui) struct ForwardEditor {
 }
 
 impl AppView {
-    pub(super) fn forward_card(&self, p: &Palette, busy: bool, cx: &mut Context<Self>) -> Div {
-        let profiles = &self.snapshot.mesh.profiles;
-        let add = Button::new("mesh-forward-add")
-            .compact()
-            .h(px(CONTROL_HEIGHT))
-            .primary()
-            .icon(IconName::Plus)
-            .label(self.tr("添加转发", "Add forward"))
-            .disabled(busy || profiles.is_empty())
-            .on_click(cx.listener(|this, _, window, cx| {
-                if let Some(profile) = this.snapshot.mesh.profiles.first() {
-                    this.open_forward_editor(profile.id.clone(), None, None, window, cx);
-                }
-            }));
-        let mut panel = card(p).child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
-                .child(
-                    div()
-                        .text_lg()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.tr("端口转发", "Port forwarding")),
-                )
-                .child(add),
-        );
-        if self.snapshot.busy.iter().any(|key| key == "mesh-forward") {
-            panel = panel.child(
-                div()
-                    .text_sm()
-                    .text_color(p.muted_fg)
-                    .child(self.tr("正在更新转发…", "Updating port forwards…")),
-            );
-        }
-        if profiles
+    pub(super) fn mesh_profile_forwards(
+        &self,
+        profile: &MeshProfileView,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let rules: Vec<(bool, PortForward)> = profile
+            .port_forwards
             .iter()
-            .all(|p| p.port_forwards.is_empty() && p.service_forwards.is_empty())
-        {
-            return panel.child(div().text_sm().text_color(p.muted_fg).child(
-                if profiles.is_empty() {
-                    self.tr("先添加网络，再设置端口转发。", "Add a network to set up port forwarding.")
-                } else {
-                    self.tr("添加转发可访问组网设备，或将本机可达的服务提供给组网成员。", "Forward to mesh devices or share host-reachable services with mesh peers.")
-                },
+            .cloned()
+            .map(|r| (false, r))
+            .chain(
+                profile
+                    .service_forwards
+                    .iter()
+                    .map(|r| (true, local_rule(r))),
+            )
+            .collect();
+        if rules.is_empty() {
+            return div().py_2().text_xs().text_color(p.muted_fg).child(self.tr(
+                "当前网络暂无端口转发规则，可转发至组网设备或向组网共享本机服务。",
+                "No port forwarding rules for this network. Forward to mesh devices or share host services.",
             ));
         }
-        for profile in profiles
-            .iter()
-            .filter(|p| !p.port_forwards.is_empty() || !p.service_forwards.is_empty())
-        {
-            let mut group = div().flex().flex_col().gap_1().child(
+        let mut list = div().flex().flex_col();
+        for (index, (service, rule)) in rules.into_iter().enumerate() {
+            let id = format!(
+                "mesh-{}-{}-{index}",
+                if service { "service" } else { "forward" },
+                profile.id
+            );
+            let menu = menus::builder(
+                cx.entity().downgrade(),
+                if service {
+                    MenuTarget::ServiceForward(profile.id.clone(), service_rule(&rule))
+                } else {
+                    MenuTarget::Forward(profile.id.clone(), rule.clone())
+                },
+            );
+            let endpoint = |addr: std::net::SocketAddr| {
+                if self.hide_ips {
+                    format!("•••:{}", addr.port())
+                } else {
+                    addr.to_string()
+                }
+            };
+            let source = if service {
+                let addresses = self
+                    .snapshot
+                    .mesh
+                    .networks
+                    .iter()
+                    .find(|n| n.profile_id == profile.id)
+                    .map(|n| {
+                        n.addresses
+                            .iter()
+                            .filter_map(|v| v.split('/').next()?.parse::<std::net::IpAddr>().ok())
+                            .map(|ip| endpoint((ip, rule.listen.port()).into()))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if addresses.is_empty() {
+                    format!(
+                        "{}:{}",
+                        self.tr("本机虚拟地址", "Device mesh address"),
+                        rule.listen.port()
+                    )
+                } else {
+                    addresses.join(", ")
+                }
+            } else {
+                endpoint(rule.listen)
+            };
+            list = list.child(
                 div()
+                    .id(SharedString::from(id.clone()))
                     .flex()
                     .items_center()
                     .gap_2()
+                    .when(index > 0, |d| d.border_t_1().border_color(p.border))
+                    .py_1p5()
                     .child(
                         div()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(profile.name.clone()),
+                            .w(px(46.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .child(pill(rule.protocol.key().to_uppercase(), p.fg, p.panel_alt)),
                     )
-                    .child(pill(profile.provider.label(), p.muted_fg, p.panel_alt)),
+                    .child(
+                        div()
+                            .w(px(96.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .child(pill(
+                                if service {
+                                    self.tr("组网 → 本机", "Mesh → Host")
+                                } else {
+                                    self.tr("本机 → 组网", "Host → Mesh")
+                                },
+                                p.muted_fg,
+                                p.panel_alt,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w(px(192.))
+                            .flex_shrink_0()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .whitespace_normal()
+                            .child(source),
+                    )
+                    .child(
+                        div()
+                            .w(px(24.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_sm()
+                            .text_color(p.muted_fg)
+                            .child("→"),
+                    )
+                    .child(
+                        div()
+                            .w(px(192.))
+                            .flex_shrink_0()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .whitespace_normal()
+                            .child(endpoint(rule.target)),
+                    )
+                    .child(div().flex_1().min_w(px(0.)))
+                    .child(
+                        more_button(
+                            SharedString::from(format!("{id}-menu")),
+                            self.tr("转发操作", "Forward actions"),
+                            cx,
+                        )
+                        .dropdown_menu(menu.clone()),
+                    )
+                    .context_menu(menu),
             );
-            let rules = profile
-                .port_forwards
-                .iter()
-                .cloned()
-                .map(|r| (false, r))
-                .chain(
-                    profile
-                        .service_forwards
-                        .iter()
-                        .map(|r| (true, local_rule(r))),
-                );
-            for (index, (service, rule)) in rules.enumerate() {
-                let id = format!(
-                    "mesh-{}-{}-{index}",
-                    if service { "service" } else { "forward" },
-                    profile.id
-                );
-                let menu = menus::builder(
-                    cx.entity().downgrade(),
-                    if service {
-                        MenuTarget::ServiceForward(profile.id.clone(), service_rule(&rule))
-                    } else {
-                        MenuTarget::Forward(profile.id.clone(), rule.clone())
-                    },
-                );
-                let endpoint = |addr: std::net::SocketAddr| {
-                    if self.hide_ips {
-                        format!("•••:{}", addr.port())
-                    } else {
-                        addr.to_string()
-                    }
-                };
-                group = group.child(
-                    div()
-                        .id(SharedString::from(id.clone()))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .border_t_1()
-                        .border_color(p.border)
-                        .py_1()
-                        .child(pill(rule.protocol.key().to_uppercase(), p.fg, p.panel_alt))
-                        .child(pill(
-                            if service {
-                                self.tr("组网 → 本机", "Mesh → Host")
-                            } else {
-                                self.tr("本机 → 组网", "Host → Mesh")
-                            },
-                            p.muted_fg,
-                            p.panel_alt,
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_sm()
-                                .whitespace_normal()
-                                .child(format!(
-                                    "{} → {}",
-                                    if service {
-                                        let addresses = self
-                                            .snapshot
-                                            .mesh
-                                            .networks
-                                            .iter()
-                                            .find(|n| n.profile_id == profile.id)
-                                            .map(|n| {
-                                                n.addresses
-                                                    .iter()
-                                                    .filter_map(|v| {
-                                                        v.split('/')
-                                                            .next()?
-                                                            .parse::<std::net::IpAddr>()
-                                                            .ok()
-                                                    })
-                                                    .map(|ip| {
-                                                        endpoint((ip, rule.listen.port()).into())
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                            })
-                                            .unwrap_or_default();
-                                        if addresses.is_empty() {
-                                            format!(
-                                                "{}:{}",
-                                                self.tr("本机虚拟地址", "Device mesh address"),
-                                                rule.listen.port()
-                                            )
-                                        } else {
-                                            addresses.join(", ")
-                                        }
-                                    } else {
-                                        endpoint(rule.listen)
-                                    },
-                                    endpoint(rule.target)
-                                )),
-                        )
-                        .child(
-                            more_button(
-                                SharedString::from(format!("{id}-menu")),
-                                self.tr("转发操作", "Forward actions"),
-                                cx,
-                            )
-                            .dropdown_menu(menu.clone()),
-                        )
-                        .context_menu(menu),
-                );
-            }
-            panel = panel.child(group);
         }
-        panel
+        list
     }
 
     pub(in crate::ui) fn open_forward_editor(
@@ -437,6 +409,7 @@ impl AppView {
                         let Some(editor) = &mut this.forward_editor else {
                             return;
                         };
+                        let profile_id = editor.profile_id.clone();
                         let listen = editor.listen.read(cx).value();
                         let target = editor.target.read(cx).value();
                         let rule = PortForward::parse(&format!(
@@ -463,12 +436,17 @@ impl AppView {
                                 ForwardRule::ToMesh(r)
                             };
                             this.service.edit_mesh_forward_rule(
-                                &editor.profile_id,
+                                &profile_id,
                                 old.as_ref(),
                                 Some(rule),
                             )
                         }) {
                             Ok(()) => {
+                                super::activate_mesh_forwards_tab(
+                                    &mut this.mesh_card_tabs,
+                                    &mut this.collapsed_mesh_sections,
+                                    &profile_id,
+                                );
                                 window.close_dialog(cx);
                                 this.sync(cx);
                             }

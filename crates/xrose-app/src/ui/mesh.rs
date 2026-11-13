@@ -21,7 +21,8 @@ use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::mesh::{
-    EasyTierOptions, MeshPhase, MeshProfile, MeshProfileView, MeshProvider, MeshSecret,
+    EasyTierOptions, MeshPeer, MeshPhase, MeshProfile, MeshProfileView, MeshProvider,
+    MeshRuntimeView, MeshSecret,
 };
 use xrose_core::service::ToastLevel;
 
@@ -233,6 +234,52 @@ impl MeshForm {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum MeshCardTab {
+    #[default]
+    Devices,
+    Forwards,
+}
+
+fn select_mesh_card_tab(
+    tabs: &mut std::collections::HashMap<String, MeshCardTab>,
+    collapsed: &mut std::collections::HashSet<String>,
+    profile_id: &str,
+    target: MeshCardTab,
+) {
+    let current = tabs.get(profile_id).copied().unwrap_or_default();
+    if !collapsed.contains(profile_id) && current == target {
+        collapsed.insert(profile_id.to_owned());
+    } else {
+        collapsed.remove(profile_id);
+        tabs.insert(profile_id.to_owned(), target);
+    }
+}
+
+pub(super) fn activate_mesh_forwards_tab(
+    tabs: &mut std::collections::HashMap<String, MeshCardTab>,
+    collapsed: &mut std::collections::HashSet<String>,
+    profile_id: &str,
+) {
+    collapsed.remove(profile_id);
+    tabs.insert(profile_id.to_owned(), MeshCardTab::Forwards);
+}
+
+fn toggle_mesh_section(collapsed: &mut std::collections::HashSet<String>, profile_id: &str) {
+    if !collapsed.remove(profile_id) {
+        collapsed.insert(profile_id.to_owned());
+    }
+}
+
+fn empty_grid_field(label: SharedString, p: &Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(0.))
+        .child(div().text_xs().text_color(p.muted_fg).child(label))
+        .child(div().text_sm().text_color(p.muted_fg).py_1().child("—"))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MeshTextKind {
     Plain,
@@ -313,8 +360,10 @@ impl AppView {
                     cx.notify();
                 }))
         });
-        // Give the route text the same column in both states so the trailing button stays put.
-        let fill_width = expanded || (kind == MeshTextKind::Routes && overflow);
+        // Keep the trailing disclosure aligned for addresses and routes so leading values stay flush.
+        let has_label = !label.is_empty();
+        let trailing_disclosure = kind != MeshTextKind::Plain;
+        let fill_width = expanded || (trailing_disclosure && overflow);
         let content =
             div()
                 .id(SharedString::from(format!("{id}-content")))
@@ -325,7 +374,7 @@ impl AppView {
                 .max_w_full()
                 .min_w(px(0.))
                 .when(fill_width, |d| d.w_full())
-                .children(disclosure.take_if(|_| kind != MeshTextKind::Routes))
+                .children(disclosure.take_if(|_| !trailing_disclosure))
                 .child(
                     div()
                         .min_w(px(0.))
@@ -371,6 +420,9 @@ impl AppView {
             .flex_1()
             .w_full()
             .min_w(px(0.))
+            .when(has_label, |d| {
+                d.text_sm().font_weight(FontWeight::MEDIUM).text_color(p.fg)
+            })
             .when(kind != MeshTextKind::Plain, |d| {
                 d.font_family(cx.theme().mono_font_family.clone())
             })
@@ -381,13 +433,11 @@ impl AppView {
             .flex_col()
             .flex_1()
             .min_w(px(0.))
-            .when(!label.is_empty(), |d| {
-                d.child(
+            .when(has_label, |d| {
+                d.gap_0p5().child(
                     div()
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_xs()
                         .text_color(p.muted_fg)
-                        .py_1()
                         .child(label.to_owned()),
                 )
             })
@@ -696,10 +746,497 @@ impl AppView {
             )
     }
 
+    fn mesh_basic_info_grid(
+        &self,
+        profile: &MeshProfileView,
+        state: &MeshRuntimeView,
+        active: bool,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let local_name = if state.local_hostname.trim().is_empty() {
+            profile.hostname.as_str()
+        } else {
+            state.local_hostname.as_str()
+        };
+        let show_full_grid = active
+            && (state.phase == MeshPhase::Connected
+                || !state.addresses.is_empty()
+                || !state.routes.is_empty()
+                || state.dns_suffix.is_some());
+        if !show_full_grid && local_name.is_empty() {
+            return None;
+        }
+        let mut grid = div()
+            .grid()
+            .grid_cols(4)
+            .gap_4()
+            .w_full()
+            .min_w(px(0.))
+            .child(
+                div()
+                    .col_span(1)
+                    .min_w(px(0.))
+                    .child(if local_name.is_empty() {
+                        empty_grid_field(self.tr("本机设备名", "Local device name"), p)
+                            .into_any_element()
+                    } else {
+                        self.mesh_text(
+                            format!("mesh-{}-local-name", profile.id),
+                            &self.tr("本机设备名", "Local device name"),
+                            vec![local_name.to_owned()],
+                            MeshTextKind::Plain,
+                            p,
+                            cx,
+                        )
+                        .into_any_element()
+                    }),
+            );
+        if show_full_grid {
+            grid = grid
+                .child(
+                    div()
+                        .col_span(1)
+                        .min_w(px(0.))
+                        .child(if state.addresses.is_empty() {
+                            empty_grid_field(self.tr("虚拟地址", "Addresses"), p).into_any_element()
+                        } else {
+                            self.mesh_text(
+                                format!("mesh-{}-addresses", profile.id),
+                                &self.tr("虚拟地址", "Addresses"),
+                                state.addresses.clone(),
+                                MeshTextKind::Address,
+                                p,
+                                cx,
+                            )
+                            .into_any_element()
+                        }),
+                )
+                .child(
+                    div()
+                        .col_span(2)
+                        .min_w(px(0.))
+                        .child(if state.routes.is_empty() {
+                            empty_grid_field(self.tr("网段与路由", "Networks and routes"), p)
+                                .into_any_element()
+                        } else {
+                            self.mesh_text(
+                                format!("mesh-{}-routes", profile.id),
+                                &self.tr("网段与路由", "Networks and routes"),
+                                state.routes.clone(),
+                                MeshTextKind::Routes,
+                                p,
+                                cx,
+                            )
+                            .into_any_element()
+                        }),
+                );
+            if let Some(suffix) = &state.dns_suffix {
+                grid = grid.child(div().col_span_full().min_w(px(0.)).child(self.mesh_text(
+                    format!("mesh-{}-dns", profile.id),
+                    "MagicDNS",
+                    vec![format!("*.{suffix}")],
+                    MeshTextKind::Plain,
+                    p,
+                    cx,
+                )));
+            }
+        }
+        Some(grid)
+    }
+
+    fn mesh_peers_list(
+        &self,
+        profile_id: &str,
+        provider: MeshProvider,
+        active: bool,
+        peers: &[MeshPeer],
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let lang = self.lang();
+        if peers.is_empty() {
+            return div()
+                .py_2()
+                .text_xs()
+                .text_color(p.muted_fg)
+                .child(if active {
+                    self.tr(
+                        "当前网络暂无已连接设备",
+                        "No connected devices in this network",
+                    )
+                } else {
+                    self.tr(
+                        "连接网络后可查看成员设备",
+                        "Connect to view network devices",
+                    )
+                });
+        }
+        let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));
+        for peer in peers {
+            let has_address = !peer.addresses.is_empty();
+            let peer_id = format!("mesh-peer-{profile_id}-{}", peer.id);
+            let expanded = self.mesh_expanded.contains(&peer_id);
+            let mut badges = super::mesh_sync::badges(peer, provider, lang, p);
+            if let Some(probe) =
+                self.mesh_probe_feedback
+                    .for_peer(profile_id, peer, std::time::Instant::now())
+            {
+                let color = if probe.success {
+                    p.ok_text
+                } else {
+                    p.danger_text
+                };
+                let label = if probe.success {
+                    match probe.latency_ms {
+                        Some(ms) => format!("{} {ms:.1} ms", tr(lang, "可达", "Reachable")),
+                        None => tr(lang, "设备可达", "Device reachable").to_string(),
+                    }
+                } else {
+                    tr(lang, "探测失败", "Probe failed").to_string()
+                };
+                let detail = if self.hide_ips {
+                    label.clone()
+                } else {
+                    probe.detail.clone()
+                };
+                badges = badges.child(
+                    div()
+                        .id(SharedString::from(format!("{peer_id}-probe")))
+                        .child(pill(label, color, color.opacity(SEMANTIC_ALPHA)))
+                        .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx)),
+                );
+            }
+            let mut subnets = peer.subnets.clone();
+            if let Some(x) = &peer.xrose {
+                subnets.extend(x.subnets.clone());
+            }
+            subnets.sort();
+            subnets.dedup();
+            let menu = menus::builder(
+                cx.entity().downgrade(),
+                MenuTarget::MeshPeer(profile_id.to_owned(), peer.id.clone()),
+            );
+            let hover_bg = p.panel_alt.opacity(0.45);
+            members = members.child(
+                div()
+                    .id(SharedString::from(peer_id.clone()))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .p_3()
+                    .rounded_lg()
+                    .bg(p.bg)
+                    .border_1()
+                    .border_color(p.border)
+                    .hover(move |d| d.bg(hover_bg))
+                    .child(dot(if peer.online { p.success } else { p.muted_fg }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(p.fg)
+                                    .when(!expanded, |d| d.truncate())
+                                    .when(expanded, |d| d.whitespace_normal())
+                                    .child(SelectableText::new(
+                                        SharedString::from(format!("{peer_id}-name")),
+                                        peer.name.clone(),
+                                    )),
+                            )
+                            .child(badges)
+                            .when(!subnets.is_empty() && !self.hide_ips, |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(subnets.join(", ")),
+                                )
+                            })
+                            .when(has_address, |d| {
+                                d.child(div().text_xs().text_color(p.muted_fg).child(
+                                    self.mesh_text(
+                                        peer_id.clone(),
+                                        "",
+                                        peer.addresses.clone(),
+                                        MeshTextKind::Address,
+                                        p,
+                                        cx,
+                                    ),
+                                ))
+                            })
+                            .when(!has_address, |d| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .py_1()
+                                        .min_h(px(26.))
+                                        .child(tr(lang, "暂无 IP 地址", "No IP address")),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when_some(peer.latency_ms, |d, ms| {
+                                d.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(format!("{ms:.1} ms")),
+                                )
+                            })
+                            .child(pill(
+                                if peer.online {
+                                    tr(lang, "在线", "Online")
+                                } else {
+                                    tr(lang, "离线", "Offline")
+                                },
+                                if peer.online { p.ok_text } else { p.muted_fg },
+                                if peer.online {
+                                    p.ok_text.opacity(0.1)
+                                } else {
+                                    p.panel_alt
+                                },
+                            )),
+                    )
+                    .child(
+                        more_button(
+                            SharedString::from(format!("{peer_id}-menu")),
+                            tr(lang, "设备操作", "Device actions"),
+                            cx,
+                        )
+                        .dropdown_menu(menu.clone()),
+                    )
+                    .context_menu(menu),
+            );
+        }
+        members
+    }
+
+    fn mesh_card_subsection(
+        &self,
+        profile: &MeshProfileView,
+        provider: MeshProvider,
+        active: bool,
+        busy: bool,
+        state: &MeshRuntimeView,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let peer_count = state.peers.len();
+        let forward_count = profile.port_forwards.len() + profile.service_forwards.len();
+        let connected = state.phase == MeshPhase::Connected;
+        if !connected && peer_count == 0 && forward_count == 0 {
+            return None;
+        }
+        let active_tab = self
+            .mesh_card_tabs
+            .get(&profile.id)
+            .copied()
+            .unwrap_or_default();
+        let collapsed = self.collapsed_mesh_sections.contains(&profile.id);
+        let tab_button = |tab: MeshCardTab,
+                          suffix: &str,
+                          label: SharedString,
+                          count: usize,
+                          cx: &mut Context<Self>| {
+            let profile_id = profile.id.clone();
+            let selected = !collapsed && active_tab == tab;
+            let variant = if selected {
+                ButtonCustomVariant::new(cx)
+                    .color(p.accent)
+                    .foreground(p.primary)
+                    .hover(p.accent)
+                    .active(p.accent)
+            } else {
+                ButtonCustomVariant::new(cx)
+                    .foreground(p.muted_fg)
+                    .hover(p.neutral_hover())
+                    .active(p.neutral_active())
+            };
+            let badge_bg = if selected {
+                if p.is_dark {
+                    p.primary.opacity(0.22)
+                } else {
+                    p.panel.opacity(0.92)
+                }
+            } else {
+                p.panel_alt
+            };
+            let badge_fg = if selected { p.primary } else { p.muted_fg };
+            Button::new(SharedString::from(format!(
+                "mesh-tab-{suffix}-{profile_id}"
+            )))
+            .compact()
+            .h(px(26.))
+            .custom(variant)
+            .border_1()
+            .border_color(if selected {
+                p.primary
+            } else {
+                cx.theme().transparent
+            })
+            .when(selected, |b| b.font_weight(FontWeight::MEDIUM))
+            .label(label)
+            .child(
+                div()
+                    .px_1p5()
+                    .rounded_full()
+                    .text_xs()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .bg(badge_bg)
+                    .text_color(badge_fg)
+                    .child(count.to_string()),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                select_mesh_card_tab(
+                    &mut this.mesh_card_tabs,
+                    &mut this.collapsed_mesh_sections,
+                    &profile_id,
+                    tab,
+                );
+                cx.notify();
+            }))
+        };
+        // Keep device list on the left and port forwarding on the right.
+        let tabs = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .p_0p5()
+            .rounded_md()
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.border)
+            .child(tab_button(
+                MeshCardTab::Devices,
+                "devices",
+                self.tr("设备列表", "Devices"),
+                peer_count,
+                cx,
+            ))
+            .child(tab_button(
+                MeshCardTab::Forwards,
+                "forwards",
+                self.tr("端口转发", "Port forwarding"),
+                forward_count,
+                cx,
+            ));
+        let toggle_profile_id = profile.id.clone();
+        let toggle_label = if collapsed {
+            self.tr("展开", "Expand")
+        } else {
+            self.tr("收起", "Collapse")
+        };
+        let toggle_tip = if collapsed {
+            match active_tab {
+                MeshCardTab::Devices => self.tr("展开设备列表", "Expand device list"),
+                MeshCardTab::Forwards => self.tr("展开端口转发", "Expand port forwards"),
+            }
+        } else {
+            match active_tab {
+                MeshCardTab::Devices => self.tr("收起设备列表", "Collapse device list"),
+                MeshCardTab::Forwards => self.tr("收起端口转发", "Collapse port forwards"),
+            }
+        };
+        let add_forward_profile_id = profile.id.clone();
+        let right_actions = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .when(!collapsed && active_tab == MeshCardTab::Forwards, |d| {
+                d.child(
+                    Button::new(SharedString::from(format!(
+                        "mesh-card-add-forward-{}",
+                        profile.id
+                    )))
+                    .compact()
+                    .ghost()
+                    .h(px(28.))
+                    .border_1()
+                    .border_color(p.border)
+                    .icon(IconName::Plus)
+                    .label(self.tr("添加转发", "Add forward"))
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_forward_editor(
+                            add_forward_profile_id.clone(),
+                            None,
+                            None,
+                            window,
+                            cx,
+                        );
+                    })),
+                )
+            })
+            .child(
+                Button::new(SharedString::from(format!(
+                    "mesh-section-toggle-{}",
+                    profile.id
+                )))
+                .compact()
+                .ghost()
+                .h(px(28.))
+                .accessibility_label(toggle_tip.clone())
+                .tooltip(toggle_tip)
+                .label(toggle_label)
+                .child(
+                    Icon::new(if collapsed {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronUp
+                    })
+                    .size(px(14.)),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    toggle_mesh_section(&mut this.collapsed_mesh_sections, &toggle_profile_id);
+                    cx.notify();
+                })),
+            );
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .pt_3()
+            .border_t_1()
+            .border_color(p.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(tabs)
+                    .child(right_actions),
+            );
+        if !collapsed {
+            section = section.child(match active_tab {
+                MeshCardTab::Devices => {
+                    self.mesh_peers_list(&profile.id, provider, active, &state.peers, p, cx)
+                }
+                MeshCardTab::Forwards => self.mesh_profile_forwards(profile, p, cx),
+            });
+        }
+        Some(section)
+    }
+
     pub(crate) fn page_mesh(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
+        let forward_busy = self.snapshot.busy.iter().any(|key| key == "mesh-forward");
         let mut body = div().flex().flex_col().gap_4().w_full().min_w(px(0.));
         body = body.child(
             card(&p)
@@ -774,6 +1311,14 @@ impl AppView {
                             "Supports concurrent connections and proxy bypass integration. Connections stay active in the tray and disconnect on exit.",
                         )),
                 )
+                .when(forward_busy, |d| {
+                    d.child(
+                        div()
+                            .text_sm()
+                            .text_color(p.muted_fg)
+                            .child(self.tr("正在更新转发…", "Updating port forwards…")),
+                    )
+                })
                 .when(!self.snapshot.mesh.supported, |d| {
                     d.child(empty_hint(
                         &p,
@@ -786,7 +1331,6 @@ impl AppView {
                 }),
         );
 
-        body = body.child(self.forward_card(&p, busy, cx));
         for profile in self.snapshot.mesh.profiles.clone() {
             let provider = profile.provider;
             let id = profile.id.clone();
@@ -846,7 +1390,10 @@ impl AppView {
                 && self.snapshot.settings.effective_tun()
                 && self.snapshot.settings.tun_strict_route;
             let mut status_tips: Vec<String> = Vec::new();
-            for message in [state.error, state.warning].into_iter().flatten() {
+            for message in [state.error.as_deref(), state.warning.as_deref()]
+                .into_iter()
+                .flatten()
+            {
                 let trimmed = message.trim();
                 if !trimmed.is_empty() {
                     status_tips.push(trimmed.to_string());
@@ -1024,267 +1571,39 @@ impl AppView {
                         .child(reason),
                 );
             }
-            let local_name = if state.local_hostname.trim().is_empty() {
-                &profile.hostname
-            } else {
-                &state.local_hostname
-            };
-            if !local_name.is_empty() {
-                network = network.child(self.mesh_text(
-                    format!("mesh-{}-local-name", profile.id),
-                    &self.tr("本机设备名", "Local device name"),
-                    vec![local_name.clone()],
-                    MeshTextKind::Plain,
-                    &p,
-                    cx,
-                ));
-            }
-            if !active {
-                body = body.child(network);
-                continue;
-            }
-            let auth_hint = if needs_approval && official_control {
-                Some(tr(
-                    lang,
-                    "请管理员在 Machines 页面找到标有 Needs approval 的设备，选择 Approve。",
-                    "Ask an administrator to open Machines and select Approve for the device marked Needs approval.",
-                ))
-            } else if needs_approval {
-                Some(tr(
-                    lang,
-                    "请联系此控制服务器的管理员批准设备。",
-                    "Ask the administrator of this control server to approve the device.",
-                ))
-            } else if needs_auth && state.login_url.is_none() {
-                Some(tr(
-                    lang,
-                    "如果迟迟没有登录链接，请检查控制服务器地址和网络连接，然后断开并重新连接。",
-                    "If the sign-in link does not appear, check the control server address and connectivity, then disconnect and reconnect.",
-                ))
-            } else {
-                None
-            };
-            if let Some(hint) = auth_hint {
-                network = network.child(div().text_sm().text_color(p.muted_fg).child(hint));
-            }
-            let mut details = vec![
-                (
-                    "addresses",
-                    self.tr("虚拟地址", "Addresses"),
-                    state.addresses,
-                ),
-                (
-                    "routes",
-                    self.tr("网段与路由", "Networks and routes"),
-                    state.routes,
-                ),
-            ];
-            if let Some(suffix) = state.dns_suffix {
-                details.push(("dns", "MagicDNS".into(), vec![format!("*.{suffix}")]));
-            }
-            for (key, label, values) in details {
-                if !values.is_empty() {
-                    network = network.child(self.mesh_text(
-                        format!("mesh-{}-{key}", profile.id),
-                        &label,
-                        values,
-                        match key {
-                            "routes" => MeshTextKind::Routes,
-                            "addresses" => MeshTextKind::Address,
-                            _ => MeshTextKind::Plain,
-                        },
-                        &p,
-                        cx,
-                    ));
-                }
-            }
-            let peer_count = state.peers.len();
-            if peer_count > 0 {
-                let profile_id = profile.id.clone();
-                let collapsed = self.collapsed_mesh_devices.contains(&profile_id);
-                let label = format!("{} ({peer_count})", self.tr("设备列表", "Devices"));
-                let tip = if collapsed {
-                    self.tr("展开设备列表", "Expand device list")
+            if active {
+                let auth_hint = if needs_approval && official_control {
+                    Some(tr(
+                        lang,
+                        "请管理员在 Machines 页面找到标有 Needs approval 的设备，选择 Approve。",
+                        "Ask an administrator to open Machines and select Approve for the device marked Needs approval.",
+                    ))
+                } else if needs_approval {
+                    Some(tr(
+                        lang,
+                        "请联系此控制服务器的管理员批准设备。",
+                        "Ask the administrator of this control server to approve the device.",
+                    ))
+                } else if needs_auth && state.login_url.is_none() {
+                    Some(tr(
+                        lang,
+                        "如果迟迟没有登录链接，请检查控制服务器地址和网络连接，然后断开并重新连接。",
+                        "If the sign-in link does not appear, check the control server address and connectivity, then disconnect and reconnect.",
+                    ))
                 } else {
-                    self.tr("收起设备列表", "Collapse device list")
+                    None
                 };
-                network = network.child(
-                    div().flex().child(
-                        Button::new(SharedString::from(format!("mesh-devices-{profile_id}")))
-                            .compact()
-                            .ghost()
-                            .accessibility_label(format!("{tip} ({peer_count})"))
-                            .tooltip(tip)
-                            .label(label)
-                            .icon(if collapsed {
-                                IconName::ChevronRight
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.collapsed_mesh_devices.remove(&profile_id) {
-                                    this.collapsed_mesh_devices.insert(profile_id.clone());
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                );
-                if collapsed {
-                    body = body.child(network);
-                    continue;
+                if let Some(hint) = auth_hint {
+                    network = network.child(div().text_sm().text_color(p.muted_fg).child(hint));
                 }
-                let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));
-                for peer in state.peers {
-                    let has_address = !peer.addresses.is_empty();
-                    let peer_id = format!("mesh-peer-{}-{}", profile.id, peer.id);
-                    let expanded = self.mesh_expanded.contains(&peer_id);
-                    let mut badges = super::mesh_sync::badges(&peer, provider, lang, &p);
-                    if let Some(probe) = self.mesh_probe_feedback.for_peer(
-                        &profile.id,
-                        &peer,
-                        std::time::Instant::now(),
-                    ) {
-                        let color = if probe.success {
-                            p.ok_text
-                        } else {
-                            p.danger_text
-                        };
-                        let label = if probe.success {
-                            match probe.latency_ms {
-                                Some(ms) => format!("{} {ms:.1} ms", tr(lang, "可达", "Reachable")),
-                                None => tr(lang, "设备可达", "Device reachable").to_string(),
-                            }
-                        } else {
-                            tr(lang, "探测失败", "Probe failed").to_string()
-                        };
-                        let detail = if self.hide_ips {
-                            label.clone()
-                        } else {
-                            probe.detail.clone()
-                        };
-                        badges = badges.child(
-                            div()
-                                .id(SharedString::from(format!("{peer_id}-probe")))
-                                .child(pill(label, color, color.opacity(SEMANTIC_ALPHA)))
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(detail.clone()).build(window, cx)
-                                }),
-                        );
-                    }
-                    let mut subnets = peer.subnets.clone();
-                    if let Some(x) = &peer.xrose {
-                        subnets.extend(x.subnets.clone());
-                    }
-                    subnets.sort();
-                    subnets.dedup();
-                    let menu = menus::builder(
-                        cx.entity().downgrade(),
-                        MenuTarget::MeshPeer(profile.id.clone(), peer.id),
-                    );
-                    let hover_bg = p.panel_alt.opacity(0.45);
-                    members = members.child(
-                        div()
-                            .id(SharedString::from(peer_id.clone()))
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .p_3()
-                            .rounded_lg()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
-                            .hover(move |d| d.bg(hover_bg))
-                            .child(dot(if peer.online { p.success } else { p.muted_fg }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(p.fg)
-                                            .when(!expanded, |d| d.truncate())
-                                            .when(expanded, |d| d.whitespace_normal())
-                                            .child(SelectableText::new(
-                                                SharedString::from(format!("{peer_id}-name")),
-                                                peer.name,
-                                            )),
-                                    )
-                                    .child(badges)
-                                    .when(!subnets.is_empty() && !self.hide_ips, |d| {
-                                        d.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(p.muted_fg)
-                                                .child(subnets.join(", ")),
-                                        )
-                                    })
-                                    .when(has_address, |d| {
-                                        d.child(div().text_xs().text_color(p.muted_fg).child(
-                                            self.mesh_text(
-                                                peer_id.clone(),
-                                                "",
-                                                peer.addresses,
-                                                MeshTextKind::Address,
-                                                &p,
-                                                cx,
-                                            ),
-                                        ))
-                                    })
-                                    .when(!has_address, |d| {
-                                        d.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(p.muted_fg)
-                                                .py_1()
-                                                .min_h(px(26.))
-                                                .child(tr(lang, "暂无 IP 地址", "No IP address")),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .when_some(peer.latency_ms, |d, ms| {
-                                        d.child(
-                                            div()
-                                                .text_xs()
-                                                .text_color(p.muted_fg)
-                                                .child(format!("{ms:.1} ms")),
-                                        )
-                                    })
-                                    .child(pill(
-                                        if peer.online {
-                                            tr(lang, "在线", "Online")
-                                        } else {
-                                            tr(lang, "离线", "Offline")
-                                        },
-                                        if peer.online { p.ok_text } else { p.muted_fg },
-                                        if peer.online {
-                                            p.ok_text.opacity(0.1)
-                                        } else {
-                                            p.panel_alt
-                                        },
-                                    )),
-                            )
-                            .child(
-                                more_button(
-                                    SharedString::from(format!("{peer_id}-menu")),
-                                    tr(lang, "设备操作", "Device actions"),
-                                    cx,
-                                )
-                                .dropdown_menu(menu.clone()),
-                            )
-                            .context_menu(menu),
-                    );
-                }
-                network = network.child(members);
+            }
+            if let Some(info_grid) = self.mesh_basic_info_grid(&profile, &state, active, &p, cx) {
+                network = network.child(info_grid);
+            }
+            if let Some(subsection) =
+                self.mesh_card_subsection(&profile, provider, active, busy, &state, &p, cx)
+            {
+                network = network.child(subsection);
             }
             body = body.child(network);
         }
@@ -1411,5 +1730,51 @@ mod probe_feedback_tests {
         mesh.networks[0].phase = MeshPhase::Disconnected;
         feedback.observe(&mesh, now + Duration::from_secs(11));
         assert!(feedback.results.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod card_tab_tests {
+    use super::{
+        MeshCardTab, activate_mesh_forwards_tab, select_mesh_card_tab, toggle_mesh_section,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn default_tab_is_always_devices() {
+        assert_eq!(MeshCardTab::default(), MeshCardTab::Devices);
+    }
+
+    #[test]
+    fn clicking_tabs_and_toggle_controls_collapse_and_expand() {
+        let mut tabs = HashMap::new();
+        let mut collapsed = HashSet::new();
+        let id = "net-1";
+
+        // Clicking the currently active expanded tab collapses the section.
+        select_mesh_card_tab(&mut tabs, &mut collapsed, id, MeshCardTab::Devices);
+        assert!(collapsed.contains(id));
+
+        // Clicking another tab expands the section and switches to that tab.
+        select_mesh_card_tab(&mut tabs, &mut collapsed, id, MeshCardTab::Forwards);
+        assert!(!collapsed.contains(id));
+        assert_eq!(tabs.get(id), Some(&MeshCardTab::Forwards));
+
+        // Toggling collapses while keeping the active tab selected.
+        toggle_mesh_section(&mut collapsed, id);
+        assert!(collapsed.contains(id));
+        assert_eq!(tabs.get(id), Some(&MeshCardTab::Forwards));
+
+        // Toggling again restores expansion on the remembered tab.
+        toggle_mesh_section(&mut collapsed, id);
+        assert!(!collapsed.contains(id));
+        assert_eq!(tabs.get(id), Some(&MeshCardTab::Forwards));
+
+        // Saving a forward expands and selects the forwards tab.
+        collapsed.insert(id.to_owned());
+        tabs.insert(id.to_owned(), MeshCardTab::Devices);
+        activate_mesh_forwards_tab(&mut tabs, &mut collapsed, id);
+        assert!(!collapsed.contains(id));
+        assert_eq!(tabs.get(id), Some(&MeshCardTab::Forwards));
     }
 }
