@@ -79,6 +79,16 @@ impl Page {
         ]
     }
 
+    fn from_shortcut(key: &str) -> Option<Self> {
+        if key == "," {
+            return Some(Self::Settings);
+        }
+        let [b @ b'1'..=b'9'] = key.as_bytes() else {
+            return None;
+        };
+        Self::all().get((b - b'1') as usize).copied()
+    }
+
     fn icon(&self) -> IconName {
         match self {
             Page::Mesh => IconName::Network,
@@ -1495,64 +1505,23 @@ impl Render for AppView {
                     cx.notify();
                     return;
                 }
-                if mods.platform
-                    && matches!(key, "," | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8")
-                {
-                    this.route_drag_epoch += 1;
-                    this.dismiss_action_menu(cx);
-                }
                 // Development shortcut for repeated flyout lifecycle checks.
                 #[cfg(debug_assertions)]
                 if (mods.control || mods.platform) && mods.shift && key == "t" {
                     crate::tray::queue_command(crate::tray::TrayCommand::TogglePopup);
                 }
                 if mods.platform {
-                    match key {
-                        "," => {
-                            this.page = Page::Settings;
-                            cx.notify();
-                        }
-                        "1" => {
-                            this.page = Page::Nodes;
-                            cx.notify();
-                        }
-                        "2" => {
-                            this.page = Page::Subscriptions;
-                            cx.notify();
-                        }
-                        "3" => {
-                            this.page = Page::Routing;
-                            cx.notify();
-                        }
-                        "4" => {
-                            this.page = Page::Dns;
-                            cx.notify();
-                        }
-                        "5" => {
-                            this.page = Page::Connections;
-                            cx.notify();
-                        }
-                        "6" => {
-                            this.page = Page::Diagnostics;
-                            cx.notify();
-                        }
-                        "7" => {
-                            this.page = Page::Logs;
-                            cx.notify();
-                        }
-                        "8" => {
-                            this.page = Page::Settings;
-                            cx.notify();
-                        }
-                        "r" => {
-                            this.service
-                                .test_latency(xrose_core::service::LatencyScope::All);
-                            cx.notify();
-                        }
-                        "q" => {
-                            crate::tray::queue_command(crate::tray::TrayCommand::Quit);
-                        }
-                        _ => {}
+                    if let Some(page) = Page::from_shortcut(key) {
+                        this.route_drag_epoch += 1;
+                        this.dismiss_action_menu(cx);
+                        this.page = page;
+                        cx.notify();
+                    } else if key == "r" {
+                        this.service
+                            .test_latency(xrose_core::service::LatencyScope::All);
+                        cx.notify();
+                    } else if key == "q" {
+                        crate::tray::queue_command(crate::tray::TrayCommand::Quit);
                     }
                 }
             }))
@@ -1643,5 +1612,23 @@ mod traffic_tests {
             super::traffic_position(1000, 200, 1000, 100),
             Some((1., 0.))
         );
+    }
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::Page;
+
+    #[test]
+    fn numeric_shortcuts_match_sidebar_order() {
+        for (index, page) in Page::all().into_iter().enumerate() {
+            let key = (index + 1).to_string();
+            assert_eq!(Page::from_shortcut(&key), Some(page));
+        }
+        assert_eq!(Page::from_shortcut("5"), Some(Page::Mesh));
+        assert_eq!(Page::from_shortcut("9"), Some(Page::Settings));
+        assert_eq!(Page::from_shortcut(","), Some(Page::Settings));
+        assert_eq!(Page::from_shortcut("0"), None);
+        assert_eq!(Page::from_shortcut("a"), None);
     }
 }
