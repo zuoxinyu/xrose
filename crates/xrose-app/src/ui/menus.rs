@@ -74,7 +74,6 @@ pub(super) enum Command {
     DeleteDns(String),
     DeleteHost(String),
     RefreshConnections,
-    ToggleProcessIcons,
     BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
     CloseConnections,
     UninstallHelper,
@@ -752,15 +751,6 @@ impl AppView {
                         .core
                         .is_some_and(|core| core.capabilities().clash_connections);
                 menu = menu
-                    .item(
-                        add(
-                            "显示进程图标",
-                            "Show process icons",
-                            true,
-                            Command::ToggleProcessIcons,
-                        )
-                        .checked(self.process_icons.is_some()),
-                    )
                     .item(add(
                         "刷新",
                         "Refresh",
@@ -896,7 +886,6 @@ impl AppView {
                 | Command::ClearLogs
                 | Command::ShareLogs(..)
                 | Command::ClearRecording
-                | Command::ToggleProcessIcons
                 | Command::EditForward(_, _)
                 | Command::DeleteForward(_, _)
                 | Command::EditService(_, _)
@@ -1241,14 +1230,6 @@ impl AppView {
                 self.service.block_connection_target(target, kind)
             }
             Command::RefreshConnections => self.service.refresh_connections(),
-            Command::ToggleProcessIcons => {
-                if let Some(icons) = self.process_icons.take() {
-                    icons.clear(window, cx);
-                } else {
-                    self.process_icons = Some(Default::default());
-                }
-                cx.notify();
-            }
             Command::UninstallHelper => self.service.uninstall_helper(),
             Command::CloseConnections => {
                 if self.snapshot.process.phase.is_alive()

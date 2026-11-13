@@ -1052,51 +1052,14 @@ impl AppView {
                           cx: &mut Context<Self>| {
             let profile_id = profile.id.clone();
             let selected = !collapsed && active_tab == tab;
-            let variant = if selected {
-                ButtonCustomVariant::new(cx)
-                    .color(p.accent)
-                    .foreground(p.primary)
-                    .hover(p.accent)
-                    .active(p.accent)
-            } else {
-                ButtonCustomVariant::new(cx)
-                    .foreground(p.muted_fg)
-                    .hover(p.neutral_hover())
-                    .active(p.neutral_active())
-            };
-            let badge_bg = if selected {
-                if p.is_dark {
-                    p.primary.opacity(0.22)
-                } else {
-                    p.panel.opacity(0.92)
-                }
-            } else {
-                p.panel_alt
-            };
-            let badge_fg = if selected { p.primary } else { p.muted_fg };
-            Button::new(SharedString::from(format!(
-                "mesh-tab-{suffix}-{profile_id}"
-            )))
-            .compact()
-            .h(px(26.))
-            .custom(variant)
-            .border_1()
-            .border_color(if selected {
-                p.primary
-            } else {
-                cx.theme().transparent
-            })
-            .when(selected, |b| b.font_weight(FontWeight::MEDIUM))
-            .label(label)
-            .child(
-                div()
-                    .px_1p5()
-                    .rounded_full()
-                    .text_xs()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .bg(badge_bg)
-                    .text_color(badge_fg)
-                    .child(count.to_string()),
+            segmented_tab_button(
+                SharedString::from(format!("mesh-tab-{suffix}-{profile_id}")),
+                None,
+                label,
+                count.to_string(),
+                selected,
+                p,
+                cx,
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 select_mesh_card_tab(
@@ -1109,15 +1072,7 @@ impl AppView {
             }))
         };
         // Keep device list on the left and port forwarding on the right.
-        let tabs = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .p_0p5()
-            .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+        let tabs = segmented_tab_track(p)
             .child(tab_button(
                 MeshCardTab::Devices,
                 "devices",

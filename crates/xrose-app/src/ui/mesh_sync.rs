@@ -1,14 +1,14 @@
 //! Mesh peer capabilities, selective sharing, and review before importing.
 use super::*;
-use gpui_kit::component::input::Input;
 use gpui_kit::component::WindowExt;
+use gpui_kit::component::input::Input;
 use std::collections::BTreeSet;
 use xrose_core::mesh::{
-    sync::{
-        data::{Category, Difference},
-        ShareMode,
-    },
     MeshPeer, MeshProvider,
+    sync::{
+        ShareMode,
+        data::{Category, Difference},
+    },
 };
 
 pub(super) struct SyncUi {

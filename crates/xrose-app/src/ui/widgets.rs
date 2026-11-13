@@ -2,13 +2,13 @@ use super::theme::*;
 use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode, Selectable};
 use gpui_kit::App;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::Icon;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    Div, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Role,
+    Div, ElementId, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, Pixels, Role,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement, Styled, div, px,
 };
 
@@ -326,6 +326,76 @@ pub fn danger_icon_button(
         .accessibility_label(label)
         .w(px(ICON_BUTTON_SIZE))
         .h(px(ICON_BUTTON_SIZE))
+}
+
+/// Bordered segmented tab track shared by Mesh card tabs and Connections primary tabs.
+pub(super) fn segmented_tab_track(p: &Palette) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .p_0p5()
+        .rounded_md()
+        .bg(p.bg)
+        .border_1()
+        .border_color(p.border)
+}
+
+/// Cyan-capsule segmented tab button with an optional icon and trailing count or value badge.
+pub(super) fn segmented_tab_button(
+    id: impl Into<ElementId>,
+    icon: Option<IconName>,
+    label: SharedString,
+    badge: impl Into<SharedString>,
+    selected: bool,
+    p: &Palette,
+    cx: &App,
+) -> Button {
+    let variant = if selected {
+        ButtonCustomVariant::new(cx)
+            .color(p.accent)
+            .foreground(p.primary)
+            .hover(p.accent)
+            .active(p.accent)
+    } else {
+        ButtonCustomVariant::new(cx)
+            .foreground(p.muted_fg)
+            .hover(p.neutral_hover())
+            .active(p.neutral_active())
+    };
+    let badge_bg = if selected {
+        if p.is_dark {
+            p.primary.opacity(0.22)
+        } else {
+            p.panel.opacity(0.92)
+        }
+    } else {
+        p.panel_alt
+    };
+    let badge_fg = if selected { p.primary } else { p.muted_fg };
+    Button::new(id)
+        .compact()
+        .h(px(26.))
+        .custom(variant)
+        .border_1()
+        .border_color(if selected {
+            p.primary
+        } else {
+            cx.theme().transparent
+        })
+        .when_some(icon, |b, icon| b.icon(icon))
+        .when(selected, |b| b.font_weight(FontWeight::MEDIUM))
+        .label(label)
+        .child(
+            div()
+                .px_1p5()
+                .rounded_full()
+                .text_xs()
+                .font_family(cx.theme().mono_font_family.clone())
+                .bg(badge_bg)
+                .text_color(badge_fg)
+                .child(badge.into()),
+        )
 }
 
 pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {

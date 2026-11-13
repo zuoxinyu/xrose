@@ -4,18 +4,18 @@
 //! validation rules so the CLI and the UI cannot drift apart.
 
 use gpui_base::Disableable;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
-use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
 
 mod vpn;
 
-use super::theme::{palette, Palette};
-use super::widgets::*;
 use super::AppView;
+use super::theme::{Palette, palette};
+use super::widgets::*;
 
 pub(crate) struct ManualNodeForm {
     vpn: vpn::VpnForm,

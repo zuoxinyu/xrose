@@ -1,19 +1,23 @@
-//! Shared traffic ranking rendered as stacked bars or a table.
+//! Shared traffic ranking rendered as horizontal stacked dual-color bars or a table.
 
 use std::time::{Duration, Instant};
 
-use gpui_base::Disableable;
+use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xrose_core::model::CoreKind;
 use xrose_core::traffic_statistics::{
     self as stats, TrafficDimension, TrafficEntityKind, TrafficQuery, TrafficRow, TrafficWindow,
 };
 use xrose_core::util::format_bytes;
 
+use super::connections::ConnectionsTab;
 use super::menus::Command;
 use super::theme::{self, Palette};
 use super::widgets::*;
@@ -21,6 +25,7 @@ use super::{AppView, Page, text_input};
 
 const BAR_PAGE_SIZE: usize = 10;
 const TABLE_PAGE_SIZE: usize = 50;
+const MIN_NONZERO_BAR_FILL: f32 = 0.008;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum TrafficDisplayMode {
@@ -30,18 +35,19 @@ pub(super) enum TrafficDisplayMode {
 }
 
 pub(super) struct TrafficUi {
-    pub expanded: bool,
     display: TrafficDisplayMode,
     query: TrafficQuery,
     dimension_chosen: bool,
+    help_open: bool,
     page: usize,
     table_limit: usize,
     date_input: Entity<InputState>,
     date_error: bool,
-    last_query: Instant,
+    last_query: Option<Instant>,
     focused: Option<usize>,
     focus_handles: Vec<FocusHandle>,
 }
+
 impl TrafficUi {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         let focus_handles: Vec<_> = (0..BAR_PAGE_SIZE).map(|_| cx.focus_handle()).collect();
@@ -53,15 +59,15 @@ impl TrafficUi {
             .detach();
         }
         Self {
-            expanded: false,
             display: TrafficDisplayMode::Bar,
             query: TrafficQuery::default(),
             dimension_chosen: false,
+            help_open: false,
             page: 0,
             table_limit: TABLE_PAGE_SIZE,
             date_input: text_input(window, cx, "yyyy-MM-dd"),
             date_error: false,
-            last_query: Instant::now(),
+            last_query: None,
             focused: None,
             focus_handles,
         }
@@ -69,7 +75,26 @@ impl TrafficUi {
 }
 
 impl AppView {
+    pub(super) fn ensure_default_traffic_dimension(&mut self) {
+        if self.traffic_ui.dimension_chosen {
+            return;
+        }
+        let core = self
+            .snapshot
+            .process
+            .core
+            .unwrap_or(self.snapshot.settings.core);
+        self.traffic_ui.query.dimension = if core.capabilities().clash_connections
+            && self.snapshot.model.work_mode == xrose_core::model::WorkMode::Direct
+        {
+            TrafficDimension::Process
+        } else {
+            TrafficDimension::Node
+        };
+    }
+
     pub(super) fn refresh_statistics(&mut self, reset_page: bool, cx: &mut Context<Self>) {
+        self.ensure_default_traffic_dimension();
         if reset_page {
             self.traffic_ui.page = 0;
             self.traffic_ui.table_limit = TABLE_PAGE_SIZE;
@@ -82,173 +107,264 @@ impl AppView {
         self.service
             .query_traffic_statistics(self.traffic_ui.query.clone());
         self.refresh_snapshot();
-        self.traffic_ui.last_query = Instant::now();
+        self.traffic_ui.last_query = Some(Instant::now());
         cx.notify();
     }
+
     pub(super) fn statistics_tick(&mut self, cx: &mut Context<Self>) {
-        if self.page == Page::Connections
-            && self.traffic_ui.expanded
-            && self.traffic_ui.last_query.elapsed() >= Duration::from_secs(5)
-            && !self.snapshot.traffic_statistics.loading
-        {
+        if self.page != Page::Connections || self.snapshot.traffic_statistics.loading {
+            return;
+        }
+        let due = match self.traffic_ui.last_query {
+            None => true,
+            Some(last) => {
+                if self.connections_tab == ConnectionsTab::Statistics {
+                    last.elapsed() >= Duration::from_secs(5)
+                } else {
+                    self.snapshot.settings.traffic_statistics_enabled
+                        && last.elapsed() >= Duration::from_secs(10)
+                }
+            }
+        };
+        if due {
             self.refresh_statistics(false, cx);
         }
     }
 
-    pub(super) fn traffic_statistics_controls(&self, cx: &mut Context<Self>) -> Div {
-        let expanded = self.traffic_ui.expanded;
-        let visibility_tip = if expanded {
-            self.tr("隐藏流量统计", "Hide traffic statistics")
+    pub(super) fn traffic_statistics_badge(&self) -> String {
+        let view = &self.snapshot.traffic_statistics;
+        if view.range_start.is_some() || view.total.total() > 0 {
+            format_bytes(view.total.total())
         } else {
-            self.tr("显示流量统计", "Show traffic statistics")
-        };
-        let collection_label = self.tr("启用流量统计", "Collect traffic statistics");
-        div()
-            .flex()
-            .items_center()
-            .flex_shrink_0()
-            .ml_auto()
-            .gap_2()
-            .child(
-                icon_button_toggled(
-                    icon_button("traffic-expand", IconName::ChartColumn, visibility_tip, cx),
-                    expanded,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.traffic_ui.expanded = !this.traffic_ui.expanded;
-                    if this.traffic_ui.expanded {
-                        if !this.traffic_ui.dimension_chosen {
-                            let core = this
-                                .snapshot
-                                .process
-                                .core
-                                .unwrap_or(this.snapshot.settings.core);
-                            this.traffic_ui.query.dimension =
-                                if core.capabilities().clash_connections
-                                    && this.snapshot.model.work_mode
-                                        == xrose_core::model::WorkMode::Direct
-                                {
-                                    TrafficDimension::Process
-                                } else {
-                                    TrafficDimension::Node
-                                };
-                        }
-                        this.refresh_statistics(false, cx);
-                    } else {
-                        cx.notify();
-                    }
-                })),
-            )
-            .child(
-                danger_icon_button(
-                    "traffic-clear",
-                    IconName::Eraser,
-                    self.tr("清空流量统计", "Clear traffic statistics"),
-                    cx,
-                )
-                .disabled(self.snapshot.busy.iter().any(|key| key == "traffic-clear"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.run_command(Command::ClearTrafficStatistics, false, window, cx);
-                })),
-            )
-            .child(
-                Switch::new("traffic-enabled")
-                    .accessibility_label(collection_label.clone())
-                    .label(self.tr("统计", "Statistics"))
-                    .tooltip(collection_label)
-                    .checked(self.snapshot.settings.traffic_statistics_enabled)
-                    .disabled(
-                        self.snapshot
-                            .busy
-                            .iter()
-                            .any(|key| key == "traffic-setting"),
-                    )
-                    .on_change(cx.listener(|this, checked, _, _| {
-                        this.service.set_traffic_statistics_enabled(*checked)
-                    })),
-            )
+            "—".to_string()
+        }
     }
 
     pub(super) fn traffic_statistics_content(&self, p: &Palette, cx: &mut Context<Self>) -> Div {
         let enabled = self.snapshot.settings.traffic_statistics_enabled;
         let view = &self.snapshot.traffic_statistics;
+        let help_open = self.traffic_ui.help_open;
+        let collection_label = self.tr("启用流量统计", "Collect traffic statistics");
+        let rules_summary = self.tr(
+            "记录内核处理的代理和直连流量，关闭后保留历史。分类根据连接采样汇总，短连接可能未被采样；无法确定归属的流量计入“未归因”。",
+            "Records proxy and direct traffic handled by the core; history is retained when paused. Short connections may miss sampling and unknown ownership counts as unattributed.",
+        );
+        let help_variant = if help_open {
+            ButtonCustomVariant::new(cx)
+                .color(p.accent)
+                .foreground(p.primary)
+                .hover(p.accent)
+                .active(p.accent)
+        } else {
+            ButtonCustomVariant::new(cx)
+                .foreground(p.muted_fg)
+                .hover(p.neutral_hover())
+                .active(p.neutral_active())
+        };
+
         let mut panel = div().flex().flex_col().gap_3();
-        panel = panel.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-            "记录内核处理的代理和直连流量，关闭后保留历史。",
-            "Records proxy and direct traffic handled by the core. History is retained when collection is off.")));
         panel = panel.child(
             div()
                 .flex()
                 .items_center()
-                .gap_3()
+                .justify_between()
+                .gap_2()
                 .flex_wrap()
                 .child(
-                    ChoiceGroup::new(
-                        "traffic-dimension",
-                        vec![
-                            self.tr("按节点", "By node"),
-                            self.tr("按进程", "By process"),
-                            self.tr("按主域名", "By domain"),
-                        ],
-                        match self.traffic_ui.query.dimension {
-                            TrafficDimension::Node => 0,
-                            TrafficDimension::Process => 1,
-                            TrafficDimension::Domain => 2,
-                        },
-                    )
-                    .on_change(cx.listener(|this, index, _, cx| {
-                        this.traffic_ui.dimension_chosen = true;
-                        this.traffic_ui.query.dimension = [
-                            TrafficDimension::Node,
-                            TrafficDimension::Process,
-                            TrafficDimension::Domain,
-                        ][*index];
-                        this.refresh_statistics(true, cx);
-                    })),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            ChoiceGroup::new(
+                                "traffic-dimension",
+                                vec![
+                                    self.tr("按节点", "By node"),
+                                    self.tr("按进程", "By process"),
+                                    self.tr("按主域名", "By domain"),
+                                ],
+                                match self.traffic_ui.query.dimension {
+                                    TrafficDimension::Node => 0,
+                                    TrafficDimension::Process => 1,
+                                    TrafficDimension::Domain => 2,
+                                },
+                            )
+                            .small()
+                            .on_change(cx.listener(
+                                |this, index, _, cx| {
+                                    this.traffic_ui.dimension_chosen = true;
+                                    this.traffic_ui.query.dimension = [
+                                        TrafficDimension::Node,
+                                        TrafficDimension::Process,
+                                        TrafficDimension::Domain,
+                                    ][*index];
+                                    this.refresh_statistics(true, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            ChoiceGroup::new(
+                                "traffic-window",
+                                vec![
+                                    self.tr("运行以来", "This session"),
+                                    self.tr("日", "Day"),
+                                    self.tr("周", "Week"),
+                                    self.tr("月", "Month"),
+                                ],
+                                match self.traffic_ui.query.window {
+                                    TrafficWindow::Session => 0,
+                                    TrafficWindow::Day => 1,
+                                    TrafficWindow::Week => 2,
+                                    TrafficWindow::Month => 3,
+                                },
+                            )
+                            .small()
+                            .on_change(cx.listener(
+                                |this, index, _, cx| {
+                                    this.traffic_ui.query.window = [
+                                        TrafficWindow::Session,
+                                        TrafficWindow::Day,
+                                        TrafficWindow::Week,
+                                        TrafficWindow::Month,
+                                    ][*index];
+                                    this.refresh_statistics(true, cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            ChoiceGroup::new(
+                                "traffic-display",
+                                vec![self.tr("条形图", "Bar chart"), self.tr("表格", "Table")],
+                                usize::from(self.traffic_ui.display == TrafficDisplayMode::Table),
+                            )
+                            .small()
+                            .on_change(cx.listener(
+                                |this, index, _, cx| {
+                                    this.traffic_ui.display = if *index == 0 {
+                                        TrafficDisplayMode::Bar
+                                    } else {
+                                        TrafficDisplayMode::Table
+                                    };
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            Button::new("traffic-attribution-help")
+                                .xsmall()
+                                .compact()
+                                .h(px(24.))
+                                .px_2()
+                                .custom(help_variant)
+                                .selected(help_open)
+                                .toggled(help_open)
+                                .icon(IconName::Info)
+                                .label(self.tr("归因说明", "Attribution"))
+                                .tooltip(rules_summary)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.traffic_ui.help_open = !this.traffic_ui.help_open;
+                                    cx.notify();
+                                })),
+                        ),
                 )
                 .child(
-                    ChoiceGroup::new(
-                        "traffic-window",
-                        vec![
-                            self.tr("运行以来", "This session"),
-                            self.tr("日", "Day"),
-                            self.tr("周", "Week"),
-                            self.tr("月", "Month"),
-                        ],
-                        match self.traffic_ui.query.window {
-                            TrafficWindow::Session => 0,
-                            TrafficWindow::Day => 1,
-                            TrafficWindow::Week => 2,
-                            TrafficWindow::Month => 3,
-                        },
-                    )
-                    .on_change(cx.listener(|this, index, _, cx| {
-                        this.traffic_ui.query.window = [
-                            TrafficWindow::Session,
-                            TrafficWindow::Day,
-                            TrafficWindow::Week,
-                            TrafficWindow::Month,
-                        ][*index];
-                        this.refresh_statistics(true, cx);
-                    })),
-                )
-                .child(
-                    ChoiceGroup::new(
-                        "traffic-display",
-                        vec![self.tr("柱状图", "Bar chart"), self.tr("表格", "Table")],
-                        usize::from(self.traffic_ui.display == TrafficDisplayMode::Table),
-                    )
-                    .on_change(cx.listener(|this, index, _, cx| {
-                        this.traffic_ui.display = if *index == 0 {
-                            TrafficDisplayMode::Bar
-                        } else {
-                            TrafficDisplayMode::Table
-                        };
-                        cx.notify();
-                    })),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_shrink_0()
+                        .ml_auto()
+                        .child(
+                            danger_icon_button(
+                                "traffic-clear",
+                                IconName::Eraser,
+                                self.tr("清空流量统计", "Clear traffic statistics"),
+                                cx,
+                            )
+                            .disabled(self.snapshot.busy.iter().any(|key| key == "traffic-clear"))
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.run_command(
+                                        Command::ClearTrafficStatistics,
+                                        false,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        )
+                        .child(
+                            Switch::new("traffic-enabled")
+                                .accessibility_label(collection_label.clone())
+                                .label(self.tr("流量采样", "Sampling"))
+                                .tooltip(collection_label)
+                                .checked(enabled)
+                                .disabled(
+                                    self.snapshot
+                                        .busy
+                                        .iter()
+                                        .any(|key| key == "traffic-setting"),
+                                )
+                                .on_change(cx.listener(|this, checked, _, _| {
+                                    this.service.set_traffic_statistics_enabled(*checked)
+                                })),
+                        ),
                 ),
         );
+
+        let xray_active = view.has_xray || self.snapshot.process.core == Some(CoreKind::Xray);
+        if help_open {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(p.bg)
+                    .border_1()
+                    .border_color(p.border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.fg)
+                            .child(self.tr("流量采样与归因规则", "Traffic sampling & attribution")),
+                    )
+                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                        "记录内核处理的代理和直连流量，关闭后保留历史。",
+                        "Records proxy and direct traffic handled by the core. History is retained when collection is off.",
+                    )))
+                    .when(
+                        view.has_singbox
+                            || self.snapshot.process.core == Some(CoreKind::SingBox),
+                        |d| {
+                            d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                                "分类根据连接采样汇总，短连接可能未被采样；无法确定归属的流量计入“未归因”。",
+                                "Categories use connection samples, which may miss short connections. Traffic without a known category is listed as unattributed.",
+                            )))
+                        },
+                    )
+                    .when(xray_active, |d| {
+                        d.child(div().text_xs().text_color(p.muted_fg).child(
+                            if self.traffic_ui.query.dimension == TrafficDimension::Node {
+                                self.tr(
+                                    "Xray 节点流量可能包含协议开销及前置代理流量，节点相加可能与区间合计不同。",
+                                    "Xray node counters may include protocol overhead and chained proxy traffic; their sum can differ from the period total.",
+                                )
+                            } else {
+                                self.tr(
+                                    "Xray 不提供进程和域名分类，其流量仅计入区间合计。",
+                                    "Xray does not provide process or domain categories. Its traffic is included only in the period total.",
+                                )
+                            },
+                        ))
+                    }),
+            );
+        }
+
         if self.traffic_ui.query.window != TrafficWindow::Session {
             let today = stats::today();
             let (start, end) = self.traffic_ui.query.range(today);
@@ -351,12 +467,9 @@ impl AppView {
             )));
         }
         if view.save_error.is_some() {
-            panel = panel.child(div().text_xs().text_color(p.danger_text).child(self.tr("统计尚未保存，正在重试。请检查磁盘空间和数据目录权限。", "Statistics are not saved yet. Retrying; check disk space and data directory permissions.")));
-        }
-        if view.collection_error || view.has_gaps {
-            panel = panel.child(div().text_xs().text_color(p.warn_text).child(self.tr(
-                "部分时段未能取得流量数据，统计可能不完整。",
-                "Traffic data was unavailable for some intervals; statistics may be incomplete.",
+            panel = panel.child(div().text_xs().text_color(p.danger_text).child(self.tr(
+                "统计尚未保存，正在重试。请检查磁盘空间和数据目录权限。",
+                "Statistics are not saved yet. Retrying; check disk space and data directory permissions.",
             )));
         }
         if !self.snapshot.process.phase.is_alive() && enabled {
@@ -368,51 +481,142 @@ impl AppView {
         if view.range_start.is_none() && (view.loading || view.query_error.is_some()) {
             return panel;
         }
+
+        let mono = cx.theme().mono_font_family.clone();
+        let last_sample = view.last_sample_at.and_then(|at| {
+            chrono::DateTime::from_timestamp(at, 0).map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+            })
+        });
         panel = panel.child(
             div()
                 .flex()
                 .items_center()
+                .justify_between()
+                .gap_3()
                 .flex_wrap()
-                .gap_4()
-                .child(div().text_sm().text_color(p.data_down).child(format!(
-                    "{}  {}",
-                    self.tr("↓ 下载", "↓ Download"),
-                    format_bytes(view.total.download)
-                )))
-                .child(div().text_sm().text_color(p.data_up).child(format!(
-                    "{}  {}",
-                    self.tr("↑ 上传", "↑ Upload"),
-                    format_bytes(view.total.upload)
-                )))
-                .child(div().text_sm().child(format!(
-                    "{}  {}",
-                    self.tr("合计", "Total"),
-                    format_bytes(view.total.total())
-                ))),
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .bg(p.bg)
+                .border_1()
+                .border_color(p.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_4()
+                        .text_sm()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_color(p.data_down)
+                                .child(div().size(px(8.)).rounded_xs().bg(p.data_down))
+                                .child(self.tr("↓ 下载", "↓ Download"))
+                                .child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(format_bytes(view.total.download)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_color(p.data_up)
+                                .child(div().size(px(8.)).rounded_xs().bg(p.data_up))
+                                .child(self.tr("↑ 上传", "↑ Upload"))
+                                .child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(format_bytes(view.total.upload)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    div()
+                                        .text_color(p.muted_fg)
+                                        .child(self.tr("Σ 合计", "Σ Total")),
+                                )
+                                .child(
+                                    div()
+                                        .font_family(mono.clone())
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.fg)
+                                        .child(format_bytes(view.total.total())),
+                                ),
+                        ),
+                )
+                .when(
+                    view.collection_error || view.has_gaps || last_sample.is_some(),
+                    |d| {
+                        let gap_tip = self.tr(
+                            "部分时段未能取得流量数据，统计可能不完整。",
+                            "Traffic data was unavailable for some intervals; statistics may be incomplete.",
+                        );
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .flex_wrap()
+                                .ml_auto()
+                                .when(view.collection_error || view.has_gaps, |w| {
+                                    w.child(
+                                        div()
+                                            .id("traffic-incomplete-warning")
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .px_2()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(p.warning.opacity(theme::SEMANTIC_ALPHA))
+                                            .text_xs()
+                                            .text_color(p.warn_text)
+                                            .tooltip(move |window, cx| {
+                                                Tooltip::new(gap_tip.clone()).build(window, cx)
+                                            })
+                                            .child(Icon::new(IconName::TriangleAlert).size(px(12.)))
+                                            .child(self.tr("部分时段采样不完整", "Incomplete intervals")),
+                                    )
+                                })
+                                .when_some(last_sample, |s, text| {
+                                    s.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .font_family(mono.clone())
+                                            .child(format!(
+                                                "{} {text}",
+                                                self.tr("最后采样", "Last sample")
+                                            )),
+                                    )
+                                }),
+                        )
+                    },
+                ),
         );
-        if let Some(at) = view.last_sample_at {
-            let text = chrono::DateTime::from_timestamp(at, 0)
-                .map(|at| {
-                    at.with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d %H:%M:%S")
-                        .to_string()
-                })
-                .unwrap_or_default();
-            panel = panel.child(
-                div()
-                    .text_xs()
-                    .text_color(p.muted_fg)
-                    .child(format!("{} {text}", self.tr("最后采样", "Last sample"))),
-            );
+
+        if xray_active && self.traffic_ui.query.dimension != TrafficDimension::Node && !help_open {
+            panel = panel.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                "Xray 不提供进程和域名分类，其流量仅计入区间合计。",
+                "Xray does not provide process or domain categories. Its traffic is included only in the period total.",
+            )));
         }
-        if view.has_singbox {
-            panel = panel.child(div().text_xs().text_color(p.muted_fg).child(self.tr("分类根据连接采样汇总，短连接可能未被采样；无法确定归属的流量计入“未归因”。", "Categories use connection samples, which may miss short connections. Traffic without a known category is listed as unattributed.")));
-        }
-        if view.has_xray || self.snapshot.process.core == Some(xrose_core::model::CoreKind::Xray) {
-            panel = panel.child(div().text_xs().text_color(p.muted_fg).child(if self.traffic_ui.query.dimension == TrafficDimension::Node {
-                self.tr("Xray 节点流量可能包含协议开销及前置代理流量，节点相加可能与区间合计不同。", "Xray node counters may include protocol overhead and chained proxy traffic; their sum can differ from the period total.")
-            } else { self.tr("Xray 不提供进程和域名分类，其流量仅计入区间合计。", "Xray does not provide process or domain categories. Its traffic is included only in the period total.") }));
-        }
+
         if view.rows.is_empty() {
             panel = panel.child(empty_hint(
                 p,
@@ -421,8 +625,8 @@ impl AppView {
                     && self.traffic_ui.query.window == TrafficWindow::Session
                 {
                     self.tr(
-                        "开启统计后可查看流量排行与历史。",
-                        "Enable collection to view traffic rankings and history.",
+                        "开启流量采样后可查看流量排行与历史。",
+                        "Enable sampling to view traffic rankings and history.",
                     )
                 } else {
                     self.tr(
@@ -432,7 +636,7 @@ impl AppView {
                 },
             ));
         } else if self.traffic_ui.display == TrafficDisplayMode::Bar {
-            panel = panel.child(self.traffic_bars(p, cx));
+            panel = panel.child(self.traffic_horizontal_bars(p, cx));
         } else {
             panel = panel.child(self.traffic_table(p, cx));
         }
@@ -442,7 +646,7 @@ impl AppView {
     fn traffic_label(&self, row: &TrafficRow) -> String {
         let label = match row.entity.kind {
             TrafficEntityKind::Named => {
-                if self.snapshot.settings.privacy_mode
+                if (self.hide_ips || self.snapshot.settings.privacy_mode)
                     && self.traffic_ui.query.dimension != TrafficDimension::Process
                 {
                     self.tr("已隐藏", "Hidden").to_string()
@@ -462,6 +666,7 @@ impl AppView {
             label
         }
     }
+
     fn traffic_detail(&self, row: &TrafficRow) -> String {
         format!(
             "{}\n{}: {} · {}: {} · {}: {}",
@@ -474,7 +679,17 @@ impl AppView {
             format_bytes(row.bytes.total())
         )
     }
-    fn traffic_bars(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+
+    fn share_denominator(&self) -> u64 {
+        let view = &self.snapshot.traffic_statistics;
+        let rows_sum = view
+            .rows
+            .iter()
+            .fold(0u64, |acc, r| acc.saturating_add(r.bytes.total()));
+        view.total.total().max(rows_sum)
+    }
+
+    fn traffic_horizontal_bars(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let view = &self.snapshot.traffic_statistics;
         let page = self
             .traffic_ui
@@ -483,85 +698,148 @@ impl AppView {
         let start = page * BAR_PAGE_SIZE;
         let end = (start + BAR_PAGE_SIZE).min(view.rows.len());
         let rows = view.rows.get(start..end).unwrap_or_default();
-        let peak = rows.iter().map(|r| r.bytes.total()).max().unwrap_or(0);
-        let (unit, divisor) = chart_unit(peak);
-        let axis = div()
-            .flex()
-            .flex_col()
-            .justify_between()
-            .h(px(theme::STATS_CHART_HEIGHT))
-            .w(px(theme::STATS_AXIS_WIDTH))
-            .flex_shrink_0()
-            .text_xs()
-            .text_color(p.muted_fg)
-            .children((0..=4).map(|i| {
-                div().child(format!(
-                    "{:.1} {unit}",
-                    peak as f64 / divisor * (4 - i) as f64 / 4.
-                ))
-            }));
-        let mut columns = div().flex().gap_1().flex_1().min_w_0();
+        let peak = view.rows.iter().map(|r| r.bytes.total()).max().unwrap_or(0);
+        let share_denom = self.share_denominator();
+        let mono = cx.theme().mono_font_family.clone();
+        let hover_bg = p.panel_alt.opacity(0.45);
+
+        let mut list = div().flex().flex_col().gap_2().w_full();
         for (index, row) in rows.iter().enumerate() {
-            let (down, up) = bar_heights(row.bytes.download, row.bytes.upload, peak);
-            let detail = self.traffic_detail(row);
-            let tip = detail.clone();
+            let (bar_fill, dl_share, ul_share) =
+                bar_segments(row.bytes.download, row.bytes.upload, peak);
+            let share_text = format_share(row.bytes.total(), share_denom);
             let label = self.traffic_label(row);
-            columns = columns.child(
+            let tip = self.traffic_detail(row);
+            let focused = self.traffic_ui.focused == Some(index);
+
+            list = list.child(
                 div()
+                    .id(("traffic-hbar-row", index))
+                    .track_focus(&self.traffic_ui.focus_handles[index])
+                    .cursor_pointer()
                     .flex()
                     .flex_col()
-                    .flex_1()
-                    .min_w_0()
                     .gap_2()
+                    .p_2p5()
+                    .rounded_lg()
+                    .border_1()
+                    .when(focused, |d| {
+                        d.border_color(p.primary).bg(p.accent.opacity(0.4))
+                    })
+                    .when(!focused, |d| {
+                        d.border_color(p.border)
+                            .bg(p.bg)
+                            .hover(move |s| s.bg(hover_bg))
+                    })
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.traffic_ui.focused = Some(index);
+                        cx.notify();
+                    }))
                     .child(
                         div()
-                            .id(("traffic-bar", index))
-                            .h(px(theme::STATS_CHART_HEIGHT))
-                            .w_full()
-                            .px_2()
                             .flex()
-                            .flex_col()
-                            .justify_end()
-                            .border_b_1()
-                            .border_color(p.border)
-                            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                            .child(div().h(px(up)).bg(p.data_up).w_full().flex_shrink_0())
-                            .child(div().h(px(down)).bg(p.data_down).w_full().flex_shrink_0()),
+                            .items_center()
+                            .justify_between()
+                            .gap_3()
+                            .flex_wrap()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.fg)
+                                            .truncate()
+                                            .child(label),
+                                    )
+                                    .child(
+                                        div()
+                                            .px_1p5()
+                                            .py_0p5()
+                                            .rounded_full()
+                                            .bg(p.panel_alt)
+                                            .text_xs()
+                                            .font_family(mono.clone())
+                                            .text_color(p.muted_fg)
+                                            .flex_shrink_0()
+                                            .child(share_text),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .font_family(mono.clone())
+                                    .child(
+                                        div().text_color(p.data_down).child(format!(
+                                            "↓ {}",
+                                            format_bytes(row.bytes.download)
+                                        )),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(p.data_up)
+                                            .child(format!("↑ {}", format_bytes(row.bytes.upload))),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(p.fg)
+                                            .child(format!(
+                                                "Σ {}",
+                                                format_bytes(row.bytes.total())
+                                            )),
+                                    ),
+                            ),
                     )
                     .child(
-                        Button::new(("traffic-bar-label", index))
-                            .ghost()
+                        div()
+                            .h(px(theme::STATS_BAR_HEIGHT))
                             .w_full()
-                            .min_w_0()
+                            .rounded_full()
+                            .bg(p.panel_alt)
                             .overflow_hidden()
-                            .label(label)
-                            .tooltip(detail.clone())
-                            .accessibility_label(detail)
-                            .track_focus(&self.traffic_ui.focus_handles[index])
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.traffic_ui.focused = Some(index);
-                                cx.notify();
-                            })),
+                            .flex()
+                            .items_center()
+                            .when(bar_fill > 0., |track| {
+                                let fill = bar_fill.max(MIN_NONZERO_BAR_FILL);
+                                track.child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(fill))
+                                        .rounded_full()
+                                        .overflow_hidden()
+                                        .flex()
+                                        .items_center()
+                                        .when(dl_share > 0., |bar| {
+                                            bar.child(
+                                                div()
+                                                    .h_full()
+                                                    .w(relative(dl_share))
+                                                    .bg(p.data_down),
+                                            )
+                                        })
+                                        .when(ul_share > 0., |bar| {
+                                            bar.child(
+                                                div().h_full().w(relative(ul_share)).bg(p.data_up),
+                                            )
+                                        }),
+                                )
+                            }),
                     ),
             );
         }
-        let mut chart = div().flex().flex_col().gap_3().child(
-            div()
-                .flex()
-                .items_start()
-                .gap_2()
-                .child(axis)
-                .child(columns),
-        );
-        if let Some(row) = rows.get(self.traffic_ui.focused.unwrap_or(0)) {
-            chart = chart.child(
-                div()
-                    .text_xs()
-                    .text_color(p.muted_fg)
-                    .child(self.traffic_detail(row)),
-            );
-        }
-        chart.child(
+
+        div().flex().flex_col().gap_3().child(list).child(
             div()
                 .flex()
                 .items_center()
@@ -608,29 +886,51 @@ impl AppView {
                 ),
         )
     }
+
     fn traffic_table(&self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let view = &self.snapshot.traffic_statistics;
-        let mut table = div().flex().flex_col().gap_2().w_full().child(
+        let share_denom = self.share_denominator();
+        let mono = cx.theme().mono_font_family.clone();
+        let hover_bg = p.panel_alt.opacity(0.45);
+        let mut table = div().flex().flex_col().gap_1().w_full().child(
             div()
                 .flex()
+                .items_center()
                 .gap_3()
+                .px_2()
+                .py_1()
                 .text_xs()
                 .text_color(p.muted_fg)
-                .child(div().flex_1().child(self.tr("名称", "Name")))
-                .children(
-                    [
-                        self.tr("上传", "Upload"),
-                        self.tr("下载", "Download"),
-                        self.tr("合计", "Total"),
-                    ]
-                    .into_iter()
-                    .map(|label| {
-                        div()
-                            .w(px(theme::STATS_VALUE_WIDTH))
-                            .flex_shrink_0()
-                            .text_right()
-                            .child(label)
-                    }),
+                .child(div().flex_1().child(self.tr("归因对象", "Entity")))
+                .child(
+                    div()
+                        .w(px(theme::STATS_VALUE_WIDTH))
+                        .flex_shrink_0()
+                        .text_right()
+                        .text_color(p.data_down)
+                        .child(self.tr("↓ 下载", "↓ Download")),
+                )
+                .child(
+                    div()
+                        .w(px(theme::STATS_VALUE_WIDTH))
+                        .flex_shrink_0()
+                        .text_right()
+                        .text_color(p.data_up)
+                        .child(self.tr("↑ 上传", "↑ Upload")),
+                )
+                .child(
+                    div()
+                        .w(px(theme::STATS_VALUE_WIDTH))
+                        .flex_shrink_0()
+                        .text_right()
+                        .child(self.tr("Σ 合计", "Σ Total")),
+                )
+                .child(
+                    div()
+                        .w(px(theme::STATS_SHARE_WIDTH))
+                        .flex_shrink_0()
+                        .text_right()
+                        .child(self.tr("占比", "Share")),
                 ),
         );
         for (index, row) in view
@@ -640,34 +940,66 @@ impl AppView {
             .enumerate()
         {
             let tip = self.traffic_detail(row);
+            let share_text = format_share(row.bytes.total(), share_denom);
             table = table.child(
                 div()
                     .id(("traffic-table-row", index))
                     .flex()
                     .items_center()
                     .gap_3()
+                    .px_2()
                     .py_2()
+                    .rounded_sm()
                     .border_b_1()
                     .border_color(p.border)
+                    .hover(move |s| s.bg(hover_bg))
                     .text_sm()
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
+                            .font_weight(FontWeight::MEDIUM)
                             .truncate()
                             .child(self.traffic_label(row)),
                     )
-                    .children(
-                        [row.bytes.upload, row.bytes.download, row.bytes.total()]
-                            .into_iter()
-                            .map(|bytes| {
-                                div()
-                                    .w(px(theme::STATS_VALUE_WIDTH))
-                                    .flex_shrink_0()
-                                    .text_right()
-                                    .child(format_bytes(bytes))
-                            }),
+                    .child(
+                        div()
+                            .w(px(theme::STATS_VALUE_WIDTH))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family(mono.clone())
+                            .text_color(p.data_down)
+                            .child(format_bytes(row.bytes.download)),
+                    )
+                    .child(
+                        div()
+                            .w(px(theme::STATS_VALUE_WIDTH))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family(mono.clone())
+                            .text_color(p.data_up)
+                            .child(format_bytes(row.bytes.upload)),
+                    )
+                    .child(
+                        div()
+                            .w(px(theme::STATS_VALUE_WIDTH))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family(mono.clone())
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.fg)
+                            .child(format_bytes(row.bytes.total())),
+                    )
+                    .child(
+                        div()
+                            .w(px(theme::STATS_SHARE_WIDTH))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_family(mono.clone())
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .child(share_text),
                     ),
             );
         }
@@ -686,43 +1018,61 @@ impl AppView {
     }
 }
 
-fn bar_heights(download: u64, upload: u64, peak: u64) -> (f32, f32) {
-    if peak == 0 {
-        return (0., 0.);
+fn bar_segments(download: u64, upload: u64, peak: u64) -> (f32, f32, f32) {
+    if peak == 0 || (download == 0 && upload == 0) {
+        return (0., 0., 0.);
     }
-    let scale = theme::STATS_CHART_HEIGHT as f64 / peak as f64;
-    (
-        (download as f64 * scale) as f32,
-        (upload as f64 * scale) as f32,
-    )
+    let total = download as f64 + upload as f64;
+    let fill = (total / peak as f64).clamp(0., 1.) as f32;
+    let dl_share = (download as f64 / total).clamp(0., 1.) as f32;
+    let ul_share = (upload as f64 / total).clamp(0., 1.) as f32;
+    (fill, dl_share, ul_share)
 }
-fn chart_unit(peak: u64) -> (&'static str, f64) {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
-    let mut index = 0;
-    let mut divisor = 1.;
-    while peak as f64 / divisor >= 1024. && index + 1 < units.len() {
-        index += 1;
-        divisor *= 1024.;
+
+fn format_share(row_total: u64, period_total: u64) -> String {
+    if row_total == 0 || period_total == 0 {
+        return "0.0%".to_string();
     }
-    (units[index], divisor)
+    let denom = period_total.max(row_total) as f64;
+    let pct = (row_total as f64 / denom) * 100.0;
+    if pct < 0.1 {
+        "<0.1%".to_string()
+    } else {
+        format!("{pct:.1}%")
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{TrafficDisplayMode, bar_heights, chart_unit, theme};
+    use super::{TrafficDisplayMode, bar_segments, format_share};
+
     #[test]
-    fn bars_keep_zero_small_values_and_stack_proportions() {
-        assert_eq!(bar_heights(0, 0, 0), (0., 0.));
-        let (down, up) = bar_heights(75, 25, 100);
-        assert!((down + up - theme::STATS_CHART_HEIGHT).abs() < 0.001);
-        assert!((down / up - 3.).abs() < 0.001);
-        assert!(bar_heights(1, 0, 100000).0 > 0.);
-        assert!(
-            bar_heights(u64::MAX / 2, u64::MAX / 2, u64::MAX)
-                .0
-                .is_finite()
-        );
-        assert_eq!(chart_unit(1024), ("KiB", 1024.));
+    fn horizontal_bars_keep_zero_small_values_and_stack_proportions() {
+        assert_eq!(bar_segments(0, 0, 0), (0., 0., 0.));
+        let (fill, dl_share, ul_share) = bar_segments(75, 25, 100);
+        assert!((fill - 1.0).abs() < 0.001);
+        assert!((dl_share - 0.75).abs() < 0.001);
+        assert!((ul_share - 0.25).abs() < 0.001);
+
+        let (tiny_fill, tiny_dl, tiny_ul) = bar_segments(1, 0, 100_000);
+        assert!(tiny_fill > 0.);
+        assert!((tiny_dl - 1.0).abs() < 0.001);
+        assert_eq!(tiny_ul, 0.);
+
+        let (max_fill, max_dl, max_ul) = bar_segments(u64::MAX / 2, u64::MAX / 2, u64::MAX);
+        assert!(max_fill.is_finite() && (max_fill - 1.0).abs() < 0.001);
+        assert!((max_dl - 0.5).abs() < 0.001);
+        assert!((max_ul - 0.5).abs() < 0.001);
+
         assert!(TrafficDisplayMode::default() == TrafficDisplayMode::Bar);
+    }
+
+    #[test]
+    fn share_percentages_format_zero_tiny_and_bounded_values() {
+        assert_eq!(format_share(0, 1000), "0.0%");
+        assert_eq!(format_share(10, 0), "0.0%");
+        assert_eq!(format_share(1, 50_000), "<0.1%");
+        assert_eq!(format_share(565, 1000), "56.5%");
+        assert_eq!(format_share(1200, 1000), "100.0%");
     }
 }

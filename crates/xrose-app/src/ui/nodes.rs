@@ -540,34 +540,11 @@ impl AppView {
                                     },
                                 ))
                             })
-                            .child(
-                                icon_button_toggled(
-                                    toolbar_icon_button(
-                                        "toggle-privacy",
-                                        if hide_ips {
-                                            IconName::EyeOff
-                                        } else {
-                                            IconName::Eye
-                                        },
-                                        self.tr("隐私模式", "Privacy mode"),
-                                        cx,
-                                    ),
-                                    hide_ips,
-                                    cx,
-                                )
-                                .tooltip(
-                                    self.tr("隐藏服务器地址与位置", "Hide addresses and location"),
-                                )
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.hide_ips = !this.hide_ips;
-                                        let mut settings = this.snapshot.settings.clone();
-                                        settings.privacy_mode = this.hide_ips;
-                                        this.service.update_settings(settings);
-                                        this.sync(cx);
-                                    },
-                                )),
-                            ),
+                            .child(self.privacy_toggle_button(
+                                "toggle-privacy",
+                                self.tr("隐藏服务器地址与位置", "Hide addresses and location"),
+                                cx,
+                            )),
                     )
                 })
                 // Batch Operation Bar (Visible when batch_mode is active).

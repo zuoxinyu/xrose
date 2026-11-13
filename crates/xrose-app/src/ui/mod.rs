@@ -302,7 +302,7 @@ pub struct AppView {
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connection_filter: ConnectionFilterKind,
-    pub(crate) show_recorded_connections: bool,
+    pub(crate) connections_tab: connections::ConnectionsTab,
     show_live_processes: bool,
     process_icons: Option<process_icons::ProcessIcons>,
     connection_sort: xrose_core::flow::ConnectionSort,
@@ -490,7 +490,7 @@ impl AppView {
             trace_input,
             connection_search: text_input(window, cx, "过滤域名、IP 或进程…"),
             connection_filter: ConnectionFilterKind::All,
-            show_recorded_connections: false,
+            connections_tab: connections::ConnectionsTab::default(),
             show_live_processes: false,
             process_icons: None,
             connection_sort: Default::default(),
@@ -523,6 +523,37 @@ impl AppView {
 
     fn tr(&self, zh: &'static str, en: &'static str) -> SharedString {
         tr(self.snapshot.settings.language, zh, en)
+    }
+
+    pub(super) fn privacy_toggle_button(
+        &self,
+        id: &'static str,
+        tooltip: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let hide_ips = self.hide_ips;
+        icon_button_toggled(
+            toolbar_icon_button(
+                id,
+                if hide_ips {
+                    IconName::EyeOff
+                } else {
+                    IconName::Eye
+                },
+                self.tr("隐私模式", "Privacy mode"),
+                cx,
+            ),
+            hide_ips,
+            cx,
+        )
+        .tooltip(tooltip)
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.hide_ips = !this.hide_ips;
+            let mut settings = this.snapshot.settings.clone();
+            settings.privacy_mode = this.hide_ips;
+            this.service.update_settings(settings);
+            this.sync(cx);
+        }))
     }
 
     fn lang(&self) -> Language {

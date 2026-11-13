@@ -4,17 +4,17 @@ use std::sync::Arc;
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::WindowExt;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::Node;
 use xrose_core::service::ToastLevel;
 
-use super::{theme::palette, widgets::ChoiceGroup, AppView};
+use super::{AppView, theme::palette, widgets::ChoiceGroup};
 
 /// Shared motion policy for form, detail, and confirmation dialogs.
 pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
