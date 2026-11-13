@@ -380,7 +380,7 @@ impl AppView {
             )),
         };
 
-        let card = div().flex().flex_col().gap_3().min_w(px(0.)).pb_1()
+        div().flex().flex_col().gap_3().min_w(px(0.)).pb_1()
             .child(
                 div()
                     .flex()
@@ -478,13 +478,13 @@ impl AppView {
                 d.child(section_label(&p, self.tr("VPN 参数", "VPN settings")))
                     .child(form.vpn.fields(protocol, &p, |zh,en| self.tr(zh,en)))
                     .child(toggle("vpn-pushed-dns", self.tr("使用 VPN 下发的分域 DNS", "Use VPN split DNS"), form.vpn.use_pushed_dns)
-                        .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.use_pushed_dns=*checked;cx.notify();})))
+                        .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.use_pushed_dns = *checked;cx.notify();})))
                     .child(field(&p, self.tr("服务器证书名称（可选）", "Server certificate name (optional)"), form.sni.clone(), true))
                     .when(protocol == Protocol::Openconnect, |d| d.child(div().flex().flex_col().items_start().gap_3()
                         .child(toggle("vpn-no-udp", self.tr("仅使用 TLS 连接", "Use TLS transport only"), form.vpn.disable_udp)
-                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.disable_udp=*checked;cx.notify();})))
+                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.disable_udp = *checked;cx.notify();})))
                         .child(toggle("vpn-insecure", self.tr("允许不安全证书", "Allow insecure certificates"), insecure)
-                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.insecure=*checked;cx.notify();})))
+                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.insecure = *checked;cx.notify();})))
                     ))
             })
             .when(tls_capable, |d| {
@@ -630,8 +630,7 @@ impl AppView {
                         form.tags.clone(),
                         true,
                     )),
-            );
-        card
+            )
     }
 
     pub(crate) fn manual_node_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {

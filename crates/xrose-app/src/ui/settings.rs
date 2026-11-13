@@ -1567,6 +1567,32 @@ fn valid_port(raw: &str) -> Option<u16> {
     raw.trim().parse::<u16>().ok().filter(|port| *port > 0)
 }
 
+/// Offer native materials only on the platforms that implement them.
+fn backdrop_setting_available() -> bool {
+    #[cfg(target_os = "linux")]
+    return crate::wayland::desktop().blur;
+    #[cfg(not(target_os = "linux"))]
+    return cfg!(any(windows, target_os = "macos"));
+}
+
+fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
+    let mut choices = vec![(BackdropStyle::Auto, "自动", "Auto")];
+    if cfg!(windows) {
+        choices.extend([
+            (BackdropStyle::Mica, "Mica", "Mica"),
+            (BackdropStyle::MicaAlt, "Mica Alt", "Mica Alt"),
+            (BackdropStyle::Acrylic, "Acrylic", "Acrylic"),
+        ]);
+    }
+    if cfg!(target_os = "macos") {
+        choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Vibrancy"));
+    }
+    #[cfg(target_os = "linux")]
+    choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Blur"));
+    choices.push((BackdropStyle::Opaque, "纯色", "Solid"));
+    choices
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1592,30 +1618,4 @@ mod tests {
         assert_eq!(super::valid_port(" 7890 "), Some(7890));
         assert_eq!(super::valid_port("65535"), Some(65535));
     }
-}
-
-/// Offer native materials only on the platforms that implement them.
-fn backdrop_setting_available() -> bool {
-    #[cfg(target_os = "linux")]
-    return crate::wayland::desktop().blur;
-    #[cfg(not(target_os = "linux"))]
-    return cfg!(any(windows, target_os = "macos"));
-}
-
-fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
-    let mut choices = vec![(BackdropStyle::Auto, "自动", "Auto")];
-    if cfg!(windows) {
-        choices.extend([
-            (BackdropStyle::Mica, "Mica", "Mica"),
-            (BackdropStyle::MicaAlt, "Mica Alt", "Mica Alt"),
-            (BackdropStyle::Acrylic, "Acrylic", "Acrylic"),
-        ]);
-    }
-    if cfg!(target_os = "macos") {
-        choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Vibrancy"));
-    }
-    #[cfg(target_os = "linux")]
-    choices.push((BackdropStyle::Vibrancy, "毛玻璃", "Blur"));
-    choices.push((BackdropStyle::Opaque, "纯色", "Solid"));
-    choices
 }

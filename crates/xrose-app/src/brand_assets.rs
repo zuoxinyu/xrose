@@ -94,7 +94,7 @@ impl AssetSource for BrandAssets {
                 .iter()
                 .map(|(name, _)| *name)
                 .filter(|name| name.starts_with(path))
-                .map(|name| SharedString::from(name)),
+                .map(SharedString::from),
         );
         Ok(items)
     }

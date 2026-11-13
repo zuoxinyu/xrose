@@ -173,7 +173,7 @@ impl AppView {
                     .ordered(self.connection_sort)
                     .iter()
                     .copied()
-                    .filter(|&i| all.get(i).is_some_and(&matches));
+                    .filter(|&i| all.get(i).is_some_and(matches));
                 let visible: Vec<_> = rows.by_ref().take(limit).collect();
                 let count = if query.is_empty() {
                     all.len()
@@ -1683,7 +1683,7 @@ impl AppView {
                         window.paint_path(path, p.border.opacity(0.3));
                     }
                 }
-                for index in 0..5 {
+                for (index, color) in colors.iter().take(5).enumerate() {
                     let x1 = index as f32 * cell + node_w;
                     let x2 = (index + 1) as f32 * cell;
                     for (stroke, opacity) in [(7., 0.06), (3., 0.15), (1.5, 0.8)] {
@@ -1691,7 +1691,7 @@ impl AppView {
                         line.move_to(at(x1, 104.));
                         line.line_to(at(x2, 104.));
                         if let Ok(path) = line.build() {
-                            window.paint_path(path, colors[index].opacity(opacity));
+                            window.paint_path(path, color.opacity(opacity));
                         }
                     }
                     if active && phase == Some(TracePhase::Request) {

@@ -14,6 +14,8 @@ use gpui_kit::{
 
 use super::theme::Palette;
 
+type IndexChangeHandler = std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>;
+
 /// Overlay the thumb on the bounded viewport, outside its scrolling content.
 pub(super) fn scroll_frame(
     id: &'static str,
@@ -363,7 +365,7 @@ pub(super) struct SegmentedTabs {
     id: ElementId,
     tabs: Vec<SegmentedTab>,
     selected: Option<usize>,
-    handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
+    handler: Option<IndexChangeHandler>,
 }
 
 impl SegmentedTabs {
@@ -513,7 +515,7 @@ pub struct ChoiceGroup {
     style: ChoiceStyle,
     scroll: Option<(ScrollHandle, Pixels)>,
     disabled: bool,
-    handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
+    handler: Option<IndexChangeHandler>,
 }
 impl ChoiceGroup {
     pub fn new(

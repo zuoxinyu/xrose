@@ -35,7 +35,7 @@ impl AppView {
             TcpAcceleration::Kcp,
             TcpAcceleration::Quic,
         ];
-        let panel = div().flex().flex_col().flex_shrink_0().gap_3()
+        div().flex().flex_col().flex_shrink_0().gap_3()
             .child(div().flex().items_center().justify_between()
                 .child(heading(self.tr("连接与路由", "Connections and routing")))
                 .child(Button::new("et-reset").ghost().compact().label(self.tr("恢复高级设置默认值", "Reset advanced settings"))
@@ -76,7 +76,6 @@ impl AppView {
                 .child(option!(device.port_mapping, "自动端口映射", "Automatic port mapping", "通过 UPnP / NAT-PMP 向路由器申请端口。", "Request router port mappings via UPnP or NAT-PMP."))
                 .child(option!(device.relay_peer_rpc, "中继对端 RPC", "Relay peer RPC", "可为其他网络中继建立直连所需的控制消息。", "Relay control messages to help other networks establish direct links."))
                 .child(option!(device.system_forwarding, "使用系统转发", "Use system forwarding", "用系统路由代替子网代理内置 NAT；须自行配置转发和回程路由。", "Replace subnet proxy NAT with system routing. Configure forwarding and return routes on the host."))
-                .when(cfg!(windows), |g| g.child(option!(device.udp_broadcast_relay, "中继 UDP 广播", "Relay UDP broadcasts", "将物理网卡上的局域网广播转发给组网设备。", "Forward LAN broadcasts from physical interfaces to mesh peers."))));
-        panel
+                .when(cfg!(windows), |g| g.child(option!(device.udp_broadcast_relay, "中继 UDP 广播", "Relay UDP broadcasts", "将物理网卡上的局域网广播转发给组网设备。", "Forward LAN broadcasts from physical interfaces to mesh peers."))))
     }
 }

@@ -205,113 +205,113 @@ impl AppView {
             let toggle_id = sub.id.clone();
             let full_url = SharedString::from(sub.url.clone());
 
-            body = body.child(
-                card(&p)
-                    .id(SharedString::from(format!("subscription-{}", sub.id)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .text_base()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(p.fg)
-                                                    .child(sub.name.clone()),
-                                            )
-                                            .when(expired, |d| {
-                                                d.child(pill(
-                                                    self.tr("已过期", "expired"),
-                                                    p.danger_text,
-                                                    p.danger.opacity(super::theme::SEMANTIC_ALPHA),
-                                                ))
-                                            })
-                                            .child(pill(
-                                                format!(
-                                                    "{} {}",
-                                                    sub.node_count,
-                                                    self.tr("节点", "nodes")
-                                                ),
-                                                p.muted_fg,
-                                                p.panel_alt,
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .id(SharedString::from(format!(
-                                                "subscription-url-{}",
-                                                sub.id
-                                            )))
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(full_url.clone())
-                                                    .max_w(px(440.))
-                                                    .build(window, cx)
-                                            })
-                                            .child(sub.masked_url()),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        more_button(
-                                            SharedString::from(format!("sub-menu-{}", sub.id)),
-                                            self.tr("订阅操作", "Subscription actions"),
-                                            cx,
+            body =
+                body.child(
+                    card(&p)
+                        .id(SharedString::from(format!("subscription-{}", sub.id)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .text_base()
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .text_color(p.fg)
+                                                        .child(sub.name.clone()),
+                                                )
+                                                .when(expired, |d| {
+                                                    d.child(pill(
+                                                        self.tr("已过期", "expired"),
+                                                        p.danger_text,
+                                                        p.danger
+                                                            .opacity(super::theme::SEMANTIC_ALPHA),
+                                                    ))
+                                                })
+                                                .child(pill(
+                                                    format!(
+                                                        "{} {}",
+                                                        sub.node_count,
+                                                        self.tr("节点", "nodes")
+                                                    ),
+                                                    p.muted_fg,
+                                                    p.panel_alt,
+                                                )),
                                         )
-                                        .dropdown_menu(
-                                            menus::builder(
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .id(SharedString::from(format!(
+                                                    "subscription-url-{}",
+                                                    sub.id
+                                                )))
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(full_url.clone())
+                                                        .max_w(px(440.))
+                                                        .build(window, cx)
+                                                })
+                                                .child(sub.masked_url()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            more_button(
+                                                SharedString::from(format!("sub-menu-{}", sub.id)),
+                                                self.tr("订阅操作", "Subscription actions"),
+                                                cx,
+                                            )
+                                            .dropdown_menu(menus::builder(
                                                 cx.entity().downgrade(),
                                                 menu_target.clone(),
-                                            ),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "refresh-{}",
-                                            sub.id
-                                        )))
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .label(self.tr("更新", "Refresh"))
-                                        .loading(refreshing)
-                                        .on_click(
-                                            cx.listener(move |this, _, _, _| {
+                                            )),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "refresh-{}",
+                                                sub.id
+                                            )))
+                                            .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                            .label(self.tr("更新", "Refresh"))
+                                            .loading(refreshing)
+                                            .on_click(cx.listener(move |this, _, _, _| {
                                                 this.service.refresh_subscription(&sub_id_refresh);
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        toggle(
-                                            SharedString::from(format!("sub-enabled-{}", sub.id)),
-                                            "",
-                                            sub.enabled,
+                                            })),
                                         )
-                                        .disabled(refreshing)
-                                        .accessibility_label(
-                                            self.tr("启用自动更新", "Enable automatic refresh"),
-                                        )
-                                        .tooltip(self.tr(
-                                            "允许此订阅自动更新",
-                                            "Allow automatic updates for this subscription",
-                                        ))
-                                        .on_change(
-                                            cx.listener(move |this, checked, _, cx| {
+                                        .child(
+                                            toggle(
+                                                SharedString::from(format!(
+                                                    "sub-enabled-{}",
+                                                    sub.id
+                                                )),
+                                                "",
+                                                sub.enabled,
+                                            )
+                                            .disabled(refreshing)
+                                            .accessibility_label(
+                                                self.tr("启用自动更新", "Enable automatic refresh"),
+                                            )
+                                            .tooltip(self.tr(
+                                                "允许此订阅自动更新",
+                                                "Allow automatic updates for this subscription",
+                                            ))
+                                            .on_change(cx.listener(move |this, checked, _, cx| {
                                                 if let Err(error) = this
                                                     .service
                                                     .set_subscription_enabled(&toggle_id, *checked)
@@ -322,90 +322,89 @@ impl AppView {
                                                     );
                                                 }
                                                 this.sync(cx);
-                                            }),
+                                            })),
                                         ),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .justify_between()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(remaining_text)
+                                        .child(format!("{percent:.1}%")),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(super::theme::PROGRESS_HEIGHT))
+                                        .w_full()
+                                        .rounded_full()
+                                        .bg(p.panel_alt)
+                                        .overflow_hidden()
+                                        .child(
+                                            div()
+                                                .h(px(super::theme::PROGRESS_HEIGHT))
+                                                .w(relative((percent / 100.0).clamp(0.0, 1.0)))
+                                                .bg(match usage_grade(percent) {
+                                                    2 => p.danger,
+                                                    1 => p.warning,
+                                                    _ => p.primary,
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_5()
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .child(
+                                    div()
+                                        .text_color(if expired {
+                                            p.danger_text
+                                        } else if expiring {
+                                            p.warn_text
+                                        } else {
+                                            p.muted_fg
+                                        })
+                                        .child(format!(
+                                            "{}：{}",
+                                            self.tr("到期", "Expires"),
+                                            expire_text
+                                        )),
+                                )
+                                .child(format!(
+                                    "{}：{}",
+                                    self.tr("最后更新", "Updated"),
+                                    last_updated
+                                )),
+                        )
+                        .when(sub.last_error.is_some(), |d| {
+                            d.child(
                                 div()
-                                    .flex()
-                                    .justify_between()
                                     .text_xs()
-                                    .text_color(p.muted_fg)
-                                    .child(remaining_text)
-                                    .child(format!("{percent:.1}%")),
+                                    .text_color(p.danger_text)
+                                    .child(sub.last_error.clone().unwrap_or_default()),
                             )
-                            .child(
+                        })
+                        .when(!sub.enabled, |d| {
+                            d.child(
                                 div()
-                                    .h(px(super::theme::PROGRESS_HEIGHT))
-                                    .w_full()
-                                    .rounded_full()
-                                    .bg(p.panel_alt)
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .h(px(super::theme::PROGRESS_HEIGHT))
-                                            .w(relative((percent as f32 / 100.0).clamp(0.0, 1.0)))
-                                            .bg(match usage_grade(percent) {
-                                                2 => p.danger,
-                                                1 => p.warning,
-                                                _ => p.primary,
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_5()
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(
-                                div()
-                                    .text_color(if expired {
-                                        p.danger_text
-                                    } else if expiring {
-                                        p.warn_text
-                                    } else {
-                                        p.muted_fg
-                                    })
-                                    .child(format!(
-                                        "{}：{}",
-                                        self.tr("到期", "Expires"),
-                                        expire_text
-                                    )),
+                                    .text_xs()
+                                    .text_color(p.warn_text)
+                                    .child(self.tr("已暂停自动更新", "Auto update paused")),
                             )
-                            .child(format!(
-                                "{}：{}",
-                                self.tr("最后更新", "Updated"),
-                                last_updated
-                            )),
-                    )
-                    .when(sub.last_error.is_some(), |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(p.danger_text)
-                                .child(sub.last_error.clone().unwrap_or_default()),
-                        )
-                    })
-                    .when(!sub.enabled, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(p.warn_text)
-                                .child(self.tr("已暂停自动更新", "Auto update paused")),
-                        )
-                    })
-                    .context_menu(menus::builder(cx.entity().downgrade(), menu_target)),
-            );
+                        })
+                        .context_menu(menus::builder(cx.entity().downgrade(), menu_target)),
+                );
         }
 
         let _ = lang;

@@ -1471,7 +1471,7 @@ fn render_node_row(
                                     Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
                                         .compact()
                                         .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .custom(icon_button_style(&p, false, cx))
+                                        .custom(icon_button_style(p, false, cx))
                                         .icon(IconName::Gauge)
                                         .tooltip(super::tr(lang, "测速", "Test latency"))
                                         .accessibility_label(super::tr(
