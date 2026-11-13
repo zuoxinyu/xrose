@@ -701,16 +701,20 @@ mod tests {
         assert!(!saved.contains(&account.username) && !saved.contains(&account.password));
         assert_eq!(Settings::load(&path).unwrap(), settings);
         assert!(account.valid());
-        assert!(!ProxyAccount {
-            username: "bad:name".into(),
-            ..account.clone()
-        }
-        .valid());
-        assert!(!ProxyAccount {
-            password: "x".repeat(256),
-            ..account
-        }
-        .valid());
+        assert!(
+            !ProxyAccount {
+                username: "bad:name".into(),
+                ..account.clone()
+            }
+            .valid()
+        );
+        assert!(
+            !ProxyAccount {
+                password: "x".repeat(256),
+                ..account
+            }
+            .valid()
+        );
     }
 
     #[test]

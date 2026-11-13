@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
 
-use crate::error::{io_context, Result};
+use crate::error::{Result, io_context};
 
 pub struct SingleInstance {
     file: File,

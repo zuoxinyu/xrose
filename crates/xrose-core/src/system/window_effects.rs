@@ -36,8 +36,8 @@ pub fn mica_backdrop_available() -> bool {
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
     /// Windows 10 1809 is the first build whose `SetWindowCompositionAttribute`
     /// exposes `ACCENT_ENABLE_ACRYLICBLURBEHIND`.
