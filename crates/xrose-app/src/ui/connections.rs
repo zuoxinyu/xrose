@@ -133,8 +133,8 @@ impl AppView {
         };
         // Store indices in display order. The list resolves rich rows and icons only
         // when it measures or paints them, including variable-height wrapped rows.
-        let (total, visible, count): (usize, Vec<usize>, usize) = match tab {
-            ConnectionsTab::Statistics => (self.snapshot.runtime.connections.len(), Vec::new(), 0),
+        let (visible, count): (Vec<usize>, usize) = match tab {
+            ConnectionsTab::Statistics => (Vec::new(), 0),
             ConnectionsTab::Recorded => {
                 let all = &self.snapshot.recording.connections;
                 let mut rows = (0..all.len())
@@ -146,7 +146,7 @@ impl AppView {
                 } else {
                     visible.len() + rows.count()
                 };
-                (all.len(), visible, count)
+                (visible, count)
             }
             ConnectionsTab::Live if processes => {
                 let text = query.to_lowercase();
@@ -163,7 +163,7 @@ impl AppView {
                 } else {
                     visible.len() + rows.count()
                 };
-                (live.processes.len(), visible, count)
+                (visible, count)
             }
             ConnectionsTab::Live => {
                 let all = &self.snapshot.runtime.connections;
@@ -178,7 +178,7 @@ impl AppView {
                 } else {
                     visible.len() + rows.count()
                 };
-                (all.len(), visible, count)
+                (visible, count)
             }
         };
         let shown = visible.len();
@@ -207,9 +207,7 @@ impl AppView {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .child(
-                            this.connection_header(processes, supported, running, count, total, cx),
-                        )
+                        .child(this.connection_header(processes, supported, running, cx))
                         .when(tab == ConnectionsTab::Statistics, |panel| {
                             panel.child(this.traffic_statistics_content(&p, cx))
                         })
@@ -274,8 +272,6 @@ impl AppView {
         processes: bool,
         supported: bool,
         running: bool,
-        count: usize,
-        total: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let p = palette(cx);
@@ -341,68 +337,50 @@ impl AppView {
             && running
             && self.snapshot.model.work_mode == WorkMode::Direct
             && !self.snapshot.settings.tun_enabled;
-        let title = div()
-            .flex()
-            .items_center()
-            .flex_wrap()
-            .gap_2()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.fg)
-                    .child(self.tr("实时连接与统计", "Live connections & statistics")),
-            )
-            .child(pill(
-                format!("{active_conn_len} {}", self.tr("活动连接", "active")),
-                p.primary,
-                p.accent,
-            ));
+        let title = div().flex().items_center().flex_wrap().gap_2().child(
+            div()
+                .text_lg()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.fg)
+                .child(self.tr("实时连接与统计", "Live connections & statistics")),
+        );
 
+        let selected_tab = match tab {
+            ConnectionsTab::Live => 0,
+            ConnectionsTab::Recorded => 1,
+            ConnectionsTab::Statistics => 2,
+        };
         let primary_tabs = div().flex().items_center().child(
-            segmented_tab_track(&p)
-                .child(
-                    segmented_tab_button(
+            SegmentedTabs::new(
+                "connections-primary-tabs",
+                vec![
+                    SegmentedTab::new(
                         "connections-tab-live",
-                        None,
                         self.tr("实时连接", "Live"),
                         active_conn_len.to_string(),
-                        tab == ConnectionsTab::Live,
-                        &p,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_connections_tab(ConnectionsTab::Live, window, cx);
-                    })),
-                )
-                .child(
-                    segmented_tab_button(
+                    ),
+                    SegmentedTab::new(
                         "connections-tab-recorded",
-                        None,
                         self.tr("录制回放", "Recorded"),
                         recorded_conn_len.to_string(),
-                        tab == ConnectionsTab::Recorded,
-                        &p,
-                        cx,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_connections_tab(ConnectionsTab::Recorded, window, cx);
-                    })),
-                )
-                .child(
-                    segmented_tab_button(
+                    ),
+                    SegmentedTab::new(
                         "connections-tab-stats",
-                        Some(IconName::ChartColumn),
                         self.tr("流量统计", "Traffic stats"),
                         self.traffic_statistics_badge(),
-                        tab == ConnectionsTab::Statistics,
-                        &p,
-                        cx,
                     )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.select_connections_tab(ConnectionsTab::Statistics, window, cx);
-                    })),
-                ),
+                    .icon(Some(IconName::ChartColumn)),
+                ],
+                Some(selected_tab),
+            )
+            .on_change(cx.listener(|this, index, window, cx| {
+                let next = [
+                    ConnectionsTab::Live,
+                    ConnectionsTab::Recorded,
+                    ConnectionsTab::Statistics,
+                ][*index];
+                this.select_connections_tab(next, window, cx);
+            })),
         );
 
         let process_icons_shown = self.process_icons.is_some();
@@ -424,29 +402,12 @@ impl AppView {
             self.tr("隐藏目标地址与节点名", "Hide addresses and node names"),
             cx,
         );
-        let mono = cx.theme().mono_font_family.clone();
-        let count_and_privacy = div()
+        let privacy_controls = div()
             .flex()
             .items_center()
             .gap_2()
             .ml_auto()
             .flex_shrink_0()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_xs()
-                    .text_color(p.muted_fg)
-                    .child(self.tr("显示", "Showing"))
-                    .child(
-                        div()
-                            .font_family(mono)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.fg)
-                            .child(format!("{count} / {total}")),
-                    ),
-            )
             .child(process_icons_button)
             .child(privacy_button);
 
@@ -596,7 +557,7 @@ impl AppView {
                                     .child(view_choice)
                                     .when(!processes && supported, |s| s.child(sort_choice)),
                             )
-                            .child(count_and_privacy),
+                            .child(privacy_controls),
                     )
                     .child(filter_row);
             }
@@ -632,7 +593,7 @@ impl AppView {
                                         ))
                                     }),
                             )
-                            .child(count_and_privacy),
+                            .child(privacy_controls),
                     )
                     .child(filter_row);
             }

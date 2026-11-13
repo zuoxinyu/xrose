@@ -328,74 +328,166 @@ pub fn danger_icon_button(
         .h(px(ICON_BUTTON_SIZE))
 }
 
-/// Bordered segmented tab track shared by Mesh card tabs and Connections primary tabs.
-pub(super) fn segmented_tab_track(p: &Palette) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap_1()
-        .p_0p5()
-        .rounded_md()
-        .bg(p.bg)
-        .border_1()
-        .border_color(p.border)
+/// Option item inside a sliding [`SegmentedTabs`] track.
+pub(super) struct SegmentedTab {
+    pub(super) id: ElementId,
+    pub(super) icon: Option<IconName>,
+    pub(super) label: SharedString,
+    pub(super) badge: SharedString,
 }
 
-/// Cyan-capsule segmented tab button with an optional icon and trailing count or value badge.
-pub(super) fn segmented_tab_button(
-    id: impl Into<ElementId>,
-    icon: Option<IconName>,
-    label: SharedString,
-    badge: impl Into<SharedString>,
-    selected: bool,
-    p: &Palette,
-    cx: &App,
-) -> Button {
-    let variant = if selected {
-        ButtonCustomVariant::new(cx)
-            .color(p.accent)
-            .foreground(p.primary)
-            .hover(p.accent)
-            .active(p.accent)
-    } else {
-        ButtonCustomVariant::new(cx)
-            .foreground(p.muted_fg)
-            .hover(p.neutral_hover())
-            .active(p.neutral_active())
-    };
-    let badge_bg = if selected {
-        if p.is_dark {
-            p.primary.opacity(0.22)
-        } else {
-            p.panel.opacity(0.92)
+impl SegmentedTab {
+    pub(super) fn new(
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        badge: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon: None,
+            label: label.into(),
+            badge: badge.into(),
         }
-    } else {
-        p.panel_alt
-    };
-    let badge_fg = if selected { p.primary } else { p.muted_fg };
-    Button::new(id)
-        .compact()
-        .h(px(26.))
-        .custom(variant)
-        .border_1()
-        .border_color(if selected {
-            p.primary
-        } else {
-            cx.theme().transparent
-        })
-        .when_some(icon, |b, icon| b.icon(icon))
-        .when(selected, |b| b.font_weight(FontWeight::MEDIUM))
-        .label(label)
-        .child(
-            div()
-                .px_1p5()
-                .rounded_full()
-                .text_xs()
-                .font_family(cx.theme().mono_font_family.clone())
-                .bg(badge_bg)
-                .text_color(badge_fg)
-                .child(badge.into()),
-        )
+    }
+
+    pub(super) fn icon(mut self, icon: Option<IconName>) -> Self {
+        self.icon = icon;
+        self
+    }
+}
+
+/// Bordered segmented tab track with a sliding cyan capsule indicator, shared by
+/// Mesh card tabs and Connections primary tabs.
+#[derive(gpui_kit::IntoElement)]
+pub(super) struct SegmentedTabs {
+    id: ElementId,
+    tabs: Vec<SegmentedTab>,
+    selected: Option<usize>,
+    handler: Option<std::rc::Rc<dyn Fn(&usize, &mut gpui_kit::Window, &mut App)>>,
+}
+
+impl SegmentedTabs {
+    pub(super) fn new(
+        id: impl Into<ElementId>,
+        tabs: Vec<SegmentedTab>,
+        selected: Option<usize>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            tabs,
+            selected,
+            handler: None,
+        }
+    }
+
+    pub(super) fn on_change(
+        mut self,
+        handler: impl Fn(&usize, &mut gpui_kit::Window, &mut App) + 'static,
+    ) -> Self {
+        self.handler = Some(std::rc::Rc::new(handler));
+        self
+    }
+}
+
+impl gpui_kit::RenderOnce for SegmentedTabs {
+    fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
+        let p = super::theme::palette(cx);
+        let count = self.tabs.len();
+        let handles = group_focus_handles(&self.id, count, window, cx);
+        let key_handles = handles.clone();
+        let key_handler = self.handler.clone();
+        let selected = self.selected.filter(|&index| index < count);
+        let layout = group_layout_handle(&self.id, window, cx);
+        let mono = cx.theme().mono_font_family.clone();
+        let transparent = cx.theme().transparent;
+        let mut track = div()
+            .id(self.id.clone())
+            .role(Role::TabList)
+            .relative()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .p_0p5()
+            .rounded_md()
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.border)
+            .track_scroll(&layout)
+            .child(sliding_indicator_canvas(
+                &self.id, selected, &layout, &p, window, cx,
+            ))
+            .on_key_down(move |event, window, cx| {
+                if let Some(next) = roving_key_target(event.keystroke.key.as_str(), selected, count)
+                {
+                    key_handles[next].focus(window, cx);
+                    if let Some(handler) = &key_handler {
+                        handler(&next, window, cx);
+                    }
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            });
+        for (index, tab) in self.tabs.into_iter().enumerate() {
+            let checked = selected == Some(index);
+            let handler = self.handler.clone();
+            let variant = ButtonCustomVariant::new(cx)
+                .color(transparent)
+                .foreground(if checked { p.primary } else { p.muted_fg })
+                .hover(if checked {
+                    transparent
+                } else {
+                    p.neutral_hover()
+                })
+                .active(if checked {
+                    transparent
+                } else {
+                    p.neutral_active()
+                });
+            let badge_bg = if checked {
+                if p.is_dark {
+                    p.primary.opacity(0.22)
+                } else {
+                    p.panel.opacity(0.92)
+                }
+            } else {
+                p.panel_alt
+            };
+            let badge_fg = if checked { p.primary } else { p.muted_fg };
+            track = track.child(
+                Button::new(tab.id)
+                    .role(Role::Tab)
+                    .compact()
+                    .h(px(26.))
+                    .rounded(gpui_kit::component::button::ButtonRounded::Size(px(3.)))
+                    .custom(variant)
+                    .selected(checked)
+                    .tab_stop(index == selected.unwrap_or(0))
+                    .track_focus(&handles[index])
+                    .border_1()
+                    .border_color(transparent)
+                    .when_some(tab.icon, |b, icon| b.icon(icon))
+                    .when(checked, |b| b.font_weight(FontWeight::MEDIUM))
+                    .label(tab.label)
+                    .child(
+                        div()
+                            .px_1p5()
+                            .rounded_full()
+                            .text_xs()
+                            .font_family(mono.clone())
+                            .bg(badge_bg)
+                            .text_color(badge_fg)
+                            .child(tab.badge),
+                    )
+                    .on_click(move |_, window, cx| {
+                        if let Some(handler) = &handler {
+                            handler(&index, window, cx);
+                        }
+                    }),
+            );
+        }
+        track
+    }
 }
 
 pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {
@@ -463,9 +555,9 @@ impl ChoiceGroup {
         self
     }
 }
-// The first child is the indicator canvas. Measure the radios relative to it so
+// The first child is the indicator canvas. Measure items relative to it so
 // moving the window or scrolling a parent does not start a new transition.
-fn choice_bounds(
+fn sliding_indicator_bounds(
     layout: &ScrollHandle,
     selected: Option<usize>,
 ) -> Option<gpui_kit::Bounds<Pixels>> {
@@ -475,20 +567,104 @@ fn choice_bounds(
     Some(bounds)
 }
 
+fn sliding_indicator_canvas(
+    id: &ElementId,
+    selected: Option<usize>,
+    layout: &ScrollHandle,
+    p: &Palette,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> gpui_kit::Canvas<()> {
+    let measured = sliding_indicator_bounds(layout, selected);
+    let animated = measured.map(|target| {
+        gpui_base::motion::transition(
+            ElementId::from((id.clone(), "choice-indicator")),
+            target,
+            gpui_base::motion::Transition::new(std::time::Duration::from_millis(150)),
+            window,
+            cx,
+        )
+    });
+    let layout = layout.clone();
+    let accent = p.accent;
+    let primary = p.primary;
+    gpui_kit::canvas(
+        |_, _, _| (),
+        move |canvas, _, window, _| {
+            if let Some(actual) = sliding_indicator_bounds(&layout, selected) {
+                let mut indicator = if Some(actual) == measured {
+                    animated.unwrap_or(actual)
+                } else {
+                    // Layout was first measured or changed during this frame.
+                    window.request_animation_frame();
+                    actual
+                };
+                indicator.origin += canvas.origin;
+                window.paint_quad(gpui_kit::quad(
+                    indicator,
+                    px(3.),
+                    accent,
+                    px(1.),
+                    primary,
+                    Default::default(),
+                ));
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+fn group_focus_handles(
+    id: &ElementId,
+    count: usize,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> Vec<gpui_kit::FocusHandle> {
+    (0..count)
+        .map(|index| {
+            window
+                .use_keyed_state((id.clone(), index.to_string()), cx, |_, cx| {
+                    cx.focus_handle()
+                })
+                .read(cx)
+                .clone()
+        })
+        .collect()
+}
+
+fn group_layout_handle(
+    id: &ElementId,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> ScrollHandle {
+    window
+        .use_keyed_state((id.clone(), "choice-layout"), cx, |_, _| {
+            ScrollHandle::new()
+        })
+        .read(cx)
+        .clone()
+}
+
+fn roving_key_target(key: &str, selected: Option<usize>, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let next = match key {
+        "left" | "up" => Some(selected.map_or(count - 1, |i| (i + count - 1) % count)),
+        "right" | "down" => Some(selected.map_or(0, |i| (i + 1) % count)),
+        "home" => Some(0),
+        "end" => count.checked_sub(1),
+        _ => None,
+    };
+    next.filter(|index| *index < count)
+}
+
 impl gpui_kit::RenderOnce for ChoiceGroup {
     fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
         let p = super::theme::palette(cx);
         let count = self.labels.len();
-        let handles: Vec<_> = (0..count)
-            .map(|index| {
-                window
-                    .use_keyed_state((self.id.clone(), index.to_string()), cx, |_, cx| {
-                        cx.focus_handle()
-                    })
-                    .read(cx)
-                    .clone()
-            })
-            .collect();
+        let handles = group_focus_handles(&self.id, count, window, cx);
         let key_handles = handles.clone();
         let key_handler = self.handler.clone();
         let selected = self.selected.filter(|&index| index < count);
@@ -496,23 +672,8 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
         let disabled = self.disabled;
         let layout = match &self.scroll {
             Some((handle, _)) => handle.clone(),
-            None => window
-                .use_keyed_state((self.id.clone(), "choice-layout"), cx, |_, _| {
-                    ScrollHandle::new()
-                })
-                .read(cx)
-                .clone(),
+            None => group_layout_handle(&self.id, window, cx),
         };
-        let measured = choice_bounds(&layout, selected);
-        let animated = measured.map(|target| {
-            gpui_base::motion::transition(
-                ElementId::from((self.id.clone(), "choice-indicator")),
-                target,
-                gpui_base::motion::Transition::new(std::time::Duration::from_millis(150)),
-                window,
-                cx,
-            )
-        });
         let mut group = gpui_base::RadioGroup::new(self.id.clone())
             .axis(gpui_kit::Axis::Horizontal)
             .relative()
@@ -530,45 +691,15 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .when_some(self.scroll.as_ref(), |group, (_, height)| {
                 group.max_h(*height).overflow_y_scroll()
             })
-            .child(
-                gpui_kit::canvas(
-                    |_, _, _| (),
-                    move |canvas, _, window, _| {
-                        if let Some(actual) = choice_bounds(&layout, selected) {
-                            let mut indicator = if Some(actual) == measured {
-                                animated.unwrap_or(actual)
-                            } else {
-                                // Layout was first measured or changed during this frame.
-                                window.request_animation_frame();
-                                actual
-                            };
-                            indicator.origin += canvas.origin;
-                            window.paint_quad(gpui_kit::quad(
-                                indicator,
-                                px(3.),
-                                p.accent,
-                                px(1.),
-                                p.primary,
-                                Default::default(),
-                            ));
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
+            .child(sliding_indicator_canvas(
+                &self.id, selected, &layout, &p, window, cx,
+            ))
             .on_key_down(move |event, window, cx| {
-                if disabled || count == 0 {
+                if disabled {
                     return;
                 }
-                let next = match event.keystroke.key.as_str() {
-                    "left" | "up" => Some(selected.map_or(count - 1, |i| (i + count - 1) % count)),
-                    "right" | "down" => Some(selected.map_or(0, |i| (i + 1) % count)),
-                    "home" => Some(0),
-                    "end" => count.checked_sub(1),
-                    _ => None,
-                };
-                if let Some(next) = next.filter(|n| *n < count) {
+                if let Some(next) = roving_key_target(event.keystroke.key.as_str(), selected, count)
+                {
                     key_handles[next].focus(window, cx);
                     if let Some((scroll, _)) = &self.scroll {
                         scroll.scroll_to_item(next + 1);
@@ -679,5 +810,21 @@ mod tests {
             assert_eq!(bg_idle, p.neutral_active());
             assert_ne!(hover_idle, p.accent);
         }
+    }
+
+    #[test]
+    fn roving_key_target_wraps_and_handles_collapsed_selection() {
+        assert_eq!(roving_key_target("left", Some(0), 3), Some(2));
+        assert_eq!(roving_key_target("right", Some(2), 3), Some(0));
+        assert_eq!(roving_key_target("down", Some(1), 3), Some(2));
+        assert_eq!(roving_key_target("up", Some(1), 3), Some(0));
+        assert_eq!(roving_key_target("home", Some(2), 3), Some(0));
+        assert_eq!(roving_key_target("end", Some(0), 3), Some(2));
+
+        // When collapsed (no active selection), arrows start at the corresponding edge.
+        assert_eq!(roving_key_target("right", None, 2), Some(0));
+        assert_eq!(roving_key_target("left", None, 2), Some(1));
+        assert_eq!(roving_key_target("tab", Some(0), 2), None);
+        assert_eq!(roving_key_target("right", None, 0), None);
     }
 }

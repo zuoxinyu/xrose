@@ -1045,48 +1045,38 @@ impl AppView {
             .copied()
             .unwrap_or_default();
         let collapsed = self.collapsed_mesh_sections.contains(&profile.id);
-        let tab_button = |tab: MeshCardTab,
-                          suffix: &str,
-                          label: SharedString,
-                          count: usize,
-                          cx: &mut Context<Self>| {
-            let profile_id = profile.id.clone();
-            let selected = !collapsed && active_tab == tab;
-            segmented_tab_button(
-                SharedString::from(format!("mesh-tab-{suffix}-{profile_id}")),
-                None,
-                label,
-                count.to_string(),
-                selected,
-                p,
-                cx,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                select_mesh_card_tab(
-                    &mut this.mesh_card_tabs,
-                    &mut this.collapsed_mesh_sections,
-                    &profile_id,
-                    tab,
-                );
-                cx.notify();
-            }))
-        };
+        let profile_id = profile.id.clone();
+        let selected_tab = (!collapsed).then_some(match active_tab {
+            MeshCardTab::Devices => 0,
+            MeshCardTab::Forwards => 1,
+        });
         // Keep device list on the left and port forwarding on the right.
-        let tabs = segmented_tab_track(p)
-            .child(tab_button(
-                MeshCardTab::Devices,
-                "devices",
-                self.tr("设备列表", "Devices"),
-                peer_count,
-                cx,
-            ))
-            .child(tab_button(
-                MeshCardTab::Forwards,
-                "forwards",
-                self.tr("端口转发", "Port forwarding"),
-                forward_count,
-                cx,
-            ));
+        let tabs = SegmentedTabs::new(
+            SharedString::from(format!("mesh-card-tabs-{profile_id}")),
+            vec![
+                SegmentedTab::new(
+                    SharedString::from(format!("mesh-tab-devices-{profile_id}")),
+                    self.tr("设备列表", "Devices"),
+                    peer_count.to_string(),
+                ),
+                SegmentedTab::new(
+                    SharedString::from(format!("mesh-tab-forwards-{profile_id}")),
+                    self.tr("端口转发", "Port forwarding"),
+                    forward_count.to_string(),
+                ),
+            ],
+            selected_tab,
+        )
+        .on_change(cx.listener(move |this, index, _, cx| {
+            let tab = [MeshCardTab::Devices, MeshCardTab::Forwards][*index];
+            select_mesh_card_tab(
+                &mut this.mesh_card_tabs,
+                &mut this.collapsed_mesh_sections,
+                &profile_id,
+                tab,
+            );
+            cx.notify();
+        }));
         let toggle_profile_id = profile.id.clone();
         let toggle_label = if collapsed {
             self.tr("展开", "Expand")
