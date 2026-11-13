@@ -4,9 +4,11 @@
   <img src="crates/xrose-app/assets/logo-mark.png" width="140" alt="Xrose logo" />
 </p>
 
-**Xrose** 是 [Project Xristina](docs/MILESTONE.M1.PROJECT-XRISTINA.md) 旗下的跨平台桌面客户端（Project Xristina 为规划中的自研网络内核项目）。Xrose 基于 Rust 与 GPUI Kit 构建，当前支持 **sing-box** 与 **Xray** 内核，并集成 **EasyTier** 与 **Tailscale** 异地组网，可运行于 Windows、macOS 和 Linux。
+**Xrose** 是 [Project Xristina](docs/MILESTONE.M1.PROJECT-XRISTINA.md) 旗下的跨平台桌面客户端。
 
-Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 **ex-rose**，命名致敬 X Japan 的歌曲《ROSE OF PAIN》。
+Xrose 基于 Rust 与 GPUI Kit 构建，当前支持 **sing-box** 与 **Xray** 内核，并集成 **EasyTier** 与 **Tailscale** 异地组网，可运行于 Windows、macOS 和 Linux。
+
+Xrose 正式读作 **k'rose**，口语也可读作 **ex-rose**，命名致敬 X Japan 的歌曲《ROSE OF PAIN》。
 
 ![节点页面](docs/screenshots/nodes.png)
 
@@ -18,6 +20,51 @@ Xrose 正式读作 **k'rose**，与英文 **Cross** 谐音，口语也可读作 
 - **高效的状态同步**：两栏式布局搭配顶栏控制胶囊，节点切换、工作模式切换与内核启停可在页内、顶栏与系统托盘面板间实时同步；托盘面板支持窗口最小化 / 关闭驻留及系统动画适配。
 - **零打断导入与拖拽编排**：在节点与订阅页支持剪贴板粘贴（`⌘V` / `Ctrl+V`）与文件拖放，自动识别链接、Base64 列表与二维码图片；在 Xrose 主窗口可用 `⇧⌘S`（macOS）或 `Ctrl+Shift+S`（Windows / Linux）唤起取景框，跨屏扫描并导入节点或订阅；节点、路由规则与自定义分组支持拖拽排序。
 - **实时可视化与隐私保护**：分段控件具备平滑指示动效，连接页展示实时速率、进程图标与多维度流量统计图表；开启隐私模式后，界面、剪贴板导出及诊断报告中的节点地址、域名与网络标识会自动遮罩。
+
+<details>
+<summary>查看全部页面截图</summary>
+
+**1. 节点**
+
+![节点](docs/screenshots/nodes.png)
+
+**2. 订阅**
+
+![订阅](docs/screenshots/subscriptions.png)
+
+**3. 路由**
+
+![路由](docs/screenshots/routing.png)
+
+**4. DNS**
+
+![DNS](docs/screenshots/dns.png)
+
+**5. 组网**
+
+![组网](docs/screenshots/mesh.png)
+
+**6. 连接**
+
+![连接](docs/screenshots/connections.png)
+
+**7. 测试**
+
+![测试](docs/screenshots/diagnostics.png)
+
+**8. 日志**
+
+![日志](docs/screenshots/logs.png)
+
+**9. 设置**
+
+![设置](docs/screenshots/settings.png)
+
+**10. 关于**
+
+![关于](docs/screenshots/about.png)
+
+</details>
 
 ### 本机直连模式
 
