@@ -60,6 +60,8 @@ Xrose 是 Project Xristina 旗下的 Xray / sing-box 跨平台桌面客户端，
 - Windows：`build.rs` 将图标嵌入为资源 ID 1，并把主线程栈提升至 16 MiB，修改构建时两者都要保留。
 - `objc` 宏依赖 `crates/xrose-app/Cargo.toml` 中 `[lints.rust]` 的 `cfg(feature = "cargo-clippy")` 条目；不得整体放行 `unexpected_cfgs`。
 - `vendor/block`（`block 0.1.6` 静态类型修复）及 `vendor/gpui-pre`、`vendor/gpui-pre-windows`（Windows 字号与 DirectWrite 渲染调整）通过 `[patch.crates-io]` 引入。
+- `vendor/gpui-pre-windows` 另含 `directx_renderer.rs` 的路径渲染纹理补丁，原因：GPUI 原本为每个窗口无条件创建 1× 与 4× MSAA 两张全窗口渲染目标（合计 32 B/px，200% 缩放下约 60 MB），从不绘制 `Path` 的窗口也要常驻，且 resize 后不归还。现改为首次绘制路径时按 `ensure_path_intermediates` 分配、resize 时释放；升级 `gpui-pre` 版本时需重新适配该函数与 `DirectXResources` 的 `Option` 字段。
+- 上述路径纹理补丁是临时过渡：上游 zed 已改为按 tile 渲染路径（`PaintedPath::tile_count` + `D32_FLOAT` 深度模板，全窗口额外目标约 4 B/px），而 `gpui-pre-windows 0.3.12` 仍是旧实现。升级 `gpui-pre` 后若对应版本的 `directx_renderer.rs` 里已没有 `path_intermediate_texture`，说明修复已随上游 rebase 进入，此时必须删除本项改动，把 `DirectXResources` 字段与 `create_resources`/`recreate_resources` 还原成上游实现，只保留该 vendor 目录原有的字号与 DirectWrite 调整，不得长期维护与上游分叉的两份实现。
 - 注册表、`networksetup`、GNOME/KDE 等平台代码主要在 Linux 上验证过；声称平台修复有效前，先运行 `xrose-cli doctor` / `check`。
 
 ## 修改入口
