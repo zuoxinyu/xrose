@@ -1,0 +1,194 @@
+name: Publish package manager manifests
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.generate.outputs.version }}
+      repo: ${{ steps.generate.outputs.repo }}
+      pkgbase: ${{ steps.generate.outputs.pkgbase }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate and validate manifests
+        id: generate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_INPUT: ${{ inputs.tag }}
+          UPSTREAM_REPO: ${{ vars.PACKAGE_UPSTREAM_REPO }}
+          AUR_PKGBASE: ${{ vars.AUR_PKGBASE }}
+          AUR_MAINTAINER: ${{ vars.AUR_MAINTAINER }}
+          AUR_GIT_NAME: ${{ vars.AUR_GIT_NAME }}
+          AUR_GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL }}
+          PACKAGE_GIT_NAME: ${{ vars.PACKAGE_GIT_NAME }}
+          PACKAGE_GIT_EMAIL: ${{ vars.PACKAGE_GIT_EMAIL }}
+        run: |
+          TAG="$TAG_INPUT"
+          [[ "$TAG" == v* ]] || TAG="v$TAG"
+          REPO="${UPSTREAM_REPO:-$GITHUB_REPOSITORY}"
+          PKGBASE="${AUR_PKGBASE:-xrose-bin}"
+
+          MAINTAINER="${AUR_MAINTAINER:-}"
+          if [[ -z "$MAINTAINER" ]]; then
+            NAME="${AUR_GIT_NAME:-${PACKAGE_GIT_NAME:-}}"
+            EMAIL="${AUR_GIT_EMAIL:-${PACKAGE_GIT_EMAIL:-}}"
+            if [[ -n "$NAME" && -n "$EMAIL" ]]; then
+              MAINTAINER="$NAME <$EMAIL>"
+            fi
+          fi
+
+          mkdir -p "$RUNNER_TEMP/checksums" "$RUNNER_TEMP/manifests"
+          gh release download "$TAG" --repo "$REPO" --pattern SHA256SUMS --dir "$RUNNER_TEMP/checksums"
+
+          python3 scripts/package_managers.py \
+            --tag "$TAG" \
+            --repo "$REPO" \
+            --checksums "$RUNNER_TEMP/checksums/SHA256SUMS" \
+            --output "$RUNNER_TEMP/manifests" \
+            --aur-pkgbase "$PKGBASE" \
+            --aur-maintainer "$MAINTAINER" \
+            --srcinfo-mode docker
+
+          python3 -m json.tool "$RUNNER_TEMP/manifests/scoop/bucket/xrose.json" >/dev/null
+          bash -n "$RUNNER_TEMP/manifests/aur/PKGBUILD"
+          if command -v ruby >/dev/null 2>&1; then
+            ruby -c "$RUNNER_TEMP/manifests/homebrew/Casks/xrose.rb"
+          fi
+
+          {
+            echo "version=${TAG#v}"
+            echo "repo=$REPO"
+            echo "pkgbase=$PKGBASE"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-manifests
+          path: ${{ runner.temp }}/manifests
+          if-no-files-found: error
+
+  publish-homebrew:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests
+      - name: Push Homebrew Cask to tap repository
+        env:
+          TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          GIT_HTTP_TOKEN: ${{ secrets.PACKAGING_GH_TOKEN }}
+          GIT_NAME: ${{ vars.PACKAGE_GIT_NAME }}
+          GIT_EMAIL: ${{ vars.PACKAGE_GIT_EMAIL }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ -z "${TAP_REPO:-}" || -z "${GIT_HTTP_TOKEN:-}" ]]; then
+            echo "::notice::未配置 HOMEBREW_TAP_REPO 或 PACKAGING_GH_TOKEN，跳过 Homebrew Tap 推送。"
+            exit 0
+          fi
+          bash scripts/publish_git_repo.sh \
+            --remote "https://github.com/${TAP_REPO}.git" \
+            --branch main \
+            --message "feat(cask): update xrose to ${VERSION}" \
+            --author-name "${GIT_NAME:-github-actions[bot]}" \
+            --author-email "${GIT_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}" \
+            "manifests/homebrew/Casks/xrose.rb:Casks/xrose.rb"
+
+  publish-scoop:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests
+      - name: Push Scoop manifest to bucket repository
+        env:
+          BUCKET_REPO: ${{ vars.SCOOP_BUCKET_REPO }}
+          GIT_HTTP_TOKEN: ${{ secrets.PACKAGING_GH_TOKEN }}
+          GIT_NAME: ${{ vars.PACKAGE_GIT_NAME }}
+          GIT_EMAIL: ${{ vars.PACKAGE_GIT_EMAIL }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ -z "${BUCKET_REPO:-}" || -z "${GIT_HTTP_TOKEN:-}" ]]; then
+            echo "::notice::未配置 SCOOP_BUCKET_REPO 或 PACKAGING_GH_TOKEN，跳过 Scoop Bucket 推送。"
+            exit 0
+          fi
+          bash scripts/publish_git_repo.sh \
+            --remote "https://github.com/${BUCKET_REPO}.git" \
+            --branch main \
+            --message "xrose: Update to version ${VERSION}" \
+            --author-name "${GIT_NAME:-github-actions[bot]}" \
+            --author-email "${GIT_EMAIL:-41898282+github-actions[bot]@users.noreply.github.com}" \
+            "manifests/scoop/bucket/xrose.json:bucket/xrose.json"
+
+  publish-aur:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: package-manifests
+          path: manifests
+      - name: Push PKGBUILD and .SRCINFO to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          PKGBASE: ${{ needs.prepare.outputs.pkgbase }}
+          AUR_GIT_NAME: ${{ vars.AUR_GIT_NAME }}
+          AUR_GIT_EMAIL: ${{ vars.AUR_GIT_EMAIL }}
+          PACKAGE_GIT_NAME: ${{ vars.PACKAGE_GIT_NAME }}
+          PACKAGE_GIT_EMAIL: ${{ vars.PACKAGE_GIT_EMAIL }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if [[ -z "${AUR_SSH_PRIVATE_KEY:-}" ]]; then
+            echo "::notice::未配置 AUR_SSH_PRIVATE_KEY，跳过 AUR 推送。"
+            exit 0
+          fi
+          if grep -q '<MAINTAINER>' manifests/aur/PKGBUILD; then
+            echo "请先在仓库 Variables 中配置 AUR_MAINTAINER（或 AUR_GIT_NAME 与 AUR_GIT_EMAIL）后再推送 AUR。" >&2
+            exit 1
+          fi
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          key_file="$HOME/.ssh/aur_key"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$RUNNER_TEMP/aur_host_key"
+          ssh-keygen -lf "$RUNNER_TEMP/aur_host_key" | grep -q "SHA256:RFzBCUItH9LZS0cKB5UE6ceAYhBD5C8GeOBip8Z11+4"
+          cat "$RUNNER_TEMP/aur_host_key" >> "$HOME/.ssh/known_hosts"
+          chmod 644 "$HOME/.ssh/known_hosts"
+
+          export GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes"
+          bash scripts/publish_git_repo.sh \
+            --remote "ssh://aur@aur.archlinux.org/${PKGBASE}.git" \
+            --branch master \
+            --push-branch master \
+            --message "Update to ${VERSION}" \
+            --author-name "${AUR_GIT_NAME:-${PACKAGE_GIT_NAME:-Xrose Maintainers}}" \
+            --author-email "${AUR_GIT_EMAIL:-${PACKAGE_GIT_EMAIL:-aur@users.noreply.github.com}}" \
+            "manifests/aur/PKGBUILD:PKGBUILD" \
+            "manifests/aur/.SRCINFO:.SRCINFO"

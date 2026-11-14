@@ -41,3 +41,21 @@ Linux 构建流程在 Debian/Ubuntu 环境生成 deb。Arch 包使用 makepkg；
 [release.yml](../.github/workflows/release.yml) 支持手动构建和标签发布。手动运行仅生成可下载的工作流产物。推送与 Cargo 工作区版本一致的标签（如 `v0.1.0`）后，各平台解包测试 full/lite，全部成功再创建 GitHub Release，附带各安装包与 `SHA256SUMS`。发布构建自动设置 `XROSE_GITHUB_REPOSITORY`；本地构建若需启用应用更新，请将其设为正式发布仓库的 `owner/repo`。
 
 macOS 本机继续优先使用指定身份或本机 Apple Development 证书。公开分发可在仓库 Secrets 配置 `MACOS_DEVELOPER_ID_P12`（Base64 编码）和 `MACOS_DEVELOPER_ID_PASSWORD`，使用 Developer ID Application 签名。再配置 `MACOS_NOTARY_APPLE_ID`、`MACOS_NOTARY_TEAM_ID` 和 `MACOS_NOTARY_PASSWORD` 可公证 DMG 并附上凭据。未配置证书时，干净的 CI runner 会生成临时签名、未经公证的 DMG。Windows ZIP 默认没有 Authenticode 签名。
+
+## 包管理器自动发布（AUR / Homebrew / Scoop）
+
+正式标签（不含 `-` 预发布后缀）在 `release.yml` 发布完成后，会自动调用 [publish-packages.yml](../.github/workflows/publish-packages.yml) 从 Release 的 `SHA256SUMS` 生成并推送以下包管理器清单（也可在 Actions 中手动触发 `workflow_dispatch` 补推指定标签）：
+
+| 目标 | 清单路径 | 上游产物 | 所需配置（未配置时自动跳过推送） |
+| :--- | :--- | :--- | :--- |
+| **AUR** | `PKGBUILD`、`.SRCINFO` | `Xrose-<ver>-linux-amd64-full.pkg.tar.zst` | Secret: `AUR_SSH_PRIVATE_KEY`；Variable: `AUR_MAINTAINER`（或 `AUR_GIT_NAME` + `AUR_GIT_EMAIL`），可选 `AUR_PKGBASE`（默认 `xrose-bin`） |
+| **Homebrew Tap** | `Casks/xrose.rb` | `Xrose-<ver>-macos-{arm64,amd64}-full.dmg` | Secret: `PACKAGING_GH_TOKEN`；Variable: `HOMEBREW_TAP_REPO`（如 `<OWNER>/homebrew-tap`） |
+| **Scoop Bucket** | `bucket/xrose.json` | `Xrose-<ver>-windows-{amd64,arm64}-full.zip` | Secret: `PACKAGING_GH_TOKEN`；Variable: `SCOOP_BUCKET_REPO`（如 `<OWNER>/scoop-bucket`） |
+
+`PACKAGING_GH_TOKEN` 需具备目标 Tap / Bucket 仓库的 `Contents: Read and write` 权限；可选配置 `PACKAGE_GIT_NAME`、`PACKAGE_GIT_EMAIL` 指定提交作者信息，或配置 `PACKAGE_UPSTREAM_REPO` 覆盖 Release 来源仓库。
+
+本地可用 `--allow-placeholders` 预览或初始化外部仓库模板：
+
+```bash
+python3 scripts/package_managers.py --allow-placeholders --output dist/package-managers
+```

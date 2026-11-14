@@ -120,3 +120,11 @@ jobs:
           if [[ "$TAG" == *-* ]]; then flags+=(--prerelease); fi
           gh release create "$TAG" "${flags[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
             --title "Xrose ${TAG#v}" Xrose-* SHA256SUMS
+
+  publish-packages:
+    needs: publish
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    uses: ./.github/workflows/publish-packages.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
