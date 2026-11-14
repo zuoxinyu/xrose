@@ -940,8 +940,24 @@ impl AppView {
         };
         let node = self.snapshot.selected_node(None);
         let direct = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Direct;
-        let node_name = node
-            .map(|n| {
+        let mesh = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh;
+        let node_name = if mesh {
+            self.snapshot
+                .model
+                .mesh_mode
+                .target
+                .as_ref()
+                .map(|target| {
+                    let name = if self.hide_ips {
+                        target.name.replace(&target.address, "•••")
+                    } else {
+                        target.name.clone()
+                    };
+                    format!("{} · {name}", self.tr("组网", "Mesh"))
+                })
+                .unwrap_or_else(|| self.tr("选择组网出口", "Select mesh exit").to_string())
+        } else {
+            node.map(|n| {
                 if self.hide_ips && !n.server.is_empty() {
                     n.name.replace(&n.server, "•••")
                 } else {
@@ -955,7 +971,8 @@ impl AppView {
                     self.tr("选择节点", "Select node")
                 }
                 .to_string()
-            });
+            })
+        };
         let state_label = match self.snapshot.process.phase {
             xrose_core::core::ProcessPhase::Stopped => self.tr("已停止", "Stopped"),
             xrose_core::core::ProcessPhase::Starting => self.tr("启动中", "Starting"),
@@ -964,14 +981,33 @@ impl AppView {
             xrose_core::core::ProcessPhase::Failed => self.tr("启动失败", "Failed"),
         };
         let mut node_tip = format!("{node_name} · {state_label}");
-        let latency = node.and_then(|n| self.snapshot.latency.get(&n.id));
-        let testing = node.is_some_and(|n| self.latency_pending.contains(&n.id))
+        let latency = node
+            .filter(|_| !mesh)
+            .and_then(|n| self.snapshot.latency.get(&n.id));
+        let mesh_delay = self
+            .snapshot
+            .model
+            .mesh_mode
+            .target
+            .as_ref()
+            .and_then(|target| {
+                self.snapshot.mesh.exits().find_map(|(profile, peer, _)| {
+                    (mesh && profile.id == target.profile_id && peer.id == target.peer_id)
+                        .then_some(peer.latency_ms)
+                        .flatten()
+                        .filter(|latency| latency.is_finite() && *latency >= 0.0)
+                        .map(|latency| latency.round() as u32)
+                })
+            });
+        let testing = !mesh
+            && node.is_some_and(|n| self.latency_pending.contains(&n.id))
             && self.snapshot.busy.iter().any(|key| key == "latency");
-        let node_delay = theme::latency_label(latency, testing, self.lang());
-        if let Some(entry) = node.and_then(|n| self.snapshot.latency.get(&n.id)) {
-            if let Some(ms) = entry.delay_ms {
-                node_tip.push_str(&format!(" · {ms} ms"));
-            }
+        let node_delay = mesh_delay.map_or_else(
+            || theme::latency_label(latency, testing, self.lang()),
+            |ms| format!("{ms} ms"),
+        );
+        if let Some(ms) = mesh_delay.or_else(|| latency.and_then(|entry| entry.delay_ms)) {
+            node_tip.push_str(&format!(" · {ms} ms"));
         }
         if running && !self.hide_ips {
             if let Some(label) = node
@@ -980,7 +1016,9 @@ impl AppView {
             {
                 node_tip.push_str(&format!("\n{label}"));
             }
-            if !self.snapshot.active_proxy_addresses.is_empty() {
+            if self.snapshot.model.work_mode != xrose_core::model::WorkMode::Mesh
+                && !self.snapshot.active_proxy_addresses.is_empty()
+            {
                 node_tip.push_str(&format!(
                     "\n{}: {}",
                     self.tr("代理地址", "Proxy"),
@@ -1083,7 +1121,7 @@ impl AppView {
                                                 .text_xs()
                                                 .child(node_name),
                                         )
-                                        .when(node.is_some(), |d| {
+                                        .when(node.is_some() || mesh, |d| {
                                             d.child(
                                                 div()
                                                     .flex_shrink_0()
@@ -1093,6 +1131,8 @@ impl AppView {
                                                     )
                                                     .text_color(if testing {
                                                         p.muted_fg
+                                                    } else if mesh {
+                                                        theme::latency_color_ms(&p, mesh_delay)
                                                     } else {
                                                         theme::latency_color(&p, latency)
                                                     })

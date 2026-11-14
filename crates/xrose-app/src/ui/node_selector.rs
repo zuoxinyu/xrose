@@ -53,6 +53,7 @@ impl AppView {
     fn node_choices(&self) -> Vec<Choice> {
         let snapshot = &self.snapshot;
         let direct = snapshot.model.work_mode == WorkMode::Direct;
+        let proxy = snapshot.model.work_mode == WorkMode::Proxy;
         let mut choices = vec![Choice {
             label: self.tr("本机直连", "Direct"),
             checked: direct,
@@ -64,7 +65,12 @@ impl AppView {
             .and_then(|id| snapshot.model.group(&id));
         if let Some(group) = group {
             let automatic = !group.manually_selectable();
-            if automatic
+            let gateway_selected = group
+                .selected
+                .as_ref()
+                .and_then(|id| snapshot.model.node(id))
+                .is_some_and(|node| node.is_mesh_gateway());
+            if (automatic || gateway_selected)
                 && snapshot
                     .model
                     .has_usable_default_group(snapshot.settings.core)
@@ -72,11 +78,15 @@ impl AppView {
                 choices.push(Choice {
                     label: format!(
                         "{} ({})",
-                        self.tr("自动选择", "Automatic"),
+                        if automatic {
+                            self.tr("自动选择", "Automatic")
+                        } else {
+                            self.tr("代理", "Proxy")
+                        },
                         self.outbound_group_label(group)
                     )
                     .into(),
-                    checked: !direct,
+                    checked: proxy,
                     command: Some(Command::SelectWorkMode(WorkMode::Proxy)),
                 });
             }
@@ -86,6 +96,7 @@ impl AppView {
                 .members
                 .iter()
                 .filter_map(|id| snapshot.model.node(id))
+                .filter(|node| !node.is_mesh_gateway())
             {
                 let name = if self.hide_ips && !node.server.is_empty() {
                     node.name.replace(&node.server, "•••")
@@ -106,6 +117,38 @@ impl AppView {
                     .then(|| Command::SelectNode(group.id.clone(), node.id.clone())),
                 });
             }
+        }
+        let target = snapshot.model.mesh_mode.target.as_ref();
+        let mut target_listed = false;
+        for (profile, peer, _) in snapshot.mesh.exits() {
+            let current = target
+                .is_some_and(|target| target.profile_id == profile.id && target.peer_id == peer.id);
+            target_listed |= current;
+            let name = if self.hide_ips && peer.name.parse::<std::net::IpAddr>().is_ok() {
+                self.tr("出口设备", "Exit device").to_string()
+            } else if peer.name.is_empty() {
+                profile.name.clone()
+            } else {
+                peer.name.clone()
+            };
+            choices.push(Choice {
+                label: format!("{} · {name}", self.tr("组网", "Mesh")).into(),
+                checked: snapshot.model.work_mode == WorkMode::Mesh && current,
+                command: (peer.online || current)
+                    .then(|| Command::SelectMeshExit(profile.id.clone(), peer.id.clone())),
+            });
+        }
+        if !target_listed && let Some(target) = target {
+            let name = if self.hide_ips {
+                target.name.replace(&target.address, "•••")
+            } else {
+                target.name.clone()
+            };
+            choices.push(Choice {
+                label: format!("{} · {name}", self.tr("组网", "Mesh")).into(),
+                checked: snapshot.model.work_mode == WorkMode::Mesh,
+                command: Some(Command::SelectWorkMode(WorkMode::Mesh)),
+            });
         }
         if choices.len() == 1 {
             choices.push(Choice {

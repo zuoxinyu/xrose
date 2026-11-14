@@ -30,6 +30,8 @@ pub enum MeshCommand {
         sync_port: u16,
         #[serde(default)]
         sync_password: MeshSecret,
+        #[serde(default)]
+        exit_bridge: Option<super::ExitBridge>,
     },
     Inspect,
     ProbeProfile {
@@ -58,13 +60,36 @@ pub enum MeshCommand {
     },
     StopAll,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MeshReply {
     pub version: u32,
     pub networks: Vec<MeshRuntimeView>,
+    /// Private runtime metadata; never copy into the normal mesh snapshot.
+    #[serde(default)]
+    pub helper_executable: Option<String>,
+}
+impl std::fmt::Debug for MeshReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeshReply")
+            .field("version", &self.version)
+            .field("networks", &self.networks)
+            .field(
+                "helper_executable",
+                &self.helper_executable.as_ref().map(|_| "[PRIVATE]"),
+            )
+            .finish()
+    }
+}
+fn helper_executable() -> Option<String> {
+    let path = std::env::current_exe().ok()?;
+    path.is_absolute()
+        .then(|| path.to_str().map(str::to_owned))
+        .flatten()
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bootstrap {
+    #[serde(default)]
+    pub exit_bridge: Option<super::ExitBridge>,
     #[serde(default)]
     pub sync_port: u16,
     pub sync_password: MeshSecret,
@@ -182,11 +207,13 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         return Ok(MeshReply {
             version: PROTOCOL_VERSION,
             networks: vec![state],
+            helper_executable: helper_executable(),
         });
     }
     if matches!(request.command, MeshCommand::Inspect) {
         return Ok(MeshReply {
             version: PROTOCOL_VERSION,
+            helper_executable: helper_executable(),
             networks: sessions
                 .values()
                 .flat_map(|s| s.workers.values())
@@ -224,6 +251,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         return Ok(MeshReply {
             version: PROTOCOL_VERSION,
             networks: Vec::new(),
+            helper_executable: helper_executable(),
         });
     }
     if let MeshCommand::Start { profile, .. } = &request.command {
@@ -262,8 +290,16 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             driver_archive,
             sync_port,
             sync_password,
+            exit_bridge,
         } => {
             profile.validate()?;
+            if profile.advertise_exit_node && profile.exit_routing == super::ExitRoutingMode::Rules
+            {
+                exit_bridge
+                    .as_ref()
+                    .ok_or_else(|| Error::config("出口分流服务未就绪，请重新连接组网"))?
+                    .validate()?;
+            }
             if session
                 .workers
                 .get(&profile.provider)
@@ -349,6 +385,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 .take()
                 .ok_or_else(|| Error::other("组网 IPC 不可用"))?;
             let bootstrap = Bootstrap {
+                exit_bridge: exit_bridge.clone(),
                 sync_port: *sync_port,
                 sync_password: sync_password.clone(),
                 profile: profile.clone(),
@@ -477,6 +514,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
     }
     Ok(MeshReply {
         version: PROTOCOL_VERSION,
+        helper_executable: helper_executable(),
         networks: session
             .workers
             .values()
@@ -527,6 +565,30 @@ pub fn call(request: MeshRequest) -> Result<MeshReply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn helper_path_is_optional_private_runtime_metadata() {
+        let legacy: MeshReply = serde_json::from_value(serde_json::json!({
+            "version": PROTOCOL_VERSION,
+            "networks": []
+        }))
+        .unwrap();
+        assert!(legacy.helper_executable.is_none());
+        let reply = MeshReply {
+            version: PROTOCOL_VERSION,
+            networks: Vec::new(),
+            helper_executable: Some("/fixture/private-helper".into()),
+        };
+        assert!(!format!("{reply:?}").contains("/fixture/private-helper"));
+        let wire = serde_json::to_vec(&reply).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<MeshReply>(&wire)
+                .unwrap()
+                .helper_executable,
+            reply.helper_executable
+        );
+        assert!(std::path::Path::new(&helper_executable().unwrap()).is_absolute());
+    }
+
     #[test]
     fn incompatible_or_uncredentialed_request_never_starts_a_worker() {
         let mut request = MeshRequest {

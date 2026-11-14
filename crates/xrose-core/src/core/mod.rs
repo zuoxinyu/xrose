@@ -38,6 +38,8 @@ pub struct StartOutcome {
 pub struct CoreManager {
     operation: tokio::sync::Mutex<()>,
     mesh: Mutex<crate::mesh::coexist::CoexistencePlan>,
+    mesh_exit: Mutex<Option<adapters::MeshExitRuntime>>,
+    exit_bridge: Mutex<Option<crate::mesh::ExitBridge>>,
     applied: Mutex<Option<AppliedConfig>>,
     paths: AppPaths,
     binaries: BinaryManager,
@@ -65,6 +67,8 @@ impl CoreManager {
         Self {
             operation: tokio::sync::Mutex::new(()),
             mesh: Mutex::new(Default::default()),
+            mesh_exit: Mutex::new(None),
+            exit_bridge: Mutex::new(None),
             applied: Mutex::new(None),
             paths,
             binaries,
@@ -357,11 +361,15 @@ impl CoreManager {
                 .unwrap()
                 .captures(&output)
                 .and_then(|c| semver::Version::parse(&c[1]).ok());
-            if !version.is_some_and(|v| v >= semver::Version::new(26, 6, 27)) {
+            if !version
+                .as_ref()
+                .is_some_and(|v| *v >= semver::Version::new(26, 6, 27))
+            {
                 return Err(Error::binary(
                     "Xray 自动 TUN 需要 26.6.27 或更新版本，请在设置中更新内核",
                 ));
             }
+            detected_version = version;
         }
         #[cfg(windows)]
         if uses_native_tun(model, core) {
@@ -384,7 +392,13 @@ impl CoreManager {
         );
         ctx.core_version = detected_version;
         ctx.mesh = self.mesh.lock().clone();
-        let compiled = adapters::adapter_for(core).compile(model, settings, &ctx)?;
+        ctx.mesh_exit = self.mesh_exit.lock().clone();
+        let bridge = self.exit_bridge.lock().clone();
+        let compiled = if let Some(bridge) = bridge {
+            adapters::compile_exit_gateway(model, settings, &ctx, bridge.port, &bridge.password.0)?
+        } else {
+            adapters::adapter_for(core).compile(model, settings, &ctx)?
+        };
         for warning in &compiled.warnings {
             self.logs
                 .core_line(LogStream::App, &format!("WARN {warning}"));
@@ -562,6 +576,18 @@ impl CoreManager {
         self.supervisor.last_tail()
     }
 
+    pub(crate) fn mesh_exit_runtime(&self) -> Option<adapters::MeshExitRuntime> {
+        self.mesh_exit.lock().clone()
+    }
+
+    pub(crate) fn set_mesh_exit(&self, runtime: Option<adapters::MeshExitRuntime>) {
+        *self.mesh_exit.lock() = runtime;
+    }
+
+    pub(crate) fn set_exit_bridge(&self, bridge: crate::mesh::ExitBridge) {
+        *self.exit_bridge.lock() = Some(bridge);
+    }
+
     pub fn mesh_plan(&self) -> crate::mesh::coexist::CoexistencePlan {
         self.mesh.lock().clone()
     }
@@ -709,8 +735,20 @@ impl CoreManager {
             self.paths.runtime_dir.clone(),
         );
         ctx.mesh = plan.clone();
+        ctx.mesh_exit = self.mesh_exit.lock().clone();
         ctx.core_version = old.compiled.core_version.clone();
-        let compiled = adapters::adapter_for(old.core).compile(&model, &old.settings, &ctx)?;
+        let bridge = self.exit_bridge.lock().clone();
+        let compiled = if let Some(bridge) = bridge {
+            adapters::compile_exit_gateway(
+                &model,
+                &old.settings,
+                &ctx,
+                bridge.port,
+                &bridge.password.0,
+            )?
+        } else {
+            adapters::adapter_for(old.core).compile(&model, &old.settings, &ctx)?
+        };
         let candidate = self.paths.runtime_dir.join("runtime-candidate.json");
         atomic_write_private(&candidate, compiled.to_pretty_string()?.as_bytes())?;
         let binary = self.resolve_and_register_binary(old.core, &old.settings)?;
@@ -884,10 +922,11 @@ fn validation_failure(report: &ValidationReport) -> String {
 
 fn uses_native_tun(model: &AppModel, core: CoreKind) -> bool {
     core.capabilities().native_tun
-        && model
-            .inbounds
-            .iter()
-            .any(|i| i.enabled && i.kind == crate::model::InboundKind::Tun)
+        && (model.work_mode == crate::model::WorkMode::Mesh
+            || model
+                .inbounds
+                .iter()
+                .any(|i| i.enabled && i.kind == crate::model::InboundKind::Tun))
 }
 
 pub fn run_args(core: CoreKind, config_path: &Path) -> Vec<String> {

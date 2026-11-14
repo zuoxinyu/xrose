@@ -1,8 +1,11 @@
 //! Compile the intent model into core-specific JSON and validate it with the
 //! real core binary. All schema knowledge lives here.
 
+mod mesh;
 pub mod singbox;
 pub mod xray;
+
+pub use mesh::{MeshExitRuntime, compile_exit_gateway, mesh_runtime_model};
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -107,6 +110,19 @@ fn add_dns_tags(tags: &mut BTreeSet<String>, server: &DnsServer) {
 
 pub(crate) fn rule_set_tags(model: &AppModel, mode: WorkMode) -> BTreeSet<String> {
     let mut tags = BTreeSet::new();
+    if mode == WorkMode::Mesh {
+        if model.mesh_mode.dns == crate::model::MeshDnsMode::Custom {
+            for server in model
+                .dns
+                .servers
+                .iter()
+                .filter(|server| !server.is_fakeip())
+            {
+                add_dns_tags(&mut tags, server);
+            }
+        }
+        return tags;
+    }
     for rule in model.routing.rules_for_mode(mode) {
         add_matcher_tags(&mut tags, &rule.matchers);
     }
@@ -200,6 +216,8 @@ fn compilation_model(model: &AppModel, warnings: &mut Vec<String>) -> AppModel {
 pub struct CompileContext {
     pub core_version: Option<semver::Version>,
     pub mesh: crate::mesh::coexist::CoexistencePlan,
+    pub mesh_exit: Option<MeshExitRuntime>,
+    pub(crate) mesh_transport: bool,
     pub data_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub api_port: u16,
@@ -214,6 +232,8 @@ impl CompileContext {
         Self {
             core_version: None,
             mesh: Default::default(),
+            mesh_exit: None,
+            mesh_transport: false,
             data_dir,
             runtime_dir,
             api_port: settings.api_port,

@@ -103,6 +103,8 @@ impl AppView {
         let lang = self.lang();
         let model = &self.snapshot.model;
         let exits = mesh_exits::choices(&self.snapshot.mesh, model, self.hide_ips, lang);
+        let discovered_gateways: HashSet<_> =
+            exits.iter().map(|exit| exit.gateway.clone()).collect();
         let has_nodes = !model.nodes.is_empty() || !exits.is_empty();
         let active_group = model.default_group_id();
         let group = active_group.as_ref().and_then(|id| model.group(id));
@@ -195,6 +197,7 @@ impl AppView {
             .nodes
             .iter()
             .enumerate()
+            .filter(|(_, node)| !node.is_mesh_gateway() || !discovered_gateways.contains(&node.id))
             .filter(|(_, n)| {
                 if search_query.is_empty() {
                     true
@@ -243,7 +246,12 @@ impl AppView {
             || this_busy(&self.snapshot.busy, "auto-probe");
         let exit_busy = this_busy(&self.snapshot.busy, "mesh-exit");
         let core_busy = is_core_busy || exit_busy;
-        let exit_count = exits.len();
+        let node_count = model
+            .nodes
+            .iter()
+            .filter(|node| !node.is_mesh_gateway() || !discovered_gateways.contains(&node.id))
+            .count()
+            + exits.len();
         let row_gap = rems(if grouped { 0.5 } else { 0.75 }).to_pixels(window.rem_size());
         let exits: Vec<_> = exits
             .into_iter()
@@ -252,24 +260,15 @@ impl AppView {
         let shown_exits = exits.len();
         let shown = display_nodes.len() + shown_exits;
         let mut exit_rows = (shown_exits != 0).then(|| {
-            let busy =
-                core_busy || this_busy(&self.snapshot.busy, "mesh") || auto_mode || batch_mode;
-            let group = active_group.clone();
+            let busy = core_busy || this_busy(&self.snapshot.busy, "mesh") || batch_mode;
             node_rows(
                 shown_exits,
                 px(super::theme::NODE_ROW_HEIGHT),
                 row_gap,
-                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
                     exits[range]
                         .iter()
-                        .map(|exit| {
-                            let disabled = busy
-                                || group.as_ref().is_none_or(|id| {
-                                    !this.snapshot.model.can_select_mesh_exit(id, &exit.gateway)
-                                });
-                            exit.row(group.clone(), disabled, hide_ips, lang, &p, cx)
-                                .into_any_element()
-                        })
+                        .map(|exit| exit.row(busy, hide_ips, lang, &p, cx).into_any_element())
                         .collect()
                 }),
             )
@@ -295,7 +294,10 @@ impl AppView {
                                 RowProps {
                                     node,
                                     lang,
-                                    selected: active_node.as_deref() == Some(node.id.as_str()),
+                                    selected: active_node.as_deref() == Some(node.id.as_str())
+                                        && (!node.is_mesh_gateway()
+                                            || this.snapshot.model.work_mode
+                                                == xrose_core::model::WorkMode::Mesh),
                                     running: this.snapshot.runtime.running_proxy_node.as_deref()
                                         == Some(node.id.as_str()),
                                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
@@ -375,12 +377,7 @@ impl AppView {
                                     if search_query.is_empty() {
                                         format!("{} {}", shown, self.tr("个", ""))
                                     } else {
-                                        format!(
-                                            "{}/{} {}",
-                                            shown,
-                                            model.nodes.len() + exit_count,
-                                            self.tr("个", "")
-                                        )
+                                        format!("{}/{} {}", shown, node_count, self.tr("个", ""))
                                     },
                                     p.primary,
                                     p.accent,
@@ -1108,7 +1105,10 @@ fn render_node_row(
     let node_id_select = node.id.clone();
     let node_id_tcp = node.id.clone();
     let node_id_batch = node.id.clone();
-    let can_select = group_id.is_some() && !is_core_busy && !offline_exit;
+    let mesh_gateway = node.is_mesh_gateway();
+    let can_select =
+        (group_id.is_some() || (mesh_gateway && node.enabled)) && !is_core_busy && !offline_exit;
+    let auto_mode = auto_mode && !mesh_gateway;
     let name = node.name.clone();
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
     let is_node_busy = is_core_busy && selected;
@@ -1229,8 +1229,15 @@ fn render_node_row(
                     if !can_select || selected {
                         return;
                     }
-                    if let Some(group) = &group_id {
-                        this.service.select_node(group, &node_id_select);
+                    if mesh_gateway || group_id.is_some() {
+                        this.service.select_node(
+                            if mesh_gateway {
+                                ""
+                            } else {
+                                group_id.as_deref().unwrap_or("")
+                            },
+                            &node_id_select,
+                        );
                         this.sync(cx);
                     }
                 }))

@@ -4,6 +4,7 @@ pub mod coexist;
 pub mod controller;
 pub mod driver;
 pub mod easytier;
+mod easytier_exit;
 mod easytier_gateway;
 mod easytier_options;
 pub use easytier_options::{EasyTierDeviceOptions, EasyTierOptions, P2pPolicy, TcpAcceleration};
@@ -19,7 +20,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 
 /// IPC protocol version between the client and the privileged mesh helper.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DNS_ADDRESS: &str = if cfg!(target_os = "macos") {
     "127.0.0.1"
 } else {
@@ -90,6 +91,33 @@ impl std::fmt::Debug for MeshSecret {
     }
 }
 
+/// Policy for traffic received from peers using this device as an exit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitRoutingMode {
+    #[default]
+    Direct,
+    Rules,
+}
+
+/// Runtime-only authenticated loopback ingress for the independent exit router.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExitBridge {
+    pub port: u16,
+    pub password: MeshSecret,
+}
+impl ExitBridge {
+    pub fn validate(&self) -> Result<()> {
+        if self.port < 1024 || self.password.0.len() < 16 || self.password.0.len() > 255 {
+            return Err(Error::config("出口分流服务未就绪，请重新启动出口服务"));
+        }
+        Ok(())
+    }
+    pub fn address(&self) -> std::net::SocketAddr {
+        (std::net::Ipv4Addr::LOCALHOST, self.port).into()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MeshProfile {
@@ -111,6 +139,8 @@ pub struct MeshProfile {
     pub control_url: String,
     pub exit_node: String,
     pub advertise_exit_node: bool,
+    #[serde(default)]
+    pub exit_routing: ExitRoutingMode,
     pub advertised_subnets: Vec<String>,
     pub port_forwards: Vec<PortForward>,
     pub service_forwards: Vec<ServiceForward>,
@@ -165,6 +195,7 @@ impl Default for MeshProfile {
             control_url: String::new(),
             exit_node: String::new(),
             advertise_exit_node: false,
+            exit_routing: ExitRoutingMode::Direct,
             advertised_subnets: Vec::new(),
             port_forwards: Vec::new(),
             service_forwards: Vec::new(),
@@ -274,6 +305,14 @@ impl MeshProfile {
             if self.provider == MeshProvider::EasyTier && net.addr().is_ipv6() {
                 return Err(Error::config("EasyTier 子网发布仅支持 IPv4"));
             }
+        }
+        if self.advertise_exit_node
+            && self.exit_routing == ExitRoutingMode::Rules
+            && self.service_forwards.iter().any(|rule| rule.port == 53)
+        {
+            return Err(Error::config(
+                "出口分流使用组网 DNS 端口 53，请移除冲突的服务转发",
+            ));
         }
         if !self.exit_node.is_empty() {
             if self.advertise_exit_node {
@@ -394,6 +433,7 @@ impl MeshProfile {
             control_url: self.control_url.clone(),
             exit_node: self.exit_node.clone(),
             advertise_exit_node: self.advertise_exit_node,
+            exit_routing: self.exit_routing,
             advertised_subnets: self.advertised_subnets.clone(),
             port_forwards: self.port_forwards.clone(),
             service_forwards: self.service_forwards.clone(),
@@ -511,6 +551,8 @@ pub struct MeshProfileView {
     pub control_url: String,
     pub exit_node: String,
     pub advertise_exit_node: bool,
+    #[serde(default)]
+    pub exit_routing: ExitRoutingMode,
     pub advertised_subnets: Vec<String>,
     pub port_forwards: Vec<PortForward>,
     #[serde(default)]
@@ -675,6 +717,46 @@ impl MeshSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn policy_exit_reserves_dns_and_keeps_legacy_profiles_direct() {
+        use super::*;
+        let mut profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            advertise_exit_node: true,
+            exit_routing: ExitRoutingMode::Rules,
+            service_forwards: vec![ServiceForward {
+                protocol: ForwardProtocol::Udp,
+                port: 53,
+                target: "127.0.0.1:5353".parse().unwrap(),
+            }],
+            ..Default::default()
+        };
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("DNS 端口 53")
+        );
+        profile.exit_routing = ExitRoutingMode::Direct;
+        assert!(profile.validate().is_ok());
+        let mut legacy = serde_json::to_value(profile).unwrap();
+        legacy.as_object_mut().unwrap().remove("exit_routing");
+        assert_eq!(
+            serde_json::from_value::<MeshProfile>(legacy)
+                .unwrap()
+                .exit_routing,
+            ExitRoutingMode::Direct
+        );
+        let bridge = ExitBridge {
+            port: 19080,
+            password: MeshSecret("fixture-secret-value".into()),
+        };
+        assert!(bridge.validate().is_ok());
+        assert_eq!(bridge.address().ip(), std::net::Ipv4Addr::LOCALHOST);
+        assert!(!format!("{bridge:?}").contains("fixture-secret-value"));
+    }
+
     #[test]
     fn provider_status_finds_a_connected_profile_after_a_disconnected_one() {
         use super::*;

@@ -836,18 +836,29 @@ impl AppView {
             }));
         card(&p)
             .child(section_title(&p, self.tr("网络与代理", "Network & proxy"), self.tr("连接范围、流量接管与本地端口", "Access scope, traffic routing and local ports")))
+            .when(self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh, |card| {
+                card.child(div().text_sm().text_color(p.muted_fg).child(self.tr("组网模式自动接管系统流量。代理模式的接管设置会保留。", "Mesh mode routes system traffic automatically. Proxy mode settings are preserved.")))
+                    .child(setting_row(&p, self.tr("局域网访问", "LAN access"), self.tr("允许组网模式直接访问本机所在局域网", "Allow direct access to the local LAN in Mesh mode"),
+                        toggle("mesh-allow-lan", self.tr("允许局域网访问", "Allow LAN access"), self.snapshot.model.mesh_mode.allow_lan)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                if let Err(error) = this.service.set_mesh_allow_lan(*checked) {
+                                    this.service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
+                                }
+                                this.sync(cx);
+                            }))))
+            })
             .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重载", "Route system traffic through the proxy; requires the privilege helper and a reload"),
-                toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
+                toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled || self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).disabled(self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
             .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重载", "Restrict traffic from bypassing TUN; reload required"),
                 toggle("tun-strict-route", self.tr("启用严格路由", "Enable strict routing"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.tun_strict_route = *checked)))))
             .child(setting_row(&p, self.tr("系统代理", "System proxy"), proxy_hint,
                 div().flex().items_center().gap_2()
                     .child(toggle("system-proxy", self.tr("由 Xrose 设置系统代理", "Let Xrose manage the system proxy"), self.snapshot.system_proxy_active)
-                        .disabled(proxy_busy).on_change(cx.listener(|this, checked, _, cx| { this.service.set_system_proxy(*checked); this.sync(cx); })))
+                        .disabled(proxy_busy || self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).on_change(cx.listener(|this, checked, _, cx| { this.service.set_system_proxy(*checked); this.sync(cx); })))
                     .child(open_proxy_settings)
                     .when(proxy_busy, |row| row.child(gpui_kit::component::spinner::Spinner::new()).child(div().text_xs().text_color(p.muted_fg).child(self.tr("正在应用…", "Applying…"))))))
             .child(setting_row(&p, "PAC", self.tr("根据路由规则自动选择代理", "Choose the proxy automatically using routing rules"),
-                toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).disabled(proxy_busy).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
+                toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).disabled(proxy_busy || self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
             .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重载", "Apply after editing; reload required"),
                 div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.port_input)))
                     .child(copy_proxy_env)

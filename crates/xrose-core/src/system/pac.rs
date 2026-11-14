@@ -132,7 +132,9 @@ fn serve(mut stream: TcpStream, body: &str) {
 /// Without TUN, every proxied request must enter the direct monitor for
 /// statistics and firewall enforcement, including PAC bypass destinations.
 pub(crate) fn use_pac(enabled: bool, mode: crate::model::WorkMode, tun_enabled: bool) -> bool {
-    enabled && (mode == crate::model::WorkMode::Proxy || tun_enabled)
+    enabled
+        && mode != crate::model::WorkMode::Mesh
+        && (mode == crate::model::WorkMode::Proxy || tun_enabled)
 }
 
 /// Generates a PAC file. Direct domains are matched as suffixes; everything

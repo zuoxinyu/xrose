@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 // Distinguish the release schema from overlapping pre-release version numbers.
 const APPLICATION_ID: i64 = i32::from_be_bytes(*b"XROS") as i64;
 
@@ -121,6 +121,8 @@ impl Store {
             // Old profile JSON may contain a chained node ID. Serde drops it when saving;
             // the application-level SOCKS5 endpoint starts empty in the separate settings file.
             (APPLICATION_ID, 1) => {}
+            // Mesh intent and exit policy are additive JSON fields with safe defaults.
+            (APPLICATION_ID, 2) => {}
             (0, 0) => tx.execute_batch(include_str!("schema_v1.sql"))?,
             (0, 14 | 15) => {
                 // These builds already use the complete v1 table layout. The two routing

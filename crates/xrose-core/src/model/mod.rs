@@ -2,6 +2,7 @@
 
 pub mod dns;
 pub mod inbound;
+pub mod mesh_mode;
 pub mod node;
 pub mod route;
 pub mod vpn;
@@ -9,6 +10,7 @@ pub use vpn::{OpenConnectOptions, OpenVpnOptions, VpnCertificates};
 
 pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
+pub use mesh_mode::{MeshDnsMode, MeshExitTarget, MeshModeConfig};
 pub use node::{
     AnytlsOptions, Credentials, FallbackScope, GroupKind, Network, Node, NodeDraft, NodeSource,
     NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode, TlsOptions, Transport,
@@ -132,6 +134,7 @@ pub enum WorkMode {
     #[default]
     Direct,
     Proxy,
+    Mesh,
 }
 
 /// The editable state. Everything the compiler needs is here; secrets are
@@ -140,6 +143,8 @@ pub enum WorkMode {
 pub struct AppModel {
     #[serde(default)]
     pub work_mode: WorkMode,
+    #[serde(default)]
+    pub mesh_mode: MeshModeConfig,
     #[serde(default = "default_profile_name")]
     pub name: String,
     #[serde(default)]
@@ -179,6 +184,7 @@ impl Default for AppModel {
     fn default() -> Self {
         let mut model = Self {
             work_mode: WorkMode::Direct,
+            mesh_mode: MeshModeConfig::default(),
             name: default_profile_name(),
             nodes: Vec::new(),
             groups: Vec::new(),
@@ -299,9 +305,9 @@ impl AppModel {
             .or_else(|| self.default_group_id())
     }
 
-    /// Only probe groups used by a proxy route, including implicit default routes.
+    /// Probe groups used by traffic or DNS, including their implicit defaults.
     pub(crate) fn managed_route_groups(&self) -> Vec<OutboundGroup> {
-        let used: std::collections::HashSet<_> = self
+        let mut used: std::collections::HashSet<_> = self
             .routing
             .effective_rules()
             .map(|r| &r.action)
@@ -309,6 +315,22 @@ impl AppModel {
             .filter(|a| a.kind == RouteActionKind::Proxy)
             .filter_map(|a| self.resolve_proxy_group(a))
             .collect();
+        if self.dns.enabled {
+            used.extend(self.dns.servers.iter().filter_map(|server| {
+                if server.is_fakeip() {
+                    return None;
+                }
+                match server.detour.as_deref()?.trim() {
+                    "" | "direct" => None,
+                    "proxy" | "default" => self.default_group_id(),
+                    id => self
+                        .groups
+                        .iter()
+                        .find(|group| group.id == id || group.tag() == id)
+                        .map(|group| group.id.clone()),
+                }
+            }));
+        }
         self.groups
             .iter()
             .filter(|g| g.enabled && g.managed() && used.contains(&g.id))
@@ -601,6 +623,31 @@ pub fn preset_rules(preset: RoutePreset) -> Vec<RouteRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_only_managed_groups_are_probed_without_traffic_proxy_rules() {
+        let mut model = AppModel::default();
+        model.routing.rules.clear();
+        model.routing.rule_groups.clear();
+        model.routing.final_action = RouteAction::direct();
+        model.groups[0].switch_policy.mode = SwitchMode::Latency;
+        let mut dns_group = OutboundGroup::new("Fixture DNS", GroupKind::Selector);
+        dns_group.switch_policy.mode = SwitchMode::Latency;
+        model.groups.push(dns_group.clone());
+        let mut server = DnsServer::udp("fixture-dns", "192.0.2.53");
+        for detour in [dns_group.id.clone(), dns_group.tag()] {
+            server.detour = Some(detour);
+            model.dns.servers = vec![server.clone()];
+            assert_eq!(model.managed_route_groups(), [dns_group.clone()]);
+        }
+        model.dns.servers[0].detour = Some("proxy".into());
+        assert_eq!(model.managed_route_groups(), [model.groups[0].clone()]);
+        model.dns.servers[0].detour = Some("direct".into());
+        assert!(model.managed_route_groups().is_empty());
+        model.dns.servers[0].detour = Some(dns_group.id.clone());
+        model.dns.enabled = false;
+        assert!(model.managed_route_groups().is_empty());
+    }
 
     #[test]
     fn new_nodes_do_not_expand_custom_policy_groups() {

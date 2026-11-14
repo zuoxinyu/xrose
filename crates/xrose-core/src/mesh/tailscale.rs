@@ -274,8 +274,15 @@ pub async fn check_api(paths: &crate::paths::AppPaths) -> Result<()> {
         hostname: "xrose-api-check".into(),
         ..Default::default()
     };
-    let backend =
-        Backend::start_inner(profile, &directory, &archive_path(paths), false, (0, "")).await?;
+    let backend = Backend::start_inner(
+        profile,
+        &directory,
+        &archive_path(paths),
+        false,
+        (0, ""),
+        None,
+    )
+    .await?;
     let denied = Client {
         channel: backend.client.channel.clone(),
         secret: "invalid-test-credential".into(),
@@ -679,8 +686,9 @@ impl Backend {
         directory: &Path,
         archive: &Path,
         discovery_relay: (u16, &str),
+        exit_bridge: Option<&super::ExitBridge>,
     ) -> Result<Self> {
-        Self::start_inner(p, directory, archive, true, discovery_relay).await
+        Self::start_inner(p, directory, archive, true, discovery_relay, exit_bridge).await
     }
 
     async fn start_inner(
@@ -689,6 +697,7 @@ impl Backend {
         archive: &Path,
         with_interface: bool,
         discovery_relay: (u16, &str),
+        exit_bridge: Option<&super::ExitBridge>,
     ) -> Result<Self> {
         let executable = unpack(archive, directory)?;
         let reserve = || {
@@ -719,6 +728,12 @@ impl Backend {
             &services.password.0,
         );
         crate::adapters::singbox::allow_mesh_discovery(&mut config, discovery_relay);
+        if p.advertise_exit_node && p.exit_routing == super::ExitRoutingMode::Rules {
+            let bridge =
+                exit_bridge.ok_or_else(|| Error::config("出口分流服务未就绪，请重新连接组网"))?;
+            bridge.validate()?;
+            crate::adapters::singbox::route_mesh_exit(&mut config, bridge);
+        }
         if !with_interface {
             config["inbounds"] = serde_json::json!([]);
             config["route"]["rules"] = serde_json::json!([]);

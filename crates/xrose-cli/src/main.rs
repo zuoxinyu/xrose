@@ -59,7 +59,7 @@ fn usage() {
         r#"xrose-cli — headless Xrose utilities
 
 用法 / Usage:
-  xrose-cli mode [direct|proxy] [--home DIR]   查看或切换工作模式
+  xrose-cli mode [direct|proxy|mesh] [--home DIR]   查看或切换工作模式
   xrose-cli compile [--core xray|sing-box] [-o config.json] [--home DIR]
   xrose-cli check   [--core xray|sing-box] [--home DIR]
   xrose-cli route preview|import <file|-> [--home DIR]   预览或追加路由规则与规则集
@@ -96,6 +96,7 @@ fn usage() {
   xrose-cli mesh install [--home DIR]         下载并验证 Tailscale/Wintun 组件
   xrose-cli mesh check [--home DIR]           离线校验独立 Tailscale 配置，不启动网卡
   xrose-cli mesh connect <ID> [ID...] [--seconds N] [--home DIR]
+  xrose-cli mesh use-exit <ID> <PEER-ID> [--seconds N] [--home DIR]
   xrose-cli mesh probe <ID> <IP> [--home DIR]
   xrose-cli mesh disconnect|logout|delete <ID> [--home DIR]
 
@@ -128,7 +129,11 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                 mesh::ipc::call(request(MeshCommand::Inspect)).map_err(|e| e.to_string())?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&reply).map_err(|e| e.to_string())?
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": reply.version,
+                    "networks": reply.networks,
+                }))
+                .map_err(|e| e.to_string())?
             );
         }
         "doctor" => {
@@ -261,6 +266,16 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
                 }
             }
         }
+        "use-exit" => {
+            let profile = positional.get(1).ok_or("请指定组网配置 ID")?;
+            let peer = positional
+                .get(2)
+                .ok_or("请指定出口设备 ID（见 mesh status）")?;
+            let seconds = value_arg(args, "--seconds")
+                .map(|value| value.parse::<u64>().map_err(|_| "--seconds 必须为非负整数"))
+                .transpose()?;
+            mesh_use_exit(paths, profile, peer, seconds)?;
+        }
         "connect" => {
             let svc = AppService::with_paths(paths).map_err(|e| e.to_string())?;
             let ids = positional
@@ -310,6 +325,148 @@ fn mesh_command(args: &[String]) -> Result<(), String> {
         _ => return Err("未知 mesh 操作".into()),
     }
     Ok(())
+}
+
+fn mesh_use_exit(
+    paths: AppPaths,
+    profile_id: &str,
+    peer_id: &str,
+    seconds: Option<u64>,
+) -> Result<(), String> {
+    use xrose_core::mesh::{
+        self, MeshPhase, MeshSecret,
+        ipc::{MeshCommand, MeshRequest},
+    };
+    let active = mesh::ipc::call(MeshRequest {
+        version: mesh::PROTOCOL_VERSION,
+        owner_pid: std::process::id(),
+        session: MeshSecret(format!("{:032x}{:032x}", rand_token(), rand_token())),
+        command: MeshCommand::Inspect,
+    });
+    if active.is_ok_and(|reply| {
+        reply.networks.iter().any(|network| {
+            network.profile_id == profile_id
+                && !network.user_stopped
+                && !matches!(network.phase, MeshPhase::Disconnected | MeshPhase::Failed)
+        })
+    }) {
+        return Err("此组网已由另一个 Xrose 会话管理，请先断开该会话后重试".into());
+    }
+    let service = AppService::with_paths(paths).map_err(|e| e.to_string())?;
+    let result = (|| {
+        if !service.snapshot().mesh.networks.iter().any(|network| {
+            network.profile_id == profile_id
+                && !network.user_stopped
+                && !matches!(network.phase, MeshPhase::Disconnected | MeshPhase::Failed)
+        }) {
+            service.mesh_connect(profile_id);
+            wait_mesh(&service)?;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+        let mut login_opened = std::collections::HashSet::new();
+        loop {
+            let snapshot = service.snapshot();
+            let network = snapshot
+                .mesh
+                .networks
+                .iter()
+                .find(|network| network.profile_id == profile_id);
+            if let Some(url) = network.and_then(|network| network.login_url.as_ref()) {
+                if login_opened.insert(url.clone()) {
+                    service.open_url(url);
+                    println!("已打开浏览器，请完成 Tailscale 登录");
+                }
+            }
+            if network.is_some_and(|network| {
+                network.phase == MeshPhase::Connected
+                    && network
+                        .peers
+                        .iter()
+                        .any(|peer| peer.id == peer_id && peer.online && peer.offers_exit)
+            }) {
+                break;
+            }
+            if network.is_some_and(|network| network.phase == MeshPhase::Failed) {
+                return Err("组网连接失败，请用 mesh status 查看诊断".into());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("等待出口设备超时，请确认设备在线且已发布出口".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let after_toast = service.snapshot().toasts.iter().map(|toast| toast.id).max();
+        service.select_mesh_exit_mode(profile_id.to_string(), peer_id.to_string());
+        wait_mesh_mode(&service, profile_id, peer_id, after_toast)?;
+        println!("组网模式已接管系统流量；Ctrl+C 或超时后清理本次会话。");
+        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+        runtime.block_on(async {
+            let deadline = tokio::time::sleep(std::time::Duration::from_secs(seconds.unwrap_or(86400 * 365)));
+            tokio::pin!(deadline);
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop { tokio::select! {
+                _ = tokio::signal::ctrl_c() => break Ok(()),
+                _ = &mut deadline => break Ok(()),
+                _ = interval.tick() => {
+                    let snapshot = service.snapshot();
+                    let network = snapshot.mesh.networks.iter().find(|network| network.profile_id == profile_id);
+                    if network.is_some_and(|network| network.user_stopped) {
+                        break Ok(());
+                    }
+                    if snapshot.model.work_mode != WorkMode::Mesh
+                        || (!snapshot.process.phase.is_alive() && !snapshot.busy.iter().any(|key| key == "core"))
+                        || network.is_some_and(|network| network.phase == MeshPhase::Failed && !snapshot.mesh_reconnecting.contains(&network.profile_id)) {
+                        break Err("组网流量接管已停止，请查看运行状态与诊断".into());
+                    }
+                }
+            }}
+        })
+    })();
+    service.shutdown();
+    result
+}
+
+fn wait_mesh_mode(
+    service: &AppService,
+    profile_id: &str,
+    peer_id: &str,
+    after_toast: Option<u64>,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    loop {
+        let snapshot = service.snapshot();
+        let busy = snapshot
+            .busy
+            .iter()
+            .any(|key| matches!(key.as_str(), "mesh" | "mesh-exit" | "core"));
+        if !busy {
+            if let Some(error) = snapshot.toasts.iter().rev().find(|toast| {
+                toast.level == xrose_core::service::ToastLevel::Error
+                    && after_toast.is_none_or(|previous| toast.id > previous)
+            }) {
+                return Err(error.message.clone());
+            }
+            if snapshot.model.work_mode == WorkMode::Mesh
+                && snapshot.process.phase == xrose_core::core::ProcessPhase::Running
+                && snapshot
+                    .model
+                    .mesh_mode
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| {
+                        target.profile_id == profile_id && target.peer_id == peer_id
+                    })
+            {
+                return Ok(());
+            }
+            if snapshot.process.phase == xrose_core::core::ProcessPhase::Failed {
+                return Err("组网流量接管启动失败，请查看内核诊断".into());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("等待组网流量接管超时，请查看运行状态与诊断".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 fn rand_token() -> u128 {
@@ -409,22 +566,37 @@ fn mode(args: &[String]) -> Result<(), String> {
                         .ok_or("--home 缺少目录")?,
                 ));
             }
-            "direct" | "proxy" if requested.is_none() => requested = Some(arg),
-            _ => return Err("用法：xrose-cli mode [direct|proxy] [--home DIR]".into()),
+            "direct" | "proxy" | "mesh" if requested.is_none() => requested = Some(arg),
+            _ => return Err("用法：xrose-cli mode [direct|proxy|mesh] [--home DIR]".into()),
         }
     }
     let service = service(home)?;
-    match requested {
+    let before = service.snapshot();
+    let mesh_target = before.model.mesh_mode.target.clone();
+    let after_toast = before.toasts.iter().map(|toast| toast.id).max();
+    let result = match requested {
         Some("direct") => service.select_direct_mode(),
         Some("proxy") => service.select_proxy_mode(),
+        Some("mesh") => service.select_mesh_mode(),
         _ => Ok(()),
     }
-    .map_err(|err| err.to_string())?;
+    .map_err(|err| err.to_string());
+    if requested == Some("mesh") {
+        let ready = result.and_then(|_| {
+            let target = mesh_target.ok_or("请先在节点页选择一个组网出口")?;
+            wait_mesh_mode(&service, &target.profile_id, &target.peer_id, after_toast)
+        });
+        service.shutdown();
+        ready?;
+    } else {
+        result?;
+    }
     println!(
         "{}",
         match service.model().work_mode {
             WorkMode::Direct => "direct",
             WorkMode::Proxy => "proxy",
+            WorkMode::Mesh => "mesh",
         }
     );
     Ok(())

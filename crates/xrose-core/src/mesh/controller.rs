@@ -23,6 +23,8 @@ pub struct MeshController {
     pub(crate) sync_password: MeshSecret,
     pub(crate) sync_port: std::sync::atomic::AtomicU16,
     networks: RwLock<Vec<MeshRuntimeView>>,
+    helper_executable: RwLock<Option<String>>,
+    exit_bridges: RwLock<std::collections::BTreeMap<String, super::ExitBridge>>,
     installed: RwLock<bool>,
     pub operation: tokio::sync::Mutex<()>,
 }
@@ -43,6 +45,8 @@ impl MeshController {
             )),
             profiles: RwLock::new(profiles),
             networks: RwLock::new(Vec::new()),
+            helper_executable: Default::default(),
+            exit_bridges: Default::default(),
             installed: RwLock::new(installed),
             operation: tokio::sync::Mutex::new(()),
         })
@@ -51,6 +55,20 @@ impl MeshController {
         MeshRuntimeView::for_provider(&self.networks.read(), provider)
             .map(|net| net.phase)
             .unwrap_or_default()
+    }
+
+    /// Read only from the authenticated helper response, not GUI executable metadata.
+    pub(crate) fn helper_executable(&self) -> Option<String> {
+        self.helper_executable.read().clone()
+    }
+
+    pub(crate) fn set_exit_bridge(&self, id: &str, bridge: Option<super::ExitBridge>) {
+        let mut bridges = self.exit_bridges.write();
+        if let Some(bridge) = bridge {
+            bridges.insert(id.into(), bridge);
+        } else {
+            bridges.remove(id);
+        }
     }
 
     pub fn snapshot(&self) -> MeshSnapshot {
@@ -70,6 +88,9 @@ impl MeshController {
     pub(crate) fn add_log_redactions(&self, rules: &mut crate::core::logs::redact::RedactionRules) {
         rules.secret(&self.session.0);
         rules.secret(&self.sync_password.0);
+        for bridge in self.exit_bridges.read().values() {
+            rules.secret(&bridge.password.0);
+        }
         for profile in self.profiles.read().iter() {
             rules.mesh_profile(profile);
         }
@@ -182,6 +203,32 @@ impl MeshController {
         *current = profile;
         Ok(())
     }
+    pub(crate) fn commit_system_exit(
+        &self,
+        profile: MeshProfile,
+        model: &mut crate::model::AppModel,
+        target: crate::model::MeshExitTarget,
+        active_profile_id: &str,
+    ) -> Result<()> {
+        let mut profiles = self.profiles.write();
+        let current = profiles
+            .iter_mut()
+            .find(|p| p.id == profile.id)
+            .ok_or_else(|| Error::config("组网配置不存在"))?;
+        let mut next = model.clone();
+        let groups = next.groups.clone();
+        upsert_outbound(&mut next, outbound_node(&profile));
+        next.groups = groups;
+        next.mesh_mode.target = Some(target);
+        next.work_mode = crate::model::WorkMode::Mesh;
+        next.updated_at = crate::util::now_unix();
+        self.store
+            .save_mesh_exit_selection(&profile, &next, active_profile_id)?;
+        *model = next;
+        *current = profile;
+        Ok(())
+    }
+
     pub fn delete(&self, id: &str) -> Result<()> {
         if self.networks.read().iter().any(|n| {
             n.profile_id == id
@@ -349,6 +396,9 @@ impl MeshController {
         if reply.version != PROTOCOL_VERSION {
             return Err(Error::other("组网助手版本不兼容，请在设置中更新提权助手"));
         }
+        *self.helper_executable.write() = reply.helper_executable.filter(|path| {
+            std::path::Path::new(path).is_absolute() && !path.chars().any(char::is_control)
+        });
         *self.networks.write() = reply.networks;
         Ok(())
     }
@@ -393,7 +443,9 @@ impl MeshController {
         #[cfg(not(windows))]
         let driver_archive = std::path::PathBuf::new();
         let provider = profile.provider;
+        let exit_bridge = self.exit_bridges.read().get(&id).cloned();
         self.send(MeshCommand::Start {
+            exit_bridge,
             profile,
             tailscale_binary: binary,
             sync_password: self.sync_password.clone(),
@@ -462,7 +514,7 @@ impl MeshController {
     }
 }
 
-fn outbound_node(profile: &MeshProfile) -> crate::model::Node {
+pub(crate) fn outbound_node(profile: &MeshProfile) -> crate::model::Node {
     let mut node = crate::model::Node::new(
         format!("{} · 出口", profile.name),
         crate::model::Protocol::Socks,

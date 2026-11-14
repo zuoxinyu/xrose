@@ -24,10 +24,10 @@ use smoltcp::wire::IpProtocol;
 
 type Ports = Arc<Mutex<HashSet<(IpProtocol, u16)>>>;
 
-struct ChannelDevice {
-    incoming: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
-    outgoing: tokio_util::sync::PollSender<Vec<u8>>,
-    caps: smoltcp::phy::DeviceCapabilities,
+pub(super) struct ChannelDevice {
+    pub(super) incoming: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    pub(super) outgoing: tokio_util::sync::PollSender<Vec<u8>>,
+    pub(super) caps: smoltcp::phy::DeviceCapabilities,
 }
 impl stack::device::AsyncDevice for ChannelDevice {
     fn capabilities(&self) -> &smoltcp::phy::DeviceCapabilities {

@@ -3,6 +3,10 @@
 
 mod mesh_discovery;
 mod mesh_exit;
+mod mesh_gateway;
+mod mesh_mode;
+#[cfg(test)]
+mod mesh_mode_tests;
 mod mesh_reconnect;
 pub mod mesh_sync;
 mod network_diagnostics;
@@ -293,6 +297,14 @@ impl UiSnapshot {
         if self.model.work_mode == WorkMode::Direct {
             return None;
         }
+        if self.model.work_mode == WorkMode::Mesh {
+            return self
+                .model
+                .mesh_mode
+                .target
+                .as_ref()
+                .and_then(|target| self.model.node(&target.gateway_id));
+        }
         let group = group_id.and_then(|id| self.model.group(id)).or_else(|| {
             self.model
                 .default_group_id()
@@ -361,6 +373,11 @@ struct Inner {
     model: RwLock<AppModel>,
     store: Arc<Store>,
     core: Arc<CoreManager>,
+    mesh_client_profile: Mutex<Option<crate::mesh::MeshProfile>>,
+    mesh_gateways: tokio::sync::Mutex<BTreeMap<String, mesh_gateway::ExitGateway>>,
+    mesh_proxy_suspended: AtomicBool,
+    mesh_takeover_requested: AtomicBool,
+    exit_policy_revision: AtomicU64,
     rt: Runtime,
     shutdown: Once,
     subs: RwLock<Vec<Subscription>>,
@@ -493,6 +510,11 @@ impl AppService {
             model: RwLock::new(model),
             store,
             core,
+            mesh_client_profile: Mutex::new(None),
+            mesh_gateways: Default::default(),
+            mesh_proxy_suspended: AtomicBool::new(false),
+            mesh_takeover_requested: AtomicBool::new(false),
+            exit_policy_revision: AtomicU64::new(0),
             rt,
             shutdown: Once::new(),
             subs: RwLock::new(subs),
@@ -647,14 +669,20 @@ impl AppService {
         };
         let updates = self.inner.updates.lock().clone();
         let system_proxy_status = self.system_proxy_status();
-        let system_proxy_active = match system_proxy_status {
-            Some(
-                system::proxy::SystemProxyStatus::Off | system::proxy::SystemProxyStatus::External,
-            ) => false,
-            Some(
-                system::proxy::SystemProxyStatus::Xrose | system::proxy::SystemProxyStatus::Partial,
-            ) => true,
-            _ => settings.system_proxy,
+        let system_proxy_active = if model.work_mode == WorkMode::Mesh {
+            false
+        } else {
+            match system_proxy_status {
+                Some(
+                    system::proxy::SystemProxyStatus::Off
+                    | system::proxy::SystemProxyStatus::External,
+                ) => false,
+                Some(
+                    system::proxy::SystemProxyStatus::Xrose
+                    | system::proxy::SystemProxyStatus::Partial,
+                ) => true,
+                _ => settings.system_proxy,
+            }
         };
         UiSnapshot {
             nat_probe: self
@@ -1075,6 +1103,9 @@ impl AppService {
     // ------------------------------------------------------------------
 
     pub fn switch_profile(&self, id: &str) -> Result<()> {
+        if self.is_busy("core") || self.is_busy("mesh-exit") {
+            return Err(Error::other("正在应用配置，请完成后再管理配置"));
+        }
         if self.is_running() {
             self.toast(ToastLevel::Warning, "切换配置前请先停止 core");
             return Err(Error::other("core 正在运行"));
@@ -1101,6 +1132,8 @@ impl AppService {
         self.sync_model_settings();
         self.refresh_doctor();
         self.refresh_profiles();
+        self.finish_idle_mode_switch();
+        self.schedule_exit_gateway_refresh();
         self.toast(
             ToastLevel::Success,
             format!("已切换到配置“{}”", profile.name),
@@ -1109,6 +1142,9 @@ impl AppService {
     }
 
     pub fn create_profile(&self, name: impl Into<String>) -> Result<()> {
+        if self.is_busy("core") || self.is_busy("mesh-exit") {
+            return Err(Error::other("正在应用配置，请完成后再管理配置"));
+        }
         if self.is_running() {
             return Err(Error::other("请先停止 core 再新建配置"));
         }
@@ -1133,11 +1169,16 @@ impl AppService {
         *self.inner.active_profile.write() = Some(id);
         self.sync_model_settings();
         self.refresh_profiles();
+        self.finish_idle_mode_switch();
+        self.schedule_exit_gateway_refresh();
         self.toast(ToastLevel::Success, "已创建新配置");
         Ok(())
     }
 
     pub fn delete_profile(&self, id: &str) -> Result<()> {
+        if self.is_busy("core") || self.is_busy("mesh-exit") {
+            return Err(Error::other("正在应用配置，请完成后再管理配置"));
+        }
         if self.is_running() {
             return Err(Error::other("请先停止 core 再删除配置"));
         }
@@ -1670,6 +1711,7 @@ impl AppService {
             if self.is_running() {
                 self.apply_config();
             } else {
+                self.finish_idle_mode_switch();
                 self.notify_work_mode(mode);
             }
         }
@@ -1683,11 +1725,18 @@ impl AppService {
             (WorkMode::Direct, Language::En) => "Switched to Direct",
             (WorkMode::Proxy, Language::Zh) => "已切换至代理模式",
             (WorkMode::Proxy, Language::En) => "Switched to proxy mode",
+            (WorkMode::Mesh, Language::Zh) => "组网模式已启动，系统流量由所选出口接管",
+            (WorkMode::Mesh, Language::En) => {
+                "Mesh mode started; the selected exit handles system traffic"
+            }
         };
         self.toast(ToastLevel::Success, message);
     }
 
     pub fn select_node(&self, group_id: &str, node_id: &str) {
+        if group_id.is_empty() && self.select_saved_mesh_gateway(node_id) {
+            return;
+        }
         if self.is_busy("core") || self.is_busy("mesh-exit") {
             return;
         }
@@ -1705,7 +1754,7 @@ impl AppService {
             else {
                 return;
             };
-            let mode_changed = current.work_mode == WorkMode::Direct;
+            let mode_changed = current.work_mode != WorkMode::Proxy;
             let selection = (node.clone(), group.tag(), mode_changed);
             let mut next = current.clone();
             if !next.select_node(group_id, node_id) && !mode_changed {
@@ -1727,8 +1776,13 @@ impl AppService {
         };
 
         if !self.is_running() {
+            if mode_changed {
+                self.finish_idle_mode_switch();
+            }
+            self.schedule_exit_gateway_refresh();
             return;
         }
+        self.schedule_exit_gateway_refresh();
         if mode_changed {
             self.mark_dirty();
             self.apply_config();
@@ -2218,11 +2272,12 @@ impl AppService {
                 .resolve_binary(settings.core, settings)
                 .map_err(|e| e.to_string())?;
             let dir = binary.parent().ok_or_else(|| "内核目录无效".to_string())?;
-            let ctx = crate::adapters::CompileContext::new(
+            let mut ctx = crate::adapters::CompileContext::new(
                 settings,
                 self.inner.paths.data_dir.clone(),
                 self.inner.paths.runtime_dir.clone(),
             );
+            ctx.mesh_exit = self.inner.core.mesh_exit_runtime();
             let compiled = crate::adapters::adapter_for(settings.core)
                 .compile(model, settings, &ctx)
                 .map_err(|e| e.to_string())?;
@@ -2415,6 +2470,11 @@ impl AppService {
     }
 
     pub fn start_core(&self) {
+        if self.model().work_mode == WorkMode::Mesh {
+            self.inner
+                .mesh_takeover_requested
+                .store(true, Ordering::Release);
+        }
         if self.is_running() {
             self.toast(ToastLevel::Info, "core 已在运行");
             return;
@@ -2450,11 +2510,16 @@ impl AppService {
     async fn start_core_task(&self) -> std::result::Result<bool, String> {
         let mut settings = self.settings();
         let model = self.model();
-        let ctx = crate::adapters::CompileContext::new(
+        self.prepare_mesh_mode(&model)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut ctx = crate::adapters::CompileContext::new(
             &settings,
             self.inner.paths.data_dir.clone(),
             self.inner.paths.runtime_dir.clone(),
         );
+        ctx.mesh_exit = self.inner.core.mesh_exit_runtime();
+        ctx.mesh = self.inner.core.mesh_plan();
         crate::adapters::adapter_for(settings.core)
             .compile(&model, &settings, &ctx)
             .map_err(|err| err.to_string())?;
@@ -2481,20 +2546,29 @@ impl AppService {
             self.inner.connections.write().clear();
             *self.inner.proxies.write() = Default::default();
             self.finish_config_apply(&model, &settings);
-            self.reapply_system_proxy();
-            self.toast(
-                ToastLevel::Success,
-                format!(
-                    "{} 已启动，代理端口 {}",
-                    settings.core.display_name(),
-                    settings.mixed_port
-                ),
-            );
+            self.update_mode_system_proxy()
+                .await
+                .map_err(|e| e.to_string())?;
+            if model.work_mode == WorkMode::Mesh {
+                self.notify_work_mode(WorkMode::Mesh);
+            } else {
+                self.toast(
+                    ToastLevel::Success,
+                    format!(
+                        "{} 已启动，代理端口 {}",
+                        settings.core.display_name(),
+                        settings.mixed_port
+                    ),
+                );
+            }
         }
         Ok(started)
     }
 
     pub fn stop_core(&self) {
+        self.inner
+            .mesh_takeover_requested
+            .store(false, Ordering::Release);
         if !self.is_running() {
             self.toast(ToastLevel::Info, "core 未运行");
             return;
@@ -2534,6 +2608,7 @@ impl AppService {
 
     /// Apply the saved intent now, validating before replacing a running core.
     pub fn apply_config(&self) {
+        self.refresh_exit_gateway_policies(true);
         self.apply_config_with_tun_cleanup(false, false);
     }
 
@@ -2552,11 +2627,18 @@ impl AppService {
         self.spawn(async move {
             let mut settings = service.inner.settings.read().clone();
             let model = service.inner.model.read().clone();
-            let ctx = crate::adapters::CompileContext::new(
+            if let Err(error) = service.prepare_mesh_mode(&model).await {
+                service.set_busy("core", false);
+                service.toast(ToastLevel::Error, error.to_string());
+                return;
+            }
+            let mut ctx = crate::adapters::CompileContext::new(
                 &settings,
                 service.inner.paths.data_dir.clone(),
                 service.inner.paths.runtime_dir.clone(),
             );
+            ctx.mesh_exit = service.inner.core.mesh_exit_runtime();
+            ctx.mesh = service.inner.core.mesh_plan();
             if let Err(err) =
                 crate::adapters::adapter_for(settings.core).compile(&model, &settings, &ctx)
             {
@@ -2622,13 +2704,18 @@ impl AppService {
                         service.inner.connections.write().clear();
                         *service.inner.proxies.write() = Default::default();
                         service.finish_config_apply(&model, &settings);
-                        service.reapply_system_proxy();
+                        if let Err(error) = service.update_mode_system_proxy().await {
+                            service.toast(ToastLevel::Error, error.to_string());
+                        }
                         if previous_mode.is_some_and(|mode| mode != model.work_mode) {
                             service.notify_work_mode(model.work_mode);
                         } else {
                             service.toast(ToastLevel::Success, "配置已应用，内核已重载");
                         }
                     } else if !was_running && ok {
+                        if let Err(error) = service.update_mode_system_proxy().await {
+                            service.toast(ToastLevel::Error, error.to_string());
+                        }
                         service.finish_config_apply(&model, &settings);
                         service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
                     }
@@ -2713,8 +2800,12 @@ impl AppService {
     // Settings
     // ------------------------------------------------------------------
 
-    pub fn update_settings(&self, new: Settings) {
+    pub fn update_settings(&self, mut new: Settings) {
         let old = self.settings();
+        if self.model().work_mode == WorkMode::Mesh {
+            new.tun_enabled = old.tun_enabled;
+            new.system_proxy = old.system_proxy;
+        }
         if self.is_busy("autostart") && new.autostart != old.autostart {
             self.toast(ToastLevel::Info, "正在设置登录启动，请稍后重试");
             return;
@@ -3395,6 +3486,9 @@ impl AppService {
 
     /// TUN interface name from the model, used for helper requests.
     fn tun_interface(&self) -> String {
+        if self.model().work_mode == WorkMode::Mesh {
+            return "xrose-tun".into();
+        }
         self.inner
             .model
             .read()
@@ -3407,8 +3501,12 @@ impl AppService {
     }
 
     /// Ensures the privileged helper is running before spawning an elevated TUN core.
+    fn runtime_uses_tun(&self) -> bool {
+        self.model().work_mode == WorkMode::Mesh || self.inner.settings.read().effective_tun()
+    }
+
     async fn ensure_tun_helper(&self) -> std::result::Result<(), String> {
-        if !self.inner.settings.read().effective_tun() || privilege::is_elevated() {
+        if !self.runtime_uses_tun() || privilege::is_elevated() {
             return Ok(());
         }
         self.ensure_helper().await
@@ -3465,7 +3563,7 @@ impl AppService {
     /// when the helper is running but the request failed; a missing helper is
     /// not an error because the core still creates its own device.
     async fn prepare_tun_via_helper(&self) -> Option<String> {
-        if !self.inner.settings.read().effective_tun() || !privilege::status().running {
+        if !self.runtime_uses_tun() || !privilege::status().running {
             return None;
         }
         let request = HelperRequest::PrepareTun {
@@ -3487,7 +3585,7 @@ impl AppService {
     }
 
     async fn cleanup_tun_via_helper(&self) {
-        if !self.inner.settings.read().effective_tun() {
+        if !self.runtime_uses_tun() && !self.inner.core.native_tun_active() {
             return;
         }
         self.cleanup_tun_interface_via_helper().await;
@@ -3504,8 +3602,18 @@ impl AppService {
     }
 
     pub fn refresh_doctor(&self) {
-        let model = self.inner.model.read().clone();
-        let settings = self.inner.settings.read().clone();
+        let mut model = self.inner.model.read().clone();
+        let mut settings = self.inner.settings.read().clone();
+        if model.work_mode == WorkMode::Mesh {
+            if let Some(runtime) = self.inner.core.mesh_exit_runtime() {
+                if let Ok((effective, runtime_settings)) =
+                    crate::adapters::mesh_runtime_model(&model, &settings, &runtime)
+                {
+                    model = effective;
+                    settings = runtime_settings;
+                }
+            }
+        }
         let state = self.inner.core.state();
         let pid = state.phase.is_alive().then_some(state.pid).flatten();
         let generation = self.inner.doctor_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -4443,6 +4551,27 @@ impl AppService {
                     }
                     "disconnect" | "logout" => {
                         let provider = provider.unwrap();
+                        if service
+                            .model()
+                            .mesh_mode
+                            .target
+                            .as_ref()
+                            .is_some_and(|t| t.provider == provider)
+                        {
+                            service
+                                .inner
+                                .mesh_takeover_requested
+                                .store(false, Ordering::Release);
+                        }
+                        let gateway_profiles: Vec<_> = service
+                            .inner
+                            .mesh
+                            .snapshot()
+                            .networks
+                            .iter()
+                            .filter(|n| n.provider == provider)
+                            .map(|n| n.profile_id.clone())
+                            .collect();
                         service
                             .inner
                             .mesh_reconnect
@@ -4452,6 +4581,9 @@ impl AppService {
                             service.inner.mesh.logout(provider).await?;
                         } else {
                             service.inner.mesh.disconnect(provider).await?;
+                        }
+                        for id in gateway_profiles {
+                            service.stop_exit_gateway(&id).await;
                         }
                     }
                     "probe" => {
@@ -4623,6 +4755,27 @@ impl AppService {
                 };
                 if tick.is_multiple_of(10) {
                     service.refresh_local_binaries();
+                    service.refresh_exit_gateway_status();
+                    if inner.mesh_takeover_requested.load(Ordering::Acquire)
+                        && service.model().work_mode == WorkMode::Mesh
+                        && service
+                            .model()
+                            .mesh_mode
+                            .target
+                            .as_ref()
+                            .is_some_and(|target| {
+                                inner
+                                    .mesh
+                                    .profile(&target.profile_id)
+                                    .is_ok_and(|profile| profile.auto_reconnect)
+                            })
+                        && !service.is_running()
+                        && !service.is_busy("core")
+                        && !service.is_busy("mesh")
+                        && service.helper_status().running
+                    {
+                        service.start_core();
+                    }
                 }
                 // Probe the privilege helper off the UI thread. The status is
                 // cached inside `privilege::status`, so this is cheap unless
@@ -4742,6 +4895,7 @@ impl AppService {
             self.flush_traffic_statistics().await;
         });
         self.inner.mesh.shutdown();
+        self.inner.rt.block_on(self.stop_exit_gateways());
         let _ = self.persist_model();
         self.close_system_proxy();
         let core = self.inner.core.clone();
@@ -4749,7 +4903,7 @@ impl AppService {
             let _ = core.stop().await;
         });
         self.inner.rt.block_on(self.flush_traffic_statistics());
-        if self.inner.settings.read().effective_tun() && self.inner.helper.read().running {
+        if self.runtime_uses_tun() && self.inner.helper.read().running {
             let request = HelperRequest::RemoveTun {
                 interface: self.tun_interface(),
             };

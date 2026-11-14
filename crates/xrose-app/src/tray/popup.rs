@@ -508,14 +508,7 @@ impl PopupView {
         let Some(node) = self.dashboard.nodes.get(index) else {
             return;
         };
-        let action = if node.id == DIRECT_VIRTUAL_NODE_ID {
-            TrayAction::SelectMode(WorkMode::Direct)
-        } else if let Some(group_id) = self.dashboard.group_id.clone() {
-            TrayAction::SelectNode {
-                group_id,
-                node_id: node.id.clone(),
-            }
-        } else {
+        let Some(action) = node.action.clone() else {
             return;
         };
         self.selected = index;
@@ -560,16 +553,11 @@ impl Render for PopupView {
                     } else {
                         gpui_kit::hsla(0., 0., 0., 0.)
                     })
-                    .when(
-                        (node.id == DIRECT_VIRTUAL_NODE_ID || d.group_id.is_some()) && !d.busy_core,
-                        |row| {
-                            row.hover(|s| s.bg(p.accent))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select(index, window, cx)
-                                }))
-                        },
-                    )
+                    .when(node.action.is_some() && !d.busy_core, |row| {
+                        row.hover(|s| s.bg(p.accent)).cursor_pointer().on_click(
+                            cx.listener(move |this, _, window, cx| this.select(index, window, cx)),
+                        )
+                    })
                     .child(
                         div()
                             .w(px(16.))
@@ -647,8 +635,13 @@ impl Render for PopupView {
                 match event.keystroke.key.as_str() {
                     "escape" => this.dismiss(window),
                     "down" if this.focus.is_focused(window) => {
-                        this.selected =
-                            (this.selected + 1).min(this.dashboard.nodes.len().saturating_sub(1));
+                        this.selected = (this.selected + 1).min(
+                            this.dashboard
+                                .nodes
+                                .iter()
+                                .filter(|node| !node.id.starts_with("__xrose_"))
+                                .count(),
+                        );
                         this.scroll.scroll_to_item(this.selected);
                         cx.notify();
                     }
@@ -1001,7 +994,7 @@ impl Render for PopupView {
                             .min_h(px(0.))
                             .overflow_y_scroll()
                             .children(node_rows)
-                            .when(d.direct && d.automatic_group, |s| {
+                            .when((d.direct || d.mesh) && d.automatic_group, |s| {
                                 s.child(
                                     Button::new("tray-resume-auto")
                                         .compact()
@@ -1035,13 +1028,15 @@ impl Render for PopupView {
                             .min_w(px(0.))
                             .truncate()
                             .text_xs()
-                            .when(d.direct, |label| label.text_color(p.muted_fg))
+                            .when(d.direct || d.mesh, |label| label.text_color(p.muted_fg))
                             .child(if d.direct {
                                 tr(
                                     lang,
                                     "本机直连 · 代理分流停用",
                                     "Direct · Proxy routing off",
                                 )
+                            } else if d.mesh {
+                                tr(lang, "组网 · 本地分流暂停", "Mesh · Local routing paused")
                             } else {
                                 tr(lang, "路由模式", "Routing mode")
                             }),
@@ -1061,7 +1056,7 @@ impl Render for PopupView {
                                     .h_full()
                                     .menu_width(px(160.))
                                     .menu_max_h(px(190.))
-                                    .disabled(d.busy_core || d.direct)
+                                    .disabled(d.busy_core || d.direct || d.mesh)
                                     .accessibility_label(tr(lang, "路由模式", "Routing mode")),
                             ),
                     ),
@@ -1090,7 +1085,7 @@ impl Render for PopupView {
                     .child(
                         Switch::new("tray-proxy")
                             .checked(d.system_proxy)
-                            .disabled(d.busy_proxy)
+                            .disabled(d.busy_proxy || d.mesh)
                             .on_change(cx.listener(|this, checked, window, cx| {
                                 this.action(TrayAction::SetSystemProxy(*checked), window, cx)
                             })),
@@ -1114,7 +1109,7 @@ impl Render for PopupView {
                     .child(
                         Switch::new("tray-tun")
                             .checked(d.tun_enabled)
-                            .disabled(!d.tun_supported || d.busy_core)
+                            .disabled(!d.tun_supported || d.busy_core || d.mesh)
                             .on_change(cx.listener(|this, _, window, cx| {
                                 this.action(TrayAction::ToggleTun, window, cx)
                             })),

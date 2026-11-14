@@ -1,6 +1,9 @@
-//! Discovered exits share the node list; only the active gateway has a saved proxy node.
+//! Discovered exits select the host mesh mode independently of proxy-group membership.
 use super::*;
-use crate::ui::{theme::NODE_ROW_HEIGHT, tr};
+use crate::ui::{
+    theme::{DISABLED_OPACITY, NODE_ROW_HEIGHT},
+    tr,
+};
 use std::net::IpAddr;
 use xrose_core::mesh::MeshProvider;
 
@@ -12,6 +15,8 @@ pub(super) struct Choice {
     provider: MeshProvider,
     address: IpAddr,
     online: bool,
+    selected: bool,
+    resumable: bool,
     pub(super) gateway: String,
 }
 
@@ -25,7 +30,6 @@ impl Choice {
 
     pub(super) fn row(
         &self,
-        group: Option<String>,
         disabled: bool,
         hide_ips: bool,
         lang: Language,
@@ -34,16 +38,18 @@ impl Choice {
     ) -> impl IntoElement + use<> {
         let profile = self.profile.clone();
         let peer = self.peer.clone();
-        let disabled = disabled || !self.online || group.is_none();
+        let disabled = disabled || (!self.online && !self.resumable);
+        let selected = self.selected;
+        let primary = p.primary;
         let mut detail = format!("{} · {}", self.network, self.provider.label());
         if !hide_ips {
             detail.push_str(&format!(" · {}", self.address));
         }
         let hover = p.panel_alt;
         let select = cx.listener(move |this, _: &ClickEvent, _, cx| {
-            if !disabled && let Some(group_id) = &group {
+            if !disabled {
                 this.service
-                    .select_mesh_exit(profile.clone(), peer.clone(), group_id.clone());
+                    .select_mesh_exit_mode(profile.clone(), peer.clone());
                 this.sync(cx);
             }
         });
@@ -51,18 +57,19 @@ impl Choice {
             "exit-{}-{}",
             self.profile, self.peer
         )))
-        .checked(false)
+        .checked(selected)
         .disabled(disabled)
         .accessibility_label(self.name.clone())
         .on_change(move |_, event, window, cx| select(event, window, cx))
         .tooltip(move |window, cx| {
             Tooltip::new(tr(
                 lang,
-                "切换出口将重新连接此组网。",
-                "Switching exits reconnects this mesh network.",
+                "进入组网模式，由此出口接管系统流量。",
+                "Use this exit for system traffic in Mesh mode.",
             ))
             .build(window, cx)
         })
+        .relative()
         .flex()
         .items_center()
         .gap_3()
@@ -71,22 +78,25 @@ impl Choice {
         .py_2()
         .min_h(px(NODE_ROW_HEIGHT))
         .border_1()
-        .border_color(p.border)
+        .border_color(if selected {
+            p.border.opacity(0.)
+        } else {
+            p.border
+        })
         .rounded_lg()
-        .bg(p.bg)
-        .when(disabled, |d| d.opacity(0.45))
-        .when(!disabled, |d| {
+        .bg(if selected { p.accent } else { p.bg })
+        .focus_visible(move |row| row.border_color(primary))
+        .when(selected, |row| row.child(selection_bar(primary)))
+        .when(disabled, |d| d.opacity(DISABLED_OPACITY))
+        .when(!disabled && !selected, |d| {
             d.cursor_pointer().hover(move |d| d.bg(hover))
         })
         .child(div().w(px(14.)).flex_shrink_0())
-        .child(
-            div()
-                .size(px(20.))
-                .flex_shrink_0()
-                .rounded_full()
-                .border_1()
-                .border_color(p.muted_fg),
-        )
+        .child(radio_indicator(
+            selected,
+            if selected { primary } else { p.muted_fg },
+            primary,
+        ))
         .child(
             div()
                 .flex_1()
@@ -136,9 +146,11 @@ pub(super) fn choices(
         } else {
             peer.name.clone()
         };
-        if peer.exit_selected && model.node(&gateway).is_some() {
-            continue;
-        }
+        let target = model
+            .mesh_mode
+            .target
+            .as_ref()
+            .is_some_and(|target| target.profile_id == profile.id && target.peer_id == peer.id);
         choices.push(Choice {
             profile: profile.id.clone(),
             peer: peer.id.clone(),
@@ -147,8 +159,40 @@ pub(super) fn choices(
             provider: profile.provider,
             address,
             online: peer.online,
+            selected: target && model.work_mode == xrose_core::model::WorkMode::Mesh,
+            resumable: target,
             gateway,
         });
+    }
+    if let Some(target) = model.mesh_mode.target.as_ref().filter(|target| {
+        !choices
+            .iter()
+            .any(|choice| choice.profile == target.profile_id && choice.peer == target.peer_id)
+    }) {
+        if let (Some(profile), Ok(address)) = (
+            mesh.profiles
+                .iter()
+                .find(|profile| profile.id == target.profile_id),
+            target.address.parse(),
+        ) {
+            let name = if hide_ips {
+                target.name.replace(&target.address, "•••")
+            } else {
+                target.name.clone()
+            };
+            choices.push(Choice {
+                profile: target.profile_id.clone(),
+                peer: target.peer_id.clone(),
+                name,
+                network: profile.name.clone(),
+                provider: target.provider,
+                address,
+                online: false,
+                selected: model.work_mode == xrose_core::model::WorkMode::Mesh,
+                resumable: true,
+                gateway: target.gateway_id.clone(),
+            });
+        }
     }
     choices.sort_by(|a, b| (&a.network, &a.name, a.address).cmp(&(&b.network, &b.name, b.address)));
     choices
@@ -164,7 +208,7 @@ mod tests {
     };
 
     #[test]
-    fn first_exit_is_visible_in_an_empty_list_and_saved_gateway_is_not_duplicated() {
+    fn discovered_exits_remain_independent_of_saved_proxy_gateways() {
         let profile = MeshProfile::default().summary();
         let selected = MeshPeer {
             id: "a".into(),
@@ -204,9 +248,34 @@ mod tests {
         gateway.id = format!("mesh-exit-{}", profile.id);
         model.add_nodes([gateway]);
         let options = choices(&mesh, &model, true, Language::En);
+        assert_eq!(options.len(), 2);
+        let offline = options.iter().find(|choice| choice.peer == "b").unwrap();
+        assert!(!offline.online);
+        assert!(!offline.matches("192.0.2.6", true));
+        assert!(offline.matches("easytier", true));
+    }
+
+    #[test]
+    fn disconnected_saved_exit_remains_visible_and_resumable() {
+        let profile = MeshProfile::default().summary();
+        let mut model = AppModel::default();
+        model.work_mode = xrose_core::model::WorkMode::Mesh;
+        model.mesh_mode.target = Some(xrose_core::model::MeshExitTarget {
+            profile_id: profile.id.clone(),
+            peer_id: "fixture-peer".into(),
+            provider: profile.provider,
+            name: "Fixture exit".into(),
+            address: "192.0.2.5".into(),
+            gateway_id: format!("mesh-exit-{}", profile.id),
+        });
+        let mesh = MeshSnapshot {
+            profiles: vec![profile],
+            ..Default::default()
+        };
+        let options = choices(&mesh, &model, false, Language::En);
         assert_eq!(options.len(), 1);
+        assert!(options[0].selected);
+        assert!(options[0].resumable);
         assert!(!options[0].online);
-        assert!(!options[0].matches("192.0.2.6", true));
-        assert!(options[0].matches("easytier", true));
     }
 }

@@ -45,7 +45,7 @@ impl TrayGlyph {
             None | Some(Direct) => asset!("plain"),
             Some(Idle) => asset!("idle"),
             Some(Proxy) => asset!("proxy"),
-            Some(MeshOnly) => asset!("mesh"),
+            Some(Mesh | MeshOnly) => asset!("mesh"),
             Some(MeshProxy) => asset!("mesh-proxy"),
             Some(Unavailable) => asset!("unavailable"),
         }
@@ -138,7 +138,7 @@ mod tests {
                 white_ink,
             }
             .raster(22);
-            for state in [Idle, Proxy, MeshOnly, MeshProxy, Unavailable] {
+            for state in [Idle, Proxy, Mesh, MeshOnly, MeshProxy, Unavailable] {
                 let icon = TrayGlyph {
                     rose: Some(state),
                     white_ink,
@@ -168,7 +168,7 @@ mod tests {
                 match state {
                     Idle => assert!(!purple && !red),
                     Proxy => assert!(blue && !purple && !red),
-                    MeshOnly => assert!(purple && !blue && !red),
+                    Mesh | MeshOnly => assert!(purple && !blue && !red),
                     MeshProxy => assert!(blue && purple && !red),
                     Unavailable => assert!(red && !blue && !purple),
                     Direct => unreachable!(),

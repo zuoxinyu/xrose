@@ -52,6 +52,19 @@ pub(crate) fn evaluate_with(
     info: &ConnectionInfo,
     cached_match: impl Fn(&RouteRule) -> Option<bool>,
 ) -> RulePreview {
+    if model.work_mode == crate::model::WorkMode::Mesh {
+        return RulePreview {
+            rule: None,
+            action: RouteAction::proxy(),
+            explanation: model
+                .mesh_mode
+                .target
+                .as_ref()
+                .map(|t| format!("组网模式：通过出口“{}”转发，本地代理分流已暂停", t.name))
+                .unwrap_or_else(|| "组网模式：尚未选择出口".into()),
+            needs_core: false,
+        };
+    }
     for rule in model.routing.rules_for_mode(model.work_mode) {
         if model.work_mode == crate::model::WorkMode::Direct && rule.matchers.is_empty() {
             continue;
@@ -114,6 +127,14 @@ fn rule_explanation(model: &AppModel, rule: &RouteRule) -> String {
 }
 
 pub fn action_label(model: &AppModel, action: &RouteAction) -> String {
+    if model.work_mode == crate::model::WorkMode::Mesh {
+        return model
+            .mesh_mode
+            .target
+            .as_ref()
+            .map(|t| format!("组网 → {}", t.name))
+            .unwrap_or_else(|| "组网".into());
+    }
     match action.kind {
         RouteActionKind::Direct => "直连".into(),
         RouteActionKind::Block => "阻止".into(),

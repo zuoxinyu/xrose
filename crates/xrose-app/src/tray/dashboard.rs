@@ -14,6 +14,7 @@ pub struct DashboardNode {
     pub label: String,
     pub delay_ms: Option<u32>,
     pub active: bool,
+    pub action: Option<TrayAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +28,8 @@ pub struct DashboardMeshStatus {
 #[derive(Debug, Clone)]
 pub struct Dashboard {
     pub language: Language,
-    pub group_id: Option<String>,
     pub direct: bool,
+    pub mesh: bool,
     pub automatic_group: bool,
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
@@ -75,6 +76,7 @@ pub(super) fn status_lines(status: &TrayStatus) -> (String, Option<String>) {
         TrayIndicator::MeshProxy => ("代理与组网运行中", "Proxy and mesh active"),
         TrayIndicator::Direct => ("直连监控", "Direct monitoring"),
         TrayIndicator::Proxy => ("代理运行中", "Proxy running"),
+        TrayIndicator::Mesh => ("组网出口接管中", "Mesh exit active"),
         TrayIndicator::Idle => match status.phase {
             ProcessPhase::Starting => ("启动中", "Starting"),
             ProcessPhase::Stopping => ("停止中", "Stopping"),
@@ -134,18 +136,56 @@ pub fn build(service: &AppService) -> Dashboard {
         .selected_node(group.as_ref().map(|group| group.id.as_str()))
         .map(|node| node.id.clone());
     let direct = model.work_mode == WorkMode::Direct;
+    let represented_gateways: std::collections::HashSet<_> = snapshot
+        .mesh
+        .exits()
+        .map(|(profile, _, _)| format!("mesh-exit-{}", profile.id))
+        .chain(
+            model
+                .mesh_mode
+                .target
+                .iter()
+                .map(|target| target.gateway_id.clone()),
+        )
+        .collect();
     let mut nodes = vec![DashboardNode {
         id: DIRECT_VIRTUAL_NODE_ID.into(),
         label: tr(language, "本机直连", "Direct").into(),
         delay_ms: None,
         active: direct,
+        action: Some(TrayAction::SelectMode(WorkMode::Direct)),
     }];
+    if let Some(group) = group.as_ref().filter(|group| {
+        group
+            .selected
+            .as_ref()
+            .and_then(|id| model.node(id))
+            .is_some_and(|node| node.is_mesh_gateway())
+    }) {
+        nodes.push(DashboardNode {
+            id: "__xrose_proxy_mode__".into(),
+            label: format!(
+                "{} · {}",
+                tr(language, "代理", "Proxy"),
+                crate::i18n::outbound_group_label(language, group)
+            ),
+            delay_ms: None,
+            active: model.work_mode == WorkMode::Proxy,
+            action: model
+                .has_usable_default_group(snapshot.settings.core)
+                .then_some(TrayAction::SelectMode(WorkMode::Proxy)),
+        });
+    }
     let members: std::collections::HashSet<_> = group.iter().flat_map(|g| &g.members).collect();
     nodes.extend(
         model
             .nodes
             .iter()
-            .filter(|node| node.usable_with(snapshot.settings.core) && members.contains(&node.id))
+            .filter(|node| {
+                node.usable_with(snapshot.settings.core)
+                    && (!node.is_mesh_gateway() || !represented_gateways.contains(&node.id))
+                    && (node.is_mesh_gateway() || members.contains(&node.id))
+            })
             .map(|node| {
                 let delay = snapshot
                     .latency
@@ -153,12 +193,70 @@ pub fn build(service: &AppService) -> Dashboard {
                     .and_then(|entry| entry.delay_ms);
                 DashboardNode {
                     id: node.id.clone(),
-                    label: node.name.clone(),
+                    label: if node.is_mesh_gateway() {
+                        format!("{} · {}", tr(language, "组网", "Mesh"), node.name)
+                    } else {
+                        node.name.clone()
+                    },
                     delay_ms: delay,
-                    active: active_node.as_deref() == Some(node.id.as_str()),
+                    active: active_node.as_deref() == Some(node.id.as_str())
+                        && (!node.is_mesh_gateway() || model.work_mode == WorkMode::Mesh),
+                    action: if node.is_mesh_gateway() {
+                        Some(TrayAction::SelectNode {
+                            group_id: String::new(),
+                            node_id: node.id.clone(),
+                        })
+                    } else {
+                        group
+                            .as_ref()
+                            .filter(|g| g.enabled && g.manually_selectable())
+                            .map(|g| TrayAction::SelectNode {
+                                group_id: g.id.clone(),
+                                node_id: node.id.clone(),
+                            })
+                    },
                 }
             }),
     );
+    let mut target_listed = false;
+    for (profile, peer, _) in snapshot.mesh.exits() {
+        let current = model
+            .mesh_mode
+            .target
+            .as_ref()
+            .is_some_and(|target| target.profile_id == profile.id && target.peer_id == peer.id);
+        target_listed |= current;
+        let name = if peer.name.is_empty() {
+            &profile.name
+        } else {
+            &peer.name
+        };
+        nodes.push(DashboardNode {
+            id: format!("mesh:{}:{}", profile.id, peer.id),
+            label: format!("{} · {name}", tr(language, "组网", "Mesh")),
+            delay_ms: peer
+                .latency_ms
+                .filter(|latency| latency.is_finite() && *latency >= 0.0)
+                .map(|latency| latency.round() as u32),
+            active: model.work_mode == WorkMode::Mesh
+                && model.mesh_mode.target.as_ref().is_some_and(|target| {
+                    target.profile_id == profile.id && target.peer_id == peer.id
+                }),
+            action: (peer.online || current).then(|| TrayAction::SelectMeshExit {
+                profile_id: profile.id.clone(),
+                peer_id: peer.id.clone(),
+            }),
+        });
+    }
+    if !target_listed && let Some(target) = &model.mesh_mode.target {
+        nodes.push(DashboardNode {
+            id: format!("mesh:{}:{}", target.profile_id, target.peer_id),
+            label: format!("{} · {}", tr(language, "组网", "Mesh"), target.name),
+            delay_ms: None,
+            active: model.work_mode == WorkMode::Mesh,
+            action: Some(TrayAction::SelectMode(WorkMode::Mesh)),
+        });
+    }
     let et_net = xrose_core::mesh::MeshRuntimeView::for_provider(
         &snapshot.mesh.networks,
         xrose_core::mesh::MeshProvider::EasyTier,
@@ -208,12 +306,9 @@ pub fn build(service: &AppService) -> Dashboard {
     Dashboard {
         language,
         direct,
+        mesh: model.work_mode == WorkMode::Mesh,
         automatic_group: group.as_ref().is_some_and(|g| !g.manually_selectable())
             && model.has_usable_default_group(snapshot.settings.core),
-        group_id: group
-            .as_ref()
-            .filter(|g| g.enabled && g.manually_selectable())
-            .map(|g| g.id.clone()),
         group_name: group
             .map(|group| crate::i18n::outbound_group_label(language, &group).to_string())
             .unwrap_or_else(|| tr(language, "代理", "Proxy").to_string()),
@@ -226,7 +321,7 @@ pub fn build(service: &AppService) -> Dashboard {
         up_speed: snapshot.runtime.up_speed,
         system_proxy: snapshot.system_proxy_active,
         system_proxy_status: snapshot.system_proxy_status,
-        tun_enabled: snapshot.settings.effective_tun(),
+        tun_enabled: model.work_mode == WorkMode::Mesh || snapshot.settings.effective_tun(),
         tun_supported: snapshot.settings.core.capabilities().native_tun,
         route_preset: snapshot.model.routing.preset,
         total: format_bytes(
@@ -237,7 +332,10 @@ pub fn build(service: &AppService) -> Dashboard {
         ),
         core_name: snapshot.settings.core.display_name().to_string(),
         busy_proxy: snapshot.busy.iter().any(|key| key == "proxy"),
-        busy_core: snapshot.busy.iter().any(|key| key == "core"),
+        busy_core: snapshot
+            .busy
+            .iter()
+            .any(|key| key == "core" || key == "mesh-exit"),
         busy_latency: snapshot
             .busy
             .iter()
@@ -251,6 +349,7 @@ pub enum TrayAction {
     TestAll,
     SelectMode(WorkMode),
     SelectNode { group_id: String, node_id: String },
+    SelectMeshExit { profile_id: String, peer_id: String },
     SetSystemProxy(bool),
     ToggleTun,
     SetRoutePreset(RoutePreset),
@@ -287,6 +386,7 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
             let result = match mode {
                 WorkMode::Direct => service.select_direct_mode(),
                 WorkMode::Proxy => service.select_proxy_mode(),
+                WorkMode::Mesh => service.select_mesh_mode(),
             };
             if let Err(error) = result {
                 service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
@@ -296,6 +396,10 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
         TrayAction::SelectNode { group_id, node_id } => {
             service.select_node(&group_id, &node_id);
         }
+        TrayAction::SelectMeshExit {
+            profile_id,
+            peer_id,
+        } => service.select_mesh_exit_mode(profile_id, peer_id),
         TrayAction::SetSystemProxy(enabled) => service.set_system_proxy(enabled),
         TrayAction::ToggleTun => service.set_tun_enabled(!service.settings().effective_tun()),
         TrayAction::SetRoutePreset(preset) => service.switch_route_preset(preset),

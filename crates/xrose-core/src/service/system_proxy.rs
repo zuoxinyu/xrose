@@ -35,6 +35,10 @@ impl AppService {
     }
 
     pub fn set_system_proxy(&self, enabled: bool) {
+        if enabled && self.model().work_mode == WorkMode::Mesh {
+            self.toast(ToastLevel::Info, "组网模式已接管系统流量，无需开启系统代理");
+            return;
+        }
         let mut requests = self.inner.proxy_requests.lock();
         self.queue_proxy(
             &mut requests,
@@ -67,6 +71,11 @@ impl AppService {
     }
 
     pub fn reapply_system_proxy(&self) {
+        if self.model().work_mode == WorkMode::Mesh
+            || self.inner.mesh_proxy_suspended.load(Ordering::Acquire)
+        {
+            return;
+        }
         let mut requests = self.inner.proxy_requests.lock();
         let enabled = requests
             .target
@@ -83,6 +92,41 @@ impl AppService {
         {
             self.queue_proxy(&mut requests, Change::Refresh);
         }
+    }
+
+    pub(super) async fn suspend_proxy_for_mesh(&self) -> Result<()> {
+        self.inner
+            .mesh_proxy_suspended
+            .store(true, Ordering::Release);
+        if self.settings().system_proxy || self.inner.paths.proxy_snapshot().exists() {
+            self.set_system_proxy(false);
+            while self.is_busy("proxy") {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            if self.inner.paths.proxy_snapshot().exists() {
+                return Err(Error::other(
+                    "系统代理未能还原，请先关闭系统代理后重试组网模式",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn update_mode_system_proxy(&self) -> Result<()> {
+        if self.model().work_mode == WorkMode::Mesh {
+            return self.suspend_proxy_for_mesh().await;
+        }
+        self.restore_mesh_split_target().await?;
+        let suspended = self
+            .inner
+            .mesh_proxy_suspended
+            .swap(false, Ordering::AcqRel);
+        if suspended && self.settings().system_proxy {
+            self.set_system_proxy(true);
+        } else {
+            self.reapply_system_proxy();
+        }
+        Ok(())
     }
 
     pub(super) fn stop_managed_proxy(&self) {
@@ -169,6 +213,9 @@ impl AppService {
     }
 
     fn record_proxy_state(&self, enabled: bool) {
+        if self.inner.mesh_proxy_suspended.load(Ordering::Acquire) {
+            return;
+        }
         let result = {
             let mut settings = self.inner.settings.write();
             settings.system_proxy = enabled;

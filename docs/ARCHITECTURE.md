@@ -6,7 +6,8 @@
 
 直接以单一内核的 JSON 结构建模会导致适配第二个内核时状态与语义泄漏。Xrose 的 [`AppModel`](../crates/xrose-core/src/model/mod.rs) 仅保存与具体内核无关的用户意图：
 
-- `work_mode`：`WorkMode::Direct`（本机直连）或 `WorkMode::Proxy`（代理），与分流模板、出站组选择正交。
+- `work_mode`：`WorkMode::Direct`（本机直连）、`WorkMode::Proxy`（代理）或 `WorkMode::Mesh`（组网），与分流模板、出站组选择正交。
+- `mesh_mode`：系统出口设备、DNS 策略（默认随出口 / 自定义）与本地 LAN 访问意图；与 `MeshProfile.exit_node` 保存的分流出口独立。
 - `nodes`：协议、凭据与 TLS / 传输参数，不含内核字段名。
 - `groups`：出站组（`selector` / `urltest` / `fallback` / `loadbalance`）及各组切换策略 `switch_policy`。
 - `routing`：自定义规则分组（`rule_groups`）、规则（`rules`，含 `geosite` / `geoip` / `rule_sets` / `process` 等语义匹配器）与规则集定义。
@@ -27,7 +28,13 @@
   - 若配置的 DNS 上游依赖代理 `detour`，直连编译期跳过该上游及其分域规则并生成中文警告；无剩余可用上游时自动回退系统解析器，防止断网。
   - `required_rule_sets` 仅收集 `Block` 规则及有效直连 DNS 引用的规则集。
   - 未启用 TUN 且开启系统代理时，直连模式经本地混合 / HTTP 入站接管系统代理流量，保证统计与拦截规则可用。
-- **无损切换**：点选「本机直连」仅更新 `work_mode`；从直连模式点选真实节点或组网出口时，在同一事务中切回 `WorkMode::Proxy` 并保留原分流模板与出站组配置。
+- **无损切换**：点选「本机直连」更新 `work_mode`；点选代理节点切回 `WorkMode::Proxy`；在节点页点选组网出口进入 `WorkMode::Mesh`。三种模式均保留原分流模板与出站组配置。
+
+### 代理与组网模式
+
+代理模式按本地路由与 DNS 配置编译，组网网关仍可作为出站组成员和规则目标。组网模式由 `adapters::mesh` 构造临时运行模型：仅启用系统 TUN、选定出口和必要的组网共存路由，暂停本地代理规则（含阻止规则）、出站组自动切换与 Fake-IP，原配置不被覆写。系统代理与 PAC 暂停，TUN 必须保持启用；可独立允许本地 LAN 访问。EasyTier 不承载的 IPv6 流量被阻止。
+
+组网 DNS 默认交给出口路径：Tailscale 使用其用户态端点解析器，EasyTier 向明确的上游发送查询并经所选出口转发。自定义模式保留 DNS 服务器与域名匹配设置，将查询统一发往组网出口；系统解析器占位值不被接受，避免解析回环或意外直连。
 
 ## 3. Xray 与 sing-box 能力映射
 
@@ -58,7 +65,9 @@
 | 实时统计 | `StatsService`（gRPC） | Clash API | Xray 通过 `xray api statsquery` 查询 |
 | 历史流量统计 | 业务入站总量、节点与直连计数 | 总量及节点 / 进程 / 主域名分类 | 默认关闭，按会话与本地自然日保存，周一为每周起点；柱状图与表格共用查询 |
 | 组网访问 | 优先 freedom 规则 + 专用 DNS | 绑定组网接口直连 + TUN 排除 + 专用 DNS | `CompileContext.mesh` 注入，不改变 `AppModel`；MagicDNS 优先于 Fake-IP |
-| 组网出口出站 | 本机认证 SOCKS 出站 | 本机认证 SOCKS 出站 | 「节点」页列出已连接组网出口候选；每个组网配置维护稳定代理节点 ID |
+| 组网出口出站 | 本机认证 SOCKS 出站 | 本机认证 SOCKS 出站 | 每个组网配置维护稳定节点 ID，可继续作为出站组与分流目标 |
+| 组网系统模式 | 原生 TUN + 组网出口 | 原生 TUN + 组网出口 | 节点页选定设备后接管系统流量；本地代理分流暂停，DNS 随出口或使用自定义上游 |
+| 远端 Xrose 出口分流 | 独立策略进程；暂不能与本机 TUN 并行 | 独立策略进程；可与本机 TUN 并行 | 使用活动配置的路由与 DNS，独立于远端主机工作模式；限制见组网文档 |
 | Windows 组网与 TUN 共存 | 自动路由排除组网网段 | 保留用户 `strict_route` 设置 | 严格路由可能影响组网 DNS，界面提示可手动关闭 |
 
 ### 协议与 TUN 适配说明
@@ -86,7 +95,9 @@
 
 - **双后端运行**：EasyTier 2.6.4 静态库在 `--mesh-worker` 中初始化；Tailscale 使用固定 sing-box 1.14.4 子进程与鉴权 gRPC，通过用户态 endpoint + 专用 TUN 实现，仅将批准路由写入 `route_address` 并为当前 tailnet 后缀设置带归属记录的 DNS（Windows NRPT / macOS `/etc/resolver` / Linux `systemd-resolved`）。
 - **双向端口转发**（组网协议 v9+）：服务将「本机 → 组网」与「组网 → 本机」统一为 `ForwardRules` 在线更新事务，先由工作进程校验并热更新监听，再落库持久化，失败自动回滚。Tailscale 通过本地鉴权 SOCKS 服务桥与路由约束保障目标隔离，不开放任意主机端口。
-- **自动重连与出口选择**：重连监控（`service/mesh_reconnect.rs`）在提权助手恢复后按网络类型串行恢复会话并重新校验代理共存路由。选择组网出口时重连对应组网并等待就绪，随后在同一事务中更新组网出口与手动出站组选择。
+- **自动重连与出口选择**：重连监控（`service/mesh_reconnect.rs`）在提权助手恢复后按网络类型串行恢复会话并重新校验共存路由。`service/mesh_mode.rs` 使用临时组网配置选择系统出口，在组网与 TUN 启动成功后提交工作模式与目标；失败恢复原会话，退出组网模式时恢复已保存的分流出口与代理设置。系统出口选择不修改出站组成员或选择。
+- **远端出口分流**：`service/mesh_gateway.rs` 为 `ExitRoutingMode::Rules` 启动独立内核进程，将活动配置按代理模式编译，使用随机认证的回环 SOCKS 入站，隔离 TUN、系统代理、PAC 与 API 端口。EasyTier 通过用户态 IPv4 TCP/UDP 转发桥接，Tailscale 通过端点路由接入；远端主机处于直连或组网模式时，出口服务仍按自己的策略运行。热重载沿用先校验后应用与失败回滚。
+- **运行边界**：EasyTier 出口分流只支持 IPv4 TCP/UDP，不支持 ICMP，UDP IP 包（含分片重组）最大 8192 字节；Rules 模式关闭入站 KCP/QUIC 加速以防绕过策略。同一网络配置只有一个出口网关，远端策略正在引用该网关时，不能让系统出口与分流出口指向不同设备。Xray 出口策略进程暂不支持与本机 TUN/组网模式同时运行，因缺少物理上联网卡绑定会产生再次捕获风险，服务明确拒绝该组合；sing-box 可并行运行。出口不可达时不自动改为直连，但助手或 TUN 进程崩溃后没有独立于这些进程的持续断网保护。
 - **设备发现与配置共享**：使用版本化 TCP 协议仅向已连接网络的成员发送握手；共享码模式使用挑战应答，无认证模式通过 Noise NN 临时密钥协商传输本次共享数据密钥。预览在内存中完成，确认时以单次 SQLite 事务写入加密配置，协议本身、共享码与预览不落库。
 
 完整权限、路由隔离与构建细节见 [异地组网文档](MESH.md)。
@@ -182,6 +193,6 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 ## 11. 持久化与安全边界
 
-- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
+- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。v3 增加组网系统模式与远端出口策略，沿用 JSON 字段默认值迁移，保留原有工作模式与分流配置。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
 - **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则，通过 `Ping` 校验应用版本、TUN 助手协议版本、组网协议版本与助手修订号。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
 - **系统代理还原**：在修改网络设置前保存快照。macOS 分别使用内核实际监听的 HTTP 和 SOCKS 端口，还原时先写地址，再还原启用状态并回读验证。设置页与菜单栏浮窗订阅 macOS 当前网络的代理变更，显示 Xrose、部分使用或外部代理状态。自动重载和退出还原会跳过用户或其他应用已修改的条目。还原失败会保留快照供重试，GUI 在获得单实例锁后执行崩溃恢复。

@@ -21,8 +21,8 @@ use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::mesh::{
-    EasyTierOptions, MeshPeer, MeshPhase, MeshProfile, MeshProfileView, MeshProvider,
-    MeshRuntimeView, MeshSecret,
+    EasyTierOptions, ExitRoutingMode, MeshPeer, MeshPhase, MeshProfile, MeshProfileView,
+    MeshProvider, MeshRuntimeView, MeshSecret,
 };
 use xrose_core::service::ToastLevel;
 
@@ -98,6 +98,7 @@ pub(crate) struct MeshForm {
     service_forwards: Vec<xrose_core::mesh::ServiceForward>,
     outbound_port: Entity<InputState>,
     advertise_exit: bool,
+    exit_routing: ExitRoutingMode,
     connect_on_startup: bool,
     auto_reconnect: bool,
 }
@@ -126,6 +127,7 @@ impl MeshForm {
             service_forwards: Vec::new(),
             outbound_port: super::text_input(window, cx, ""),
             advertise_exit: false,
+            exit_routing: ExitRoutingMode::Direct,
             connect_on_startup: false,
             auto_reconnect: true,
         }
@@ -138,6 +140,7 @@ impl MeshForm {
         self.id = profile.id;
         self.provider = profile.provider;
         self.advertise_exit = profile.advertise_exit_node;
+        self.exit_routing = profile.exit_routing;
         self.auto_reconnect = profile.auto_reconnect;
         self.error = None;
         for (input, value) in [
@@ -216,6 +219,7 @@ impl MeshForm {
             auto_reconnect: self.auto_reconnect,
             exit_node: value(&self.exit_node),
             advertise_exit_node: self.advertise_exit,
+            exit_routing: self.exit_routing,
             advertised_subnets: list(&self.advertised),
             port_forwards: list(&self.forwards)
                 .iter()
@@ -647,6 +651,20 @@ impl AppView {
             }
             form = form.child(toggle("mesh-advertise-exit", self.tr("发布本机为出口节点", "Advertise this device as an exit node"), self.mesh_form.advertise_exit).flex_shrink_0().on_change(cx.listener(|this, checked, _, cx| { this.mesh_form.advertise_exit = *checked; cx.notify(); })))
             .child(div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr("填写出口出站端口后，节点列表将生成可用于出站组和分流规则的出口节点。转发格式：tcp://监听IP:端口/目标IP:端口（支持 udp）。", "An outbound port creates a node for groups and routing rules. Forward format: tcp://listen-IP:port/target-IP:port (udp supported).")));
+            if self.mesh_form.advertise_exit {
+                form = form.child(div().flex().flex_col().gap_2().flex_shrink_0()
+                    .child(div().text_sm().child(self.tr("出口流量处理", "Exit traffic")))
+                    .child(ChoiceGroup::new("mesh-exit-routing", vec![self.tr("直接转发", "Forward directly"), self.tr("按规则分流", "Apply routing rules")],
+                        if self.mesh_form.exit_routing == ExitRoutingMode::Direct { 0 } else { 1 })
+                        .on_change(cx.listener(|this, index, _, cx| {
+                            this.mesh_form.exit_routing = if *index == 0 { ExitRoutingMode::Direct } else { ExitRoutingMode::Rules };
+                            cx.notify();
+                        })))
+                    .child(div().text_sm().text_color(p.muted_fg).child(self.tr(
+                        "按规则分流使用当前配置的路由与 DNS，独立于本机工作模式。",
+                        "Routing uses this profile's rules and DNS independently of the local work mode.",
+                    ))));
+            }
             if self.mesh_form.provider == MeshProvider::Tailscale {
                 form = form.child(
                     div().flex_shrink_0().text_sm().text_color(p.muted_fg).child(self.tr(

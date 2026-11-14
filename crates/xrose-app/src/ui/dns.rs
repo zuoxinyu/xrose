@@ -4,7 +4,7 @@ use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::dns::{self, DnsPreset};
-use xrose_core::model::{DnsServer, DnsServerType};
+use xrose_core::model::{DnsServer, DnsServerType, MeshDnsMode, WorkMode};
 
 use super::AppView;
 use super::menus::{self, MenuTarget};
@@ -68,6 +68,24 @@ impl AppView {
                                 })),
                         ),
                 )
+                .when(model.work_mode == WorkMode::Mesh, |card| {
+                    card.child(ChoiceGroup::new(
+                        "mesh-dns-mode",
+                        vec![self.tr("随出口", "Use exit DNS"), self.tr("自定义 DNS", "Custom DNS")],
+                        if model.mesh_mode.dns == MeshDnsMode::Exit { 0 } else { 1 },
+                    ).on_change(cx.listener(|this, index, _, cx| {
+                        let mode = if *index == 0 { MeshDnsMode::Exit } else { MeshDnsMode::Custom };
+                        if let Err(error) = this.service.set_mesh_dns_mode(mode) {
+                            this.service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
+                        }
+                        this.sync(cx);
+                    })))
+                    .child(div().text_sm().text_color(p.muted_fg).child(if model.mesh_mode.dns == MeshDnsMode::Exit {
+                        self.tr("组网模式使用出口 DNS。以下自定义配置会保留，本地 Fake-IP 已暂停。", "Mesh mode uses exit DNS. Your custom settings are preserved; local Fake-IP is paused.")
+                    } else {
+                        self.tr("组网模式使用下方自定义 DNS，查询经组网出口发送。本地 Fake-IP 已暂停。", "Mesh mode uses the custom DNS below through the exit. Local Fake-IP is paused.")
+                    }))
+                })
                 .child({
                     let mut labels = vec![self.tr("分流 + Fake-IP", "Split + Fake-IP"), self.tr("分流 DNS", "Split DNS"), self.tr("加密 DNS", "Encrypted DNS"), self.tr("系统 DNS", "System DNS")];
                     if current_preset.is_none() { labels.push(self.tr("自定义", "Custom")); }

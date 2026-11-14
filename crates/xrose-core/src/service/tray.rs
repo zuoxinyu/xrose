@@ -10,6 +10,7 @@ pub enum TrayIndicator {
     Idle,
     Direct,
     Proxy,
+    Mesh,
     MeshOnly,
     MeshProxy,
     Unavailable,
@@ -33,6 +34,13 @@ impl TrayIndicator {
                     Self::MeshProxy
                 } else {
                     Self::Proxy
+                }
+            }
+            ProcessPhase::Running if mode == Some(WorkMode::Mesh) => {
+                if mesh && !failed_probe {
+                    Self::Mesh
+                } else {
+                    Self::Unavailable
                 }
             }
             _ if mesh => Self::MeshOnly,
@@ -98,13 +106,27 @@ impl AppService {
         let tailscale = self.inner.mesh.phase(MeshProvider::Tailscale);
         let failed = self.inner.failed_proxy_probe.lock().clone();
         let failed_probe = failed.is_some() && failed == self.tray_probe_target();
+        let mode = self.inner.core.applied_work_mode();
+        let mesh_connected = if mode == Some(WorkMode::Mesh) {
+            self.model().mesh_mode.target.is_some_and(|target| {
+                self.inner.mesh.snapshot().networks.iter().any(|network| {
+                    network.profile_id == target.profile_id
+                        && network.phase == MeshPhase::Connected
+                        && network.peers.iter().any(|peer| {
+                            peer.id == target.peer_id && peer.online && peer.exit_selected
+                        })
+                })
+            })
+        } else {
+            easytier == MeshPhase::Connected || tailscale == MeshPhase::Connected
+        };
         let indicator = TrayIndicator::resolve(
             process.phase,
-            self.inner.core.applied_work_mode(),
+            mode,
             self.inner.last_start_failed.load(Ordering::Relaxed)
                 || (process.phase == ProcessPhase::Starting && process.restarts > 0),
             failed_probe,
-            easytier == MeshPhase::Connected || tailscale == MeshPhase::Connected,
+            mesh_connected,
         );
         let (up, down, up_speed, down_speed) = self.inner.traffic.lock().snapshot();
         TrayStatus {

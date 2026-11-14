@@ -105,22 +105,25 @@ impl AppView {
                             ),
                     ),
             )
-            .when(selected && automatic_group, |row| {
-                row.child(
-                    Button::new("resume-auto-proxy")
-                        .compact()
-                        .mr_3()
-                        .disabled(busy)
-                        .label(self.tr("恢复自动代理", "Resume automatic proxy"))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.run_command(
-                                Command::SelectWorkMode(WorkMode::Proxy),
-                                false,
-                                window,
-                                cx,
-                            );
-                        })),
-                )
-            })
+            .when(
+                self.snapshot.model.work_mode != WorkMode::Proxy && automatic_group,
+                |row| {
+                    row.child(
+                        Button::new("resume-auto-proxy")
+                            .compact()
+                            .mr_3()
+                            .disabled(busy)
+                            .label(self.tr("恢复自动代理", "Resume automatic proxy"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.run_command(
+                                    Command::SelectWorkMode(WorkMode::Proxy),
+                                    false,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                },
+            )
     }
 }

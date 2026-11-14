@@ -22,6 +22,12 @@ enum Search {
     Recover,
 }
 
+fn same_session(actual: &ProcessState, expected: &ProcessState) -> bool {
+    actual.phase == ProcessPhase::Running
+        && actual.pid == expected.pid
+        && actual.started_at == expected.started_at
+}
+
 impl RoundState {
     fn observe(&mut self, group: &OutboundGroup, healthy: bool) -> Search {
         if healthy {
@@ -145,11 +151,7 @@ impl AppService {
 
     fn switch_session_current(&self, expected: &ProcessState) -> bool {
         let actual = self.process_state();
-        actual.phase == ProcessPhase::Running
-            && actual.pid == expected.pid
-            && actual.started_at == expected.started_at
-            && !self.is_busy("core")
-            && !self.inner.reload.lock().dirty
+        same_session(&actual, expected) && !self.is_busy("core") && !self.inner.reload.lock().dirty
     }
 
     pub(super) fn start_node_switch_scheduler(&self) {
@@ -187,7 +189,7 @@ impl AppService {
                 let state = states.entry(group.id.clone()).or_default();
                 // Dropping the round cancels its isolated probe when the user stops or applies.
                 let result = tokio::select! {
-                    res = service.measure_group(&process, &group, state) => res,
+                    res = service.measure_group(&service.inner.core, &process, &group, state, true) => res,
                     _ = service.wait_for_switch_cancel(&process) => Ok(None),
                 };
                 service.set_busy("auto-probe", false);
@@ -214,6 +216,97 @@ impl AppService {
                 ));
             }
         });
+    }
+
+    /// The gateway owns this scheduler through its weak manager reference.
+    /// Temporary stop/reload and recoverable failures do not remove scheduling.
+    pub(super) fn start_exit_node_switch_scheduler(&self, core: Arc<CoreManager>) {
+        let weak_service = Arc::downgrade(&self.inner);
+        let weak_core = Arc::downgrade(&core);
+        self.spawn(async move {
+            let mut states = BTreeMap::<String, RoundState>::new();
+            let mut session = None;
+            loop {
+                // Neither service nor manager is held alive between rounds.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let (Some(inner), Some(core)) = (weak_service.upgrade(), weak_core.upgrade())
+                else {
+                    break;
+                };
+                let service = AppService { inner };
+                let process = core.state();
+                if !service.exit_switch_session_current(&core, &process) {
+                    states.clear();
+                    session = None;
+                    continue;
+                }
+                let key = (process.pid, process.started_at);
+                if session != Some(key) {
+                    states.clear();
+                    session = Some(key);
+                }
+                let due = |g: &OutboundGroup| states.get(&g.id).and_then(|s| s.due);
+                let group = core
+                    .managed_probe_groups()
+                    .into_iter()
+                    .filter(|g| g.members.len() > 1 && due(g).is_none_or(|t| t <= Instant::now()))
+                    .min_by_key(due);
+                let Some(group) = group else { continue };
+                if !service.try_begin_probe("auto-probe") {
+                    continue;
+                }
+                let state = states.entry(group.id.clone()).or_default();
+                let result = tokio::select! {
+                    res = service.measure_group(&core, &process, &group, state, false) => res,
+                    _ = async {
+                        while service.exit_switch_session_current(&core, &process) {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    } => Ok(None),
+                };
+                service.set_busy("auto-probe", false);
+                match result {
+                    Ok(Some((id, recover)))
+                        if service.exit_switch_session_current(&core, &process) =>
+                    {
+                        // The manager locks its operation and rechecks the process
+                        // epoch and applied group before replacing its configuration.
+                        match core.switch_managed_node(&process, &group, &id).await {
+                            Ok(true) => {
+                                state.failures = 0;
+                                state.no_match_reported = false;
+                                service.toast(
+                                    ToastLevel::Success,
+                                    if recover {
+                                        "出口分流已切换到备用节点"
+                                    } else {
+                                        "出口分流已按性能优先策略切换节点"
+                                    },
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(error) => service
+                                .toast(ToastLevel::Error, format!("出口分流自动切换失败：{error}")),
+                        }
+                        let current = core.state();
+                        session = Some((current.pid, current.started_at));
+                    }
+                    Err(error) => {
+                        service.toast(ToastLevel::Warning, format!("出口分流检查失败：{error}"))
+                    }
+                    _ => {}
+                }
+                state.due = Instant::now().checked_add(Duration::from_secs(
+                    group.interval_secs.clamp(30, u32::MAX as u64),
+                ));
+            }
+        });
+    }
+
+    fn exit_switch_session_current(&self, core: &CoreManager, expected: &ProcessState) -> bool {
+        same_session(&core.state(), expected)
+            && !self.is_busy("core")
+            && !self.is_busy("exit-policy")
     }
 
     async fn wait_for_switch_cancel(&self, process: &ProcessState) {
@@ -267,24 +360,24 @@ impl AppService {
 
     async fn measure_group(
         &self,
+        manager: &CoreManager,
         process: &ProcessState,
         group: &OutboundGroup,
         state: &mut RoundState,
+        report_main: bool,
     ) -> Result<Option<(String, bool)>> {
-        let (Some(core), Some(binary), Some(model)) = (
+        let (Some(core), Some(binary), Some((model, settings, _))) = (
             process.core,
             process.binary.as_deref(),
-            self.inner
-                .core
-                .applied_model()
-                .filter(|m| m.work_mode == crate::model::WorkMode::Proxy),
+            manager
+                .statistics_context()
+                .filter(|(model, _, _)| model.work_mode == crate::model::WorkMode::Proxy),
         ) else {
             return Ok(None);
         };
         let Some(active) = group.active_node().and_then(|id| model.node(id)) else {
             return Ok(None);
         };
-        let settings = self.settings();
         let url = group.url.as_deref().unwrap_or(&settings.urltest_url);
         let bypass_tun = self.inner.core.native_tun_active();
         let probe = GroupProbe {
@@ -295,9 +388,11 @@ impl AppService {
             bypass_tun,
             mode: group.switch_mode(),
         };
-        let target = self.tray_probe_target();
+        let target = report_main.then(|| self.tray_probe_target()).flatten();
         let current = probe.measure(active).await;
-        self.record_proxy_probe(target.as_ref(), &active.id, current.is_some());
+        if report_main {
+            self.record_proxy_probe(target.as_ref(), &active.id, current.is_some());
+        }
         let search = state.observe(group, current.is_some());
         if search == Search::Stay {
             return Ok(None);
@@ -353,7 +448,11 @@ impl AppService {
         if best.is_none() && search == Search::Recover && !state.no_match_reported {
             self.toast(
                 ToastLevel::Warning,
-                "回退范围内没有可用节点，保留当前节点并在下轮重试",
+                if report_main {
+                    "回退范围内没有可用节点，保留当前节点并在下轮重试"
+                } else {
+                    "出口分流的回退范围内没有可用节点，保留当前节点并在下轮重试"
+                },
             );
             state.no_match_reported = true;
         }
@@ -439,6 +538,37 @@ impl GroupProbe<'_> {
 mod tests {
     use super::*;
     use crate::model::{GroupKind, Protocol};
+
+    #[test]
+    fn switch_rounds_only_accept_results_from_the_same_running_process() {
+        let expected = ProcessState {
+            phase: ProcessPhase::Running,
+            pid: Some(41),
+            started_at: Some(100),
+            ..Default::default()
+        };
+        assert!(same_session(&expected, &expected));
+        for actual in [
+            ProcessState {
+                phase: ProcessPhase::Stopped,
+                ..expected.clone()
+            },
+            ProcessState {
+                phase: ProcessPhase::Failed,
+                ..expected.clone()
+            },
+            ProcessState {
+                pid: Some(42),
+                ..expected.clone()
+            },
+            ProcessState {
+                started_at: Some(101),
+                ..expected.clone()
+            },
+        ] {
+            assert!(!same_session(&actual, &expected));
+        }
+    }
 
     #[test]
     fn failover_waits_for_consecutive_failures_and_keeps_member_order() {

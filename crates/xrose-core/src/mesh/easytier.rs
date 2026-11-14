@@ -88,6 +88,12 @@ pub fn configuration(p: &MeshProfile) -> Result<TomlConfigLoader> {
     flags.use_smoltcp = local.userspace_stack;
     flags.disable_kcp_input = !local.accept_kcp;
     flags.disable_quic_input = !local.accept_quic;
+    if p.advertise_exit_node && p.exit_routing == super::ExitRoutingMode::Rules {
+        // Upstream acceleration destinations create their own host sockets.
+        // Advertise these paths as unavailable when all exit traffic must enter policy.
+        flags.disable_kcp_input = true;
+        flags.disable_quic_input = true;
+    }
     flags.disable_tcp_hole_punching = !local.tcp_hole_punching;
     flags.disable_udp_hole_punching = !local.udp_hole_punching;
     flags.disable_sym_hole_punching = !local.symmetric_nat_punching;
@@ -230,13 +236,55 @@ pub struct Backend {
     gateway: Option<super::easytier_gateway::Gateway>,
     forward_gateway: Option<(super::easytier_gateway::Gateway, super::forwards::Forwards)>,
     services: super::forwards::Forwards,
+    exit_gateway: Option<super::easytier_exit::Gateway>,
     started: std::time::Instant,
     observation: std::sync::Arc<parking_lot::Mutex<StartupObservation>>,
     _events: tokio_util::task::AbortOnDropHandle<()>,
 }
 impl Backend {
     pub async fn start(profile: MeshProfile) -> Result<Self> {
-        let mut instance = Instance::new(configuration(&profile)?);
+        Self::start_with_exit(profile, None).await
+    }
+    pub async fn start_with_exit(
+        profile: MeshProfile,
+        bridge: Option<super::ExitBridge>,
+    ) -> Result<Self> {
+        let policy_exit =
+            profile.advertise_exit_node && profile.exit_routing == super::ExitRoutingMode::Rules;
+        if policy_exit {
+            bridge
+                .as_ref()
+                .ok_or_else(|| Error::config("出口分流服务未就绪，请重新连接组网"))?
+                .validate()?;
+        }
+        let config = configuration(&profile)?;
+        let original_acl = config.get_acl();
+        if policy_exit {
+            // Block data before peers connect; the upstream NAT must not accept a
+            // packet until our policy ingress has been installed ahead of it.
+            let mut acl = original_acl.clone().unwrap_or_default();
+            let v1 = acl.acl_v1.get_or_insert_with(Default::default);
+            v1.chains = [
+                easytier::proto::acl::ChainType::Inbound,
+                easytier::proto::acl::ChainType::Forward,
+            ]
+            .into_iter()
+            .map(|kind| easytier::proto::acl::Chain {
+                name: "xrose-exit-startup".into(),
+                chain_type: kind as i32,
+                enabled: true,
+                default_action: easytier::proto::acl::Action::Drop as i32,
+                ..Default::default()
+            })
+            .collect();
+            config.set_acl(Some(acl));
+        }
+        let mut instance = Instance::new(config);
+        if policy_exit {
+            let ctx = instance.get_global_ctx();
+            ctx.get_acl_filter()
+                .reload_rules(ctx.config.get_acl().as_ref());
+        }
         let observation =
             std::sync::Arc::new(parking_lot::Mutex::new(StartupObservation::default()));
         let observed = observation.clone();
@@ -260,6 +308,7 @@ impl Backend {
             gateway: None,
             forward_gateway: None,
             services: super::forwards::Forwards::direct(),
+            exit_gateway: None,
             started: std::time::Instant::now(),
             observation,
             _events: events,
@@ -267,6 +316,7 @@ impl Backend {
         if result.profile.outbound_port != 0
             || !result.profile.port_forwards.is_empty()
             || !result.profile.service_forwards.is_empty()
+            || policy_exit
         {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(40);
             let address = loop {
@@ -280,6 +330,16 @@ impl Backend {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             };
+            if policy_exit {
+                result.exit_gateway = Some(
+                    super::easytier_exit::Gateway::start(
+                        result.instance.get_peer_manager(),
+                        address.address(),
+                        bridge.unwrap(),
+                    )
+                    .await?,
+                );
+            }
             if result.profile.outbound_port != 0 {
                 result.gateway = Some(
                     super::easytier_gateway::Gateway::start(
@@ -304,6 +364,11 @@ impl Backend {
                     Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
                 }
             }
+        }
+        if policy_exit {
+            let ctx = result.instance.get_global_ctx();
+            ctx.config.set_acl(original_acl.clone());
+            ctx.get_acl_filter().reload_rules(original_acl.as_ref());
         }
         Ok(result)
     }
@@ -398,6 +463,9 @@ impl Backend {
         };
         if let Some(ip) = ctx.get_ipv4() {
             self.services.check_address(ip.address().into())?;
+            if let Some(gateway) = &self.exit_gateway {
+                gateway.check_address(ip.address())?;
+            }
             if let Some(gateway) = &self.gateway {
                 gateway.check_address(ip.address().into())?;
             }
@@ -485,6 +553,45 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn policy_exit_requires_a_ready_bridge_before_starting_the_instance() {
+        let profile = MeshProfile {
+            advertise_exit_node: true,
+            exit_routing: super::super::ExitRoutingMode::Rules,
+            ..Default::default()
+        };
+        let result = Backend::start_with_exit(profile.clone(), None).await;
+        assert!(matches!(result, Err(error) if error.to_string().contains("出口分流服务未就绪")));
+        let result = Backend::start_with_exit(
+            profile,
+            Some(super::super::ExitBridge {
+                port: 0,
+                password: super::super::MeshSecret("fixture".into()),
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error.to_string().contains("出口分流服务未就绪")));
+    }
+
+    #[test]
+    fn policy_exit_disables_acceleration_paths_that_bypass_the_policy_router() {
+        let mut profile = MeshProfile {
+            network_name: "fixture".into(),
+            network_secret: super::super::MeshSecret("fixture".into()),
+            peers: vec!["udp://192.0.2.1:11010".into()],
+            advertise_exit_node: true,
+            exit_routing: super::super::ExitRoutingMode::Rules,
+            ..Default::default()
+        };
+        profile.easytier.device.accept_kcp = true;
+        profile.easytier.device.accept_quic = true;
+        let flags = configuration(&profile).unwrap().get_flags();
+        assert!(flags.enable_exit_node && flags.disable_kcp_input && flags.disable_quic_input);
+        profile.exit_routing = super::super::ExitRoutingMode::Direct;
+        let flags = configuration(&profile).unwrap().get_flags();
+        assert!(flags.enable_exit_node && !flags.disable_kcp_input && !flags.disable_quic_input);
+    }
+
     #[test]
     fn startup_diagnostics_distinguish_connection_allocation_and_tun() {
         let mut observation = StartupObservation::default();

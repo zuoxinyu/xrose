@@ -15,6 +15,36 @@ use crate::settings::Settings;
 
 pub struct XrayAdapter;
 
+pub(super) fn authenticate_exit_gateway(
+    config: &mut CompiledConfig,
+    model: &AppModel,
+    password: &str,
+) -> Result<()> {
+    for group in super::mesh::policy_groups(model, CoreKind::Xray)? {
+        if !group
+            .members
+            .iter()
+            .filter_map(|id| model.node(id))
+            .any(|node| {
+                config.json["outbounds"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|outbound| outbound["tag"] == node.outbound_tag())
+            })
+        {
+            return Err(Error::config("出口出站组无法编译，请检查节点配置后重试"));
+        }
+    }
+    for inbound in config.json["inbounds"].as_array_mut().unwrap() {
+        if inbound["tag"] == super::mesh::EXIT_INBOUND {
+            inbound["settings"]["auth"] = json!("password");
+            inbound["settings"]["accounts"] = json!([{"user":"xrose","pass":password}]);
+        }
+    }
+    Ok(())
+}
+
 impl CoreAdapter for XrayAdapter {
     fn kind(&self) -> CoreKind {
         CoreKind::Xray
@@ -35,6 +65,9 @@ impl CoreAdapter for XrayAdapter {
         settings: &Settings,
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
+        if model.work_mode == crate::model::WorkMode::Mesh {
+            return super::mesh::compile_client(CoreKind::Xray, model, settings, ctx);
+        }
         let mut warnings = Vec::new();
         let mut effective = super::compilation_model(model, &mut warnings);
         let model = &effective;
@@ -183,6 +216,7 @@ impl CoreAdapter for XrayAdapter {
             }
         }
         if !direct
+            && super::mesh::requires_proxy(model)
             && !outbounds
                 .iter()
                 .any(|o| o["protocol"] != "blackhole" && o["protocol"] != "dns")
@@ -260,6 +294,36 @@ impl CoreAdapter for XrayAdapter {
         // --- Routing -----------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
         rules.push(json!({"type": "field", "inboundTag": ["api-in"], "outboundTag": "api"}));
+        if ctx.mesh_transport {
+            if let Some(process) = ctx
+                .mesh_exit
+                .as_ref()
+                .and_then(|exit| exit.transport_process.as_ref())
+            {
+                let process = super::mesh::transport_process_path(CoreKind::Xray, process);
+                rules.push(json!({"type":"field","inboundTag":["mesh-system-tun"],"process":[process],"outboundTag":"direct"}));
+            }
+        }
+        if model.dns.enabled {
+            for (index, server) in model.dns.servers.iter().enumerate() {
+                if server.is_fakeip() {
+                    continue;
+                }
+                if let Some(target) = dns_detour(model, server) {
+                    rules.push(json!({"type":"field", "inboundTag":[format!("xrose-dns-{index}")], (target_field(&target)):target}));
+                }
+            }
+        }
+        if ctx.mesh_transport {
+            if let Some(address) = ctx
+                .mesh_exit
+                .as_ref()
+                .and_then(|exit| exit.dns_address)
+                .filter(|address| address.ip().is_loopback())
+            {
+                rules.push(json!({"type":"field", "ip":[address.ip().to_string()], "port":address.port(), "network":"tcp,udp", "outboundTag":"direct"}));
+            }
+        }
         for (index, route) in ctx.mesh.routes.iter().enumerate() {
             let tag = format!("xrose-mesh-{index}");
             outbounds.push(json!({"tag":tag,"protocol":"freedom","settings":{},"streamSettings":{"sockopt":{"interface":route.interface}}}));
@@ -375,7 +439,16 @@ impl CoreAdapter for XrayAdapter {
             let mut dns_servers = Vec::new();
             let mut backups = Vec::new();
             let mut final_address = String::from("localhost");
-            for server in &model.dns.servers {
+            let mut final_dns_tag = None;
+            let mut final_dns_port = None;
+            for (index, server) in model.dns.servers.iter().enumerate() {
+                if ctx.mesh_transport
+                    && server.tag == super::mesh::BOOTSTRAP_DNS
+                    && model.dns.final_server.as_ref() != Some(&server.tag)
+                    && server.domains.is_empty()
+                {
+                    continue;
+                }
                 if let Some(address) = xray_dns_address(server, &mut warnings) {
                     let address = if !direct
                         && !tun_dns_tags.is_empty()
@@ -386,11 +459,31 @@ impl CoreAdapter for XrayAdapter {
                     } else {
                         address
                     };
+                    let (address, port) = if server.server_type == crate::model::DnsServerType::Udp
+                    {
+                        match address.parse::<std::net::SocketAddr>() {
+                            Ok(socket) => (socket.ip().to_string(), Some(socket.port())),
+                            Err(_) => (address, None),
+                        }
+                    } else {
+                        (address, None)
+                    };
                     let is_final = model.dns.final_server.as_ref() == Some(&server.tag);
                     if is_final {
                         final_address = address.clone();
+                        final_dns_port = port;
                     }
                     let mut entry = json!({"address": address});
+                    if let Some(port) = port {
+                        entry["port"] = json!(port);
+                    }
+                    if dns_detour(model, server).is_some() && address != "localhost" {
+                        let tag = format!("xrose-dns-{index}");
+                        entry["tag"] = json!(tag);
+                        if is_final {
+                            final_dns_tag = Some(tag);
+                        }
+                    }
                     if !server.domains.is_empty() {
                         entry["domains"] = json!(
                             server
@@ -424,7 +517,9 @@ impl CoreAdapter for XrayAdapter {
                             backups.push(entry);
                         }
                     } else {
-                        if direct {
+                        if direct
+                            || (ctx.mesh_transport && server.tag == super::mesh::BOOTSTRAP_DNS)
+                        {
                             entry["skipFallback"] = json!(true);
                         }
                         dns_servers.push(entry);
@@ -436,7 +531,14 @@ impl CoreAdapter for XrayAdapter {
             }
             // Scoped servers are only consulted for matching domains. The
             // chosen final is first among unscoped fallbacks, ahead of backups.
-            dns_servers.push(json!({"address": final_address}));
+            let mut fallback = json!({"address": final_address});
+            if let Some(port) = final_dns_port {
+                fallback["port"] = json!(port);
+            }
+            if let Some(tag) = final_dns_tag {
+                fallback["tag"] = json!(tag);
+            }
+            dns_servers.push(fallback);
             dns_servers.extend(backups);
             let mut dns = json!({
                 "servers": dns_servers,
@@ -471,6 +573,39 @@ impl CoreAdapter for XrayAdapter {
             default_outbound,
         })
     }
+}
+
+fn dns_detour(model: &AppModel, server: &crate::model::DnsServer) -> Option<String> {
+    let raw = server.detour.as_deref()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if model.work_mode == crate::model::WorkMode::Direct || raw == "direct" {
+        return Some("direct".into());
+    }
+    let action = match raw {
+        "proxy" | "default" => crate::model::RouteAction::proxy(),
+        id => {
+            if let Some(group) = model
+                .groups
+                .iter()
+                .find(|group| group.id == id || group.tag() == id)
+            {
+                return action_tag(
+                    CoreKind::Xray,
+                    model,
+                    &crate::model::RouteAction::proxy_via(&group.id),
+                );
+            }
+            return Some(
+                model
+                    .node(id)
+                    .map(Node::outbound_tag)
+                    .unwrap_or_else(|| id.to_owned()),
+            );
+        }
+    };
+    action_tag(CoreKind::Xray, model, &action)
 }
 
 fn xray_domain_strategy(strategy: DomainStrategy) -> &'static str {
@@ -1333,14 +1468,21 @@ mod tests {
             address: "127.0.0.153".into(),
         });
         let config = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
-        assert_eq!(
-            config.json["routing"]["rules"][1]["ip"],
-            json!(["100.64.0.0/10"])
-        );
-        assert_eq!(
-            config.json["routing"]["rules"][2]["domain"],
-            json!(["domain:example.ts.net"])
-        );
+        let rules = config.json["routing"]["rules"].as_array().unwrap();
+        let mesh_address = rules
+            .iter()
+            .position(|rule| rule["ip"] == json!(["100.64.0.0/10"]))
+            .unwrap();
+        let mesh_domain = rules
+            .iter()
+            .position(|rule| rule["domain"] == json!(["domain:example.ts.net"]))
+            .unwrap();
+        let proxy = rules
+            .iter()
+            .position(|rule| rule["ip"] == json!(["geoip:cn"]))
+            .unwrap();
+        assert!(mesh_address < proxy);
+        assert!(mesh_domain < proxy);
         assert_eq!(
             config.json["dns"]["servers"][0]["domains"],
             json!(["domain:example.ts.net"])

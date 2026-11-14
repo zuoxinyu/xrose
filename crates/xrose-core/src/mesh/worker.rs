@@ -217,7 +217,8 @@ impl Backend {
         }
         match b.profile.provider {
             MeshProvider::EasyTier => Ok(Self::EasyTier(
-                super::easytier::Backend::start(b.profile.clone()).await?,
+                super::easytier::Backend::start_with_exit(b.profile.clone(), b.exit_bridge.clone())
+                    .await?,
             )),
             MeshProvider::Tailscale => Ok(Self::Tailscale(
                 super::tailscale::Backend::start(
@@ -227,6 +228,7 @@ impl Backend {
                         .as_deref()
                         .ok_or_else(|| Error::binary("缺少组网组件"))?,
                     (b.sync_port, &b.sync_password.0),
+                    b.exit_bridge.as_ref(),
                 )
                 .await?,
             )),

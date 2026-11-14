@@ -119,7 +119,7 @@ pub(super) fn proxy_ports(model: &AppModel, settings: &Settings) -> HashSet<u16>
     ports
 }
 
-fn available_port(
+pub(super) fn available_port(
     model: &AppModel,
     settings: &Settings,
     profiles: &[crate::mesh::MeshProfileView],

@@ -55,6 +55,7 @@ impl AppService {
     }
 
     pub(super) fn mark_dirty(&self) {
+        self.schedule_exit_gateway_refresh();
         if self.is_running() || self.is_busy("core") {
             let settings = self.inner.settings.read();
             let mut reload = self.inner.reload.lock();

@@ -214,16 +214,32 @@ impl AppService {
         Ok(())
     }
 
-    pub(super) async fn connect_mesh_worker(&self, profile: MeshProfile) -> Result<()> {
+    pub(super) async fn connect_mesh_worker(&self, mut profile: MeshProfile) -> Result<()> {
+        self.prepare_exit_gateway(&profile).await?;
+        if self.model().work_mode == crate::model::WorkMode::Mesh {
+            if let Some(target) = self
+                .model()
+                .mesh_mode
+                .target
+                .filter(|t| t.profile_id == profile.id)
+            {
+                profile.exit_node = target.address;
+            }
+        }
+        let profile_id = profile.id.clone();
         let mut preflight = self.inner.core.mesh_plan();
         preflight.active = true;
-        self.apply_mesh_plan(preflight).await?;
+        if let Err(error) = self.apply_mesh_plan(preflight).await {
+            self.stop_exit_gateway(&profile_id).await;
+            return Err(error);
+        }
         if let Err(error) = self
             .inner
             .mesh
             .start_profile(profile, &self.resource_network(), None)
             .await
         {
+            self.stop_exit_gateway(&profile_id).await;
             let _ = self.reconcile_mesh().await;
             return Err(error);
         }

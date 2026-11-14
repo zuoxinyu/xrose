@@ -514,6 +514,7 @@ impl Bundle {
                         value.outbound_secret = old.outbound_secret.clone();
                         value.advertised_subnets = old.advertised_subnets.clone();
                         value.advertise_exit_node = old.advertise_exit_node;
+                        value.exit_routing = old.exit_routing;
                         value.port_forwards = old.port_forwards.clone();
                         value.service_forwards = old.service_forwards.clone();
                         value.validate()?;

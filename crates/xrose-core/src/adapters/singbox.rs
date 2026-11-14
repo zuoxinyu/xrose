@@ -52,7 +52,8 @@ pub fn compile_mesh(
     routes.extend(profile.remote_subnets.clone());
     // This TUN only captures mesh prefixes. On Windows, let the OS route
     // control-plane connections through an existing VPN when necessary.
-    // Automatic uplink binding can bypass that working route and time out.
+    // Exit sessions must bind their uplink before the host enables a full TUN.
+    // Otherwise control-plane traffic can be captured by its own exit route.
     let mut config = json!({
         "log":{"level":"error"},
         "endpoints":[{"type":"tailscale","tag":"mesh-ts","state_directory":directory.join("identity"),"hostname":profile.hostname,
@@ -62,8 +63,8 @@ pub fn compile_mesh(
         "inbounds":[{"type":"direct","tag":"mesh-dns","listen":crate::mesh::DNS_ADDRESS,"listen_port":53},
             {"type":"tun","tag":"mesh-tun","interface_name":profile.interface_name(),"address":[crate::mesh::TAILSCALE_TUN_ADDRESS,crate::mesh::TAILSCALE_TUN_IPV6_ADDRESS],"mtu":1280,"stack":"gvisor","auto_route":true,"strict_route":false,"route_address":routes}],
         "outbounds":[{"type":"direct","tag":"direct"}],
-        "route":{"auto_detect_interface":!cfg!(windows),"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
-        "dns":{"servers":[{"type":"local","tag":"local"},{"type":"tailscale","tag":"mesh-dns","endpoint":"mesh-ts","accept_default_resolvers":false}],
+        "route":{"auto_detect_interface":!cfg!(windows) || !profile.exit_node.is_empty(),"default_domain_resolver":"local","rules":[{"inbound":"mesh-dns","action":"hijack-dns"},{"inbound":"mesh-tun","action":"route","outbound":"mesh-ts"},{"inbound":"mesh-ts","action":"reject"}],"final":"direct"},
+        "dns":{"servers":[{"type":"local","tag":"local"},{"type":"tailscale","tag":"mesh-dns","endpoint":"mesh-ts","accept_default_resolvers":!profile.exit_node.is_empty()}],
             "rules":[{"inbound":"mesh-dns","action":"route","server":"mesh-dns"}],"final":"local"}
     });
     let mut incoming = profile.advertised_subnets.clone();
@@ -94,6 +95,71 @@ pub fn compile_mesh(
         }),
     );
     Ok(config)
+}
+
+/// Forward exit traffic and Tailscale peer DNS to the independent local policy router.
+pub(crate) fn route_mesh_exit(config: &mut Value, bridge: &crate::mesh::ExitBridge) {
+    config["outbounds"].as_array_mut().unwrap().push(json!({
+        "type":"socks", "tag":"mesh-exit-policy", "server":"127.0.0.1",
+        "server_port":bridge.port, "version":"5", "username":"xrose", "password":bridge.password.0
+    }));
+    let rules = config["route"]["rules"].as_array_mut().unwrap();
+    for rule in rules
+        .iter_mut()
+        .filter(|rule| rule["inbound"] == "mesh-ts" && rule["outbound"] == "direct")
+    {
+        if let Some(prefixes) = rule["ip_cidr"].as_array_mut() {
+            prefixes.retain(|prefix| prefix != "0.0.0.0/0" && prefix != "::/0");
+        }
+    }
+    rules.retain(|rule| {
+        !(rule["inbound"] == "mesh-ts"
+            && rule["outbound"] == "direct"
+            && rule["ip_cidr"].as_array().is_some_and(Vec::is_empty))
+    });
+    let position = rules
+        .iter()
+        .position(|rule| rule["inbound"] == "mesh-ts" && rule["action"] == "reject")
+        .unwrap_or(rules.len());
+    rules.insert(position, json!({"inbound":"mesh-ts","network":["tcp","udp"],"action":"route","outbound":"mesh-exit-policy"}));
+    config["dns"]["servers"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+            "type":"udp", "tag":"mesh-exit-policy-dns", "server":"1.1.1.1", "server_port":53,
+            "detour":"mesh-exit-policy"
+        }));
+    config["dns"]["rules"].as_array_mut().unwrap().insert(
+        0,
+        json!({"inbound":"mesh-ts","action":"route","server":"mesh-exit-policy-dns"}),
+    );
+}
+
+pub(super) fn authenticate_exit_gateway(
+    config: &mut CompiledConfig,
+    model: &AppModel,
+    password: &str,
+    ctx: &CompileContext,
+) -> Result<()> {
+    for group in super::mesh::policy_groups(model, CoreKind::SingBox)? {
+        if !config.json["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|outbound| outbound["tag"] == group.tag())
+        {
+            return Err(Error::config("出口出站组无法编译，请检查节点配置后重试"));
+        }
+    }
+    config.json["dns"]["reverse_mapping"] = json!(true);
+    config.json["experimental"]["cache_file"]["path"] =
+        json!(ctx.runtime_dir.join("exit-cache.db"));
+    for inbound in config.json["inbounds"].as_array_mut().unwrap() {
+        if inbound["tag"] == super::mesh::EXIT_INBOUND {
+            inbound["users"] = json!([{"username":"xrose","password":password}]);
+        }
+    }
+    Ok(())
 }
 
 /// A fixed authenticated bridge applies service rules without restarting the endpoint.
@@ -153,6 +219,9 @@ impl CoreAdapter for SingBoxAdapter {
         settings: &Settings,
         ctx: &CompileContext,
     ) -> Result<CompiledConfig> {
+        if model.work_mode == crate::model::WorkMode::Mesh {
+            return super::mesh::compile_client(CoreKind::SingBox, model, settings, ctx);
+        }
         let mut warnings = Vec::new();
         let mut effective = super::compilation_model(model, &mut warnings);
         let model = &effective;
@@ -226,10 +295,6 @@ impl CoreAdapter for SingBoxAdapter {
                         "listen": inbound.listen_address(),
                         "listen_port": inbound.port
                     });
-                    // sing-box 1.11 removed `udp` from mixed/http; SOCKS keeps it.
-                    if inbound.kind == InboundKind::Socks {
-                        value["udp"] = json!(inbound.udp);
-                    }
                     if let Some(a) = account {
                         value["users"] = json!([{"username":a.username, "password":a.password}]);
                     }
@@ -288,7 +353,11 @@ impl CoreAdapter for SingBoxAdapter {
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
             }
         }
-        if !direct && outbounds.is_empty() && endpoints.is_empty() {
+        if !direct
+            && outbounds.is_empty()
+            && endpoints.is_empty()
+            && super::mesh::requires_proxy(model)
+        {
             return Err(Error::config(
                 if model.nodes.iter().any(|n| n.enabled && n.protocol.is_vpn()) {
                     "没有可编译的出站节点；请检查 VPN 凭据并使用 sing-box 1.14.0 或更新版本"
@@ -397,6 +466,21 @@ impl CoreAdapter for SingBoxAdapter {
 
         // --- route -------------------------------------------------------
         let mut rules: Vec<Value> = Vec::new();
+        if ctx.mesh_transport {
+            if let Some(process) = ctx
+                .mesh_exit
+                .as_ref()
+                .and_then(|exit| exit.transport_process.as_ref())
+            {
+                let process = super::mesh::transport_process_path(CoreKind::SingBox, process);
+                rules.push(json!({"inbound":["mesh-system-tun"],"process_path":[process],"action":"route","outbound":"direct"}));
+            }
+        }
+        for inbound in listeners.iter().filter(|inbound| {
+            !inbound.udp && matches!(inbound.kind, InboundKind::Socks | InboundKind::Mixed)
+        }) {
+            rules.push(json!({"inbound":inbound.tag,"network":"udp","action":"reject"}));
+        }
         let mesh_dns: Vec<_> = ctx
             .mesh
             .dns
@@ -484,7 +568,8 @@ impl CoreAdapter for SingBoxAdapter {
         // --- DNS ---------------------------------------------------------
         let mut dns_section = Value::Null;
         if model.dns.enabled {
-            let (dns, bootstrap_tag) = build_dns(model, &default_group, &mut warnings);
+            let (dns, bootstrap_tag) =
+                build_dns(model, &default_group, &mut warnings, ctx.mesh_transport);
             dns_section = dns;
             route["default_domain_resolver"] = json!(bootstrap_tag);
             let mut vpn_rules = Vec::new();
@@ -1142,13 +1227,21 @@ fn dns_server_object(server: &crate::model::DnsServer, local_tag: &str) -> Optio
     Some(Value::Object(object))
 }
 
-fn build_dns(model: &AppModel, default_group: &str, warnings: &mut Vec<String>) -> (Value, String) {
+fn build_dns(
+    model: &AppModel,
+    default_group: &str,
+    warnings: &mut Vec<String>,
+    mesh_transport: bool,
+) -> (Value, String) {
     let mut servers: Vec<Value> = Vec::new();
     let mut rules: Vec<Value> = Vec::new();
     let fake_enabled = model.dns.fake_ip;
 
     // Bootstrap proxy endpoints and encrypted resolver hostnames without cycles.
     let local = model.dns.servers.iter().find(|s| {
+        if mesh_transport {
+            return s.tag == super::mesh::BOOTSTRAP_DNS;
+        }
         !s.requires_proxy()
             && matches!(
                 s.server_type,
@@ -1326,6 +1419,77 @@ fn build_dns(model: &AppModel, default_group: &str, warnings: &mut Vec<String>) 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mesh_exit_policy_preserves_services_and_subnets_and_handles_peer_dns() {
+        use crate::mesh::{ExitBridge, MeshProfile, MeshProvider, MeshSecret};
+        let profile = MeshProfile {
+            provider: MeshProvider::Tailscale,
+            advertise_exit_node: true,
+            advertised_subnets: vec!["192.0.2.0/24".into()],
+            ..Default::default()
+        };
+        let mut config = super::compile_mesh(
+            &profile,
+            std::path::Path::new("fixture"),
+            19090,
+            "fixture",
+            (19091, "fixture"),
+        )
+        .unwrap();
+        super::allow_mesh_services(&mut config, "127.0.0.1:19092".parse().unwrap(), "fixture");
+        super::route_mesh_exit(
+            &mut config,
+            &ExitBridge {
+                port: 19093,
+                password: MeshSecret("fixture-secret-only".into()),
+            },
+        );
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let service = rules
+            .iter()
+            .position(|rule| rule["outbound"] == "mesh-services")
+            .unwrap();
+        let subnet = rules
+            .iter()
+            .position(|rule| {
+                rule["inbound"] == "mesh-ts"
+                    && rule["ip_cidr"] == serde_json::json!(["192.0.2.0/24"])
+            })
+            .unwrap();
+        let policy = rules
+            .iter()
+            .position(|rule| rule["outbound"] == "mesh-exit-policy")
+            .unwrap();
+        let reject = rules
+            .iter()
+            .position(|rule| rule["inbound"] == "mesh-ts" && rule["action"] == "reject")
+            .unwrap();
+        assert!(service < policy && subnet < policy && policy < reject);
+        assert!(!rules.iter().any(|rule| {
+            rule["outbound"] == "direct"
+                && rule["ip_cidr"]
+                    .as_array()
+                    .is_some_and(|nets| nets.contains(&serde_json::json!("0.0.0.0/0")))
+        }));
+        assert_eq!(config["dns"]["rules"][0]["inbound"], "mesh-ts");
+        assert_eq!(config["dns"]["rules"][0]["server"], "mesh-exit-policy-dns");
+        let dns = config["dns"]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["tag"] == "mesh-exit-policy-dns")
+            .unwrap();
+        assert_eq!(dns["detour"], "mesh-exit-policy");
+        let outbound = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|outbound| outbound["tag"] == "mesh-exit-policy")
+            .unwrap();
+        assert_eq!(outbound["server"], "127.0.0.1");
+        assert_eq!(outbound["password"], "fixture-secret-only");
+    }
+
     #[test]
     fn mesh_service_forward_matches_only_own_endpoint_and_selected_port() {
         use crate::mesh::{ForwardProtocol, MeshProfile, MeshProvider, ServiceForward};
@@ -1779,6 +1943,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config["endpoints"][0]["exit_node"], "100.64.1.1");
+        assert_eq!(config["route"]["auto_detect_interface"], true);
+        assert_eq!(
+            config["dns"]["servers"][1]["accept_default_resolvers"],
+            true
+        );
         assert_eq!(config["endpoints"][0]["exit_node_allow_lan_access"], false);
         assert_eq!(
             config["endpoints"][0]["advertise_routes"],

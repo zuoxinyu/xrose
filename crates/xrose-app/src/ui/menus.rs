@@ -49,6 +49,7 @@ pub(super) enum Command {
     ExportRoute(ExportScope),
     SelectNode(String, String),
     SelectWorkMode(WorkMode),
+    SelectMeshExit(String, String),
     SetDefaultOutbound(String),
     SelectRuleOutbound(Option<String>),
     ManageOutboundGroups,
@@ -834,9 +835,13 @@ impl AppView {
                 self.batch_mode && !busy("latency") && !busy("download") && !busy("auto-probe")
             }
             Command::SelectNode(group_id, node_id) => {
-                self.snapshot.model.group(group_id).is_some_and(|g| {
-                    g.enabled && g.manually_selectable() && g.members.contains(node_id)
-                }) && self.snapshot.model.node(node_id).is_some_and(|n| n.enabled)
+                self.snapshot.model.node(node_id).is_some_and(|n| {
+                    n.enabled
+                        && (n.is_mesh_gateway()
+                            || self.snapshot.model.group(group_id).is_some_and(|g| {
+                                g.enabled && g.manually_selectable() && g.members.contains(node_id)
+                            }))
+                })
             }
             Command::ClearTrafficStatistics => !busy("traffic-clear"),
             Command::UninstallHelper => self.snapshot.platform.helper_installed && !busy("helper"),
@@ -1039,10 +1044,14 @@ impl AppView {
                 let result = match mode {
                     WorkMode::Direct => self.service.select_direct_mode(),
                     WorkMode::Proxy => self.service.select_proxy_mode(),
+                    WorkMode::Mesh => self.service.select_mesh_mode(),
                 };
                 if let Err(error) = result {
                     self.service.toast(ToastLevel::Error, error.to_string());
                 }
+            }
+            Command::SelectMeshExit(profile_id, peer_id) => {
+                self.service.select_mesh_exit_mode(profile_id, peer_id);
             }
             Command::SelectNode(group_id, node_id) => {
                 self.service.select_node(&group_id, &node_id);

@@ -249,6 +249,12 @@ impl AppView {
                             )
                         }),
                 )
+                .when(model.work_mode == xrose_core::model::WorkMode::Mesh, |card| {
+                    card.child(div().text_sm().text_color(p.muted_fg).child(self.tr(
+                        "组网模式下，本地代理分流已暂停。规则会保留，切回代理模式后生效。",
+                        "Local proxy routing is paused in Mesh mode. Saved rules apply when you return to Proxy mode.",
+                    )))
+                })
                 .child(
                     ChoiceGroup::new(
                         "route-preset",
