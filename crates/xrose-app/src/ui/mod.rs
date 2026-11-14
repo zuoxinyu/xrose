@@ -331,6 +331,7 @@ pub struct AppView {
     pub(crate) show_host_form: bool,
     pub(crate) matcher_kind: MatcherKind,
     pub(crate) rule_action: RouteActionKind,
+    pub(crate) rule_outbound_group: Option<String>,
 }
 
 impl AppView {
@@ -517,6 +518,7 @@ impl AppView {
             show_host_form: false,
             matcher_kind: MatcherKind::Suffix,
             rule_action: RouteActionKind::Proxy,
+            rule_outbound_group: None,
         };
         view.init_import(window, cx);
         view.refresh_header_location();

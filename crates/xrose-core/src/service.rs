@@ -2916,17 +2916,25 @@ impl AppService {
     }
 
     pub fn upsert_rule(&self, rule: RouteRule) {
-        self.upsert_rule_in_group(rule, None);
+        if let Err(error) = self.upsert_rule_in_group(rule, None) {
+            self.toast(ToastLevel::Error, error.to_string());
+        }
     }
 
-    pub fn upsert_rule_in_group(&self, rule: RouteRule, group_id: Option<&str>) {
-        {
-            let mut model = self.inner.model.write();
+    pub fn upsert_rule_in_group(&self, mut rule: RouteRule, group_id: Option<&str>) -> Result<()> {
+        self.commit_model_change(|model| {
+            if rule.action.kind == crate::model::RouteActionKind::Proxy {
+                if let Some(id) = &rule.action.group {
+                    if !model.group(id).is_some_and(|group| group.enabled) {
+                        return Err(Error::config("出站组已停用或不存在，请重新选择"));
+                    }
+                }
+            } else {
+                rule.action.group = None;
+            }
             if let Some(id) = group_id {
                 if !model.routing.rule_groups.iter().any(|g| g.id == id) {
-                    drop(model);
-                    self.toast(ToastLevel::Error, "规则分组不存在，请重新选择");
-                    return;
+                    return Err(Error::config("规则分组不存在，请重新选择"));
                 }
             }
             if let Some(existing) = model.routing.all_rules_mut().find(|r| r.id == rule.id) {
@@ -2944,10 +2952,10 @@ impl AppService {
                 model.routing.rules.push(rule);
                 model.routing.preset = RoutePreset::Custom;
             }
-        }
-        let _ = self.persist_model();
-        self.mark_dirty();
+            Ok(true)
+        })?;
         self.toast(ToastLevel::Info, "规则已保存，应用配置后生效");
+        Ok(())
     }
 
     pub fn new_rule(&self) -> RouteRule {
@@ -5164,11 +5172,15 @@ mod tests {
             ..Default::default()
         };
         let direct = RouteRule::new("direct", matcher.clone(), RouteAction::direct());
-        service.upsert_rule_in_group(direct.clone(), Some(&first));
-        service.upsert_rule_in_group(
-            RouteRule::new("block", matcher, RouteAction::block()),
-            Some(&second),
-        );
+        service
+            .upsert_rule_in_group(direct.clone(), Some(&first))
+            .unwrap();
+        service
+            .upsert_rule_in_group(
+                RouteRule::new("block", matcher, RouteAction::block()),
+                Some(&second),
+            )
+            .unwrap();
         service.set_route_preset(RoutePreset::Global);
         let preview = || {
             crate::route::evaluate(
@@ -5198,6 +5210,153 @@ mod tests {
             .unwrap();
         assert_eq!(stored.model.routing, service.model().routing);
         assert_eq!(stored.model.routing.rule_groups[0].name, "renamed");
+    }
+
+    #[test]
+    fn rule_outbound_group_persists_and_routes_through_both_cores() {
+        use crate::model::{GroupKind, Matchers, OutboundGroup, Protocol, RouteAction};
+        let (service, _dir) = service();
+        let node = Node::new("Fixture exit", Protocol::Socks, "192.0.2.10", 1080);
+        let mut group = OutboundGroup::new("Fixture outbound", GroupKind::Selector);
+        group.members.push(node.id.clone());
+        group.selected = Some(node.id.clone());
+        service
+            .commit_model_change(|model| {
+                model.add_nodes([node.clone()]);
+                model.groups.push(group.clone());
+                model.work_mode = WorkMode::Proxy;
+                model.apply_preset(RoutePreset::Global);
+                Ok(true)
+            })
+            .unwrap();
+        let rule_group = service.save_rule_group(None, "Fixture rules").unwrap();
+        let rule = RouteRule::new(
+            "Fixture route",
+            Matchers {
+                domains: vec!["route.example".into()],
+                ..Default::default()
+            },
+            RouteAction::proxy_via(&group.id),
+        );
+        service
+            .upsert_rule_in_group(rule.clone(), Some(&rule_group))
+            .unwrap();
+        let stored = service
+            .inner
+            .store
+            .load_profile(service.inner.active_profile.read().as_ref().unwrap())
+            .unwrap()
+            .unwrap()
+            .model;
+        assert_eq!(
+            stored
+                .routing
+                .rules_for_mode(WorkMode::Proxy)
+                .find(|r| r.id == rule.id)
+                .unwrap()
+                .action,
+            rule.action
+        );
+        assert_ne!(
+            stored.default_group_id().as_deref(),
+            Some(group.id.as_str())
+        );
+        let settings = service.settings();
+        let ctx = crate::adapters::CompileContext::new(
+            &settings,
+            service.paths().data_dir.clone(),
+            service.paths().runtime_dir.clone(),
+        );
+        for core in [CoreKind::SingBox, CoreKind::Xray] {
+            let compiled = crate::adapters::adapter_for(core)
+                .compile(&stored, &settings, &ctx)
+                .unwrap();
+            let (rules, domain, outbound_key, expected) = match core {
+                CoreKind::SingBox => (
+                    &compiled.json["route"]["rules"],
+                    "route.example",
+                    "outbound",
+                    group.tag(),
+                ),
+                CoreKind::Xray => (
+                    &compiled.json["routing"]["rules"],
+                    "full:route.example",
+                    "outboundTag",
+                    node.outbound_tag(),
+                ),
+            };
+            let compiled_rule = rules
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["domain"] == serde_json::json!([domain]))
+                .unwrap();
+            assert_eq!(compiled_rule[outbound_key], expected);
+        }
+    }
+
+    #[test]
+    fn rule_outbound_validation_and_storage_failure_preserve_saved_rules() {
+        use crate::model::{Matchers, RouteAction};
+        let (service, dir) = service();
+        let mut rule = RouteRule::new(
+            "Fixture route",
+            Matchers {
+                domains: vec!["route.example".into()],
+                ..Default::default()
+            },
+            RouteAction::proxy(),
+        );
+        service.upsert_rule_in_group(rule.clone(), None).unwrap();
+        assert!(
+            service
+                .model()
+                .routing
+                .rules_for_mode(WorkMode::Proxy)
+                .find(|r| r.id == rule.id)
+                .unwrap()
+                .action
+                .group
+                .is_none()
+        );
+        let saved = service.model().routing;
+        rule.action = RouteAction::proxy_via("missing-group");
+        assert!(service.upsert_rule_in_group(rule.clone(), None).is_err());
+        let group_id = service.model().default_group_id().unwrap();
+        service
+            .inner
+            .model
+            .write()
+            .group_mut(&group_id)
+            .unwrap()
+            .enabled = false;
+        rule.action = RouteAction::proxy_via(&group_id);
+        assert!(service.upsert_rule_in_group(rule.clone(), None).is_err());
+        assert_eq!(service.model().routing, saved);
+        rule.action = RouteAction::direct();
+        assert!(
+            service
+                .upsert_rule_in_group(rule.clone(), Some("missing-rule-group"))
+                .is_err()
+        );
+        let db = rusqlite::Connection::open(AppPaths::from_root(dir.path()).database()).unwrap();
+        db.execute_batch("CREATE TRIGGER fail_profile_update BEFORE UPDATE ON profiles BEGIN SELECT RAISE(FAIL, 'test storage failure'); END;").unwrap();
+        assert!(service.upsert_rule_in_group(rule.clone(), None).is_err());
+        assert_eq!(service.model().routing, saved);
+        db.execute_batch("DROP TRIGGER fail_profile_update")
+            .unwrap();
+        rule.action.group = Some(group_id);
+        service.upsert_rule_in_group(rule.clone(), None).unwrap();
+        let model = service.model();
+        assert_eq!(
+            model
+                .routing
+                .rules_for_mode(WorkMode::Proxy)
+                .find(|r| r.id == rule.id)
+                .unwrap()
+                .action,
+            RouteAction::direct()
+        );
     }
 
     #[test]

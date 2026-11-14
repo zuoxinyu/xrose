@@ -23,6 +23,7 @@ pub(super) enum MenuTarget {
     RoutingRules,
     RuleSetSources,
     DefaultOutbound,
+    RuleOutbound,
     OutboundGroup(String),
     Node(String),
     Nodes,
@@ -49,6 +50,7 @@ pub(super) enum Command {
     SelectNode(String, String),
     SelectWorkMode(WorkMode),
     SetDefaultOutbound(String),
+    SelectRuleOutbound(Option<String>),
     ManageOutboundGroups,
     EditOutboundGroup(String),
     DeleteOutboundGroup(String),
@@ -341,6 +343,28 @@ impl AppView {
                     !busy("mesh") && !busy("mesh-forward") && peer.dial_address(provider).is_some(),
                     Command::AddPeerForward(profile_id, peer_id),
                 ));
+            }
+            MenuTarget::RuleOutbound => {
+                menu = menu.item(
+                    item(
+                        &view,
+                        tr(lang, "默认出站组", "Default outbound group"),
+                        true,
+                        Command::SelectRuleOutbound(None),
+                    )
+                    .checked(self.rule_outbound_group.is_none()),
+                );
+                for group in &self.snapshot.model.groups {
+                    menu = menu.item(
+                        item(
+                            &view,
+                            self.outbound_group_label(group),
+                            group.enabled,
+                            Command::SelectRuleOutbound(Some(group.id.clone())),
+                        )
+                        .checked(self.rule_outbound_group.as_ref() == Some(&group.id)),
+                    );
+                }
             }
             MenuTarget::DefaultOutbound => {
                 let model = &self.snapshot.model;
@@ -996,6 +1020,16 @@ impl AppView {
             }
             Command::EditRuleSetSource => self.open_rule_set_source_dialog(window, cx),
             Command::ExportRoute(scope) => self.pick_route_export(scope, cx),
+            Command::SelectRuleOutbound(id) => {
+                if id.as_ref().is_none_or(|id| {
+                    self.snapshot
+                        .model
+                        .group(id)
+                        .is_some_and(|group| group.enabled)
+                }) {
+                    self.rule_outbound_group = id;
+                }
+            }
             Command::SetDefaultOutbound(id) => {
                 if let Err(err) = self.service.set_default_outbound_group(&id) {
                     self.service.toast(ToastLevel::Error, err.to_string());

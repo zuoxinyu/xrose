@@ -522,49 +522,38 @@ impl AppView {
                                     .child(div().w(px(180.)).child(Input::new(&self.rule_name)))
                                     .child(div().flex_1().child(Input::new(&self.rule_value))),
                             )
-                            .child(
-                                div().flex().items_center().gap_2().flex_wrap().children(
-                                    [
-                                        MatcherKind::Domain,
-                                        MatcherKind::Suffix,
-                                        MatcherKind::Geo,
-                                        MatcherKind::RuleSet,
-                                        MatcherKind::Ip,
-                                        MatcherKind::Process,
-                                        MatcherKind::Port,
-                                    ]
-                                    .into_iter()
-                                    .map(|kind| {
-                                        let selected = self.matcher_kind == kind;
-                                        div()
-                                            .id(SharedString::from(format!("matcher-{kind:?}")))
-                                            .px_2()
-                                            .py_1()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .border_1()
-                                            .border_color(if selected {
-                                                p.primary
-                                            } else {
-                                                p.border
-                                            })
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.matcher_kind = kind;
-                                                cx.notify();
-                                            }))
-                                            .child(kind.label(lang))
-                                    }),
-                                ),
-                            )
+                            .child({
+                                let kinds = [
+                                    MatcherKind::Domain,
+                                    MatcherKind::Suffix,
+                                    MatcherKind::Geo,
+                                    MatcherKind::RuleSet,
+                                    MatcherKind::Ip,
+                                    MatcherKind::Process,
+                                    MatcherKind::Port,
+                                ];
+                                ChoiceGroup::new(
+                                    "rule-matcher",
+                                    kinds.iter().map(|kind| kind.label(lang)).collect(),
+                                    kinds.iter().position(|kind| *kind == self.matcher_kind),
+                                )
+                                .small()
+                                .on_change(cx.listener(move |this, index, _, cx| {
+                                    this.matcher_kind = kinds[*index];
+                                    cx.notify();
+                                }))
+                            })
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_center()
                                     .justify_between()
+                                    .gap_2()
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_wrap()
                                             .items_center()
                                             .gap_2()
                                             .child(
@@ -573,49 +562,53 @@ impl AppView {
                                                     .text_color(p.muted_fg)
                                                     .child(self.tr("动作", "Action")),
                                             )
-                                            .children(
-                                                [
-                                                    (
-                                                        RouteActionKind::Proxy,
+                                            .child({
+                                                let kinds = [
+                                                    RouteActionKind::Proxy,
+                                                    RouteActionKind::Direct,
+                                                    RouteActionKind::Block,
+                                                ];
+                                                ChoiceGroup::new(
+                                                    "rule-action",
+                                                    vec![
                                                         self.tr("代理", "Proxy"),
-                                                    ),
-                                                    (
-                                                        RouteActionKind::Direct,
                                                         self.tr("直连", "Direct"),
-                                                    ),
-                                                    (
-                                                        RouteActionKind::Block,
                                                         self.tr("阻止", "Block"),
-                                                    ),
-                                                ]
-                                                .into_iter()
-                                                .map(|(kind, label)| {
-                                                    let selected = self.rule_action == kind;
+                                                    ],
+                                                    kinds.iter().position(|kind| *kind == self.rule_action),
+                                                )
+                                                .small()
+                                                .on_change(cx.listener(move |this, index, _, cx| {
+                                                    this.rule_action = kinds[*index];
+                                                    cx.notify();
+                                                }))
+                                            })
+                                            .when(self.rule_action == RouteActionKind::Proxy, |d| {
+                                                let label = match &self.rule_outbound_group {
+                                                    Some(id) => model.group(id)
+                                                        .map(|group| self.outbound_group_label(group))
+                                                        .unwrap_or_else(|| self.tr("请重新选择", "Select again")),
+                                                    None => self.tr("默认出站组", "Default outbound group"),
+                                                };
+                                                d.child(
                                                     div()
-                                                        .id(SharedString::from(format!(
-                                                            "rule-action-{kind:?}"
-                                                        )))
-                                                        .px_2()
-                                                        .py_1()
-                                                        .rounded_md()
-                                                        .text_xs()
-                                                        .border_1()
-                                                        .border_color(if selected {
-                                                            p.primary
-                                                        } else {
-                                                            p.border
-                                                        })
-                                                        .bg(if selected { p.accent } else { p.bg })
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.rule_action = kind;
-                                                                cx.notify();
-                                                            },
-                                                        ))
-                                                        .child(label)
-                                                }),
-                                            ),
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(div().text_xs().text_color(p.muted_fg)
+                                                            .child(self.tr("出站组", "Outbound group")))
+                                                        .child(Button::new("rule-outbound-group")
+                                                            .compact()
+                                                            .max_w(px(super::theme::FORM_FIELD_WIDTH))
+                                                            .label(label.clone())
+                                                            .tooltip(label)
+                                                            .icon(IconName::ChevronDown)
+                                                            .dropdown_menu(menus::builder(
+                                                                cx.entity().downgrade(),
+                                                                MenuTarget::RuleOutbound,
+                                                            ))),
+                                                )
+                                            }),
                                     )
                                     .child(
                                         Button::new("save-rule")
@@ -673,13 +666,21 @@ impl AppView {
                                                     matchers,
                                                     RouteAction {
                                                         kind: this.rule_action,
-                                                        group: None,
+                                                        group: if this.rule_action == RouteActionKind::Proxy {
+                                                            this.rule_outbound_group.clone()
+                                                        } else {
+                                                            None
+                                                        },
                                                     },
                                                 );
-                                                this.service.upsert_rule_in_group(
+                                                if let Err(error) = this.service.upsert_rule_in_group(
                                                     rule,
                                                     this.rule_group_id.as_deref(),
-                                                );
+                                                ) {
+                                                    this.service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
+                                                    this.sync(cx);
+                                                    return;
+                                                }
                                                 this.show_rule_form = false;
                                                 this.sync(cx);
                                             })),
