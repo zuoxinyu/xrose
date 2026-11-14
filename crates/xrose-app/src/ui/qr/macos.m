@@ -504,13 +504,22 @@ int xrose_paste_image(size_t limit, void *context, void (*receive)(void *, const
     return 1;
 }
 
-// Subclass just this window; leave the platform class, other windows, and GPUI's
-// file-drag lifecycle intact. Only inspect drag data on an actual drop.
+// Swizzle GPUIWindow's drag handlers in place and tag only the target window,
+// leaving other windows and GPUI's file-drag lifecycle intact. Calling
+// object_setClass() on a window that already has AppKit KVO observers (such as
+// NSTitlebarView observing _titlebarBackdropGroupName) invalidates Foundation's
+// per-class KVO property lookup and throws an NSRangeException on fullscreen.
 extern bool xrose_accepts_drop(void);
 extern bool xrose_receive_drop(bool image, const void *data, size_t length);
-static Class original;
-static NSString *dropType(id<NSDraggingInfo> drag) {
-    if (!xrose_accepts_drop() || drag.draggingSource != nil)
+static const char dropWindowKey = 0;
+typedef NSDragOperation (*DragOperationIMP)(id, SEL, id<NSDraggingInfo>);
+typedef BOOL (*PerformDragIMP)(id, SEL, id<NSDraggingInfo>);
+static IMP origEntered;
+static IMP origUpdated;
+static IMP origPerform;
+static NSString *dropType(id window, id<NSDraggingInfo> drag) {
+    if (!objc_getAssociatedObject(window, &dropWindowKey) || !xrose_accepts_drop() ||
+        drag.draggingSource != nil)
         return nil;
     NSPasteboard *board = drag.draggingPasteboard;
     if ([board.types containsObject:NSPasteboardTypeFileURL])
@@ -519,41 +528,46 @@ static NSString *dropType(id<NSDraggingInfo> drag) {
                       NSPasteboardTypeURL, NSPasteboardTypeString
                   ]]];
 }
-static NSDragOperation entered(id window, SEL cmd, id<NSDraggingInfo> drag) {
-    if (dropType(drag))
+static NSDragOperation dragOp(id window, SEL cmd, id<NSDraggingInfo> drag, IMP orig) {
+    if (dropType(window, drag))
         return NSDragOperationCopy;
-    return ((NSDragOperation (*)(id, SEL, id))class_getMethodImplementation(original, cmd))(window, cmd,
-                                                                                            drag);
+    return orig ? ((DragOperationIMP)orig)(window, cmd, drag) : NSDragOperationNone;
+}
+static NSDragOperation entered(id window, SEL cmd, id<NSDraggingInfo> drag) {
+    return dragOp(window, cmd, drag, origEntered);
+}
+static NSDragOperation updated(id window, SEL cmd, id<NSDraggingInfo> drag) {
+    return dragOp(window, cmd, drag, origUpdated);
 }
 static BOOL perform(id window, SEL cmd, id<NSDraggingInfo> drag) {
-    NSString *type = dropType(drag);
+    NSString *type = dropType(window, drag);
     if (!type)
-        return ((BOOL (*)(id, SEL, id))class_getMethodImplementation(original, cmd))(window, cmd, drag);
+        return origPerform ? ((PerformDragIMP)origPerform)(window, cmd, drag) : NO;
     BOOL image = ![type isEqual:NSPasteboardTypeURL] && ![type isEqual:NSPasteboardTypeString];
     NSData *data =
         image ? [drag.draggingPasteboard dataForType:type]
               : [[drag.draggingPasteboard stringForType:type] dataUsingEncoding:NSUTF8StringEncoding];
     return data && xrose_receive_drop(image, data.bytes, data.length);
 }
+static void swizzleDragMethod(Class cls, SEL sel, IMP replacement, IMP *origOut) {
+    Method method = class_getInstanceMethod(cls, sel);
+    if (!method)
+        return;
+    *origOut = method_getImplementation(method);
+    class_replaceMethod(cls, sel, replacement, method_getTypeEncoding(method));
+}
 void xrose_install_drop(void *view) {
     NSWindow *window = [(__bridge NSView *)view window];
     if (!window)
         return;
-    static Class subclass;
-    if (!subclass) {
-        original = object_getClass(window);
-        subclass = objc_allocateClassPair(original, "XroseImportWindow", 0);
-        if (!subclass)
-            return;
-        SEL selectors[] = {@selector(draggingEntered:), @selector(draggingUpdated:),
-                           @selector(performDragOperation:)};
-        IMP methods[] = {(IMP)entered, (IMP)entered, (IMP)perform};
-        for (int i = 0; i < 3; i++)
-            class_addMethod(subclass, selectors[i], methods[i],
-                            method_getTypeEncoding(class_getInstanceMethod(original, selectors[i])));
-        objc_registerClassPair(subclass);
-    }
-    object_setClass(window, subclass);
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      Class cls = [window class];
+      swizzleDragMethod(cls, @selector(draggingEntered:), (IMP)entered, &origEntered);
+      swizzleDragMethod(cls, @selector(draggingUpdated:), (IMP)updated, &origUpdated);
+      swizzleDragMethod(cls, @selector(performDragOperation:), (IMP)perform, &origPerform);
+    });
+    objc_setAssociatedObject(window, &dropWindowKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [window registerForDraggedTypes:@[
         @"NSFilenamesPboardType", NSPasteboardTypePNG, NSPasteboardTypeTIFF, @"public.jpeg",
         @"org.webmproject.webp", NSPasteboardTypeURL, NSPasteboardTypeString
