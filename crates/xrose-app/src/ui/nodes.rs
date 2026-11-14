@@ -311,6 +311,17 @@ impl AppView {
                                     hide_ips,
                                     auto_mode,
                                     offline_exit: offline_exits.contains(&node.id),
+                                    mesh_provider: node
+                                        .id
+                                        .strip_prefix("mesh-exit-")
+                                        .and_then(|id| {
+                                            this.snapshot
+                                                .mesh
+                                                .profiles
+                                                .iter()
+                                                .find(|profile| profile.id == id)
+                                        })
+                                        .map(|profile| profile.provider),
                                     group_id: row_group
                                         .as_ref()
                                         .filter(|_| {
@@ -1015,6 +1026,7 @@ struct RowProps<'a> {
     hide_ips: bool,
     auto_mode: bool,
     offline_exit: bool,
+    mesh_provider: Option<xrose_core::mesh::MeshProvider>,
     group_id: Option<String>,
     core_busy: bool,
     latency_busy: bool,
@@ -1093,6 +1105,7 @@ fn render_node_row(
         hide_ips,
         auto_mode,
         offline_exit,
+        mesh_provider,
         group_id,
         core_busy: is_core_busy,
         latency_busy: is_latency_busy,
@@ -1325,6 +1338,9 @@ fn render_node_row(
                                     p.primary,
                                     p.panel,
                                 ))
+                                .when_some(mesh_provider, |d, provider| {
+                                    d.child(pill(provider.label(), p.primary, p.panel))
+                                })
                                 .when(offline_exit, |d| {
                                     d.child(pill(
                                         super::tr(lang, "离线", "Offline"),

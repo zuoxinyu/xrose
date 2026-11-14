@@ -20,10 +20,14 @@ impl AppView {
         let title = section_title(
             &p,
             self.tr("DNS 解析对比", "DNS comparison"),
-            self.tr(
-                "使用上方链路测试的域名，并发查询各解析器的 A 与 AAAA 记录",
-                "Compare A and AAAA records for the host entered in Link trace",
-            ),
+            if self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh {
+                self.tr("对比系统解析、当前组网 DNS 与经组网访问的加密解析器", "Compare system DNS, the active mesh DNS policy, and an encrypted resolver reached through the mesh")
+            } else {
+                self.tr(
+                    "使用上方链路测试的域名，并发查询各解析器的 A 与 AAAA 记录",
+                    "Compare A and AAAA records for the host entered in Link trace",
+                )
+            },
         );
         let compare = Button::new("compare-dns")
             .compact()

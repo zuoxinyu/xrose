@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use url::Url;
 
-use crate::model::{AppModel, CoreKind, DnsServer, Node, RouteActionKind};
+use crate::model::{AppModel, CoreKind, DnsServer, MeshDnsMode, Node, RouteActionKind, WorkMode};
 use crate::route::{self, ConnectionInfo};
 use crate::runtime::clash::{ClashClient, ClashConnection};
 use crate::service::AppService;
@@ -350,10 +350,16 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         TraceProtocol::Icmp => "tun",
         _ => "socks",
     };
-    let (model, settings, active_inbound) = running
+    let (model, settings, mut active_inbound) = running
         .then(|| core.trace_context(inbound_kind))
         .flatten()
         .unwrap_or_else(|| (service.model(), service.settings(), None));
+    let mesh_mode = model.work_mode == WorkMode::Mesh;
+    if mesh_mode {
+        active_inbound = core
+            .trace_context("tun")
+            .and_then(|(_, _, inbound)| inbound);
+    }
     let id = session.id;
     let overall = Instant::now();
 
@@ -377,12 +383,22 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     // Inbound ----------------------------------------------------------
     let inbound = match active_inbound.as_ref() {
+        Some(i) if mesh_mode => (true, format!("组网模式 · 系统 TUN · {}", i.tag)),
         Some(i) => (true, format!("{} · {} :{}", i.kind, i.tag, i.port)),
         None if !running => (false, "内核未运行 · 无活动入站".into()),
         None => (false, format!("没有启用的 {inbound_kind} 入站")),
     };
     session.activate(TraceStepKind::Inbound, inbound.1.clone());
     publish(service, session)?;
+    let dns_config = if mesh_mode {
+        service
+            .mesh_diagnostic_config(&model, &settings)
+            .map_err(|e| e.to_string())?
+            .0
+            .dns
+    } else {
+        model.dns.clone()
+    };
     sleep(100).await;
     session.set(
         TraceStepKind::Inbound,
@@ -411,14 +427,20 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             Some(0),
         );
     } else {
-        let lookup = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::net::lookup_host((target.host.as_str(), target.port.max(1))),
-        )
+        let lookup = tokio::time::timeout(Duration::from_secs(5), async {
+            if mesh_mode {
+                crate::dns::probe::mesh_lookup(&target.host)
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))
+            } else {
+                tokio::net::lookup_host((target.host.as_str(), target.port.max(1)))
+                    .await
+                    .map(|iter| iter.map(|addr| addr.ip()).collect())
+            }
+        })
         .await;
         match lookup {
-            Ok(Ok(iter)) => {
-                let mut ips: Vec<IpAddr> = iter.map(|addr| addr.ip()).collect();
+            Ok(Ok(mut ips)) => {
                 ips.dedup();
                 if ips.is_empty() {
                     let msg = "DNS 未返回任何地址".to_string();
@@ -432,15 +454,25 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 }
                 resolved_ip = ips.first().copied();
                 session.resolved_ips = ips.iter().map(|ip| ip.to_string()).collect();
-                let server = choose_dns_server(&model, &target.host);
-                session.dns_server = Some("系统解析器".into());
-                let fake = if model.dns.fake_ip {
+                let server = (!mesh_mode)
+                    .then(|| choose_dns_server(&model, &target.host))
+                    .flatten();
+                let resolver = if mesh_mode {
+                    match model.mesh_mode.dns {
+                        MeshDnsMode::Exit => "出口 DNS（经组网）",
+                        MeshDnsMode::Custom => "自定义 DNS（经组网）",
+                    }
+                } else {
+                    "系统解析器"
+                };
+                session.dns_server = Some(resolver.into());
+                let fake = if dns_config.fake_ip {
                     " · 已启用 Fake-IP"
                 } else {
                     ""
                 };
                 let detail = format!(
-                    "系统解析：{} → {}{}{}",
+                    "{resolver}：{} → {}{}{}",
                     target.host,
                     ips.iter()
                         .take(3)
@@ -461,6 +493,9 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             }
             Ok(Err(err)) => {
                 let msg = format!("DNS 解析失败：{err}");
+                if mesh_mode {
+                    return Err(msg);
+                }
                 session.set(
                     TraceStepKind::Dns,
                     if running {
@@ -481,6 +516,9 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             }
             Err(_) => {
                 let msg = "DNS 解析超时（5 秒）".to_string();
+                if mesh_mode {
+                    return Err(msg);
+                }
                 session.set(
                     TraceStepKind::Dns,
                     if running {
@@ -566,7 +604,11 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     } else {
         preview.action.clone()
     };
-    let action_label = route::action_label(&model, &effective_action);
+    let action_label = if mesh_mode {
+        "组网转发".into()
+    } else {
+        route::action_label(&model, &effective_action)
+    };
     let group = effective_action
         .group
         .clone()
@@ -578,12 +620,19 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         });
     if let Some(group) = group
         .as_ref()
-        .filter(|_| effective_action.kind == RouteActionKind::Proxy)
+        .filter(|_| !mesh_mode && effective_action.kind == RouteActionKind::Proxy)
     {
         session.group_name = Some(group.name.clone());
         if let Some(node_id) = group.active_node() {
             session.node_name = model.node(node_id).map(|n| n.name.clone());
         }
+    }
+    if mesh_mode {
+        session.node_name = model
+            .mesh_mode
+            .target
+            .as_ref()
+            .map(|target| target.name.clone());
     }
     session.activate(TraceStepKind::Route, "正在匹配路由规则…");
     publish(service, session)?;
@@ -647,7 +696,20 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
 
     // Outbound ---------------------------------------------------------
     let direct = effective_action.kind == RouteActionKind::Direct;
-    let outbound_label = if let Some(route) = mesh {
+    let outbound_label = if mesh_mode {
+        model
+            .mesh_mode
+            .target
+            .as_ref()
+            .map(|target| {
+                format!(
+                    "{} · {} 组网出口（配置）",
+                    target.name,
+                    target.provider.label()
+                )
+            })
+            .unwrap_or_default()
+    } else if let Some(route) = mesh {
         format!("组网接口 {} · {}", route.interface, route.cidr)
     } else if direct {
         "本机直连".to_string()
@@ -660,6 +722,30 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     };
     session.activate(TraceStepKind::Outbound, outbound_label.clone());
     publish(service, session)?;
+    if mesh_mode {
+        service
+            .mesh_diagnostic_config(&model, &settings)
+            .map_err(|e| e.to_string())?;
+        if target.protocol == TraceProtocol::Icmp {
+            return Err(
+                "当前组网出口转发链路不提供可验证的 ICMP 探测，请使用 TCP、HTTPS 或 UDP".into(),
+            );
+        }
+        if !core.mesh_exit_runtime().is_some_and(|runtime| runtime.ipv6)
+            && !session
+                .resolved_ips
+                .iter()
+                .any(|ip| ip.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv4()))
+        {
+            return Err("当前组网出口仅支持 IPv4，目标没有可用的 IPv4 地址".into());
+        }
+        session.set(
+            TraceStepKind::Outbound,
+            TraceStatus::Ok,
+            format!("{outbound_label} · 请求经系统 TUN 发出；远端分流结果不在本机展示"),
+            None,
+        );
+    }
 
     if !running {
         session.set(
@@ -680,8 +766,8 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     let socks = core.active_proxy("socks");
     // A running core must evaluate its own applied rules, including direct and
     // reject actions. The editable model may contain unapplied changes.
-    let use_proxy = running && target.protocol != TraceProtocol::Icmp;
-    let used_direct = !use_proxy;
+    let use_proxy = running && !mesh_mode && target.protocol != TraceProtocol::Icmp;
+    let used_direct = !use_proxy && !mesh_mode;
     if use_proxy && socks.is_none() && target.protocol.is_stream() {
         session.set(
             TraceStepKind::Outbound,
@@ -706,6 +792,19 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     publish(service, session)?;
     sleep(90).await;
 
+    let mesh_addresses: Vec<IpAddr> = if mesh_mode {
+        session
+            .resolved_ips
+            .iter()
+            .filter_map(|ip| ip.parse::<IpAddr>().ok())
+            .filter(|ip| {
+                ip.is_ipv4() || core.mesh_exit_runtime().is_some_and(|runtime| runtime.ipv6)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let resolved = mesh_mode.then_some(mesh_addresses.as_slice());
     let remote = match target.protocol {
         TraceProtocol::Http | TraceProtocol::Https => {
             if use_proxy && http.is_none() {
@@ -714,7 +813,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                 );
             }
             let http_proxy = if use_proxy { http.as_ref() } else { None };
-            http_test(&settings, &target, http_proxy).await
+            http_test(&settings, &target, http_proxy, resolved).await
         }
         TraceProtocol::Tcp => {
             if use_proxy {
@@ -732,7 +831,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                     None => return Err("没有启用的 SOCKS/mixed 入站，无法经 core 测试 TCP".into()),
                 }
             } else {
-                tcp_direct(&target).await
+                tcp_direct(&target, resolved).await
             }
         }
         TraceProtocol::Udp => {
@@ -751,7 +850,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
                     None => return Err("没有启用的 SOCKS/mixed 入站，无法经 core 测试 UDP".into()),
                 }
             } else {
-                udp_direct(&target).await
+                udp_direct(&target, resolved).await
             }
         }
         TraceProtocol::Icmp => icmp_test(&target, running, &model).await,
@@ -875,7 +974,9 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             .clash
             .as_ref()
             .is_some_and(|c| c.chains.iter().any(|tag| tag == "direct"));
-    let endpoint = if actual_direct {
+    let endpoint = if mesh_mode {
+        "组网链路".into()
+    } else if actual_direct {
         "直连".to_string()
     } else {
         session
@@ -1016,6 +1117,20 @@ fn explain_route(
     info: &ConnectionInfo,
     mesh: Option<&crate::mesh::coexist::MeshRoute>,
 ) -> route::RulePreview {
+    if model.work_mode == WorkMode::Mesh {
+        let mut preview = route::evaluate(model, info);
+        preview.explanation.push_str(if model.mesh_mode.allow_lan {
+            "；允许本地局域网绕过出口"
+        } else {
+            "；关闭本地局域网绕过"
+        });
+        if let Some(mesh) = mesh {
+            preview
+                .explanation
+                .push_str(&format!("；目标命中组网网段 {}", mesh.cidr));
+        }
+        return preview;
+    }
     if let Some(mesh) = mesh {
         return route::RulePreview {
             rule: None,
@@ -1111,6 +1226,7 @@ async fn http_test(
     settings: &Settings,
     target: &TraceTarget,
     proxy: Option<&crate::updates::LocalProxy>,
+    resolved: Option<&[IpAddr]>,
 ) -> RemoteResult {
     let Some(url) = &target.url else {
         return RemoteResult {
@@ -1126,6 +1242,13 @@ async fn http_test(
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Xrose-Trace/0.1");
+    if let Some(ips) = resolved {
+        let addresses: Vec<_> = ips
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, target.port))
+            .collect();
+        builder = builder.resolve_to_addrs(&target.host, &addresses);
+    }
     if let Some(proxy) = proxy {
         match proxy.http_proxy() {
             Ok(proxy) => builder = builder.proxy(proxy),
@@ -1192,6 +1315,8 @@ async fn http_test(
                 status.as_u16(),
                 if proxy.is_some() {
                     "经 core 代理"
+                } else if resolved.is_some() {
+                    "经组网"
                 } else {
                     "直连"
                 },
@@ -1221,12 +1346,19 @@ async fn http_test(
     }
 }
 
-async fn tcp_direct(target: &TraceTarget) -> RemoteResult {
+async fn tcp_direct(target: &TraceTarget, resolved: Option<&[IpAddr]>) -> RemoteResult {
     let started = Instant::now();
-    match tokio::time::timeout(
-        Duration::from_secs(8),
-        TcpStream::connect((target.host.as_str(), target.port)),
-    )
+    match tokio::time::timeout(Duration::from_secs(8), async {
+        if let Some(ips) = resolved {
+            let addresses: Vec<_> = ips
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, target.port))
+                .collect();
+            TcpStream::connect(addresses.as_slice()).await
+        } else {
+            TcpStream::connect((target.host.as_str(), target.port)).await
+        }
+    })
     .await
     {
         Ok(Ok(stream)) => {
@@ -1235,7 +1367,7 @@ async fn tcp_direct(target: &TraceTarget) -> RemoteResult {
             RemoteResult {
                 status: TraceStatus::Ok,
                 detail: format!(
-                    "本机直连 {}:{} 成功 · {elapsed} ms",
+                    "TCP 连接 {}:{} 成功 · {elapsed} ms",
                     target.host, target.port
                 ),
                 duration_ms: Some(elapsed),
@@ -1245,14 +1377,14 @@ async fn tcp_direct(target: &TraceTarget) -> RemoteResult {
         }
         Ok(Err(err)) => RemoteResult {
             status: TraceStatus::Error,
-            detail: format!("本机直连失败：{err}"),
+            detail: format!("TCP 连接失败：{err}"),
             duration_ms: Some(started.elapsed().as_millis() as u64),
             warning: None,
             clash: None,
         },
         Err(_) => RemoteResult {
             status: TraceStatus::Error,
-            detail: "本机直连超时（8 秒）".into(),
+            detail: "TCP 连接超时（8 秒）".into(),
             duration_ms: Some(8000),
             warning: None,
             clash: None,
@@ -1332,12 +1464,21 @@ async fn tcp_probe(
     }
 }
 
-async fn udp_direct(target: &TraceTarget) -> RemoteResult {
+async fn udp_direct(target: &TraceTarget, resolved: Option<&[IpAddr]>) -> RemoteResult {
     let started = Instant::now();
     let port = target.port;
     let payload = udp_payload(port);
     let host = target.host.clone();
-    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+    let address = resolved
+        .and_then(|ips| ips.first())
+        .map(|ip| std::net::SocketAddr::new(*ip, port));
+    let sock = match UdpSocket::bind(if address.is_some_and(|address| address.is_ipv6()) {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    })
+    .await
+    {
         Ok(sock) => sock,
         Err(err) => {
             return RemoteResult {
@@ -1349,7 +1490,11 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
             };
         }
     };
-    let sent = sock.send_to(&payload, (host.as_str(), port)).await;
+    let sent = if let Some(address) = address {
+        sock.send_to(&payload, address).await
+    } else {
+        sock.send_to(&payload, (host.as_str(), port)).await
+    };
     match sent {
         Ok(_) => {
             let mut buf = [0u8; 2048];
@@ -1357,7 +1502,7 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
                 Ok(Ok((n, from))) => RemoteResult {
                     status: TraceStatus::Ok,
                     detail: format!(
-                        "本机 UDP 发送成功，收到 {n} 字节响应（来自 {from}）· {} ms",
+                        "UDP 发送成功，收到 {n} 字节响应（来自 {from}）· {} ms",
                         started.elapsed().as_millis()
                     ),
                     duration_ms: Some(started.elapsed().as_millis() as u64),
@@ -1367,7 +1512,7 @@ async fn udp_direct(target: &TraceTarget) -> RemoteResult {
                 _ => RemoteResult {
                     status: TraceStatus::Warn,
                     detail: format!(
-                        "本机 UDP 数据包已发出，3 秒内未收到响应（服务可能不回复）· {} ms",
+                        "UDP 数据包已发出，3 秒内未收到响应（服务可能不回复）· {} ms",
                         started.elapsed().as_millis()
                     ),
                     duration_ms: Some(started.elapsed().as_millis() as u64),
@@ -1814,6 +1959,88 @@ fn matches_probe_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_preview_ignores_saved_proxy_and_firewall_rules() {
+        let mut model = AppModel::default();
+        model.work_mode = WorkMode::Mesh;
+        model.routing.rules.insert(
+            0,
+            crate::model::RouteRule::new(
+                "saved block",
+                Default::default(),
+                crate::model::RouteAction::block(),
+            ),
+        );
+        model.mesh_mode.target = Some(crate::model::MeshExitTarget {
+            profile_id: "fixture".into(),
+            peer_id: "exit".into(),
+            provider: crate::mesh::MeshProvider::EasyTier,
+            name: "Fixture exit".into(),
+            address: "192.0.2.10".into(),
+            gateway_id: "mesh-exit-fixture".into(),
+        });
+        let route = crate::mesh::coexist::MeshRoute {
+            cidr: "192.0.2.0/24".into(),
+            interface: "fixture-tun".into(),
+        };
+        let preview = explain_route(&model, &ConnectionInfo::default(), Some(&route));
+        assert!(preview.rule.is_none());
+        assert_eq!(preview.action.kind, RouteActionKind::Proxy);
+        assert!(preview.explanation.contains("Fixture exit"));
+        assert!(preview.explanation.contains("本地代理分流已暂停"));
+        assert!(preview.explanation.contains("192.0.2.0/24"));
+    }
+
+    #[tokio::test]
+    async fn system_probes_use_supplied_mesh_dns_answers_without_proxy_listeners() {
+        let ips = [IpAddr::from([127, 0, 0, 1])];
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let target = parse_target(&format!("tcp://mesh-probe.invalid:{port}")).unwrap();
+        assert_eq!(
+            tcp_direct(&target, Some(&ips)).await.status,
+            TraceStatus::Ok
+        );
+        let (connection, _) = listener.accept().await.unwrap();
+        drop(connection);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut data = vec![0; 4096];
+            let n = stream.read(&mut data).await.unwrap();
+            let headers = String::from_utf8_lossy(&data[..n]);
+            assert!(
+                headers
+                    .to_lowercase()
+                    .contains(&format!("host: mesh-probe.invalid:{port}"))
+            );
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let target = parse_target(&format!("http://mesh-probe.invalid:{port}/")).unwrap();
+        let http = http_test(&Settings::default(), &target, None, Some(&ips)).await;
+        assert_eq!(http.status, TraceStatus::Ok);
+        assert!(http.detail.contains("经组网"));
+        assert!(!http.detail.contains("直连"));
+        server.await.unwrap();
+        let socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let echo = tokio::spawn(async move {
+            let mut data = [0; 2048];
+            let (n, from) = socket.recv_from(&mut data).await.unwrap();
+            socket.send_to(&data[..n], from).await.unwrap();
+        });
+        let target = parse_target(&format!("udp://mesh-probe.invalid:{port}")).unwrap();
+        assert_eq!(
+            udp_direct(&target, Some(&ips)).await.status,
+            TraceStatus::Ok
+        );
+        echo.await.unwrap();
+    }
 
     #[cfg(windows)]
     #[tokio::test]

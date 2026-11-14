@@ -116,7 +116,8 @@ impl Choice {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(self.name.clone()),
                         )
-                        .child(pill(tr(lang, "组网出口", "Mesh exit"), p.primary, p.panel)),
+                        .child(pill(tr(lang, "组网出口", "Mesh exit"), p.primary, p.panel))
+                        .child(pill(self.provider.label(), p.primary, p.panel)),
                 )
                 .child(
                     div()

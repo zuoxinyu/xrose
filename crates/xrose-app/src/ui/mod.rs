@@ -68,10 +68,10 @@ impl Page {
     fn all() -> [Page; 9] {
         [
             Page::Nodes,
+            Page::Mesh,
             Page::Subscriptions,
             Page::Routing,
             Page::Dns,
-            Page::Mesh,
             Page::Connections,
             Page::Diagnostics,
             Page::Logs,
@@ -112,7 +112,7 @@ impl Page {
             Page::Routing => "路由",
             Page::Dns => "DNS",
             Page::Connections => "连接",
-            Page::Diagnostics => "测试",
+            Page::Diagnostics => "诊断",
             Page::Logs => "日志",
             Page::Settings => "设置",
             Page::About => "关于",
@@ -365,6 +365,7 @@ pub struct AppView {
     pub(crate) selected_connection: Option<xrose_core::runtime::ClashConnection>,
     pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
     pub(crate) diagnostic_rule_action: RouteActionKind,
+    pub(crate) diagnostic_rule_group: Option<String>,
     pub(crate) expanded_trace_step: Option<TraceStepKind>,
     pub(crate) auto_trace_started: bool,
     last_refresh: std::time::Instant,
@@ -588,6 +589,7 @@ impl AppView {
             selected_connection: None,
             diagnostic_rule_kind: DiagnosticRuleKind::Domain,
             diagnostic_rule_action: RouteActionKind::Proxy,
+            diagnostic_rule_group: None,
             expanded_trace_step: None,
             auto_trace_started: false,
             last_refresh: std::time::Instant::now(),
@@ -1746,7 +1748,7 @@ mod shortcut_tests {
             let key = (index + 1).to_string();
             assert_eq!(Page::from_shortcut(&key), Some(page));
         }
-        assert_eq!(Page::from_shortcut("5"), Some(Page::Mesh));
+        assert_eq!(Page::from_shortcut("2"), Some(Page::Mesh));
         assert_eq!(Page::from_shortcut("9"), Some(Page::Settings));
         assert_eq!(Page::from_shortcut(","), Some(Page::Settings));
         assert_eq!(Page::from_shortcut("0"), None);

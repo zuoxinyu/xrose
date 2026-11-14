@@ -86,6 +86,33 @@ pub fn pill(text: impl Into<SharedString>, fg: Hsla, bg: Hsla) -> impl IntoEleme
         .child(text.into())
 }
 
+pub(super) fn prefixed_dropdown_content(
+    prefix: SharedString,
+    value: impl Into<SharedString>,
+    p: &Palette,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(div().text_xs().text_color(p.muted_fg).child(prefix))
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.fg)
+                .max_w(px(160.))
+                .truncate()
+                .child(value.into()),
+        )
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .size(px(14.))
+                .text_color(p.muted_fg)
+                .flex_shrink_0(),
+        )
+}
+
 pub fn dot(color: Hsla) -> impl IntoElement {
     div().size(px(8.)).flex_shrink_0().rounded_full().bg(color)
 }

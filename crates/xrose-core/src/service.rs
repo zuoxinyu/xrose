@@ -4173,7 +4173,11 @@ impl AppService {
         self.save_diagnostic_rule(target, kind, action)?;
         self.toast(
             ToastLevel::Success,
-            "规则已置顶保存，点击应用配置后重新测试",
+            if self.model().work_mode == WorkMode::Mesh {
+                "规则已保存至本机；组网模式暂停本地代理分流，远端出口规则未修改"
+            } else {
+                "规则已置顶保存，点击应用配置后重新测试"
+            },
         );
         Ok(())
     }
@@ -4213,8 +4217,8 @@ impl AppService {
         let matchers = target.matchers(kind)?;
         let mut model = self.inner.model.write();
         if let Some(group) = &action.group {
-            if model.group(group).is_none() {
-                return Err(Error::config("所选策略组已不存在，请重新选择"));
+            if !model.group(group).is_some_and(|group| group.enabled) {
+                return Err(Error::config("所选出站组已不存在或已停用，请重新选择"));
             }
         }
         let mut next = model.clone();
@@ -5018,6 +5022,18 @@ impl AppService {
         }
         let service = self.clone();
         self.spawn(async move {
+            let core = service.core();
+            let model = core
+                .applied_model()
+                .filter(|_| service.is_running())
+                .unwrap_or_else(|| service.model());
+            if model.work_mode == WorkMode::Mesh {
+                if let Err(error) = service.mesh_diagnostic_config(&model, &service.settings()) {
+                    service.toast(ToastLevel::Error, error.to_string());
+                    service.set_busy("stun", false);
+                    return;
+                }
+            }
             let result = system::nat::probe().await;
             *service.inner.nat_probe.write() = Some(result);
             service.set_busy("stun", false);
@@ -6110,6 +6126,101 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         let service = AppService::with_paths(paths).unwrap();
         (service, dir)
+    }
+
+    #[test]
+    fn disconnected_mesh_diagnostics_never_fall_back_to_a_host_connection() {
+        for provider in [
+            crate::mesh::MeshProvider::EasyTier,
+            crate::mesh::MeshProvider::Tailscale,
+        ] {
+            let (service, _dir) = service();
+            {
+                let mut model = service.inner.model.write();
+                model.work_mode = WorkMode::Mesh;
+                model.mesh_mode.target = Some(crate::model::MeshExitTarget {
+                    profile_id: "fixture".into(),
+                    peer_id: "fixture-exit".into(),
+                    provider,
+                    name: "Fixture exit".into(),
+                    address: "192.0.2.10".into(),
+                    gateway_id: "mesh-exit-fixture".into(),
+                });
+            }
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            service
+                .start_trace(&format!("tcp://{}", listener.local_addr().unwrap()))
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let session = service.trace_snapshot().unwrap();
+                if session.phase == trace::TracePhase::Failed {
+                    assert!(session.error.as_deref().unwrap().contains("组网出口"));
+                    assert!(session.group_name.is_none());
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "mesh trace did not reject disconnected mode"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_rules_persist_selected_outbound_and_reject_disabled_or_removed_groups() {
+        let (service, dir) = service();
+        let group =
+            crate::model::OutboundGroup::new("Fixture outbound", crate::model::GroupKind::Selector);
+        let id = group.id.clone();
+        service.inner.model.write().groups.push(group);
+        let target = DiagnosticTarget {
+            domain: "fixture.example".into(),
+            ..Default::default()
+        };
+        let action = crate::model::RouteAction::proxy_via(&id);
+        service
+            .add_diagnostic_rule(&target, DiagnosticRuleKind::Domain, action.clone())
+            .unwrap();
+        let saved = Store::open(&AppPaths::from_root(dir.path()))
+            .unwrap()
+            .load_profile(&service.snapshot().active_profile.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.model.routing.rules[0].action, action);
+        let count = service.model().routing.rules.len();
+        service
+            .inner
+            .model
+            .write()
+            .groups
+            .iter_mut()
+            .find(|g| g.id == id)
+            .unwrap()
+            .enabled = false;
+        assert!(
+            service
+                .add_diagnostic_rule(&target, DiagnosticRuleKind::Domain, action.clone())
+                .is_err()
+        );
+        service
+            .inner
+            .model
+            .write()
+            .groups
+            .retain(|group| group.id != id);
+        assert!(
+            service
+                .add_diagnostic_rule(&target, DiagnosticRuleKind::Domain, action)
+                .is_err()
+        );
+        assert_eq!(service.model().routing.rules.len(), count);
     }
 
     #[test]

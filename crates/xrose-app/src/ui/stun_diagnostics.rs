@@ -16,10 +16,12 @@ impl AppView {
                     .child(section_title(
                         &p,
                         self.tr("UDP 连通性与 NAT", "UDP connectivity and NAT"),
-                        self.tr(
+                        if self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh {
+                            self.tr("通过组网链路探测 UDP；结果反映出口路径，不代表本机物理网络的 NAT。", "Probe UDP through the mesh; results describe the exit path, not the host's physical NAT.")
+                        } else { self.tr(
                             "通过公共 STUN 服务检查本机 UDP 出口。",
                             "Check outbound UDP access using public STUN servers.",
-                        ),
+                        ) },
                     ))
                     .child(
                         Button::new("probe-stun")

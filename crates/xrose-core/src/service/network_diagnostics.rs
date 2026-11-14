@@ -2,6 +2,40 @@
 use super::*;
 
 impl AppService {
+    /// Validate the applied mesh path before emitting diagnostic traffic.
+    pub(crate) fn mesh_diagnostic_config(
+        &self,
+        model: &AppModel,
+        settings: &Settings,
+    ) -> Result<(AppModel, Settings)> {
+        let target = model
+            .mesh_mode
+            .target
+            .as_ref()
+            .ok_or_else(|| Error::config("请先选择组网出口"))?;
+        if !self.is_running()
+            || !self.inner.core.native_tun_active()
+            || !self.inner.core.applied_model().is_some_and(|applied| {
+                applied.work_mode == WorkMode::Mesh
+                    && applied.mesh_mode.target.as_ref() == Some(target)
+            })
+            || !self.inner.mesh.snapshot().networks.iter().any(|network| {
+                network.profile_id == target.profile_id
+                    && network.phase == crate::mesh::MeshPhase::Connected
+            })
+        {
+            return Err(Error::config(
+                "组网出口尚未连接或系统流量接管未就绪，请连接后重新诊断",
+            ));
+        }
+        let runtime = self
+            .inner
+            .core
+            .mesh_exit_runtime()
+            .ok_or_else(|| Error::config("组网出口不可用，请重新连接"))?;
+        crate::adapters::mesh_runtime_model(model, settings, &runtime)
+    }
+
     /// Blocking entry point for the CLI and the service's diagnostics worker.
     pub fn collect_network_report(&self) -> system::net_diag::NetworkReport {
         let helper = privilege::status();
@@ -65,16 +99,32 @@ impl AppService {
             let settings = service.settings();
             let core = service.core();
             let running = service.is_running();
-            let model = running
+            let mut model = running
                 .then(|| core.applied_model())
                 .flatten()
                 .unwrap_or_else(|| service.model());
+            let mode = match model.work_mode {
+                WorkMode::Mesh => {
+                    let mode = dns::probe::ProbeMode::Mesh(model.mesh_mode.dns);
+                    match service.mesh_diagnostic_config(&model, &settings) {
+                        Ok((effective, _)) => model = effective,
+                        Err(error) => {
+                            service.toast(ToastLevel::Error, error.to_string());
+                            service.set_busy("dns-probe", false);
+                            return;
+                        }
+                    }
+                    mode
+                }
+                WorkMode::Direct => dns::probe::ProbeMode::Direct,
+                WorkMode::Proxy => dns::probe::ProbeMode::Proxy,
+            };
             let result = dns::probe::compare(
                 host,
                 model.dns,
                 core.mesh_plan().dns,
                 running,
-                model.work_mode == WorkMode::Direct,
+                mode,
                 core.active_proxy("socks"),
                 core.active_proxy("http"),
                 settings.language,

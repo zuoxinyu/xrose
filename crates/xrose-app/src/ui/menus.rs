@@ -24,6 +24,7 @@ pub(super) enum MenuTarget {
     RuleSetSources,
     DefaultOutbound,
     RuleOutbound,
+    DiagnosticOutbound,
     OutboundGroup(String),
     Node(String),
     Nodes,
@@ -52,6 +53,7 @@ pub(super) enum Command {
     SelectMeshExit(String, String),
     SetDefaultOutbound(String),
     SelectRuleOutbound(Option<String>),
+    SelectDiagnosticOutbound(Option<String>),
     ManageOutboundGroups,
     EditOutboundGroup(String),
     DeleteOutboundGroup(String),
@@ -345,15 +347,28 @@ impl AppView {
                     Command::AddPeerForward(profile_id, peer_id),
                 ));
             }
-            MenuTarget::RuleOutbound => {
+            MenuTarget::RuleOutbound | MenuTarget::DiagnosticOutbound => {
+                let diagnostic = matches!(target, MenuTarget::DiagnosticOutbound);
+                let selected = if diagnostic {
+                    &self.diagnostic_rule_group
+                } else {
+                    &self.rule_outbound_group
+                };
+                let select = |id| {
+                    if diagnostic {
+                        Command::SelectDiagnosticOutbound(id)
+                    } else {
+                        Command::SelectRuleOutbound(id)
+                    }
+                };
                 menu = menu.item(
                     item(
                         &view,
                         tr(lang, "默认出站组", "Default outbound group"),
                         true,
-                        Command::SelectRuleOutbound(None),
+                        select(None),
                     )
-                    .checked(self.rule_outbound_group.is_none()),
+                    .checked(selected.is_none()),
                 );
                 for group in &self.snapshot.model.groups {
                     menu = menu.item(
@@ -361,9 +376,9 @@ impl AppView {
                             &view,
                             self.outbound_group_label(group),
                             group.enabled,
-                            Command::SelectRuleOutbound(Some(group.id.clone())),
+                            select(Some(group.id.clone())),
                         )
-                        .checked(self.rule_outbound_group.as_ref() == Some(&group.id)),
+                        .checked(selected.as_ref() == Some(&group.id)),
                     );
                 }
             }
@@ -1033,6 +1048,16 @@ impl AppView {
                         .is_some_and(|group| group.enabled)
                 }) {
                     self.rule_outbound_group = id;
+                }
+            }
+            Command::SelectDiagnosticOutbound(id) => {
+                if id.as_ref().is_none_or(|id| {
+                    self.snapshot
+                        .model
+                        .group(id)
+                        .is_some_and(|group| group.enabled)
+                }) {
+                    self.diagnostic_rule_group = id;
                 }
             }
             Command::SetDefaultOutbound(id) => {

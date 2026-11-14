@@ -1377,6 +1377,17 @@ impl AppView {
         let p = palette(cx);
         let kind = self.diagnostic_rule_kind;
         let value = target.value(kind).to_string();
+        let outbound_label = self
+            .diagnostic_rule_group
+            .as_deref()
+            .map(|id| {
+                self.snapshot
+                    .model
+                    .group(id)
+                    .map(|group| self.outbound_group_label(group))
+                    .unwrap_or_else(|| self.tr("出站组已删除", "Outbound group removed"))
+            })
+            .unwrap_or_else(|| self.tr("默认出站组", "Default outbound group"));
         let kinds = [
             (DiagnosticRuleKind::Domain, self.tr("域名", "Domain")),
             (DiagnosticRuleKind::Ip, self.tr("IP", "IP")),
@@ -1460,7 +1471,14 @@ impl AppView {
                             this.diagnostic_rule_action = actions[*index].0;
                             cx.notify();
                         })),
-                    ),
+                    )
+                    .when(self.diagnostic_rule_action == RouteActionKind::Proxy, |d| {
+                        d.child(Button::new(SharedString::from(format!("{prefix}-rule-outbound")))
+                            .compact().h(px(super::theme::CONTROL_HEIGHT))
+                            .tooltip(outbound_label.clone())
+                            .child(prefixed_dropdown_content(self.tr("出站目标", "Outbound"), outbound_label, &p))
+                            .dropdown_menu(menus::builder(cx.entity().downgrade(), MenuTarget::DiagnosticOutbound)))
+                    }),
             )
             .child(
                 div()
@@ -1477,7 +1495,9 @@ impl AppView {
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let action = RouteAction {
                                     kind: this.diagnostic_rule_action,
-                                    group: None,
+                                    group: if this.diagnostic_rule_action == RouteActionKind::Proxy {
+                                        this.diagnostic_rule_group.clone()
+                                    } else { None },
                                 };
                                 if let Err(err) = this.service.add_diagnostic_rule(
                                     &target,
@@ -1489,10 +1509,11 @@ impl AppView {
                                 this.sync(cx);
                             })),
                     )
-                    .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                        "置顶保存至自定义规则（优先级低于局域网与大陆绕过），应用配置后生效",
-                        "Saved at the top of custom rules (below built-in LAN/China bypasses); apply config to take effect",
-                    ))),
+                    .child(div().text_xs().text_color(p.muted_fg).child(if self.snapshot.model.work_mode == WorkMode::Mesh {
+                        self.tr("保存至本机规则；组网模式暂停本地代理分流，不会修改远端出口规则", "Saved locally; Mesh mode pauses local proxy routing and does not change the remote exit's rules")
+                    } else {
+                        self.tr("置顶保存至自定义规则（优先级低于局域网与大陆绕过），应用配置后生效", "Saved at the top of custom rules (below built-in LAN/China bypasses); apply config to take effect")
+                    })),
             )
     }
 
@@ -1586,7 +1607,9 @@ impl AppView {
                     .on_click(cx.listener(|this, _, _, cx| { let target = this.trace_input.read(cx).value().to_string(); this.run_trace(&target, cx); })))
                 .child(Button::new("trace-clear").compact().h(px(crate::ui::theme::CONTROL_HEIGHT)).ghost().label(self.tr("清除", "Clear"))
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_trace(); this.expanded_trace_step = None; this.sync(cx); }))))
-            .child(div().text_xs().text_color(p.muted_fg).child(self.tr("点击阶段查看完整详情", "Select a stage for full details")))
+            .child(div().text_xs().text_color(p.muted_fg).child(if self.snapshot.model.work_mode == WorkMode::Mesh {
+                self.tr("通过组网链路测试；本地代理分流已暂停，远端出口的分流结果需在出口设备查看。ICMP 暂不支持。", "Test through the mesh; local proxy routing is paused. Inspect remote routing on the exit device. ICMP is unavailable.")
+            } else { self.tr("点击阶段查看完整详情", "Select a stage for full details") }))
             .child(self.trace_graph(trace.as_ref(), cx))
             .when_some(trace.as_ref(), |d, trace| {
                 let failed = trace.steps.iter().find(|s| s.status == TraceStatus::Error);

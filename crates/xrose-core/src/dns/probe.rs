@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::{
     Error, Result,
     mesh::coexist::MeshDns,
-    model::{DnsConfig, DnsServer, DnsServerType},
+    model::{DnsConfig, DnsServer, DnsServerType, MeshDnsMode},
     runtime::location,
     settings::Language,
     updates::LocalProxy,
@@ -49,62 +49,42 @@ enum Resolver {
     Core(Option<LocalProxy>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeMode {
+    Direct,
+    Proxy,
+    Mesh(MeshDnsMode),
+}
+
+fn tun_resolver() -> Resolver {
+    // Both mesh adapters intercept port 53. A reserved address prevents an
+    // accidental public resolver fallback if interception is unavailable.
+    Resolver::Server(DnsServer::udp("mesh-dns", "192.0.2.53"), None)
+}
+
+pub(crate) async fn mesh_lookup(host: &str) -> Result<Vec<IpAddr>> {
+    let row = probe_one(host, "组网 DNS".into(), tun_resolver(), Language::Zh).await;
+    if row.addresses.is_empty() {
+        return Err(Error::other(
+            row.error.unwrap_or_else(|| "组网 DNS 未返回地址".into()),
+        ));
+    }
+    Ok(row.addresses)
+}
+
 pub(crate) async fn compare(
     host: String,
     config: DnsConfig,
     mesh: Vec<MeshDns>,
     running: bool,
-    direct: bool,
+    mode: ProbeMode,
     socks: Option<LocalProxy>,
     http: Option<LocalProxy>,
     language: Language,
     private: bool,
 ) -> Comparison {
     let tr = |zh, en| if language == Language::En { en } else { zh };
-    let mut targets = vec![(tr("系统解析器", "System resolver").into(), Resolver::System)];
-    let public = config
-        .servers
-        .iter()
-        .find(|s| {
-            matches!(s.server_type, DnsServerType::Udp | DnsServerType::Tcp)
-                && !s.requires_proxy()
-                && !matches!(s.address.as_str(), "system" | "local")
-        })
-        .cloned()
-        .unwrap_or_else(|| DnsServer::udp("AliDNS", "223.5.5.5"));
-    targets.push((
-        format!("{} · {}", public.tag, public.server_type.as_str()),
-        Resolver::Server(public, None),
-    ));
-    let magic = mesh
-        .iter()
-        .find(|m| host == m.suffix || host.ends_with(&format!(".{}", m.suffix)))
-        .or_else(|| mesh.first());
-    if let Some(dns) = magic {
-        targets.push((
-            format!("MagicDNS · {}", dns.suffix),
-            Resolver::Server(DnsServer::udp("mesh", &dns.address), None),
-        ));
-    } else {
-        let s = config
-            .servers
-            .iter()
-            .filter(|s| {
-                matches!(s.server_type, DnsServerType::Https | DnsServerType::Tls)
-                    && (!s.requires_proxy()
-                        || (!direct && http.is_some() && s.server_type == DnsServerType::Https))
-            })
-            .min_by_key(|s| s.requires_proxy())
-            .cloned()
-            .unwrap_or_else(|| DnsServer::https("DNSPod", "doh.pub"));
-        targets.push((
-            format!("{} · {}", s.tag, s.server_type.as_str()),
-            Resolver::Server(s, http),
-        ));
-    }
-    if running && config.enabled {
-        targets.push((tr("内核 DNS", "Core DNS").into(), Resolver::Core(socks)));
-    }
+    let targets = comparison_targets(&host, &config, &mesh, running, mode, socks, http, language);
     let mut rows = join_all(
         targets
             .into_iter()
@@ -156,6 +136,96 @@ pub(crate) async fn compare(
         rows,
         different_subnets,
     }
+}
+
+fn comparison_targets(
+    host: &str,
+    config: &DnsConfig,
+    mesh: &[MeshDns],
+    running: bool,
+    mode: ProbeMode,
+    socks: Option<LocalProxy>,
+    http: Option<LocalProxy>,
+    language: Language,
+) -> Vec<(String, Resolver)> {
+    let tr = |zh, en| if language == Language::En { en } else { zh };
+    if let ProbeMode::Mesh(dns) = mode {
+        let mut encrypted = config
+            .servers
+            .iter()
+            .find(|s| matches!(s.server_type, DnsServerType::Https | DnsServerType::Tls))
+            .cloned()
+            .unwrap_or_else(|| DnsServer::https("DNSPod", "doh.pub"));
+        // The system socket is already captured by the mesh TUN; a local
+        // HTTP/SOCKS detour would use an unrelated saved proxy configuration.
+        encrypted.detour = None;
+        let policy = match dns {
+            MeshDnsMode::Exit => tr("出口 DNS", "Exit DNS"),
+            MeshDnsMode::Custom => tr("自定义组网 DNS", "Custom mesh DNS"),
+        };
+        return vec![
+            (
+                tr("系统解析器（组网模式）", "System resolver (Mesh mode)").into(),
+                Resolver::System,
+            ),
+            (policy.into(), tun_resolver()),
+            (
+                format!(
+                    "{} · {} · {}",
+                    encrypted.tag,
+                    encrypted.server_type.as_str(),
+                    tr("经组网", "via mesh")
+                ),
+                Resolver::Server(encrypted, None),
+            ),
+        ];
+    }
+    let direct = mode == ProbeMode::Direct;
+    let mut targets = vec![(tr("系统解析器", "System resolver").into(), Resolver::System)];
+    let public = config
+        .servers
+        .iter()
+        .find(|s| {
+            matches!(s.server_type, DnsServerType::Udp | DnsServerType::Tcp)
+                && !s.requires_proxy()
+                && !matches!(s.address.as_str(), "system" | "local")
+        })
+        .cloned()
+        .unwrap_or_else(|| DnsServer::udp("AliDNS", "223.5.5.5"));
+    targets.push((
+        format!("{} · {}", public.tag, public.server_type.as_str()),
+        Resolver::Server(public, None),
+    ));
+    let magic = mesh
+        .iter()
+        .find(|m| host == m.suffix || host.ends_with(&format!(".{}", m.suffix)))
+        .or_else(|| mesh.first());
+    if let Some(dns) = magic {
+        targets.push((
+            format!("MagicDNS · {}", dns.suffix),
+            Resolver::Server(DnsServer::udp("mesh", &dns.address), None),
+        ));
+    } else {
+        let s = config
+            .servers
+            .iter()
+            .filter(|s| {
+                matches!(s.server_type, DnsServerType::Https | DnsServerType::Tls)
+                    && (!s.requires_proxy()
+                        || (!direct && http.is_some() && s.server_type == DnsServerType::Https))
+            })
+            .min_by_key(|s| s.requires_proxy())
+            .cloned()
+            .unwrap_or_else(|| DnsServer::https("DNSPod", "doh.pub"));
+        targets.push((
+            format!("{} · {}", s.tag, s.server_type.as_str()),
+            Resolver::Server(s, http),
+        ));
+    }
+    if running && config.enabled {
+        targets.push((tr("内核 DNS", "Core DNS").into(), Resolver::Core(socks)));
+    }
+    targets
 }
 
 // Only compare corresponding families. An IPv6-only resolver is not evidence
@@ -426,6 +496,65 @@ fn answers(request: &Message, packet: &[u8]) -> Result<Vec<IpAddr>> {
 mod tests {
     use super::*;
     use hickory_proto::rr::{RData, Record, rdata::A};
+
+    #[test]
+    fn mesh_comparison_uses_tun_dns_and_keeps_encrypted_queries_on_system_transport() {
+        let mut encrypted = DnsServer::https("fixture", "https://resolver.example/dns-query");
+        encrypted.detour = Some("saved-proxy-group".into());
+        let config = DnsConfig {
+            servers: vec![encrypted],
+            ..Default::default()
+        };
+        for mode in [MeshDnsMode::Exit, MeshDnsMode::Custom] {
+            let targets = comparison_targets(
+                "example.org",
+                &config,
+                &[],
+                true,
+                ProbeMode::Mesh(mode),
+                None,
+                None,
+                Language::En,
+            );
+            assert_eq!(targets.len(), 3);
+            assert!(matches!(targets[0].1, Resolver::System));
+            let Resolver::Server(dns, None) = &targets[1].1 else {
+                panic!("mesh DNS must not require a SOCKS listener");
+            };
+            assert_eq!(dns.address, "192.0.2.53");
+            let Resolver::Server(doh, None) = &targets[2].1 else {
+                panic!("encrypted DNS must use the captured system path");
+            };
+            assert!(!doh.requires_proxy());
+            assert_eq!(doh.display_address(), "https://resolver.example/dns-query");
+            assert_eq!(
+                targets[1].0,
+                if mode == MeshDnsMode::Exit {
+                    "Exit DNS"
+                } else {
+                    "Custom mesh DNS"
+                }
+            );
+        }
+        assert_eq!(
+            config.servers[0].detour.as_deref(),
+            Some("saved-proxy-group")
+        );
+        assert!(
+            comparison_targets(
+                "example.org",
+                &config,
+                &[],
+                true,
+                ProbeMode::Proxy,
+                None,
+                None,
+                Language::En
+            )
+            .iter()
+            .any(|(_, resolver)| matches!(resolver, Resolver::Core(_)))
+        );
+    }
 
     #[tokio::test]
     async fn queries_both_families_through_reserved_loopback_fixture() {
