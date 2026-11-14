@@ -368,6 +368,79 @@ pub(super) struct SegmentedTabs {
     handler: Option<IndexChangeHandler>,
 }
 
+/// Generic bordered track hosting heterogeneous tab items (such as draggable
+/// routing groups) while retaining the shared 150 ms sliding cyan indicator.
+#[derive(gpui_kit::IntoElement)]
+pub(super) struct SlidingTabTrack {
+    id: ElementId,
+    selected_item: Option<usize>,
+    items: Vec<gpui_kit::AnyElement>,
+}
+
+impl SlidingTabTrack {
+    pub(super) fn new(id: impl Into<ElementId>, selected_item: Option<usize>) -> Self {
+        Self {
+            id: id.into(),
+            selected_item,
+            items: Vec::new(),
+        }
+    }
+
+    pub(super) fn children(
+        mut self,
+        items: impl IntoIterator<Item = gpui_kit::AnyElement>,
+    ) -> Self {
+        self.items.extend(items);
+        self
+    }
+}
+
+fn sliding_track_shell(
+    id: &ElementId,
+    selected_child: Option<usize>,
+    p: &Palette,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> gpui_kit::Stateful<Div> {
+    let layout = group_layout_handle(id, window, cx);
+    div()
+        .id(id.clone())
+        .role(Role::TabList)
+        .relative()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1()
+        .p_0p5()
+        .rounded_md()
+        .bg(p.bg)
+        .border_1()
+        .border_color(p.border)
+        .track_scroll(&layout)
+        .child(sliding_indicator_canvas_at_child(
+            id,
+            selected_child,
+            &layout,
+            p,
+            window,
+            cx,
+        ))
+}
+
+fn sliding_track_selected_child(selected_item: Option<usize>, item_count: usize) -> Option<usize> {
+    selected_item
+        .filter(|&index| index < item_count)
+        .map(|index| index + 1)
+}
+
+impl gpui_kit::RenderOnce for SlidingTabTrack {
+    fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
+        let p = super::theme::palette(cx);
+        let selected_child = sliding_track_selected_child(self.selected_item, self.items.len());
+        sliding_track_shell(&self.id, selected_child, &p, window, cx).children(self.items)
+    }
+}
+
 impl SegmentedTabs {
     pub(super) fn new(
         id: impl Into<ElementId>,
@@ -399,26 +472,9 @@ impl gpui_kit::RenderOnce for SegmentedTabs {
         let key_handles = handles.clone();
         let key_handler = self.handler.clone();
         let selected = self.selected.filter(|&index| index < count);
-        let layout = group_layout_handle(&self.id, window, cx);
         let mono = cx.theme().mono_font_family.clone();
         let transparent = cx.theme().transparent;
-        let mut track = div()
-            .id(self.id.clone())
-            .role(Role::TabList)
-            .relative()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_1()
-            .p_0p5()
-            .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
-            .track_scroll(&layout)
-            .child(sliding_indicator_canvas(
-                &self.id, selected, &layout, &p, window, cx,
-            ))
+        let mut track = sliding_track_shell(&self.id, selected.map(|i| i + 1), &p, window, cx)
             .on_key_down(move |event, window, cx| {
                 if let Some(next) = roving_key_target(event.keystroke.key.as_str(), selected, count)
                 {
@@ -511,8 +567,11 @@ enum ChoiceStyle {
 pub struct ChoiceGroup {
     id: ElementId,
     labels: Vec<SharedString>,
+    tooltips: Vec<SharedString>,
     selected: Option<usize>,
     style: ChoiceStyle,
+    full_width: bool,
+    wrap: bool,
     scroll: Option<(ScrollHandle, Pixels)>,
     disabled: bool,
     handler: Option<IndexChangeHandler>,
@@ -526,8 +585,11 @@ impl ChoiceGroup {
         Self {
             id: id.into(),
             labels,
+            tooltips: Vec::new(),
             selected: selected.into(),
             style: ChoiceStyle::Default,
+            full_width: false,
+            wrap: true,
             scroll: None,
             disabled: false,
             handler: None,
@@ -539,6 +601,18 @@ impl ChoiceGroup {
     }
     pub fn small(mut self) -> Self {
         self.style = ChoiceStyle::Small;
+        self
+    }
+    pub fn full_width(mut self) -> Self {
+        self.full_width = true;
+        self
+    }
+    pub fn tooltips(mut self, tooltips: Vec<SharedString>) -> Self {
+        self.tooltips = tooltips;
+        self
+    }
+    pub fn no_wrap(mut self) -> Self {
+        self.wrap = false;
         self
     }
     pub fn scrollable(mut self, handle: &ScrollHandle, max_height: Pixels) -> Self {
@@ -559,25 +633,25 @@ impl ChoiceGroup {
 }
 // The first child is the indicator canvas. Measure items relative to it so
 // moving the window or scrolling a parent does not start a new transition.
-fn sliding_indicator_bounds(
+fn sliding_indicator_item_bounds(
     layout: &ScrollHandle,
-    selected: Option<usize>,
+    child_index: Option<usize>,
 ) -> Option<gpui_kit::Bounds<Pixels>> {
     let origin = layout.bounds_for_item(0)?.origin;
-    let mut bounds = layout.bounds_for_item(selected? + 1)?;
+    let mut bounds = layout.bounds_for_item(child_index?)?;
     bounds.origin -= origin;
     Some(bounds)
 }
 
-fn sliding_indicator_canvas(
+fn sliding_indicator_canvas_at_child(
     id: &ElementId,
-    selected: Option<usize>,
+    child_index: Option<usize>,
     layout: &ScrollHandle,
     p: &Palette,
     window: &mut gpui_kit::Window,
     cx: &mut App,
 ) -> gpui_kit::Canvas<()> {
-    let measured = sliding_indicator_bounds(layout, selected);
+    let measured = sliding_indicator_item_bounds(layout, child_index);
     let animated = measured.map(|target| {
         gpui_base::motion::transition(
             ElementId::from((id.clone(), "choice-indicator")),
@@ -593,7 +667,7 @@ fn sliding_indicator_canvas(
     gpui_kit::canvas(
         |_, _, _| (),
         move |canvas, _, window, _| {
-            if let Some(actual) = sliding_indicator_bounds(&layout, selected) {
+            if let Some(actual) = sliding_indicator_item_bounds(&layout, child_index) {
                 let mut indicator = if Some(actual) == measured {
                     animated.unwrap_or(actual)
                 } else {
@@ -615,6 +689,17 @@ fn sliding_indicator_canvas(
     )
     .absolute()
     .inset_0()
+}
+
+fn sliding_indicator_canvas(
+    id: &ElementId,
+    selected: Option<usize>,
+    layout: &ScrollHandle,
+    p: &Palette,
+    window: &mut gpui_kit::Window,
+    cx: &mut App,
+) -> gpui_kit::Canvas<()> {
+    sliding_indicator_canvas_at_child(id, selected.map(|index| index + 1), layout, p, window, cx)
 }
 
 fn group_focus_handles(
@@ -671,6 +756,8 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
         let key_handler = self.handler.clone();
         let selected = self.selected.filter(|&index| index < count);
         let style = self.style;
+        let full_width = self.full_width;
+        let wrap = self.wrap;
         let disabled = self.disabled;
         let layout = match &self.scroll {
             Some((handle, _)) => handle.clone(),
@@ -680,7 +767,8 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .axis(gpui_kit::Axis::Horizontal)
             .relative()
             .flex()
-            .flex_wrap()
+            .when(wrap, |group| group.flex_wrap())
+            .when(full_width, |group| group.w_full())
             .items_center()
             .gap_0p5()
             .p_0p5()
@@ -716,6 +804,12 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
         for (index, label) in self.labels.into_iter().enumerate() {
             let checked = selected == Some(index);
             let handler = self.handler.clone();
+            let tooltip = self
+                .tooltips
+                .get(index)
+                .cloned()
+                .filter(|tip| !tip.is_empty())
+                .or_else(|| (style == ChoiceStyle::Cards).then(|| label.clone()));
             group = group.child(
                 gpui_base::Radio::new((self.id.clone(), index.to_string()))
                     .checked(checked)
@@ -723,9 +817,9 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     .tab_stop(index == selected.unwrap_or(0) && !disabled)
                     .track_focus(&handles[index])
                     .accessibility_label(label.clone())
-                    .when(style == ChoiceStyle::Cards, |option| {
-                        let tooltip = label.clone();
-                        option.max_w_full().tooltip(move |window, cx| {
+                    .when(style == ChoiceStyle::Cards, |option| option.max_w_full())
+                    .when_some(tooltip, |option, tooltip| {
+                        option.tooltip(move |window, cx| {
                             Tooltip::new(tooltip.clone()).build(window, cx)
                         })
                     })
@@ -828,5 +922,14 @@ mod tests {
         assert_eq!(roving_key_target("left", None, 2), Some(1));
         assert_eq!(roving_key_target("tab", Some(0), 2), None);
         assert_eq!(roving_key_target("right", None, 0), None);
+    }
+
+    #[test]
+    fn sliding_track_selected_child_offsets_canvas_and_guards_bounds() {
+        assert_eq!(sliding_track_selected_child(None, 4), None);
+        assert_eq!(sliding_track_selected_child(Some(0), 0), None);
+        assert_eq!(sliding_track_selected_child(Some(4), 4), None);
+        assert_eq!(sliding_track_selected_child(Some(0), 5), Some(1));
+        assert_eq!(sliding_track_selected_child(Some(4), 5), Some(5));
     }
 }

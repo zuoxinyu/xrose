@@ -1605,6 +1605,7 @@ impl AppView {
                             .child(Button::new("trace-open-hit").compact().ghost()
                                 .label(self.tr("查看拦截规则","View blocking rule"))
                                 .on_click(cx.listener(move |this,_,_,cx|{
+                                    this.rule_show_all = false;
                                     this.rule_group_id = group.clone();
                                     this.page = Page::Routing;
                                     this.sync(cx);

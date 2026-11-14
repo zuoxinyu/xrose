@@ -1225,7 +1225,7 @@ impl AppView {
             Command::AssignRule(id, group) => self.service.assign_rule_group(&id, group.as_deref()),
             Command::DeleteRule(id) => self.service.delete_rule(&id),
             Command::RenameGroup(id) => {
-                self.open_rule_group_dialog(Some(id), window, cx);
+                self.open_rule_group_dialog(id, window, cx);
             }
             Command::EnableGroup(id) => {
                 if let Some(group) = self
@@ -1244,6 +1244,7 @@ impl AppView {
                 self.service.delete_rule_group(&id);
                 if self.rule_group_id.as_deref() == Some(&id) {
                     self.rule_group_id = None;
+                    self.rule_show_all = true;
                 }
             }
             Command::EditSubscription(id) => self.open_edit_subscription(&id, window, cx),
