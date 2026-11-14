@@ -147,7 +147,19 @@ pub enum MatcherKind {
 }
 
 impl MatcherKind {
-    fn label(&self, lang: Language) -> SharedString {
+    pub(crate) const fn all() -> [MatcherKind; 7] {
+        [
+            MatcherKind::Domain,
+            MatcherKind::Suffix,
+            MatcherKind::Geo,
+            MatcherKind::RuleSet,
+            MatcherKind::Ip,
+            MatcherKind::Process,
+            MatcherKind::Port,
+        ]
+    }
+
+    pub(crate) fn label(&self, lang: Language) -> SharedString {
         let (zh, en) = match self {
             MatcherKind::Domain => ("完整域名", "Exact domain"),
             MatcherKind::Suffix => ("域名后缀", "Domain suffix"),
@@ -156,6 +168,34 @@ impl MatcherKind {
             MatcherKind::Ip => ("IP / CIDR", "IP / CIDR"),
             MatcherKind::Process => ("进程名", "Process"),
             MatcherKind::Port => ("端口", "Port"),
+        };
+        tr(lang, zh, en)
+    }
+
+    pub(crate) const fn prefix(&self) -> &'static str {
+        match self {
+            MatcherKind::Domain => "domain:",
+            MatcherKind::Suffix => "suffix:",
+            MatcherKind::Geo => "geosite:",
+            MatcherKind::RuleSet => "ruleset:",
+            MatcherKind::Ip => "ip:",
+            MatcherKind::Process => "process:",
+            MatcherKind::Port => "port:",
+        }
+    }
+
+    pub(crate) fn placeholder(&self, lang: Language) -> SharedString {
+        let (zh, en) = match self {
+            MatcherKind::Domain => (
+                "example.com，多个用逗号分隔",
+                "example.com, comma-separated",
+            ),
+            MatcherKind::Suffix => ("openai.com, google.com", "openai.com, google.com"),
+            MatcherKind::Geo => ("cn, gfw, geolocation-!cn", "cn, gfw, geolocation-!cn"),
+            MatcherKind::RuleSet => ("geosite-gfw, geoip-cn", "geosite-gfw, geoip-cn"),
+            MatcherKind::Ip => ("10.0.0.0/8, 192.168.1.0/24", "10.0.0.0/8, 192.168.1.0/24"),
+            MatcherKind::Process => ("chrome, telegram", "chrome, telegram"),
+            MatcherKind::Port => ("443, 8000-8080", "443, 8000-8080"),
         };
         tr(lang, zh, en)
     }
@@ -281,7 +321,12 @@ pub struct AppView {
     connection_list: ListState,
     log_filter: LogFilter,
     pub(crate) rule_name: Entity<InputState>,
+    pub(crate) rule_search: Entity<InputState>,
+    pub(crate) rule_group_inline_open: bool,
+    pub(crate) rule_group_inline_error: Option<SharedString>,
+    pub(crate) rule_group_name_input: Entity<InputState>,
     pub(crate) rule_group_id: Option<String>,
+    pub(crate) rule_show_all: bool,
     route_drag_epoch: u64,
     route_scroll_running: bool,
     node_selector: Option<Entity<node_selector::NodeSelector>>,
@@ -358,7 +403,37 @@ impl AppView {
         let node_search = text_input(window, cx, "按名称或地址过滤节点…");
         let log_search = text_input(window, cx, "搜索日志…");
         let rule_name = text_input(window, cx, "规则名称");
-        let rule_value = text_input(window, cx, "example.com, 或 cn（Geo），或 10.0.0.0/8");
+        let rule_search = text_input(window, cx, "过滤规则…");
+        cx.subscribe(&rule_search, |_, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        let rule_group_name_input = text_input(window, cx, "新分组名称");
+        cx.subscribe_in(
+            &rule_group_name_input,
+            window,
+            |this, _, event, window, cx| match event {
+                InputEvent::Change => {
+                    if this.rule_group_inline_error.is_some() {
+                        this.rule_group_inline_error = None;
+                        cx.notify();
+                    }
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.submit_inline_rule_group(window, cx);
+                }
+                _ => {}
+            },
+        )
+        .detach();
+        let initial_matcher_kind = MatcherKind::Suffix;
+        let rule_value = text_input(
+            window,
+            cx,
+            &initial_matcher_kind.placeholder(snapshot.settings.language),
+        );
         let dns_tag = text_input(window, cx, "tag，例如 remote");
         let dns_address = text_input(window, cx, "1.1.1.1 或 https://1.1.1.1/dns-query");
         let dns_domains = text_input(
@@ -469,7 +544,12 @@ impl AppView {
                 .with_uniform_item_height(px(100.)),
             log_filter: LogFilter::default(),
             rule_name,
+            rule_search,
+            rule_group_inline_open: false,
+            rule_group_inline_error: None,
+            rule_group_name_input,
             rule_group_id: None,
+            rule_show_all: true,
             route_drag_epoch: 0,
             route_scroll_running: false,
             action_menu: None,
@@ -516,7 +596,7 @@ impl AppView {
             show_rule_form: false,
             show_dns_form: false,
             show_host_form: false,
-            matcher_kind: MatcherKind::Suffix,
+            matcher_kind: initial_matcher_kind,
             rule_action: RouteActionKind::Proxy,
             rule_outbound_group: None,
         };
@@ -590,13 +670,12 @@ impl AppView {
                 self.tr("订阅名称（可选）", "Subscription name (optional)"),
             ),
             (&self.rule_name, self.tr("规则名称", "Rule name")),
+            (&self.rule_search, self.tr("过滤规则…", "Filter rules…")),
             (
-                &self.rule_value,
-                self.tr(
-                    "example.com, 或 cn（Geo），或 10.0.0.0/8",
-                    "example.com, cn (Geo), or 10.0.0.0/8",
-                ),
+                &self.rule_group_name_input,
+                self.tr("新分组名称", "New group name"),
             ),
+            (&self.rule_value, self.matcher_kind.placeholder(self.lang())),
             (
                 &self.dns_tag,
                 self.tr("tag，例如 remote", "Tag, e.g. remote"),

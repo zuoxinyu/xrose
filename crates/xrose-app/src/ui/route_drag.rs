@@ -6,6 +6,7 @@ use super::{
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::Placement;
 use xrose_core::service::ToastLevel;
@@ -28,13 +29,21 @@ impl Render for RouteDrag {
 }
 
 pub(super) fn handle(drag: RouteDrag, view: WeakEntity<AppView>) -> impl IntoElement {
+    let groups = drag.groups;
+    let icon_size = if groups { 13. } else { theme::ICON_SIZE };
     div()
         .id(SharedString::from(format!("route-grip-{}", drag.id)))
         .flex()
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .size(px(theme::ICON_BUTTON_SIZE))
+        .map(|d| {
+            if groups {
+                d.h(px(24.)).w(px(18.))
+            } else {
+                d.size(px(theme::ICON_BUTTON_SIZE))
+            }
+        })
         .cursor_grab()
         .opacity(theme::DISABLED_OPACITY)
         .hover(|s| s.opacity(1.))
@@ -46,7 +55,7 @@ pub(super) fn handle(drag: RouteDrag, view: WeakEntity<AppView>) -> impl IntoEle
             });
             cx.new(|_| drag.clone())
         })
-        .child(Icon::new(IconName::GripVertical).size(px(theme::ICON_SIZE)))
+        .child(Icon::new(IconName::GripVertical).size(px(icon_size)))
 }
 
 fn placement_at(bounds: Bounds<Pixels>, pointer: Point<Pixels>, groups: bool) -> Placement {
@@ -116,7 +125,7 @@ pub(super) fn target(
                 || drag.epoch != this.route_drag_epoch
                 || drag.groups != groups
                 || drag.group != group
-                || (!groups && this.rule_group_id != group)
+                || (!groups && !this.allows_rule_drop(group.as_deref(), cx))
                 || !bounds.contains(&pointer)
                 || this.snapshot.busy.iter().any(|key| key == "core")
             {

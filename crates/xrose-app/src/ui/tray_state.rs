@@ -5,7 +5,7 @@ pub(crate) struct TrayWindowState {
     page: Page,
     settings_tab: SettingsTab,
     network_advanced_open: bool,
-    page_inputs: [SharedString; 9],
+    page_inputs: [SharedString; 10],
     hide_ips: bool,
     hide_traffic_chart: bool,
     sort_by_latency: bool,
@@ -19,6 +19,7 @@ pub(crate) struct TrayWindowState {
     settings_offset: Point<Pixels>,
     log_filter: LogFilter,
     rule_group_id: Option<String>,
+    rule_show_all: bool,
     collapsed_subs: std::collections::HashSet<String>,
     mesh_expanded: std::collections::HashSet<String>,
     mesh_card_tabs: std::collections::HashMap<String, mesh::MeshCardTab>,
@@ -28,11 +29,12 @@ pub(crate) struct TrayWindowState {
 impl AppView {
     // The two windows have different focus and input subscriptions. Carry the text
     // across in memory and let GPUI bind the new controls to their own window.
-    fn page_inputs(&self) -> [&Entity<InputState>; 9] {
+    fn page_inputs(&self) -> [&Entity<InputState>; 10] {
         [
             &self.node_search,
             &self.connection_search,
             &self.log_search,
+            &self.rule_search,
             &self.port_input,
             &self.lan_port_input,
             &self.lan_user_input,
@@ -61,6 +63,7 @@ impl AppView {
             connections_tab: self.connections_tab,
             log_filter: self.log_filter.clone(),
             rule_group_id: self.rule_group_id.clone(),
+            rule_show_all: self.rule_show_all,
             collapsed_subs: self.collapsed_subs.clone(),
             mesh_expanded: self.mesh_expanded.clone(),
             mesh_card_tabs: self.mesh_card_tabs.clone(),
@@ -79,6 +82,7 @@ impl AppView {
         self.network_advanced_open = state.network_advanced_open;
         self.log_filter = state.log_filter;
         self.rule_group_id = state.rule_group_id;
+        self.rule_show_all = state.rule_show_all;
         self.collapsed_subs = state.collapsed_subs;
         self.mesh_expanded = state.mesh_expanded;
         self.mesh_card_tabs = state.mesh_card_tabs;
