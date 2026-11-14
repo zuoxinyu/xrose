@@ -1,6 +1,9 @@
 //! Bounded userspace exit forwarding into the authenticated local policy router.
 //! Peer ACLs run before this filter. Captured traffic never uses host destination sockets.
-use super::{ExitBridge, easytier_gateway::ChannelDevice};
+use super::{
+    ExitBridge,
+    easytier_gateway::{ChannelDevice, socket_buffers},
+};
 use crate::{Error, Result};
 use async_socks5::{AddrKind, Auth, SocksDatagram};
 use easytier::{
@@ -353,11 +356,12 @@ async fn run(peer: Arc<PeerManager>, bridge: ExitBridge, mut packets: mpsc::Rece
     caps.max_burst_size = Some(8);
     let mut interface = smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip);
     interface.random_seed = uuid::Uuid::new_v4().as_u128() as u64;
-    let config = stack::NetConfig::new(
+    let mut config = stack::NetConfig::new(
         interface,
         smoltcp::wire::IpCidr::new(STACK_ADDRESS.into(), 32),
         vec![STACK_ADDRESS.into()],
     );
+    config.buffer_size = socket_buffers();
     let net = Arc::new(stack::Net::new(
         ChannelDevice {
             incoming: received,
@@ -669,8 +673,16 @@ mod tests {
                                 socket.write_all(&[5,0,0,1,127,0,0,1,0,0]).await.unwrap();
                                 let mut body = [0; 4];
                                 socket.read_exact(&mut body).await.unwrap();
-                                assert_eq!(&body, b"ping");
-                                socket.write_all(b"pong").await.unwrap();
+                                match &body {
+                                    b"ping" => socket.write_all(b"pong").await.unwrap(),
+                                    b"bulk" => {
+                                        let mut body = vec![0; 1024 * 1024];
+                                        socket.read_exact(&mut body).await.unwrap();
+                                        assert!(body.iter().all(|byte| *byte == 42));
+                                        socket.write_all(&body).await.unwrap();
+                                    }
+                                    _ => panic!("unknown fixture request"),
+                                }
                             } else {
                                 assert_eq!(command, 3);
                                 let relay = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -683,7 +695,15 @@ mod tests {
                                     packet = relay.recv_from(&mut buffer) => {
                                         let (n, peer) = packet.unwrap();
                                         assert_eq!(&buffer[..10], &[0,0,0,1,203,0,113,5,0,53]);
-                                        relay.send_to(&buffer[..n], peer).await.unwrap();
+                                        if &buffer[10..n] == b"burst" {
+                                            for index in 0..32u8 {
+                                                let mut packet = buffer[..10].to_vec();
+                                                packet.extend(vec![index; 1200]);
+                                                relay.send_to(&packet, peer).await.unwrap();
+                                            }
+                                        } else {
+                                            relay.send_to(&buffer[..n], peer).await.unwrap();
+                                        }
                                     }
                                 }}
                             }
@@ -696,8 +716,46 @@ mod tests {
         (bridge, AbortOnDropHandle::new(task))
     }
 
+    fn delayed_tunnel(
+        tunnel: Box<dyn easytier::tunnel::Tunnel>,
+    ) -> Box<dyn easytier::tunnel::Tunnel> {
+        use futures_util::StreamExt;
+        let info = tunnel.info();
+        let (reader, writer) = tunnel.split();
+        // Delay packets concurrently, preserving their order and the link bandwidth.
+        let reader = reader
+            .map(|packet| async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                packet
+            })
+            .buffered(1024);
+        Box::new(easytier::tunnel::common::TunnelWrapper::new(
+            reader, writer, info,
+        ))
+    }
+
+    async fn receive_burst(udp: &SocksDatagram<TcpStream>, destination: SocketAddr) {
+        let mut reply = [0; 1400];
+        let mut seen = [false; 32];
+        let burst = tokio::time::timeout(Duration::from_secs(2), async {
+            while !seen.iter().all(|received| *received) {
+                let (n, address) = udp.recv_from(&mut reply).await.unwrap();
+                assert_eq!(address, AddrKind::Ip(destination));
+                assert_eq!(n, 1200);
+                assert!(reply[..n].iter().all(|byte| *byte == reply[0]));
+                seen[usize::from(reply[0])] = true;
+            }
+        })
+        .await;
+        assert!(
+            burst.is_ok(),
+            "received {} of 32 UDP packets",
+            seen.iter().filter(|received| **received).count()
+        );
+    }
+
     #[tokio::test]
-    async fn official_exit_frames_forward_tcp_and_fragmented_udp_through_policy_socks() {
+    async fn official_exit_frames_forward_bulk_tcp_and_udp_bursts_through_policy_socks() {
         use super::super::{
             MeshProfile, MeshSecret, easytier::configuration, easytier_gateway::GatewayRoute,
         };
@@ -728,8 +786,8 @@ mod tests {
             remote.run().await.unwrap();
             let (a, b) = create_ring_tunnel_pair();
             let (a, b) = tokio::join!(
-                local.add_client_tunnel(a, false),
-                remote.add_tunnel_as_server(b, true)
+                local.add_client_tunnel(delayed_tunnel(a), false),
+                remote.add_tunnel_as_server(delayed_tunnel(b), true)
             );
             a.unwrap();
             b.unwrap();
@@ -759,6 +817,27 @@ mod tests {
             let mut reply = [0; 4];
             tcp.read_exact(&mut reply).await.unwrap();
             assert_eq!(&reply, b"pong");
+            let mut download = TcpStream::connect(gateway.listen).await.unwrap();
+            async_socks5::connect(
+                &mut download,
+                "203.0.113.5:443".parse::<SocketAddr>().unwrap(),
+                Some(Auth::new("xrose", "fixture")),
+            )
+            .await
+            .unwrap();
+            download.write_all(b"bulk").await.unwrap();
+            // At 40 ms RTT the old 8 KiB windows need over 10 seconds for this
+            // round trip. Leave scheduling headroom for the larger, bounded
+            // windows on both gateways, which complete it in a few seconds.
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let mut body = vec![42; 1024 * 1024];
+                download.write_all(&body).await.unwrap();
+                body.fill(0);
+                download.read_exact(&mut body).await.unwrap();
+                assert!(body.iter().all(|byte| *byte == 42));
+            })
+            .await
+            .expect("bulk TCP should not stall behind an 8 KiB window");
             let control = TcpStream::connect(gateway.listen).await.unwrap();
             let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
             let address = socket.local_addr().unwrap();
@@ -777,6 +856,12 @@ mod tests {
             let (n, address) = udp.recv_from(&mut reply).await.unwrap();
             assert_eq!(address, AddrKind::Ip(destination));
             assert_eq!(&reply[..n], body);
+            udp.send_to(b"burst", destination).await.unwrap();
+            receive_burst(&udp, destination).await;
+            for index in 0..32u8 {
+                udp.send_to(&[index; 1200], destination).await.unwrap();
+            }
+            receive_burst(&udp, destination).await;
             assert!(
                 uncaptured.try_recv().is_err(),
                 "exit packets must not reach the host interface"

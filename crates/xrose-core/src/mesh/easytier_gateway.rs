@@ -24,6 +24,21 @@ use smoltcp::wire::IpProtocol;
 
 type Ports = Arc<Mutex<HashSet<(IpProtocol, u16)>>>;
 
+/// Allocate per active socket, bounded by each gateway's connection limit.
+/// The stack's 8 KiB defaults restrict WAN TCP windows and drop UDP bursts
+/// before the relay task can drain the receive queue.
+pub(super) fn socket_buffers() -> stack::BufferSize {
+    stack::BufferSize {
+        tcp_rx_size: 64 * 1024,
+        tcp_tx_size: 64 * 1024,
+        udp_rx_size: 64 * 1024,
+        udp_tx_size: 64 * 1024,
+        udp_rx_meta_size: 64,
+        udp_tx_meta_size: 64,
+        ..Default::default()
+    }
+}
+
 pub(super) struct ChannelDevice {
     pub(super) incoming: tokio::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
     pub(super) outgoing: tokio_util::sync::PollSender<Vec<u8>>,
@@ -192,16 +207,15 @@ impl Gateway {
             sender,
         }))
         .await;
-        let net = Arc::new(stack::Net::new(
-            device,
-            stack::NetConfig::new(
-                smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip),
-                address
-                    .parse()
-                    .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?,
-                vec![cidr.addr().into()],
-            ),
-        ));
+        let mut config = stack::NetConfig::new(
+            smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ip),
+            address
+                .parse()
+                .map_err(|_| Error::config("EasyTier 虚拟地址无效"))?,
+            vec![cidr.addr().into()],
+        );
+        config.buffer_size = socket_buffers();
+        let net = Arc::new(stack::Net::new(device, config));
         let mut tasks = Vec::new();
         tasks.push(tokio::spawn(async move {
             while let Some(data) = receiver.recv().await {
