@@ -112,7 +112,7 @@ impl AppView {
                     self.lang(),
                 );
                 choices.push(Choice {
-                    label: format!("{name}  HTTP {delay}").into(),
+                    label: format!("{name}  {delay}").into(),
                     checked: selected.is_some_and(|n| n.id == node.id),
                     command: (!automatic
                         && group.enabled

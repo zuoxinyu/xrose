@@ -1138,12 +1138,9 @@ impl AppView {
                 .iter()
                 .any(|busy| busy == &format!("latency:{key}"))
         });
-        let node_delay = format!(
-            "HTTP {}",
-            theme::latency_label(latency, testing, self.lang())
-        );
+        let node_delay = theme::latency_label(latency, testing, self.lang());
         if let Some(ms) = latency.and_then(|entry| entry.delay_ms) {
-            node_tip.push_str(&format!(" · HTTP {ms} ms"));
+            node_tip.push_str(&format!(" · {ms} ms"));
         }
         if running
             && !self.hide_ips
