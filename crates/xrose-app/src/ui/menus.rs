@@ -80,6 +80,7 @@ pub(super) enum Command {
     DeleteGroup(String),
     EditSubscription(String),
     DeleteSubscription(String),
+    SetDefaultDns(String),
     DeleteDns(String),
     DeleteHost(String),
     BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
@@ -799,12 +800,22 @@ impl AppView {
                     ));
             }
             MenuTarget::Dns(id) => {
+                let is_default =
+                    self.snapshot.model.dns.final_server.as_deref() == Some(id.as_str());
                 let reason = self.snapshot.dns_deletion_reason(&id);
+                menu = menu
+                    .item(add(
+                        "设为默认服务器",
+                        "Set as default server",
+                        !is_default,
+                        Command::SetDefaultDns(id.clone()),
+                    ))
+                    .separator();
                 if reason.is_some() {
                     menu = menu.label(tr(
                         lang,
-                        "请先解除默认 DNS 或 Fake-IP 引用",
-                        "Remove the default DNS or Fake-IP reference first",
+                        "请先选择其他默认服务器后再删除",
+                        "Select another default server before deleting",
                     ));
                 }
                 menu = menu.item(add(
@@ -959,6 +970,16 @@ impl AppView {
                 .rule_groups
                 .iter()
                 .any(|g| &g.id == id),
+            Command::SetDefaultDns(id) => {
+                self.snapshot.model.dns.final_server.as_deref() != Some(id.as_str())
+                    && self
+                        .snapshot
+                        .model
+                        .dns
+                        .servers
+                        .iter()
+                        .any(|s| &s.tag == id && !s.is_fakeip())
+            }
             Command::DeleteDns(id) => self.snapshot.model.dns.servers.iter().any(|s| &s.tag == id),
             Command::DeleteHost(id) => self.snapshot.model.dns.hosts.contains_key(id),
             Command::EditSubscription(id) | Command::DeleteSubscription(id) => {
@@ -1339,6 +1360,7 @@ impl AppView {
                     self.service.toast(ToastLevel::Error, e.to_string());
                 }
             }
+            Command::SetDefaultDns(id) => self.select_default_dns(&id, cx),
             Command::DeleteDns(id) => {
                 if let Err(e) = self.service.delete_dns_server(&id) {
                     self.service.toast(ToastLevel::Error, e.to_string());

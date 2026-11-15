@@ -1158,6 +1158,7 @@ fn render_virtual_node_row(
 fn http_row_controls(
     target: HttpTestTarget,
     menu: MenuTarget,
+    hover_group: SharedString,
     entry: Option<&LatencyEntry>,
     testing: bool,
     disabled: bool,
@@ -1167,7 +1168,7 @@ fn http_row_controls(
     cx: &mut Context<AppView>,
 ) -> impl IntoElement + use<> {
     let key = target.key();
-    let label = format!("HTTP {}", super::theme::latency_label(entry, false, lang));
+    let label = super::theme::latency_label(entry, false, lang);
     let detail: SharedString = entry
         .map(|entry| {
             format!(
@@ -1223,32 +1224,37 @@ fn http_row_controls(
                 .items_center()
                 .gap_1()
                 .child(
-                    Button::new(SharedString::from(format!("http-test-{key}")))
-                        .compact()
-                        .h(px(super::theme::CONTROL_HEIGHT))
-                        .custom(icon_button_style(p, false, cx))
-                        .icon(IconName::Gauge)
-                        .tooltip(if offline {
-                            super::tr(
-                                lang,
-                                "出口设备离线，请先连接所属组网",
-                                "Exit device is offline; connect its mesh network first",
-                            )
-                        } else if disabled {
-                            super::tr(
-                                lang,
-                                "请先启用节点，并等待当前任务完成",
-                                "Enable the node and wait for the current task to finish",
-                            )
-                        } else {
-                            super::tr(lang, "HTTP 测速", "HTTP test")
-                        })
-                        .accessibility_label(super::tr(lang, "HTTP 测速", "HTTP test"))
-                        .disabled(disabled)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.service.test_http_target(target.clone());
-                            this.sync(cx);
-                        })),
+                    div()
+                        .opacity(0.)
+                        .group_hover(hover_group, |s| s.opacity(1.))
+                        .child(
+                            Button::new(SharedString::from(format!("http-test-{key}")))
+                                .compact()
+                                .h(px(super::theme::CONTROL_HEIGHT))
+                                .custom(icon_button_style(p, false, cx))
+                                .icon(IconName::Gauge)
+                                .tooltip(if offline {
+                                    super::tr(
+                                        lang,
+                                        "出口设备离线，请先连接所属组网",
+                                        "Exit device is offline; connect its mesh network first",
+                                    )
+                                } else if disabled {
+                                    super::tr(
+                                        lang,
+                                        "请先启用节点，并等待当前任务完成",
+                                        "Enable the node and wait for the current task to finish",
+                                    )
+                                } else {
+                                    super::tr(lang, "HTTP 测速", "HTTP test")
+                                })
+                                .accessibility_label(super::tr(lang, "HTTP 测速", "HTTP test"))
+                                .disabled(disabled)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.service.test_http_target(target.clone());
+                                    this.sync(cx);
+                                })),
+                        ),
                 )
                 .child(
                     more_button(
@@ -1709,6 +1715,7 @@ fn render_node_row(
                 .child(http_row_controls(
                     http_target,
                     row_menu.clone(),
+                    hover_group,
                     latency,
                     testing,
                     is_latency_busy || is_core_busy || !node.enabled || offline_exit,

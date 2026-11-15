@@ -5,6 +5,7 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::dns::{self, DnsPreset};
 use xrose_core::model::{DnsServer, DnsServerType, MeshDnsMode, WorkMode};
+use xrose_core::settings::Language;
 
 use super::AppView;
 use super::menus::{self, MenuTarget};
@@ -14,8 +15,20 @@ use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
 
+fn visible_dns_servers(servers: &[DnsServer]) -> Vec<&DnsServer> {
+    servers.iter().filter(|s| !s.is_fakeip()).collect()
+}
+
+fn dns_rules_summary(domains: &[String], lang: Language) -> String {
+    if domains.is_empty() {
+        super::tr(lang, "匹配所有域名", "All domains").to_string()
+    } else {
+        domains.join(", ")
+    }
+}
+
 impl AppView {
-    fn select_default_dns(&mut self, tag: &str, cx: &mut Context<Self>) {
+    pub(super) fn select_default_dns(&mut self, tag: &str, cx: &mut Context<Self>) {
         let dns = &self.snapshot.model.dns;
         if dns.final_server.as_deref() == Some(tag)
             || !dns
@@ -127,6 +140,7 @@ impl AppView {
         );
 
         // Servers.
+        let visible_servers = visible_dns_servers(&dns_config.servers);
         body = body.child(
             card(&p)
                 .child(
@@ -248,31 +262,131 @@ impl AppView {
                             ),
                     )
                 })
-                .children(dns_config.servers.iter().map(|server| {
+                .when(visible_servers.is_empty(), |d| {
+                    d.child(empty_hint(
+                        &p,
+                        self.tr("没有 DNS 服务器", "No DNS servers"),
+                    ))
+                })
+                .children(visible_servers.into_iter().map(|server| {
                     let tag = server.tag.clone();
                     let is_final = final_tag == tag;
                     let menu_target = MenuTarget::Dns(tag.clone());
-                    let view = cx.entity().downgrade();
-                    let row_tag = tag.clone();
-                    radio_row_surface(SharedString::from(format!("dns-row-{tag}")), is_final, !server.is_fakeip(), &p)
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_default_dns(&row_tag, cx)))
-                        .child(row_radio(SharedString::from(format!("final-{tag}")),
-                            self.tr("设为默认 DNS", "Use as default DNS"), is_final, !server.is_fakeip(), &p)
-                            .tooltip(move |window, cx| Tooltip::new(super::tr(lang, "未匹配其他规则时使用此服务器", "Use this server when no other rule matches")).build(window, cx))
-                            .on_change(move |_, _, _, cx| {
-                                cx.stop_propagation();
-                                let _ = view.update(cx, |this, cx| this.select_default_dns(&tag, cx));
-                            }))
-                        .child(div().flex().flex_col().gap_1().flex_1().min_w(px(0.))
-                            .child(div().flex().items_center().gap_2()
-                                .child(div().text_sm().text_color(p.fg).child(server.tag.clone()))
-                                .when(server.tag != server.server_type.as_str(), |d| d.child(pill(server.server_type.as_str(), p.muted_fg, p.panel_alt)))
-                                .when(is_final, |d| d.child(pill(self.tr("默认", "Default"), p.primary, p.panel))))
-                            .when(!server.is_fakeip(), |d| d.child(div().text_sm().text_color(p.muted_fg).truncate().child(server.display_address())))
-                            .child(div().text_xs().text_color(p.muted_fg).truncate().child(if server.is_fakeip() { self.tr("用于 Fake-IP 解析", "Used for Fake-IP resolution").to_string() } else if server.domains.is_empty() { self.tr("匹配所有域名", "All domains").to_string() } else { server.domains.join(", ") })))
-                        .child(more_button(SharedString::from(format!("dns-menu-{}", server.tag)), self.tr("服务器操作", "Server actions"), cx)
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .dropdown_menu(menus::builder(cx.entity().downgrade(), menu_target.clone())))
+                    let action_tag = tag.clone();
+                    let address = server.display_address();
+                    let rules = dns_rules_summary(&server.domains, lang);
+                    let hover_bg = p.neutral_hover();
+                    let hover_group = SharedString::from(format!("dns-group-{tag}"));
+                    div()
+                        .id(SharedString::from(format!("dns-row-{tag}")))
+                        .group(hover_group.clone())
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(p.border)
+                        .bg(p.bg)
+                        .hover(move |s| s.bg(hover_bg))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dns-name-{tag}")))
+                                .w(px(super::theme::DNS_NAME_COL_WIDTH))
+                                .flex_shrink_0()
+                                .min_w(px(0.))
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .when(tag.chars().count() > 16, |d| {
+                                    let tip = tag.clone();
+                                    d.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                })
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(p.fg)
+                                        .min_w(px(0.))
+                                        .truncate()
+                                        .child(tag.clone()),
+                                )
+                                .when(tag != server.server_type.as_str(), |d| {
+                                    d.child(pill(server.server_type.as_str(), p.muted_fg, p.panel_alt))
+                                })
+                                .when(is_final, |d| {
+                                    d.child(pill(self.tr("默认", "Default"), p.primary, p.accent))
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dns-addr-{tag}")))
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .truncate()
+                                .when(address.chars().count() > 20, |d| {
+                                    let tip = address.clone();
+                                    d.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                })
+                                .child(address),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dns-rules-{tag}")))
+                                .flex_1()
+                                .min_w(px(0.))
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .truncate()
+                                .when(!server.domains.is_empty() && rules.chars().count() > 20, |d| {
+                                    let tip = rules.clone();
+                                    d.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                                })
+                                .child(rules),
+                        )
+                        .child(
+                            div()
+                                .w(px(super::theme::DNS_ACTION_WIDTH))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .when(!is_final, |d| {
+                                    d.child(
+                                        div()
+                                            .id(SharedString::from(format!("dns-set-default-{tag}")))
+                                            .opacity(0.)
+                                            .group_hover(hover_group, |s| s.opacity(1.))
+                                            .cursor_pointer()
+                                            .text_xs()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.primary)
+                                            .whitespace_nowrap()
+                                            .hover(|s| s.underline())
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.select_default_dns(&action_tag, cx);
+                                            }))
+                                            .child(self.tr("设为默认", "Set as default")),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .child(
+                                    more_button(
+                                        SharedString::from(format!("dns-menu-{tag}")),
+                                        self.tr("服务器操作", "Server actions"),
+                                        cx,
+                                    )
+                                    .on_click(|_, _, cx| cx.stop_propagation())
+                                    .dropdown_menu(menus::builder(cx.entity().downgrade(), menu_target.clone())),
+                                ),
+                        )
                         .context_menu(menus::builder(cx.entity().downgrade(), menu_target))
                 })),
         );
@@ -428,5 +542,36 @@ impl AppView {
 
         let _ = lang;
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dns_rules_summary, visible_dns_servers};
+    use xrose_core::dns::{DnsPreset, apply_preset};
+    use xrose_core::model::DnsConfig;
+    use xrose_core::settings::Language;
+
+    #[test]
+    fn visible_dns_servers_hides_virtual_fakeip() {
+        let mut config = DnsConfig::default();
+        apply_preset(&mut config, DnsPreset::SplitFakeIp);
+        let tags: Vec<&str> = visible_dns_servers(&config.servers)
+            .into_iter()
+            .map(|s| s.tag.as_str())
+            .collect();
+        assert!(!tags.contains(&"fakeip"));
+        assert_eq!(tags, vec!["cn", "remote", "local"]);
+    }
+
+    #[test]
+    fn dns_rules_summary_formats_empty_and_non_empty_domains() {
+        assert_eq!(dns_rules_summary(&[], Language::Zh), "匹配所有域名");
+        assert_eq!(dns_rules_summary(&[], Language::En), "All domains");
+        let domains = vec!["geosite:cn".into(), "example.com".into()];
+        assert_eq!(
+            dns_rules_summary(&domains, Language::Zh),
+            "geosite:cn, example.com"
+        );
     }
 }
