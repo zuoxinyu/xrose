@@ -6204,7 +6204,7 @@ mod tests {
         assert_eq!(
             shared,
             format!(
-                "{} [warning] stdout dial <node-server>:443\n{} [error] stderr retry token=***\n",
+                "{} [warn] stdout dial <node-server>:443\n{} [error] stderr retry token=***\n",
                 entries[1].timestamp, entries[0].timestamp
             )
         );

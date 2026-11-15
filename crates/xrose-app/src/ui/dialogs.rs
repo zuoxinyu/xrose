@@ -24,11 +24,10 @@ pub(super) fn dialog_scroll_body(
     max_height: Pixels,
     body: impl IntoElement,
 ) -> Div {
-    // Extend the viewport into the dialog padding to leave room for outer focus rings.
+    // Extend the viewport horizontally and keep vertical padding for top/bottom focus rings.
     div().mx_neg_1().child(
         div()
-            .px_1()
-            .pb_1()
+            .p_1()
             .max_h(max_height)
             .child(body)
             .overflow_y_scrollbar()
@@ -86,20 +85,22 @@ impl AppView {
         self.show_import_box = !manual;
         self.import_editor_epoch = self.import_editor_epoch.wrapping_add(1);
         let view = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, window, cx| {
             if let Some(view) = view.upgrade() {
-                view.update(cx, |this, cx| this.node_dialog(dialog, cx))
+                view.update(cx, |this, cx| this.node_dialog(dialog, window, cx))
             } else {
                 dialog
             }
         });
         if self.show_import_box {
             self.import_input.focus_handle(cx).focus(window, cx);
+        } else if self.show_manual_form {
+            self.manual_form.server.focus_handle(cx).focus(window, cx);
         }
         cx.notify();
     }
 
-    fn node_dialog(&mut self, dialog: Dialog, cx: &mut Context<Self>) -> Dialog {
+    fn node_dialog(&mut self, dialog: Dialog, window: &Window, cx: &mut Context<Self>) -> Dialog {
         let editing = self.editing_node.is_some();
         let p = palette(cx);
         let view = cx.entity().downgrade();
@@ -135,12 +136,19 @@ impl AppView {
                         ],
                         usize::from(self.show_manual_form),
                     )
-                    .on_change(cx.listener(|this, index: &usize, _, cx| {
-                        this.show_import_box = *index == 0;
-                        this.show_manual_form = *index == 1;
-                        this.manual_error = None;
-                        cx.notify();
-                    })),
+                    .on_change(cx.listener(
+                        |this, index: &usize, window, cx| {
+                            this.show_import_box = *index == 0;
+                            this.show_manual_form = *index == 1;
+                            this.manual_error = None;
+                            if this.show_import_box {
+                                this.import_input.focus_handle(cx).focus(window, cx);
+                            } else if this.show_manual_form {
+                                this.manual_form.server.focus_handle(cx).focus(window, cx);
+                            }
+                            cx.notify();
+                        },
+                    )),
                 ),
             );
         }
@@ -191,7 +199,11 @@ impl AppView {
                 )
         } else if self.show_manual_form {
             dialog
-                .child(self.manual_node_fields(cx))
+                .child(dialog_scroll_body(
+                    "manual-node-scroll",
+                    px(520.).min(window.viewport_size().height * 0.58),
+                    self.manual_node_fields(cx),
+                ))
                 .footer(self.manual_node_footer(cx))
         } else {
             let p = palette(cx);

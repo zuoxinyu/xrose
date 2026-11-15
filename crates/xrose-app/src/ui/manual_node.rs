@@ -6,7 +6,7 @@
 use gpui_base::Disableable;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
@@ -14,7 +14,7 @@ use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
 mod vpn;
 
 use super::AppView;
-use super::theme::{Palette, palette};
+use super::theme::{CONTROL_HEIGHT, FORM_FIELD_WIDTH, Palette, SETTING_LABEL_WIDTH, palette};
 use super::widgets::*;
 
 pub(crate) struct ManualNodeForm {
@@ -68,30 +68,30 @@ impl ManualNodeForm {
         });
         Self {
             vpn: vpn::VpnForm::new(window, cx),
-            name: text(window, cx, "名称（留空自动使用 地址:端口）"),
+            name: text(window, cx, "留空自动使用 地址:端口"),
             server: text(window, cx, "example.com 或 1.2.3.4"),
             port,
-            uuid: text(window, cx, "UUID / 用户 ID"),
-            password: text(window, cx, "密码"),
-            username: text(window, cx, "用户名（可选）"),
+            uuid: text(window, cx, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
+            password: text(window, cx, "输入节点密码或密钥"),
+            username: text(window, cx, "可选，例如 user"),
             method: text(window, cx, "aes-256-gcm"),
-            flow: text(window, cx, "xtls-rprx-vision（可选）"),
-            sni: text(window, cx, "TLS SNI（留空使用服务器地址）"),
-            alpn: text(window, cx, "h2,http/1.1（可选）"),
-            fingerprint: text(window, cx, "chrome（可选）"),
-            reality_public_key: text(window, cx, "Reality 公钥 pbk"),
-            reality_short_id: text(window, cx, "Reality shortId（可选）"),
+            flow: text(window, cx, "xtls-rprx-vision"),
+            sni: text(window, cx, "留空默认使用服务器地址"),
+            alpn: text(window, cx, "h2,http/1.1"),
+            fingerprint: text(window, cx, "chrome"),
+            reality_public_key: text(window, cx, "Base64url 公钥"),
+            reality_short_id: text(window, cx, "0123abcd"),
             path,
-            host: text(window, cx, "WS/H2 Host（可选）"),
-            service_name: text(window, cx, "gRPC serviceName"),
-            tags: text(window, cx, "标签，逗号分隔（可选）"),
-            wireguard_private_key: text(window, cx, "Private key"),
-            wireguard_public_key: text(window, cx, "Peer public key"),
-            wireguard_pre_shared_key: text(window, cx, "Pre-shared key (optional)"),
-            wireguard_addresses: text(window, cx, "Local addresses (comma separated)"),
-            wireguard_allowed_ips: text(window, cx, "Allowed networks"),
-            wireguard_mtu: text(window, cx, "MTU"),
-            wireguard_reserved: text(window, cx, "Reserved (3 bytes)"),
+            host: text(window, cx, "cdn.example.com"),
+            service_name: text(window, cx, "grpc-service"),
+            tags: text(window, cx, "hk, relay（逗号分隔）"),
+            wireguard_private_key: text(window, cx, "Base64 私钥"),
+            wireguard_public_key: text(window, cx, "Base64 对端公钥"),
+            wireguard_pre_shared_key: text(window, cx, "Base64 预共享密钥（可选）"),
+            wireguard_addresses: text(window, cx, "10.0.0.2/32, fd00::2/128"),
+            wireguard_allowed_ips: text(window, cx, "0.0.0.0/0, ::/0"),
+            wireguard_mtu: text(window, cx, "1408"),
+            wireguard_reserved: text(window, cx, "0,0,0"),
             protocol: Protocol::Vless,
             transport: TransportKind::Tcp,
             tls: true,
@@ -162,71 +162,69 @@ impl ManualNodeForm {
         for (input, placeholder) in [
             (
                 &self.name,
-                tr(
-                    "名称（留空自动使用 地址:端口）",
-                    "Name (blank uses host:port)",
-                ),
+                tr("留空自动使用 地址:端口", "Blank uses host:port"),
             ),
             (
                 &self.server,
                 tr("example.com 或 1.2.3.4", "example.com or 1.2.3.4"),
             ),
-            (&self.uuid, tr("UUID / 用户 ID", "UUID / user ID")),
-            (&self.password, tr("密码", "Password")),
-            (&self.username, tr("用户名（可选）", "Username (optional)")),
             (
-                &self.flow,
-                tr("xtls-rprx-vision（可选）", "xtls-rprx-vision (optional)"),
-            ),
-            (
-                &self.sni,
+                &self.uuid,
                 tr(
-                    "TLS SNI（留空使用服务器地址）",
-                    "TLS SNI (blank uses server address)",
+                    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                    "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
                 ),
             ),
             (
-                &self.alpn,
-                tr("h2,http/1.1（可选）", "h2,http/1.1 (optional)"),
+                &self.password,
+                tr("输入节点密码或密钥", "Enter password or secret"),
             ),
-            (&self.fingerprint, tr("chrome（可选）", "chrome (optional)")),
+            (&self.username, tr("可选，例如 user", "Optional, e.g. user")),
+            (&self.method, tr("aes-256-gcm", "aes-256-gcm")),
+            (&self.flow, tr("xtls-rprx-vision", "xtls-rprx-vision")),
+            (
+                &self.sni,
+                tr("留空默认使用服务器地址", "Blank uses server address"),
+            ),
+            (&self.alpn, tr("h2,http/1.1", "h2,http/1.1")),
+            (&self.fingerprint, tr("chrome", "chrome")),
             (
                 &self.reality_public_key,
-                tr("Reality 公钥 pbk", "Reality public key pbk"),
+                tr("Base64url 公钥", "Base64url public key"),
             ),
-            (
-                &self.reality_short_id,
-                tr("Reality shortId（可选）", "Reality shortId (optional)"),
-            ),
-            (
-                &self.host,
-                tr("WS/H2 Host（可选）", "WS/H2 Host (optional)"),
-            ),
+            (&self.reality_short_id, tr("0123abcd", "0123abcd")),
+            (&self.path, tr("/ws", "/ws")),
+            (&self.host, tr("cdn.example.com", "cdn.example.com")),
+            (&self.service_name, tr("grpc-service", "grpc-service")),
             (
                 &self.tags,
-                tr("标签，逗号分隔（可选）", "Tags, comma separated (optional)"),
+                tr("hk, relay（逗号分隔）", "hk, relay (comma separated)"),
             ),
-            (&self.wireguard_private_key, tr("本机私钥", "Private key")),
+            (
+                &self.wireguard_private_key,
+                tr("Base64 私钥", "Base64 private key"),
+            ),
             (
                 &self.wireguard_public_key,
-                tr("对端公钥", "Peer public key"),
+                tr("Base64 对端公钥", "Base64 peer public key"),
             ),
             (
                 &self.wireguard_pre_shared_key,
-                tr("预共享密钥（可选）", "Pre-shared key (optional)"),
+                tr(
+                    "Base64 预共享密钥（可选）",
+                    "Base64 pre-shared key (optional)",
+                ),
             ),
             (
                 &self.wireguard_addresses,
-                tr("本机地址（逗号分隔）", "Local addresses (comma separated)"),
+                tr("10.0.0.2/32, fd00::2/128", "10.0.0.2/32, fd00::2/128"),
             ),
             (
                 &self.wireguard_allowed_ips,
-                tr("允许网段", "Allowed networks"),
+                tr("0.0.0.0/0, ::/0", "0.0.0.0/0, ::/0"),
             ),
-            (
-                &self.wireguard_reserved,
-                tr("保留字节（3 字节）", "Reserved (3 bytes)"),
-            ),
+            (&self.wireguard_mtu, tr("1408", "1408")),
+            (&self.wireguard_reserved, tr("0,0,0", "0,0,0")),
         ] {
             input.update(cx, |input, cx| {
                 input.set_placeholder(placeholder, window, cx)
@@ -316,35 +314,143 @@ impl ManualNodeForm {
     }
 }
 
-/// One parameter per row: fixed label column on the left, control filling the
-/// remaining width. Horizontal packing made multi-field rows unreadable once
-/// the window was scaled (150% DPI) or narrowed.
-fn field(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FieldWidth {
+    Compact,
+    Medium,
+    Full,
+}
+
+impl FieldWidth {
+    pub(super) fn fixed_width(self) -> Option<Pixels> {
+        match self {
+            Self::Compact => Some(px(SETTING_LABEL_WIDTH)),
+            Self::Medium => Some(px(FORM_FIELD_WIDTH)),
+            Self::Full => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowWidth {
+    Auto,
+    Fixed(Pixels),
+    Full,
+}
+
+impl From<FieldWidth> for RowWidth {
+    fn from(value: FieldWidth) -> Self {
+        match value.fixed_width() {
+            Some(width) => Self::Fixed(width),
+            None => Self::Full,
+        }
+    }
+}
+
+fn show_reality_fields(protocol: Protocol, public_key: &str, short_id: &str) -> bool {
+    protocol == Protocol::Vless || !public_key.trim().is_empty() || !short_id.trim().is_empty()
+}
+
+/// Two-column form row aligned to the shared `SETTING_LABEL_WIDTH` / `CONTROL_HEIGHT` grid.
+fn form_row(
     p: &Palette,
     label: impl Into<SharedString>,
-    input: Entity<InputState>,
-    _grow: bool,
-) -> impl IntoElement {
-    div()
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    width: RowWidth,
+) -> Div {
+    let description = description.into();
+    let control_wrap = div()
         .flex()
         .items_center()
+        .min_h(px(CONTROL_HEIGHT))
+        .max_w_full();
+    let control_wrap = match width {
+        RowWidth::Auto => control_wrap,
+        RowWidth::Fixed(width) => control_wrap.w(width),
+        RowWidth::Full => control_wrap.w_full(),
+    }
+    .child(control);
+
+    div()
+        .flex()
+        .items_start()
+        .flex_shrink_0()
         .gap_3()
-        .max_w(px(900.))
+        .py_0p5()
         .child(
             div()
-                .w(px(150.))
+                .w(px(SETTING_LABEL_WIDTH))
+                .min_h(px(CONTROL_HEIGHT))
+                .flex()
+                .items_center()
                 .flex_shrink_0()
-                .text_xs()
+                .text_sm()
                 .text_color(p.muted_fg)
                 .child(label.into()),
         )
-        .child(div().flex_1().min_w(px(0.)).child(Input::new(&input)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .flex_1()
+                .min_w(px(0.))
+                .child(control_wrap)
+                .when(!description.is_empty(), |d| {
+                    d.child(div().text_xs().text_color(p.muted_fg).child(description))
+                }),
+        )
 }
 
-fn section_label(p: &Palette, label: impl Into<SharedString>) -> impl IntoElement {
+pub(super) fn field(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    input: Entity<InputState>,
+    width: FieldWidth,
+) -> Div {
+    field_with_desc(p, label, "", input, width)
+}
+
+pub(super) fn field_with_desc(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    input: Entity<InputState>,
+    width: FieldWidth,
+) -> Div {
+    form_row(p, label, description, Input::new(&input), width.into())
+}
+
+pub(super) fn textarea_field(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    input: &Entity<TextareaState>,
+) -> Div {
+    form_row(
+        p,
+        label,
+        description,
+        Textarea::new(input).h(px(80.)),
+        RowWidth::Full,
+    )
+}
+
+fn control_row(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    form_row(p, label, description, control, RowWidth::Auto)
+}
+
+fn section_heading(p: &Palette, label: impl Into<SharedString>) -> impl IntoElement {
     div()
-        .pt_2()
-        .text_xs()
+        .pt_1()
+        .text_sm()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(p.fg)
         .child(label.into())
@@ -396,12 +502,12 @@ impl AppView {
             credentials = credentials.child(field(
                 &p,
                 if protocol == Protocol::Tuic {
-                    self.tr("UUID（TUIC 用户 ID）", "UUID")
+                    self.tr("UUID（TUIC）", "UUID (TUIC)")
                 } else {
                     self.tr("UUID / 用户 ID", "UUID / user id")
                 },
                 form.uuid.clone(),
-                true,
+                FieldWidth::Full,
             ));
         }
         if protocol == Protocol::Vless {
@@ -409,7 +515,7 @@ impl AppView {
                 &p,
                 self.tr("Flow（可选）", "Flow (optional)"),
                 form.flow.clone(),
-                true,
+                FieldWidth::Medium,
             ));
         }
         if protocol == Protocol::Shadowsocks {
@@ -417,7 +523,7 @@ impl AppView {
                 &p,
                 self.tr("加密方式", "Cipher"),
                 form.method.clone(),
-                true,
+                FieldWidth::Medium,
             ));
         }
         if needs_username {
@@ -425,7 +531,7 @@ impl AppView {
                 &p,
                 self.tr("用户名", "Username"),
                 form.username.clone(),
-                true,
+                FieldWidth::Full,
             ));
         }
         if needs_password {
@@ -437,105 +543,128 @@ impl AppView {
                     self.tr("密码 / 密钥", "Password")
                 },
                 form.password.clone(),
-                true,
+                FieldWidth::Full,
             ));
         }
 
         let transport_fields = match transport {
-            TransportKind::WebSocket | TransportKind::Http2 | TransportKind::HttpUpgrade => div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(field(
-                    &p,
-                    self.tr("路径 Path", "Path"),
-                    form.path.clone(),
-                    true,
-                ))
-                .child(field(
-                    &p,
-                    self.tr("Host / CDN（可选）", "Host / CDN (optional)"),
-                    form.host.clone(),
-                    true,
-                )),
-            TransportKind::Grpc => div().child(field(
-                &p,
-                self.tr("serviceName", "serviceName"),
-                form.service_name.clone(),
-                true,
-            )),
-            _ => div().text_xs().text_color(p.muted_fg).child(self.tr(
-                "TCP 直连，无需额外传输参数",
-                "Plain TCP: no extra transport options",
-            )),
-        };
-
-        div().flex().flex_col().gap_3().min_w(px(0.)).pb_1()
-            .child(
+            TransportKind::WebSocket | TransportKind::Http2 | TransportKind::HttpUpgrade => Some(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_1p5()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr("协议", "Protocol")),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .children(Protocol::manual().into_iter().map(|candidate| {
-                                let selected = protocol == candidate;
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "manual-protocol-{}",
-                                        candidate.as_str()
-                                    )))
-                                    .px_2()
-                                    .py_1()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .border_1()
-                                    .border_color(if selected { p.primary } else { p.border })
-                                    .bg(if selected { p.accent } else { p.bg })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        let old_port = this.manual_form.protocol.default_port().to_string();
-                                        if this.manual_form.port.read(cx).value().as_ref() == old_port.as_str() {
-                                            this.manual_form.port.update(cx, |s,cx| s.set_value(candidate.default_port().to_string(), window, cx));
-                                        }
-                                        this.manual_form.protocol = candidate;
-                                        if candidate == Protocol::Wireguard || candidate.is_vpn() { this.manual_form.transport = TransportKind::Tcp; this.manual_form.insecure = false; }
-                                        if candidate.is_vpn() {
-                                            this.manual_form.tls = true;
-                                            for input in [&this.manual_form.alpn, &this.manual_form.fingerprint, &this.manual_form.reality_public_key, &this.manual_form.reality_short_id] {
-                                                input.update(cx, |s,cx| s.set_value("", window, cx));
-                                            }
-                                        }
-                                        if matches!(candidate, Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls) {
-                                            this.manual_form.tls = true;
-                                            this.manual_form.transport = TransportKind::Tcp;
-                                        }
-                                        this.manual_error = None;
-                                        cx.notify();
-                                    }))
-                                    .child(candidate.display_name())
-                            })),
-                    ),
-            )
-            .when(protocol == Protocol::Wireguard, |d| d.child(div().flex().flex_col().gap_2()
-                .child(field(&p, self.tr("私钥", "Private key"), form.wireguard_private_key.clone(), true))
-                .child(field(&p, self.tr("对端公钥", "Peer public key"), form.wireguard_public_key.clone(), true))
-                .child(field(&p, self.tr("预共享密钥（可选）", "Pre-shared key (optional)"), form.wireguard_pre_shared_key.clone(), true))
-                .child(field(&p, self.tr("本地地址（逗号分隔）", "Local addresses (comma separated)"), form.wireguard_addresses.clone(), true))
-                .child(field(&p, self.tr("允许网段", "Allowed networks"), form.wireguard_allowed_ips.clone(), true))
-                .child(field(&p, self.tr("MTU", "MTU"), form.wireguard_mtu.clone(), true))
-                .child(field(&p, self.tr("Reserved（3 字节）", "Reserved (3 bytes)"), form.wireguard_reserved.clone(), true))
+                    .gap_2()
+                    .child(field(
+                        &p,
+                        self.tr("路径 Path", "Path"),
+                        form.path.clone(),
+                        FieldWidth::Full,
+                    ))
+                    .child(field(
+                        &p,
+                        self.tr("Host / CDN（可选）", "Host / CDN (optional)"),
+                        form.host.clone(),
+                        FieldWidth::Full,
+                    )),
+            ),
+            TransportKind::Grpc => Some(div().flex().flex_col().gap_2().child(field(
+                &p,
+                self.tr("serviceName", "serviceName"),
+                form.service_name.clone(),
+                FieldWidth::Medium,
+            ))),
+            TransportKind::Tcp | TransportKind::Kcp | TransportKind::Quic => None,
+        };
+        let transport_note: SharedString = match transport {
+            TransportKind::Tcp => self.tr(
+                "TCP 直连，无需额外传输参数。",
+                "Plain TCP: no extra transport parameters.",
+            ),
+            TransportKind::Kcp => self.tr(
+                "mKCP 使用默认传输参数。",
+                "mKCP uses default transport parameters.",
+            ),
+            TransportKind::Quic => self.tr(
+                "QUIC 使用默认传输参数。",
+                "QUIC uses default transport parameters.",
+            ),
+            _ => "".into(),
+        };
+
+        let show_reality = show_reality_fields(
+            protocol,
+            form.reality_public_key.read(cx).value().as_ref(),
+            form.reality_short_id.read(cx).value().as_ref(),
+        );
+        let protocols = Protocol::manual();
+        let selected_protocol = protocols
+            .iter()
+            .position(|candidate| *candidate == protocol);
+        let transports = TransportKind::all();
+        let selected_transport = transports
+            .iter()
+            .position(|candidate| *candidate == transport);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .min_w(px(0.))
+            .pb_1()
+            .child(control_row(
+                &p,
+                self.tr("协议", "Protocol"),
+                "",
+                ChoiceGroup::new(
+                    "manual-protocol",
+                    protocols
+                        .into_iter()
+                        .map(|candidate| SharedString::from(candidate.display_name()))
+                        .collect(),
+                    selected_protocol,
+                )
+                .small()
+                .on_change(cx.listener(|this, index: &usize, window, cx| {
+                    let Some(candidate) = Protocol::manual().into_iter().nth(*index) else {
+                        return;
+                    };
+                    if candidate == this.manual_form.protocol {
+                        return;
+                    }
+                    let old_port = this.manual_form.protocol.default_port().to_string();
+                    if this.manual_form.port.read(cx).value().as_ref() == old_port.as_str() {
+                        this.manual_form.port.update(cx, |s, cx| {
+                            s.set_value(candidate.default_port().to_string(), window, cx)
+                        });
+                    }
+                    this.manual_form.protocol = candidate;
+                    if candidate == Protocol::Wireguard || candidate.is_vpn() {
+                        this.manual_form.transport = TransportKind::Tcp;
+                        this.manual_form.insecure = false;
+                    }
+                    if candidate.is_vpn() {
+                        this.manual_form.tls = true;
+                        for input in [
+                            &this.manual_form.alpn,
+                            &this.manual_form.fingerprint,
+                            &this.manual_form.reality_public_key,
+                            &this.manual_form.reality_short_id,
+                        ] {
+                            input.update(cx, |s, cx| s.set_value("", window, cx));
+                        }
+                    }
+                    if matches!(
+                        candidate,
+                        Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+                    ) {
+                        this.manual_form.tls = true;
+                        this.manual_form.transport = TransportKind::Tcp;
+                    }
+                    this.manual_error = None;
+                    cx.notify();
+                })),
             ))
-            .child(section_label(&p, self.tr("基础", "Basics")))
+            .child(divider(&p))
+            .child(section_heading(&p, self.tr("基础", "Basics")))
             .child(
                 div()
                     .flex()
@@ -545,180 +674,296 @@ impl AppView {
                         &p,
                         self.tr("名称（可选）", "Name (optional)"),
                         form.name.clone(),
-                        true,
+                        FieldWidth::Full,
                     ))
                     .child(field(
                         &p,
                         self.tr("服务器", "Server"),
                         form.server.clone(),
-                        true,
+                        FieldWidth::Full,
                     ))
                     .child(field(
                         &p,
                         self.tr("端口", "Port"),
                         form.port.clone(),
-                        false,
+                        FieldWidth::Compact,
                     )),
             )
             .when(has_credentials, |d| {
-                d.child(section_label(&p, self.tr("凭据", "Credentials")))
+                d.child(divider(&p))
+                    .child(section_heading(&p, self.tr("凭据", "Credentials")))
                     .child(credentials)
             })
+            .when(protocol == Protocol::Wireguard, |d| {
+                d.child(divider(&p))
+                    .child(section_heading(&p, "WireGuard"))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(field(
+                                &p,
+                                self.tr("私钥", "Private key"),
+                                form.wireguard_private_key.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("对端公钥", "Peer public key"),
+                                form.wireguard_public_key.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("预共享密钥（可选）", "Pre-shared key (optional)"),
+                                form.wireguard_pre_shared_key.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("本地地址（逗号分隔）", "Local addresses"),
+                                form.wireguard_addresses.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("允许网段", "Allowed networks"),
+                                form.wireguard_allowed_ips.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("MTU", "MTU"),
+                                form.wireguard_mtu.clone(),
+                                FieldWidth::Compact,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("Reserved（3 字节）", "Reserved (3 bytes)"),
+                                form.wireguard_reserved.clone(),
+                                FieldWidth::Compact,
+                            )),
+                    )
+            })
             .when(protocol.is_vpn(), |d| {
-                d.child(section_label(&p, self.tr("VPN 参数", "VPN settings")))
-                    .child(form.vpn.fields(protocol, &p, |zh,en| self.tr(zh,en)))
-                    .child(toggle("vpn-pushed-dns", self.tr("使用 VPN 下发的分域 DNS", "Use VPN split DNS"), form.vpn.use_pushed_dns)
-                        .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.use_pushed_dns = *checked;cx.notify();})))
-                    .child(field(&p, self.tr("服务器证书名称（可选）", "Server certificate name (optional)"), form.sni.clone(), true))
-                    .when(protocol == Protocol::Openconnect, |d| d.child(div().flex().flex_col().items_start().gap_3()
-                        .child(toggle("vpn-no-udp", self.tr("仅使用 TLS 连接", "Use TLS transport only"), form.vpn.disable_udp)
-                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.vpn.disable_udp = *checked;cx.notify();})))
-                        .child(toggle("vpn-insecure", self.tr("允许不安全证书", "Allow insecure certificates"), insecure)
-                            .on_change(cx.listener(|this,checked,_,cx| {this.manual_form.insecure = *checked;cx.notify();})))
+                d.child(divider(&p))
+                    .child(section_heading(&p, self.tr("VPN 参数", "VPN settings")))
+                    .child(form.vpn.fields(protocol, &p, |zh, en| self.tr(zh, en)))
+                    .child(control_row(
+                        &p,
+                        self.tr("分域 DNS", "Split DNS"),
+                        "",
+                        toggle(
+                            "vpn-pushed-dns",
+                            self.tr("使用 VPN 下发的分域 DNS", "Use VPN split DNS"),
+                            form.vpn.use_pushed_dns,
+                        )
+                        .on_change(cx.listener(|this, checked, _, cx| {
+                            this.manual_form.vpn.use_pushed_dns = *checked;
+                            cx.notify();
+                        })),
                     ))
+                    .child(field(
+                        &p,
+                        self.tr("服务器证书名称（可选）", "Server cert name (optional)"),
+                        form.sni.clone(),
+                        FieldWidth::Full,
+                    ))
+                    .when(protocol == Protocol::Openconnect, |d| {
+                        d.child(control_row(
+                            &p,
+                            self.tr("传输模式", "Transport"),
+                            self.tr(
+                                "禁用 DTLS/UDP 数据通道，仅通过 TCP/TLS 转发流量。",
+                                "Disable DTLS/UDP and send all traffic over TCP/TLS.",
+                            ),
+                            toggle(
+                                "vpn-no-udp",
+                                self.tr("仅使用 TLS 连接", "Use TLS transport only"),
+                                form.vpn.disable_udp,
+                            )
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.manual_form.vpn.disable_udp = *checked;
+                                cx.notify();
+                            })),
+                        ))
+                        .child(control_row(
+                            &p,
+                            self.tr("证书校验", "Verification"),
+                            self.tr(
+                                "跳过服务端 TLS 证书与主机名校验，仅在可信或自签名环境下启用。",
+                                "Skip server TLS certificate and hostname checks. Only enable for trusted or self-signed endpoints.",
+                            ),
+                            toggle(
+                                "vpn-insecure",
+                                self.tr("允许不安全证书", "Allow insecure certificates"),
+                                insecure,
+                            )
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.manual_form.insecure = *checked;
+                                cx.notify();
+                            })),
+                        ))
+                    })
             })
             .when(tls_capable, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .child(section_label(&p, self.tr("TLS / Reality", "TLS / Reality")))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .gap_3()
-                                .child(
-                                    toggle("manual-tls", "TLS", tls || !transport_capable).disabled(!transport_capable).on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.manual_form.tls = *checked;
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(
-                                    toggle(
-                                        "manual-insecure",
-                                        self.tr("允许不安全证书", "Allow insecure"),
-                                        insecure,
+                d.child(divider(&p))
+                    .child(section_heading(
+                        &p,
+                        if show_reality {
+                            self.tr("TLS / Reality", "TLS / Reality")
+                        } else {
+                            self.tr("TLS", "TLS")
+                        },
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(control_row(
+                                &p,
+                                "TLS",
+                                if !transport_capable {
+                                    self.tr(
+                                        "当前协议强制启用 TLS。",
+                                        "TLS is always enabled for this protocol.",
                                     )
-                                    .on_change(cx.listener(
-                                        |this, checked, _, cx| {
-                                            this.manual_form.insecure = *checked;
-                                            cx.notify();
-                                        },
-                                    )),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(field(
-                                    &p,
-                                    self.tr("SNI（可选）", "SNI (optional)"),
-                                    form.sni.clone(),
-                                    true,
-                                ))
-                                .child(field(
-                                    &p,
-                                    self.tr("ALPN（逗号分隔）", "ALPN (comma separated)"),
-                                    form.alpn.clone(),
-                                    true,
-                                ))
-                                .child(field(
-                                    &p,
-                                    self.tr("uTLS 指纹（可选）", "uTLS fingerprint"),
-                                    form.fingerprint.clone(),
-                                    true,
+                                } else {
+                                    "".into()
+                                },
+                                toggle(
+                                    "manual-tls",
+                                    self.tr("启用 TLS", "Enable TLS"),
+                                    tls || !transport_capable,
+                                )
+                                .disabled(!transport_capable)
+                                .on_change(cx.listener(
+                                    |this, checked, _, cx| {
+                                        this.manual_form.tls = *checked;
+                                        cx.notify();
+                                    },
                                 )),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(field(
+                            ))
+                            .child(control_row(
+                                &p,
+                                self.tr("证书校验", "Verification"),
+                                self.tr(
+                                    "跳过服务端 TLS 证书与主机名校验，仅在可信或自签名环境下启用。",
+                                    "Skip server TLS certificate and hostname checks. Only enable for trusted or self-signed endpoints.",
+                                ),
+                                toggle(
+                                    "manual-insecure",
+                                    self.tr("允许不安全证书", "Allow insecure certificates"),
+                                    insecure,
+                                )
+                                .on_change(cx.listener(
+                                    |this, checked, _, cx| {
+                                        this.manual_form.insecure = *checked;
+                                        cx.notify();
+                                    },
+                                )),
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("SNI（可选）", "SNI (optional)"),
+                                form.sni.clone(),
+                                FieldWidth::Full,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("ALPN（可选）", "ALPN (optional)"),
+                                form.alpn.clone(),
+                                FieldWidth::Medium,
+                            ))
+                            .child(field(
+                                &p,
+                                self.tr("uTLS 指纹（可选）", "uTLS fingerprint"),
+                                form.fingerprint.clone(),
+                                FieldWidth::Medium,
+                            ))
+                            .when(show_reality, |d| {
+                                d.child(field(
                                     &p,
                                     self.tr("Reality 公钥 pbk", "Reality public key"),
                                     form.reality_public_key.clone(),
-                                    true,
+                                    FieldWidth::Full,
                                 ))
-                                .child(field(
+                                .child(field_with_desc(
                                     &p,
-                                    self.tr("Reality shortId（可选）", "Reality shortId"),
+                                    self.tr("Reality shortId", "Reality shortId"),
+                                    self.tr(
+                                        "填写公钥即启用 Reality（自动开启 TLS），shortId 可留空。",
+                                        "Setting a public key enables Reality and TLS automatically; shortId is optional.",
+                                    ),
                                     form.reality_short_id.clone(),
-                                    true,
-                                )),
-                        )
-                        .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                            "Reality：填写公钥即启用（自动开启 TLS），shortId 可留空",
-                            "Reality turns on as soon as a public key is filled in; shortId may stay empty",
-                        ))),
-                )
+                                    FieldWidth::Medium,
+                                ))
+                            }),
+                    )
             })
             .when(transport_capable, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1p5()
-                        .child(section_label(&p, self.tr("传输层", "Transport")))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_1()
-                                .children(TransportKind::all().into_iter().map(|candidate| {
-                                    let selected = transport == candidate;
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "manual-transport-{}",
-                                            candidate.as_str()
-                                        )))
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_md()
-                                        .text_xs()
-                                        .border_1()
-                                        .border_color(if selected {
-                                            p.primary
-                                        } else {
-                                            p.border
+                d.child(divider(&p))
+                    .child(section_heading(&p, self.tr("传输层", "Transport")))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(control_row(
+                                &p,
+                                self.tr("类型", "Mode"),
+                                transport_note,
+                                ChoiceGroup::new(
+                                    "manual-transport",
+                                    transports
+                                        .into_iter()
+                                        .map(|candidate| {
+                                            SharedString::from(candidate.display_name())
                                         })
-                                        .bg(if selected { p.accent } else { p.bg })
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.manual_form.transport = candidate;
-                                            cx.notify();
-                                        }))
-                                        .child(candidate.display_name())
+                                        .collect(),
+                                    selected_transport,
+                                )
+                                .small()
+                                .on_change(cx.listener(|this, index: &usize, _, cx| {
+                                    if let Some(candidate) = TransportKind::all().into_iter().nth(*index)
+                                    {
+                                        this.manual_form.transport = candidate;
+                                        cx.notify();
+                                    }
                                 })),
-                        )
-                        .child(transport_fields),
-                )
+                            ))
+                            .when_some(transport_fields, |d, fields| d.child(fields)),
+                    )
             })
+            .child(divider(&p))
+            .child(section_heading(&p, self.tr("其他", "Options")))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .when(!protocol.is_vpn(), |d| d.child(
-                        toggle("manual-udp", self.tr("启用 UDP", "UDP"), udp).on_change(
-                            cx.listener(|this, checked, _, cx| {
-                                this.manual_form.udp = *checked;
-                                cx.notify();
-                            }),
-                        ),
-                    ))
+                    .when(!protocol.is_vpn(), |d| {
+                        d.child(control_row(
+                            &p,
+                            self.tr("UDP 转发", "UDP"),
+                            self.tr(
+                                "允许通过该节点转发 UDP 流量。",
+                                "Forward UDP traffic through this node.",
+                            ),
+                            toggle("manual-udp", self.tr("启用 UDP", "Enable UDP"), udp)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.manual_form.udp = *checked;
+                                    cx.notify();
+                                })),
+                        ))
+                    })
                     .child(field(
                         &p,
-                        self.tr("标签（逗号分隔，可选）", "Tags (comma separated)"),
+                        self.tr("标签（可选）", "Tags (optional)"),
                         form.tags.clone(),
-                        true,
+                        FieldWidth::Full,
                     )),
             )
     }
@@ -780,5 +1025,31 @@ impl AppView {
                 d.child(super::widgets::form_feedback(error, false, &p))
             })
             .child(actions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FORM_FIELD_WIDTH, FieldWidth, Protocol, SETTING_LABEL_WIDTH, show_reality_fields};
+    use gpui_kit::px;
+
+    #[test]
+    fn reality_fields_scope_to_vless_unless_already_populated() {
+        assert!(show_reality_fields(Protocol::Vless, "", ""));
+        assert!(!show_reality_fields(Protocol::Trojan, "", ""));
+        assert!(!show_reality_fields(Protocol::Vmess, "", "  "));
+        assert!(!show_reality_fields(Protocol::Hysteria2, "", ""));
+        assert!(show_reality_fields(Protocol::Trojan, "pbk-value", ""));
+        assert!(show_reality_fields(Protocol::Vmess, "", "abcd"));
+    }
+
+    #[test]
+    fn field_width_maps_to_design_tokens() {
+        assert_eq!(
+            FieldWidth::Compact.fixed_width(),
+            Some(px(SETTING_LABEL_WIDTH))
+        );
+        assert_eq!(FieldWidth::Medium.fixed_width(), Some(px(FORM_FIELD_WIDTH)));
+        assert_eq!(FieldWidth::Full.fixed_width(), None);
     }
 }

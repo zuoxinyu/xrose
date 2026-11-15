@@ -884,7 +884,16 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
                     .child(div().min_w_0().truncate().child(label)),
             );
         }
-        group
+        if wrap {
+            // Keep a block wrapper around wrapped groups so flex rows measure all lines.
+            div()
+                .max_w_full()
+                .when(full_width, |wrapper| wrapper.w_full())
+                .child(group)
+                .into_any_element()
+        } else {
+            group.into_any_element()
+        }
     }
 }
 

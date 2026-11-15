@@ -69,7 +69,7 @@ impl LogLevel {
             LogLevel::Trace => "trace",
             LogLevel::Debug => "debug",
             LogLevel::Info => "info",
-            LogLevel::Warn => "warning",
+            LogLevel::Warn => "warn",
             LogLevel::Error => "error",
         }
     }

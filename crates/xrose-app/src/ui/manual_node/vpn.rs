@@ -1,7 +1,7 @@
 //! Client VPN form controls. Hidden advanced imported options survive normal edits.
 
-use super::{AppView, Palette, field};
-use gpui_kit::component::input::{InputState, Textarea, TextareaState};
+use super::{AppView, FieldWidth, Palette, field, field_with_desc, textarea_field};
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use xrose_core::model::{NodeDraft, OpenConnectOptions, OpenVpnOptions, Protocol, VpnCertificates};
 
@@ -199,130 +199,134 @@ impl VpnForm {
                 (
                     tr("传输（udp / tcp）", "Transport (udp / tcp)"),
                     self.network.clone(),
+                    FieldWidth::Compact,
                 ),
                 (
                     tr("数据加密（逗号分隔）", "Data ciphers (comma separated)"),
                     self.ciphers.clone(),
+                    FieldWidth::Full,
                 ),
                 (
                     tr("兼容加密（可选）", "Fallback cipher (optional)"),
                     self.fallback_cipher.clone(),
+                    FieldWidth::Medium,
                 ),
                 (
                     tr("认证摘要（可选）", "Auth digest (optional)"),
                     self.auth.clone(),
+                    FieldWidth::Medium,
                 ),
                 (
                     tr("证书匹配方式（可选）", "Certificate match (optional)"),
                     self.name_match.clone(),
+                    FieldWidth::Medium,
                 ),
                 (
                     tr("控制通道模式（可选）", "Control channel mode (optional)"),
                     self.control_mode.clone(),
+                    FieldWidth::Medium,
                 ),
                 (
                     tr("密钥方向（可选）", "Key direction (optional)"),
                     self.control_direction.clone(),
+                    FieldWidth::Compact,
                 ),
             ]
         } else {
+            form = form.child(field_with_desc(
+                p,
+                tr("类型", "Flavor"),
+                tr(
+                    "支持 anyconnect / gp / fortinet / f5 / pulse / nc。",
+                    "Supports anyconnect / gp / fortinet / f5 / pulse / nc.",
+                ),
+                self.flavor.clone(),
+                FieldWidth::Medium,
+            ));
             vec![
-                (tr("类型", "Flavor"), self.flavor.clone()),
-                (tr("服务器路径", "Server path"), self.path.clone()),
+                (
+                    tr("服务器路径", "Server path"),
+                    self.path.clone(),
+                    FieldWidth::Full,
+                ),
                 (
                     tr("认证组（可选）", "Auth group (optional)"),
                     self.group.clone(),
+                    FieldWidth::Medium,
                 ),
                 (
                     tr("认证会话（可选）", "Session cookie (optional)"),
                     self.cookie.clone(),
+                    FieldWidth::Full,
                 ),
                 (
                     tr("客户端标识（可选）", "User agent (optional)"),
                     self.user_agent.clone(),
+                    FieldWidth::Full,
                 ),
                 (
                     tr("系统标识（可选）", "Reported OS (optional)"),
                     self.reported_os.clone(),
+                    FieldWidth::Medium,
                 ),
             ]
         };
-        for (label, input) in fields {
-            form = form.child(field(p, label, input, true));
+        for (label, input, width) in fields {
+            form = form.child(field(p, label, input, width));
         }
         form = form
             .child(field(
                 p,
                 tr("MTU（0 为自动）", "MTU (0 = auto)"),
                 self.mtu.clone(),
-                true,
+                FieldWidth::Compact,
             ))
             .child(field(
                 p,
                 tr("服务器指纹（可选）", "Peer fingerprints (optional)"),
                 self.fingerprints.clone(),
-                true,
+                FieldWidth::Full,
             ));
         for (label, input) in [
             (
                 tr("CA 证书 PEM（可选）", "CA certificate PEM (optional)"),
-                self.ca.clone(),
+                &self.ca,
             ),
             (
                 tr(
                     "客户端证书 PEM（可选）",
                     "Client certificate PEM (optional)",
                 ),
-                self.certificate.clone(),
+                &self.certificate,
             ),
             (
                 tr(
                     "客户端私钥 PEM（可选）",
                     "Client private key PEM (optional)",
                 ),
-                self.key.clone(),
+                &self.key,
             ),
         ] {
-            form = form.child(pem_field(p, label, input));
+            form = form.child(textarea_field(p, label, "", input));
         }
         if protocol == Protocol::Openvpn {
-            form=form.child(pem_field(p,tr("控制通道密钥（可选）","Control channel key (optional)"),self.control_key.clone()))
-                .child(div().text_xs().text_color(p.muted_fg).child(tr("控制通道支持 tls_auth / tls_crypt / tls_crypt_v2；密钥方向可填 client / server。","Control channel: tls_auth / tls_crypt / tls_crypt_v2; key direction: client / server.")));
+            form = form.child(textarea_field(
+                p,
+                tr("控制通道密钥（可选）", "Control channel key (optional)"),
+                tr(
+                    "控制通道支持 tls_auth / tls_crypt / tls_crypt_v2；密钥方向可填 client / server。",
+                    "Supports tls_auth / tls_crypt / tls_crypt_v2; key direction: client / server.",
+                ),
+                &self.control_key,
+            ));
         } else {
-            form = form
-                .child(field(
-                    p,
-                    tr("私钥密码（可选）", "Private key password (optional)"),
-                    self.key_password.clone(),
-                    true,
-                ))
-                .child(div().text_xs().text_color(p.muted_fg).child(tr(
-                    "类型支持 anyconnect / gp / fortinet / f5 / pulse / nc。",
-                    "Flavors: anyconnect / gp / fortinet / f5 / pulse / nc.",
-                )));
+            form = form.child(field(
+                p,
+                tr("私钥密码（可选）", "Private key password (optional)"),
+                self.key_password.clone(),
+                FieldWidth::Full,
+            ));
         }
         form
     }
-}
-
-fn pem_field(p: &Palette, label: SharedString, input: Entity<TextareaState>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_start()
-        .gap_3()
-        .max_w(px(900.))
-        .child(
-            div()
-                .w(px(150.))
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(p.muted_fg)
-                .child(label),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .child(Textarea::new(&input).h(px(80.))),
-        )
 }
