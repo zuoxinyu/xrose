@@ -1,8 +1,19 @@
 //! Main window lifetime. The tray and the service outlive a withdrawn KDE window.
 use crate::{APP_ID, tray, ui, window_effects};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::*;
 use std::sync::Arc;
 use xrose_core::{AppService, settings::ThemeMode};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ShowTarget {
+    Current,
+    Settings,
+    #[cfg(target_os = "macos")]
+    About,
+    #[cfg(target_os = "macos")]
+    Updates,
+}
 
 pub struct MainWindow {
     service: AppService,
@@ -140,11 +151,11 @@ impl MainWindow {
     #[cfg(target_os = "linux")]
     pub fn restore_if_hidden(&mut self, cx: &mut App) {
         if self.withdrawn.is_some() {
-            self.show(false, cx);
+            self.show(ShowTarget::Current, cx);
         }
     }
 
-    pub fn show(&mut self, settings: bool, cx: &mut App) {
+    pub fn show(&mut self, target: ShowTarget, cx: &mut App) {
         if self.visible.is_none() {
             if let Err(err) = self.open(cx) {
                 self.service.toast(
@@ -156,14 +167,26 @@ impl MainWindow {
             cx.set_quit_mode(QuitMode::Default);
         }
         if let Some((handle, view)) = &self.visible {
-            if settings {
-                let _ = view.update(cx, |view, cx| {
-                    view.page = ui::Page::Settings;
-                    cx.notify();
-                });
-            }
             tray::show_main_window();
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            let _ = handle.update(cx, |_, window, cx| {
+                if target != ShowTarget::Current {
+                    if window.has_active_dialog(cx) {
+                        window.close_all_dialogs(cx);
+                    }
+                    let _ = view.update(cx, |view, cx| {
+                        match target {
+                            ShowTarget::Current => {}
+                            ShowTarget::Settings => view.navigate(ui::Page::Settings, cx),
+                            #[cfg(target_os = "macos")]
+                            ShowTarget::About => view.navigate(ui::Page::About, cx),
+                            #[cfg(target_os = "macos")]
+                            ShowTarget::Updates => view.open_updates_settings(cx),
+                        }
+                        view.focus_handle.focus(window, cx);
+                    });
+                }
+                window.activate_window();
+            });
             cx.activate(true);
         }
     }

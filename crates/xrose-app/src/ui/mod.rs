@@ -730,6 +730,23 @@ impl AppView {
         }
     }
 
+    pub(crate) fn navigate(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.route_drag_epoch += 1;
+        self.dismiss_action_menu(cx);
+        self.page = page;
+        cx.notify();
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn open_updates_settings(&mut self, cx: &mut Context<Self>) {
+        self.navigate(Page::Settings, cx);
+        self.settings_tab = settings::SettingsTab::Updates;
+        self.settings_scroll.set_offset(point(px(0.), px(0.)));
+        self.settings_tab_scroll
+            .scroll_to_item(settings::SettingsTab::Updates as usize);
+        cx.notify();
+    }
+
     /// Poll state without starving live connections while a trace is active.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
         if self.page == Page::Connections
@@ -896,10 +913,7 @@ impl AppView {
                             .text_color(if active { p.primary } else { p.muted_fg })
                             .when(active, |b| b.bg(p.accent))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.route_drag_epoch += 1;
-                                this.dismiss_action_menu(cx);
-                                this.page = page;
-                                cx.notify();
+                                this.navigate(page, cx);
                             })),
                     )
                 }),
@@ -916,10 +930,7 @@ impl AppView {
                         .accessibility_label(self.tr("关于", "About"))
                         .when(about_active, |b| b.bg(p.accent))
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.route_drag_epoch += 1;
-                            this.dismiss_action_menu(cx);
-                            this.page = Page::About;
-                            cx.notify();
+                            this.navigate(Page::About, cx);
                         }))
                         .child(
                             div()
@@ -1635,10 +1646,7 @@ impl Render for AppView {
                 }
                 if mods.platform {
                     if let Some(page) = Page::from_shortcut(key) {
-                        this.route_drag_epoch += 1;
-                        this.dismiss_action_menu(cx);
-                        this.page = page;
-                        cx.notify();
+                        this.navigate(page, cx);
                     } else if key == "r" {
                         this.service
                             .test_latency(xrose_core::service::LatencyScope::All);

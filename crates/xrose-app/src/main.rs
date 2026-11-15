@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app_icon;
+mod app_menu;
 mod brand_assets;
 mod i18n;
 mod main_window;
@@ -84,6 +85,7 @@ fn main() {
         .with_assets(brand_assets::BrandAssets)
         .run(move |cx| {
             init(cx);
+            app_menu::install(&app_service, cx);
             #[cfg(target_os = "linux")]
             wayland::init(cx);
             window_effects::configure(app_service.settings().backdrop);
@@ -138,37 +140,43 @@ fn main() {
                         backdrop = new_backdrop;
                         cx.update(|cx| window_effects::refresh_all(backdrop, cx));
                     }
+                    let language = service_for_loop.settings().language;
+                    cx.update(|cx| app_menu::sync(language, cx));
                     let command = cx.update(|cx| tray.tick(&service_for_loop, cx));
                     if let Some(command) = command {
-                        match command {
-                            tray::TrayCommand::ShowWindow
-                            | tray::TrayCommand::ShowSettings => {
-                                cx.update(|cx| {
-                                    main.show(command == tray::TrayCommand::ShowSettings, cx);
-                                    #[cfg(target_os = "linux")]
-                                    tray.dismiss_popup(cx);
-                                });
-                            }
-                            #[cfg(target_os = "linux")]
-                            tray::TrayCommand::CloseMainWindow => {
-                                cx.update(|cx| main.close(cx));
-                            }
-                            #[cfg(target_os = "linux")]
-                            tray::TrayCommand::TrayUnavailable => {
-                                cx.update(|cx| main.restore_if_hidden(cx));
-                            }
-                            tray::TrayCommand::TogglePopup => {}
-                            tray::TrayCommand::Quit => {
-                                // Keep the event loop alive to finish quitting after cleanup.
+                        if let Some(target) = show_target(command) {
+                            cx.update(|cx| {
+                                main.show(target, cx);
                                 #[cfg(target_os = "linux")]
-                                cx.update(|cx| main.minimize(cx));
-                                tray::hide_main_window();
-                                cx.background_executor()
-                                    .spawn(async move { service_for_loop.shutdown() })
-                                    .await;
-                                tray::request_quit();
-                                cx.update(|cx| cx.quit());
-                                break;
+                                tray.dismiss_popup(cx);
+                            });
+                        } else {
+                            match command {
+                                #[cfg(target_os = "linux")]
+                                tray::TrayCommand::CloseMainWindow => {
+                                    cx.update(|cx| main.close(cx));
+                                }
+                                #[cfg(target_os = "linux")]
+                                tray::TrayCommand::TrayUnavailable => {
+                                    cx.update(|cx| main.restore_if_hidden(cx));
+                                }
+                                tray::TrayCommand::ShowWindow
+                                | tray::TrayCommand::ShowSettings
+                                | tray::TrayCommand::TogglePopup => {}
+                                #[cfg(target_os = "macos")]
+                                tray::TrayCommand::ShowAbout | tray::TrayCommand::ShowUpdates => {}
+                                tray::TrayCommand::Quit => {
+                                    // Keep the event loop alive to finish quitting after cleanup.
+                                    #[cfg(target_os = "linux")]
+                                    cx.update(|cx| main.minimize(cx));
+                                    tray::hide_main_window();
+                                    cx.background_executor()
+                                        .spawn(async move { service_for_loop.shutdown() })
+                                        .await;
+                                    tray::request_quit();
+                                    cx.update(|cx| cx.quit());
+                                    break;
+                                }
                             }
                         }
                     }
@@ -182,4 +190,16 @@ fn main() {
         });
 
     service.shutdown();
+}
+
+fn show_target(command: tray::TrayCommand) -> Option<main_window::ShowTarget> {
+    match command {
+        tray::TrayCommand::ShowWindow => Some(main_window::ShowTarget::Current),
+        tray::TrayCommand::ShowSettings => Some(main_window::ShowTarget::Settings),
+        #[cfg(target_os = "macos")]
+        tray::TrayCommand::ShowAbout => Some(main_window::ShowTarget::About),
+        #[cfg(target_os = "macos")]
+        tray::TrayCommand::ShowUpdates => Some(main_window::ShowTarget::Updates),
+        _ => None,
+    }
 }

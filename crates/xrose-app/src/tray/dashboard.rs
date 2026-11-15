@@ -369,6 +369,10 @@ pub enum TrayCommand {
     TogglePopup,
     ShowWindow,
     ShowSettings,
+    #[cfg(target_os = "macos")]
+    ShowAbout,
+    #[cfg(target_os = "macos")]
+    ShowUpdates,
     Quit,
 }
 

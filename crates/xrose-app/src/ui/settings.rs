@@ -232,6 +232,7 @@ impl AppView {
                     });
                     this.sync(cx);
                     this.localize_inputs(window, cx);
+                    crate::app_menu::sync(this.lang(), cx);
                 })),
             ))
             .child(setting_row(
