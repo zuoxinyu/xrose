@@ -380,6 +380,7 @@ pub struct AppView {
     pub(crate) matcher_kind: MatcherKind,
     pub(crate) rule_action: RouteActionKind,
     pub(crate) rule_outbound_group: Option<String>,
+    pub(crate) about_note_hovered: bool,
 }
 
 impl AppView {
@@ -558,6 +559,7 @@ impl AppView {
             action_menu: None,
             node_selector: None,
             traffic_popover_open: false,
+            about_note_hovered: false,
             active_route_drag: None,
             trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
             inspector_anchor: ScrollAnchor::for_handle(content_scroll.clone()),

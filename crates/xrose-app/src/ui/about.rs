@@ -200,24 +200,64 @@ impl AppView {
                                     ),
                             )),
                     )
-                    .children([
-                        self.tr(
-                            "Xrose 是 Project Xristina 旗下的跨平台桌面客户端。当前支持 Xray 和 sing-box 内核。",
-                            "Xrose is a cross-platform desktop client from Project Xristina. It currently supports the Xray and sing-box cores.",
-                        ),
-                        self.tr(
-                            "Xrose 正式读作 /k'ɹəʊz/，但你也可以读作 /ɛks-ɹəʊz/。",
-                            "Xrose is officially pronounced /k'ɹəʊz/, but you can also pronounce it /ɛks-ɹəʊz/.",
-                        ),
-                        self.tr(
-                            "Xrose 的命名致敬了 X Japan 的歌曲《ROSE OF PAIN》。",
-                            "The name Xrose pays tribute to the X Japan song “ROSE OF PAIN”.",
-                        ),
-                        self.tr(
-                            "Xrose 的诞生要感谢 DeepSeek 构建的第一版 MVP，与 Gemini Argon 进行的头脑风暴和 GPT-6 Astra 的孜孜不倦。是的，Claude 不在此列。",
-                            "Xrose owes its beginnings to the first MVP built by DeepSeek, the brainstorming sessions with Gemini Argon, and the tireless efforts of GPT-6 Astra. Yes, Claude is not on that list.",
-                        ),
-                    ].map(|paragraph| div().text_xs().text_color(p.muted_fg).whitespace_normal().child(paragraph))),
+                    .children(
+                        [
+                            self.tr(
+                                "Xrose 是 Project Xristina 旗下的跨平台桌面客户端。当前支持 Xray 和 sing-box 内核以及 EasyTier 与 Tailscale 组网协议。",
+                                "Xrose is a cross-platform desktop client from Project Xristina. It currently supports the Xray and sing-box cores, as well as the EasyTier and Tailscale mesh protocols.",
+                            ),
+                            self.tr(
+                                "Xrose 正式读作 /k'ɹəʊz/，但你也可以读作 /ɛks-ɹəʊz/。",
+                                "Xrose is officially pronounced /k'ɹəʊz/, but you can also pronounce it /ɛks-ɹəʊz/.",
+                            ),
+                            self.tr(
+                                "Xrose 的命名致敬了 X Japan 的歌曲《ROSE OF PAIN》。",
+                                "The name Xrose pays tribute to the X Japan song “ROSE OF PAIN”.",
+                            ),
+                        ]
+                        .map(|paragraph| {
+                            div()
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .whitespace_normal()
+                                .child(paragraph)
+                        }),
+                    )
+                    .child({
+                        let prefix = self.tr(
+                            "Xrose 的诞生要感谢 DeepSeek 构建的第一版 MVP，与 Gemini Argon 进行的头脑风暴和 GPT-6 Astra 的孜孜不倦。",
+                            "Xrose owes its beginnings to the first MVP built by DeepSeek, the brainstorming sessions with Gemini Argon, and the tireless efforts of GPT-6 Astra. ",
+                        );
+                        let note = self.tr(
+                            "是的，Claude 不在此列。",
+                            "Yes, Claude is not on that list.",
+                        );
+                        let start = prefix.len();
+                        let full = format!("{prefix}{note}");
+                        let end = full.len();
+                        let mut text = StyledText::new(full);
+                        if !self.about_note_hovered {
+                            text = text.with_highlights([(
+                                start..end,
+                                HighlightStyle {
+                                    fade_out: Some(0.95),
+                                    ..Default::default()
+                                },
+                            )]);
+                        }
+                        div()
+                            .id("about-origin-note")
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .whitespace_normal()
+                            .on_hover(cx.listener(|this, hovered, _, cx| {
+                                if this.about_note_hovered != *hovered {
+                                    this.about_note_hovered = *hovered;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(text)
+                    }),
             )
             // Open-source license card
             .child(
