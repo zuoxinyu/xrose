@@ -68,12 +68,21 @@ pub fn interaction_tint(dark: bool) -> Hsla {
 const WAYLAND_SURFACE_ALPHA: f32 = 0.87;
 
 impl Palette {
+    /// Solid backdrop color used when window material is set to Solid or blur is unavailable.
+    pub(crate) fn solid_backdrop(&self) -> Hsla {
+        if self.is_dark {
+            self.panel
+        } else {
+            rgb(0xc5e1ec).into()
+        }
+    }
+
     /// Mica and macOS vibrancy supply their own tint through a clear sidebar.
     /// Acrylic and vibrancy over a bright wallpaper get a theme-matched tint so
     /// dark mode stays dark.
     pub fn sidebar(&self) -> Hsla {
         if !crate::window_effects::blur_backdrop() {
-            return self.panel;
+            return self.solid_backdrop();
         }
         if crate::window_effects::uses_mica() {
             return gpui_kit::hsla(0., 0., 0., 0.);
@@ -327,5 +336,17 @@ mod tests {
         assert_ne!(p.neutral_hover(), p.panel);
         assert_ne!(p.neutral_hover(), p.accent);
         assert_ne!(p.neutral_hover(), p.neutral_active());
+    }
+
+    #[test]
+    fn test_solid_backdrop_uses_ice_blue_in_light_mode_and_panel_in_dark_mode() {
+        let mut p = dummy_palette();
+        p.panel = hsl(0., 0., 1.0);
+        p.is_dark = false;
+        assert_eq!(p.solid_backdrop(), Hsla::from(rgb(0xc5e1ec)));
+
+        p.panel = hsl(0., 0., 0.15);
+        p.is_dark = true;
+        assert_eq!(p.solid_backdrop(), p.panel);
     }
 }

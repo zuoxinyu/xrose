@@ -73,7 +73,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
   --data-up:   hsl(262 83% 58%);   /* #7c3bed ⚠K24 */
 
   /* 侧栏（有模糊背景时） */
-  --sidebar: hsl(210 30% 98% / .28);  /* 无模糊背景时回退为 --surface；Windows Mica 为透明；Linux Wayland 模糊为 --surface 87% 不透明度 */
+  --sidebar: hsl(210 30% 98% / .28);  /* 无模糊背景（纯色）时浅色使用 #c5e1ec、深色使用 --surface；Windows Mica 为透明；Linux Wayland 模糊为 --surface 87% 不透明度 */
 }
 ```
 

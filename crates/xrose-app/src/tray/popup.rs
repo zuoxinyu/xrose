@@ -600,12 +600,10 @@ impl Render for PopupView {
         }
         let surface = if crate::window_effects::uses_mica() {
             gpui_kit::hsla(0., 0., 0., 0.)
-        } else if cfg!(target_os = "linux") {
+        } else if cfg!(target_os = "linux") || !translucent {
             p.sidebar()
-        } else if translucent {
-            p.panel.opacity(if p.is_dark { 0.30 } else { 0.25 })
         } else {
-            p.panel
+            p.panel.opacity(if p.is_dark { 0.30 } else { 0.25 })
         };
         let card = if translucent {
             p.bg.opacity(if p.is_dark { 0.18 } else { 0.35 })
