@@ -160,6 +160,9 @@ impl AppView {
         if self.node_selector.take().is_some() {
             cx.notify();
         }
+        if std::mem::take(&mut self.traffic_popover_open) {
+            cx.notify();
+        }
         if let Some(menu) = self.action_menu.take() {
             let _ = menu.update(cx, |_, cx| cx.emit(DismissEvent));
         }

@@ -402,11 +402,6 @@ impl AppView {
             .on_click(cx.listener(|this, _, window, cx| {
                 this.toggle_process_icons(window, cx);
             }));
-            let privacy_button = self.privacy_toggle_button(
-                "connections-privacy",
-                self.tr("隐藏目标地址与节点名", "Hide addresses and node names"),
-                cx,
-            );
             div()
                 .flex()
                 .items_center()
@@ -414,7 +409,6 @@ impl AppView {
                 .flex_shrink_0()
                 .when(include_refresh, |d| d.child(refresh_button))
                 .child(process_icons_button)
-                .child(privacy_button)
         };
 
         let search_input = div()
@@ -606,7 +600,7 @@ impl AppView {
                 empty_state(
                     p,
                     IconName::Info,
-                    self.tr("当前 Core 不提供连接列表", "Connection list unavailable"),
+                    self.tr("当前内核不提供连接列表", "Connection list unavailable"),
                     self.tr(
                         "可使用 sing-box 查看连接，或前往诊断页面",
                         "Use sing-box to inspect connections, or open Diagnostics",
@@ -627,7 +621,7 @@ impl AppView {
                 empty_state(
                     p,
                     IconName::Power,
-                    self.tr("Core 未运行", "Core stopped"),
+                    self.tr("内核未运行", "Core stopped"),
                     self.tr(
                         "启动后可查看实时连接",
                         "Start the core to view live connections",

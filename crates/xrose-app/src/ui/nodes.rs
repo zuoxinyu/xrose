@@ -145,7 +145,7 @@ impl AppView {
                                 Button::new("wizard-install")
                                     .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                                     .primary()
-                                    .label(self.tr("下载 Core", "Install core"))
+                                    .label(self.tr("下载内核", "Install core"))
                                     .on_click(cx.listener(|this, _, _, _| {
                                         let core = this.snapshot.settings.core;
                                         this.service.install_core_update(core);
@@ -561,12 +561,7 @@ impl AppView {
                                         cx.notify();
                                     },
                                 ))
-                            })
-                            .child(self.privacy_toggle_button(
-                                "toggle-privacy",
-                                self.tr("隐藏服务器地址与位置", "Hide addresses and location"),
-                                cx,
-                            )),
+                            }),
                     )
                 })
                 // Batch Operation Bar (Visible when batch_mode is active).

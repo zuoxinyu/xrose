@@ -4,7 +4,7 @@ use gpui_base::{Disableable, Scrollbar, ScrollbarMode};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
@@ -18,9 +18,9 @@ use xrose_core::util::format_speed;
 use super::PopupAnchor;
 use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
-use crate::ui::theme::{SEMANTIC_ALPHA, palette};
+use crate::ui::theme::palette;
 use crate::ui::traffic_label;
-use crate::ui::widgets::icon_button_style;
+use crate::ui::widgets::{danger_button_style, icon_button_style, start_ghost_button_style};
 
 const NODE_ROW_HEIGHT: f32 = 38.;
 const NODE_SCROLL_HINT_DELAY: Duration = Duration::from_millis(150);
@@ -1122,48 +1122,42 @@ impl Render for PopupView {
                             })),
                     ),
             )
-            .child(
-                div().flex().flex_shrink_0().child(
-                    Button::new("tray-core")
-                        .xsmall()
-                        .h(px(32.))
-                        .w_full()
-                        .primary()
-                        .when(running, |b| {
-                            let tint = p.fg.opacity(SEMANTIC_ALPHA);
-                            let hover = p.danger_text.blend(tint);
-                            b.custom(
-                                ButtonCustomVariant::new(cx)
-                                    .color(p.danger_text)
-                                    .foreground(p.panel)
-                                    .hover(hover)
-                                    .active(hover.blend(tint)),
-                            )
-                            .when(!d.busy_core, |b| b.bg(p.danger_text))
-                        })
-                        .disabled(d.busy_core)
-                        .label(tr(
-                            lang,
-                            if d.busy_core {
-                                "处理中…"
-                            } else if running {
-                                "停止 Core"
-                            } else {
-                                "启动 Core"
-                            },
-                            if d.busy_core {
-                                "Working…"
-                            } else if running {
-                                "Stop core"
-                            } else {
-                                "Start core"
-                            },
-                        ))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.action(TrayAction::ToggleCore, window, cx)
-                        })),
-                ),
-            )
+            .child(div().flex().flex_shrink_0().child({
+                let core_border = if running { p.danger_text } else { p.primary }
+                    .opacity(if d.busy_core { 0.25 } else { 0.5 });
+                Button::new("tray-core")
+                    .xsmall()
+                    .h(px(32.))
+                    .w_full()
+                    .custom(if running {
+                        danger_button_style(&p, cx)
+                    } else {
+                        start_ghost_button_style(&p, cx)
+                    })
+                    .outline()
+                    .border_color(core_border)
+                    .disabled(d.busy_core)
+                    .label(tr(
+                        lang,
+                        if d.busy_core {
+                            "处理中…"
+                        } else if running {
+                            "停止内核"
+                        } else {
+                            "启动内核"
+                        },
+                        if d.busy_core {
+                            "Working…"
+                        } else if running {
+                            "Stop core"
+                        } else {
+                            "Start core"
+                        },
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.action(TrayAction::ToggleCore, window, cx)
+                    }))
+            }))
             .child(
                 div()
                     .flex()

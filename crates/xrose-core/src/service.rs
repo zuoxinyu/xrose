@@ -2896,7 +2896,7 @@ impl AppService {
             return;
         }
         if self.is_busy("core") {
-            self.toast(ToastLevel::Info, "Core 正在处理，请稍后再切换 TUN");
+            self.toast(ToastLevel::Info, "内核正在处理，请稍后再切换 TUN");
             return;
         }
         if settings.tun_enabled == enabled {
@@ -2909,10 +2909,10 @@ impl AppService {
             return;
         }
         if running {
-            self.toast(ToastLevel::Info, "正在重载 Core 以应用 TUN 设置");
+            self.toast(ToastLevel::Info, "正在重载内核以应用 TUN 设置");
             self.apply_config_with_tun_cleanup(old_tun, false);
         } else {
-            self.toast(ToastLevel::Info, "TUN 设置已保存，下次启动 Core 时生效");
+            self.toast(ToastLevel::Info, "TUN 设置已保存，下次启动内核时生效");
         }
     }
 
@@ -2937,7 +2937,7 @@ impl AppService {
     /// Quick routing switch used by the tray, applying through a validated restart.
     pub fn switch_route_preset(&self, preset: RoutePreset) {
         if self.is_busy("core") {
-            self.toast(ToastLevel::Info, "Core 正在处理，请稍后再切换路由");
+            self.toast(ToastLevel::Info, "内核正在处理，请稍后再切换路由");
             return;
         }
         if self.model().routing.preset == preset {
@@ -2946,10 +2946,10 @@ impl AppService {
         let running = self.is_running();
         self.set_route_preset(preset);
         if running {
-            self.toast(ToastLevel::Info, "正在重载 Core 以应用路由设置");
+            self.toast(ToastLevel::Info, "正在重载内核以应用路由设置");
             self.apply_config();
         } else {
-            self.toast(ToastLevel::Info, "路由设置已保存，下次启动 Core 时生效");
+            self.toast(ToastLevel::Info, "路由设置已保存，下次启动内核时生效");
         }
     }
 

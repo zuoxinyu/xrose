@@ -225,6 +225,8 @@ pub const HEADER_DRAG_GAP: f32 = 24.;
 pub const STATUS_HEIGHT: f32 = 28.;
 pub const STATUS_END_RADIUS: f32 = STATUS_HEIGHT / 2. - 1.;
 pub const STATUS_NODE_WIDTH: f32 = 220.;
+pub const HEADER_TRAFFIC_POPOVER_WIDTH: f32 = 308.;
+pub const HEADER_PRIVACY_EDGE_GAP: f32 = if cfg!(target_os = "macos") { 12. } else { 8. };
 pub const ICON_BUTTON_SIZE: f32 = 28.;
 pub const ICON_SIZE: f32 = 16.;
 pub const NODE_ROW_HEIGHT: f32 = 64.;

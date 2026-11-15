@@ -802,23 +802,11 @@ impl AppView {
             self.tr("复制代理环境变量命令", "Copy proxy environment commands"),
             cx,
         )
-            .disabled(port_dirty)
-            .when(port_dirty, |button| button.tooltip(self.tr("请先应用端口修改", "Apply the port change first")))
-            .on_click(cx.listener(|this, _, _, cx| {
-                match this.service.proxy_env_command() {
-                    Ok(command) => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(command.text));
-                        let message = if command.requires_credentials {
-                            this.tr("命令已复制，请将 USER 和 PASSWORD 替换为 URL 编码后的用户名和密码",
-                                "Commands copied. Replace USER and PASSWORD with your URL-encoded credentials.")
-                        } else {
-                            this.tr("代理环境变量命令已复制", "Proxy environment commands copied")
-                        };
-                        this.service.toast(ToastLevel::Success, message);
-                    }
-                    Err(error) => this.service.toast(ToastLevel::Error, error.to_string()),
-                }
-            }));
+        .disabled(port_dirty)
+        .when(port_dirty, |button| {
+            button.tooltip(self.tr("请先应用端口修改", "Apply the port change first"))
+        })
+        .on_click(cx.listener(|this, _, _, cx| this.copy_proxy_env_commands(cx)));
         let advanced_toggle = Button::new("network-advanced")
             .ghost()
             .compact()
@@ -1115,7 +1103,7 @@ impl AppView {
                                     div()
                                         .text_sm()
                                         .text_color(p.fg)
-                                        .child(self.tr("Core 更新状态", "Core update status")),
+                                        .child(self.tr("内核更新状态", "Core update status")),
                                 )
                                 .child(match core_check.and_then(|c| c.candidate.as_ref()) {
                                     Some(candidate) => {

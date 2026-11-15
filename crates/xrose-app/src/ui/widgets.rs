@@ -575,11 +575,18 @@ impl gpui_kit::RenderOnce for SegmentedTabs {
     }
 }
 
-pub(super) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {
+pub(crate) fn danger_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {
     ButtonCustomVariant::new(cx)
         .foreground(p.danger_text)
         .hover(p.danger.opacity(SEMANTIC_ALPHA))
         .active(p.danger.opacity(SEMANTIC_ALPHA))
+}
+
+pub(crate) fn start_ghost_button_style(p: &Palette, cx: &App) -> ButtonCustomVariant {
+    ButtonCustomVariant::new(cx)
+        .foreground(p.primary)
+        .hover(p.accent)
+        .active(p.accent)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

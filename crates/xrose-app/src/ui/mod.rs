@@ -20,6 +20,7 @@ mod stun_diagnostics;
 mod subscriptions;
 pub(crate) mod theme;
 mod title_controls;
+mod traffic_popover;
 mod traffic_statistics;
 #[cfg(target_os = "linux")]
 mod tray_state;
@@ -330,6 +331,7 @@ pub struct AppView {
     route_drag_epoch: u64,
     route_scroll_running: bool,
     node_selector: Option<Entity<node_selector::NodeSelector>>,
+    pub(crate) traffic_popover_open: bool,
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
     sidebar_view: Entity<WindowRegion>,
@@ -555,6 +557,7 @@ impl AppView {
             route_scroll_running: false,
             action_menu: None,
             node_selector: None,
+            traffic_popover_open: false,
             active_route_drag: None,
             trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
             inspector_anchor: ScrollAnchor::for_handle(content_scroll.clone()),
@@ -617,35 +620,73 @@ impl AppView {
         tr(self.snapshot.settings.language, zh, en)
     }
 
-    pub(super) fn privacy_toggle_button(
-        &self,
-        id: &'static str,
-        tooltip: SharedString,
-        cx: &mut Context<Self>,
-    ) -> Button {
-        let hide_ips = self.hide_ips;
-        icon_button_toggled(
-            toolbar_icon_button(
-                id,
-                if hide_ips {
-                    IconName::EyeOff
+    fn toggle_privacy_mode(&mut self, cx: &mut Context<Self>) {
+        self.hide_ips = !self.hide_ips;
+        let mut settings = self.snapshot.settings.clone();
+        settings.privacy_mode = self.hide_ips;
+        self.service.update_settings(settings);
+        self.sync(cx);
+    }
+
+    pub(super) fn copy_proxy_env_commands(&self, cx: &mut Context<Self>) {
+        match self.service.proxy_env_command() {
+            Ok(command) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(command.text));
+                let message = if command.requires_credentials {
+                    self.tr(
+                        "命令已复制，请将 USER 和 PASSWORD 替换为 URL 编码后的用户名和密码",
+                        "Commands copied. Replace USER and PASSWORD with your URL-encoded credentials.",
+                    )
                 } else {
-                    IconName::Eye
-                },
-                self.tr("隐私模式", "Privacy mode"),
-                cx,
-            ),
-            hide_ips,
-            cx,
-        )
-        .tooltip(tooltip)
-        .on_click(cx.listener(|this, _, _, cx| {
-            this.hide_ips = !this.hide_ips;
-            let mut settings = this.snapshot.settings.clone();
-            settings.privacy_mode = this.hide_ips;
-            this.service.update_settings(settings);
-            this.sync(cx);
-        }))
+                    self.tr(
+                        "代理环境变量命令已复制",
+                        "Proxy environment commands copied",
+                    )
+                };
+                self.service
+                    .toast(xrose_core::service::ToastLevel::Success, message);
+            }
+            Err(error) => self
+                .service
+                .toast(xrose_core::service::ToastLevel::Error, error.to_string()),
+        }
+    }
+
+    fn header_privacy_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let hide_ips = self.hide_ips;
+        let tip = if hide_ips {
+            self.tr(
+                "隐私模式已开启：隐藏服务器地址、IP 与位置（点击关闭）",
+                "Privacy mode on: hiding addresses, IPs, and locations (click to reveal)",
+            )
+        } else {
+            self.tr(
+                "隐私模式已关闭：当前显示真实地址与位置（点击开启）",
+                "Privacy mode off: showing real addresses and locations (click to hide)",
+            )
+        };
+        Button::new("header-privacy-toggle")
+            .compact()
+            .flex_shrink_0()
+            .mr(px(theme::HEADER_PRIVACY_EDGE_GAP))
+            .w(px(theme::ICON_BUTTON_SIZE))
+            .h(px(theme::ICON_BUTTON_SIZE))
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .foreground(if hide_ips { p.primary } else { p.muted_fg })
+                    .hover(p.neutral_hover())
+                    .active(p.neutral_active()),
+            )
+            .icon(if hide_ips {
+                IconName::EyeOff
+            } else {
+                IconName::Eye
+            })
+            .toggled(hide_ips)
+            .accessibility_label(self.tr("隐私模式", "Privacy mode"))
+            .tooltip(tip)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_privacy_mode(cx)))
     }
 
     fn lang(&self) -> Language {
@@ -1104,28 +1145,13 @@ impl AppView {
         if let Some(ms) = latency.and_then(|entry| entry.delay_ms) {
             node_tip.push_str(&format!(" · HTTP {ms} ms"));
         }
-        if running && !self.hide_ips {
-            if let Some(label) = node
+        if running
+            && !self.hide_ips
+            && let Some(label) = node
                 .and_then(|n| self.snapshot.node_location(n))
                 .and_then(|l| l.label.as_ref())
-            {
-                node_tip.push_str(&format!("\n{label}"));
-            }
-            if self.snapshot.model.work_mode != xrose_core::model::WorkMode::Mesh
-                && !self.snapshot.active_proxy_addresses.is_empty()
-            {
-                node_tip.push_str(&format!(
-                    "\n{}: {}",
-                    self.tr("代理地址", "Proxy"),
-                    self.snapshot.active_proxy_addresses.join(", ")
-                ));
-            }
-            if let Some(interface) = &self.snapshot.active_tun_interface {
-                node_tip.push_str(&format!(
-                    "\n{}: {interface}",
-                    self.tr("TUN 网卡", "TUN interface")
-                ));
-            }
+        {
+            node_tip.push_str(&format!("\n{label}"));
         }
         let drag_region = |id| {
             div()
@@ -1249,6 +1275,8 @@ impl AppView {
                         ),
                     )
                     .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
+                    .child(self.traffic_mode_popover(cx))
+                    .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
                     .child(
                         Button::new("toggle-core")
                             .h_full()
@@ -1261,10 +1289,7 @@ impl AppView {
                             .custom(if running {
                                 danger_button_style(&p, cx)
                             } else {
-                                ButtonCustomVariant::new(cx)
-                                    .foreground(p.primary)
-                                    .hover(p.accent)
-                                    .active(p.accent)
+                                start_ghost_button_style(&p, cx)
                             })
                             .icon(action_icon)
                             .tooltip(action_label.clone())
@@ -1281,7 +1306,9 @@ impl AppView {
                     .flex()
                     .flex_1()
                     .h_full()
+                    .items_center()
                     .child(drag_region("header-drag-right"))
+                    .child(self.header_privacy_toggle(cx))
                     .child(WindowControls::new(p)),
             )
     }
@@ -1317,12 +1344,12 @@ impl AppView {
                             .text_color(p.fg)
                             .child(if self.snapshot.process.phase.is_alive() {
                                 self.tr(
-                                    "有未应用的配置变更，需重载 Core 生效",
+                                    "有未应用的配置变更，需重载内核生效",
                                     "Unapplied config changes. Reload Core to apply.",
                                 )
                             } else {
                                 self.tr(
-                                    "配置变更已保存，启动 Core 时生效",
+                                    "配置变更已保存，启动内核时生效",
                                     "Changes saved. They take effect when Core starts.",
                                 )
                             }),
