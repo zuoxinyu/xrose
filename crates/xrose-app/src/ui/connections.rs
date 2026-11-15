@@ -1607,9 +1607,12 @@ impl AppView {
                     .on_click(cx.listener(|this, _, _, cx| { let target = this.trace_input.read(cx).value().to_string(); this.run_trace(&target, cx); })))
                 .child(Button::new("trace-clear").compact().h(px(crate::ui::theme::CONTROL_HEIGHT)).ghost().label(self.tr("清除", "Clear"))
                     .on_click(cx.listener(|this, _, _, cx| { this.service.clear_trace(); this.expanded_trace_step = None; this.sync(cx); }))))
-            .child(div().text_xs().text_color(p.muted_fg).child(if self.snapshot.model.work_mode == WorkMode::Mesh {
-                self.tr("通过组网链路测试；本地代理分流已暂停，远端出口的分流结果需在出口设备查看。ICMP 暂不支持。", "Test through the mesh; local proxy routing is paused. Inspect remote routing on the exit device. ICMP is unavailable.")
-            } else { self.tr("点击阶段查看完整详情", "Select a stage for full details") }))
+            .when(self.snapshot.model.work_mode == WorkMode::Mesh, |d| {
+                d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                    "通过组网链路测试；本地代理分流已暂停，远端出口的分流结果需在出口设备查看。ICMP 暂不支持。",
+                    "Test through the mesh; local proxy routing is paused. Inspect remote routing on the exit device. ICMP is unavailable.",
+                )))
+            })
             .child(self.trace_graph(trace.as_ref(), cx))
             .when_some(trace.as_ref(), |d, trace| {
                 let failed = trace.steps.iter().find(|s| s.status == TraceStatus::Error);
@@ -1793,9 +1796,29 @@ impl AppView {
                             .absolute()
                             .top(px(8.))
                             .left(px(super::theme::TRACE_CANVAS_PAD))
-                            .text_xs()
-                            .text_color(p.muted_fg)
-                            .child(self.tr("请求发出 →", "REQUEST SENT →")),
+                            .right(px(super::theme::TRACE_CANVAS_PAD))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_xs()
+                                    .text_color(p.muted_fg)
+                                    .child(self.tr("请求发出 →", "REQUEST SENT →")),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(p.muted_fg)
+                                    .child(self.tr(
+                                        "点击阶段查看完整详情",
+                                        "Select a stage for full details",
+                                    )),
+                            ),
                     )
                     .child(
                         div()
