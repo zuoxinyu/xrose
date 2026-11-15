@@ -206,11 +206,11 @@ impl AppView {
                             "Xrose is a cross-platform desktop client from Project Xristina. It currently supports the Xray and sing-box cores.",
                         ),
                         self.tr(
-                            "Xrose 正式读作 /k'ɹəʊz/，但你也可以读作 /ɛks-ɹəʊz/ 。",
+                            "Xrose 正式读作 /k'ɹəʊz/，但你也可以读作 /ɛks-ɹəʊz/。",
                             "Xrose is officially pronounced /k'ɹəʊz/, but you can also pronounce it /ɛks-ɹəʊz/.",
                         ),
                         self.tr(
-                            "Xrose 的命名致敬了 X Japan 的歌曲 《ROSE OF PAIN》。",
+                            "Xrose 的命名致敬了 X Japan 的歌曲《ROSE OF PAIN》。",
                             "The name Xrose pays tribute to the X Japan song “ROSE OF PAIN”.",
                         ),
                         self.tr(

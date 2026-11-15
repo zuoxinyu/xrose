@@ -228,7 +228,11 @@ impl AppView {
                                                 .save_outbound_group(state.original.as_ref(), draft)
                                         } else {
                                             Err(xrose_core::error::Error::config(
-                                                "当前配置已切换，请重新打开后编辑",
+                                                this.tr(
+                                                    "当前配置已切换，请重新打开后编辑",
+                                                    "Configuration changed. Reopen to edit.",
+                                                )
+                                                .to_string(),
                                             ))
                                         };
                                         match result {
@@ -477,7 +481,13 @@ impl AppView {
                                 let result = if this.snapshot.active_profile == profile {
                                     this.service.set_node_outbound_groups(&node_id, &state.original, &state.selected)
                                 } else {
-                                    Err(xrose_core::error::Error::config("当前配置已切换，请重新打开后编辑"))
+                                    Err(xrose_core::error::Error::config(
+                                        this.tr(
+                                            "当前配置已切换，请重新打开后编辑",
+                                            "Configuration changed. Reopen to edit.",
+                                        )
+                                        .to_string(),
+                                    ))
                                 };
                                 match result {
                                     Ok(()) => { this.sync(cx); window.close_dialog(cx); }

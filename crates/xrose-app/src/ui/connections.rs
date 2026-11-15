@@ -608,14 +608,14 @@ impl AppView {
                     IconName::Info,
                     self.tr("当前 Core 不提供连接列表", "Connection list unavailable"),
                     self.tr(
-                        "可使用 sing-box 查看连接，或前往测试页面",
+                        "可使用 sing-box 查看连接，或前往诊断页面",
                         "Use sing-box to inspect connections, or open Diagnostics",
                     ),
                 )
                 .child(
                     Button::new("connections-diagnostics")
                         .primary()
-                        .label(self.tr("前往测试", "Open diagnostics"))
+                        .label(self.tr("前往诊断", "Open diagnostics"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.page = Page::Diagnostics;
                             cx.notify();
@@ -1077,7 +1077,7 @@ impl AppView {
                                 "{} → {}",
                                 rule_label(
                                     &connection,
-                                    self.tr("core 未提供规则", "Rule unavailable").as_ref()
+                                    self.tr("内核未提供规则", "Rule unavailable").as_ref()
                                 ),
                                 self.connection_chain(&connection)
                             )),
@@ -1203,7 +1203,7 @@ impl AppView {
     fn connection_chain(&self, connection: &ClashConnection) -> String {
         if connection.chains.is_empty() {
             return self
-                .tr("core 未提供出站链", "Outbound chain unavailable")
+                .tr("内核未提供出站链", "Outbound chain unavailable")
                 .to_string();
         }
         connection
@@ -1273,7 +1273,7 @@ impl AppView {
             ),
             (
                 self.tr("04 · 命中规则", "04 · Matched rule"),
-                rule_label(c, self.tr("core 未提供规则", "Rule unavailable").as_ref()),
+                rule_label(c, self.tr("内核未提供规则", "Rule unavailable").as_ref()),
             ),
             (
                 self.tr("05 · 出站链", "05 · Outbound chain"),
@@ -1303,7 +1303,7 @@ impl AppView {
                         &p,
                         self.tr("连接透视", "Connection inspector"),
                         self.tr(
-                            "来自 core 的连接元数据；缺失信息会明确标注",
+                            "来自内核的连接元数据；缺失信息会明确标注",
                             "Core connection metadata; unavailable fields are labeled",
                         ),
                     ))
@@ -1396,7 +1396,7 @@ impl AppView {
         let actions = [
             (RouteActionKind::Proxy, self.tr("代理", "Proxy")),
             (RouteActionKind::Direct, self.tr("直连", "Direct")),
-            (RouteActionKind::Block, self.tr("拦截", "Block")),
+            (RouteActionKind::Block, self.tr("阻止", "Block")),
         ];
         div()
             .flex()
@@ -1512,7 +1512,7 @@ impl AppView {
                     .child(div().text_xs().text_color(p.muted_fg).child(if self.snapshot.model.work_mode == WorkMode::Mesh {
                         self.tr("保存至本机规则；组网模式暂停本地代理分流，不会修改远端出口规则", "Saved locally; Mesh mode pauses local proxy routing and does not change the remote exit's rules")
                     } else {
-                        self.tr("置顶保存至自定义规则（优先级低于局域网与大陆绕过），应用配置后生效", "Saved at the top of custom rules (below built-in LAN/China bypasses); apply config to take effect")
+                        self.tr("置顶保存至自定义规则，应用配置后生效", "Saved at the top of custom rules; apply config to take effect")
                     })),
             )
     }

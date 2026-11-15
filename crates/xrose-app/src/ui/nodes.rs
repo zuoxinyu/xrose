@@ -400,9 +400,9 @@ impl AppView {
                                 )
                                 .child(pill(
                                     if search_query.is_empty() {
-                                        format!("{} {}", shown, self.tr("个", ""))
+                                        format!("{shown}{}", self.tr(" 个", ""))
                                     } else {
-                                        format!("{}/{} {}", shown, node_count, self.tr("个", ""))
+                                        format!("{shown}/{node_count}{}", self.tr(" 个", ""))
                                     },
                                     p.primary,
                                     p.accent,
@@ -417,8 +417,8 @@ impl AppView {
                                             .text_color(p.warn_text)
                                             .child(Icon::new(IconName::TriangleAlert).size(px(14.)))
                                             .child(self.tr(
-                                                "Xray core 模式：切换节点需重载内核",
-                                                "Xray core: switching nodes reloads the core",
+                                                "Xray 模式：切换节点需重载内核",
+                                                "Xray: switching nodes reloads the core",
                                             )),
                                     )
                                 }),
@@ -1173,7 +1173,10 @@ fn http_row_controls(
             format!(
                 "{} · {}",
                 age_text(lang, latency_age_secs(entry)),
-                entry.detail.as_deref().unwrap_or("HTTP 延迟")
+                entry
+                    .detail
+                    .as_deref()
+                    .unwrap_or(super::tr(lang, "HTTP 延迟", "HTTP latency").as_ref())
             )
         })
         .unwrap_or_else(|| {

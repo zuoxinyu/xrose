@@ -203,7 +203,11 @@ impl AppView {
                                                 if tag.is_empty() || address.is_empty() {
                                                     this.service.toast(
                                                         xrose_core::service::ToastLevel::Warning,
-                                                        "tag 与地址不能为空",
+                                                        this.tr(
+                                                            "标识与地址不能为空",
+                                                            "Tag and address are required",
+                                                        )
+                                                        .to_string(),
                                                     );
                                                     return;
                                                 }
@@ -338,7 +342,11 @@ impl AppView {
                                         if domain.is_empty() || ips.is_empty() {
                                             this.service.toast(
                                                 xrose_core::service::ToastLevel::Warning,
-                                                "域名与 IP 不能为空",
+                                                this.tr(
+                                                    "域名与 IP 不能为空",
+                                                    "Domain and IP are required",
+                                                )
+                                                .to_string(),
                                             );
                                             return;
                                         }

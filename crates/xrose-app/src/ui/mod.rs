@@ -435,7 +435,7 @@ impl AppView {
             cx,
             &initial_matcher_kind.placeholder(snapshot.settings.language),
         );
-        let dns_tag = text_input(window, cx, "tag，例如 remote");
+        let dns_tag = text_input(window, cx, "标识，例如 remote");
         let dns_address = text_input(window, cx, "1.1.1.1 或 https://1.1.1.1/dns-query");
         let dns_domains = text_input(
             window,
@@ -680,7 +680,7 @@ impl AppView {
             (&self.rule_value, self.matcher_kind.placeholder(self.lang())),
             (
                 &self.dns_tag,
-                self.tr("tag，例如 remote", "Tag, e.g. remote"),
+                self.tr("标识，例如 remote", "Tag, e.g. remote"),
             ),
             (
                 &self.dns_address,
@@ -708,6 +708,7 @@ impl AppView {
                 input.set_placeholder(placeholder, window, cx)
             });
         }
+        self.manual_form.localize_inputs(self.lang(), window, cx);
     }
 
     fn refresh_snapshot(&mut self) {

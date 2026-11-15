@@ -231,7 +231,12 @@ impl Backend {
                 self.reported_failure = true;
                 service.toast(
                     xrose_core::service::ToastLevel::Warning,
-                    "系统拒绝注册托盘图标：关闭窗口将直接退出（可稍后重试或检查任务栏是否正常）",
+                    crate::i18n::tr(
+                        service.settings().language,
+                        "系统拒绝注册托盘图标：关闭窗口将直接退出（可稍后重试或检查任务栏是否正常）",
+                        "System rejected tray icon registration: closing the window will exit (retry later or check the taskbar)",
+                    )
+                    .to_string(),
                 );
             }
         }

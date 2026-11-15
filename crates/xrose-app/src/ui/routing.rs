@@ -262,7 +262,12 @@ impl AppView {
                                 .text_xs()
                                 .text_color(p.danger)
                                 .child(match issue.line {
-                                    Some(line) => format!("第 {line} 行：{}", issue.message),
+                                    Some(line) => format!(
+                                        "{} {line}{}{}",
+                                        self.tr("第", "Line"),
+                                        self.tr(" 行：", ": "),
+                                        issue.message
+                                    ),
                                     None => issue.message.clone(),
                                 })
                         }))
@@ -1168,7 +1173,8 @@ impl AppView {
                                         if values.is_empty() {
                                             this.service.toast(
                                                 xrose_core::service::ToastLevel::Warning,
-                                                "请填写匹配值",
+                                                this.tr("请填写匹配值", "Enter a match value")
+                                                    .to_string(),
                                             );
                                             return;
                                         }
@@ -1203,7 +1209,7 @@ impl AppView {
                                         }
                                         let rule = RouteRule::new(
                                             if name.trim().is_empty() {
-                                                "自定义规则".into()
+                                                this.tr("自定义规则", "Custom rule").to_string()
                                             } else {
                                                 name
                                             },

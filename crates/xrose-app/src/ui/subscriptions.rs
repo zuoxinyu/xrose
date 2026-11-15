@@ -172,7 +172,7 @@ impl AppView {
                 .and_then(|u| u.expire)
                 .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
                 .map(|dt| dt.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| self.tr("未知", "unknown").to_string());
+                .unwrap_or_else(|| self.tr("未知", "Unknown").to_string());
             let remaining_text = usage
                 .as_ref()
                 .map(|u| match u.remaining() {
@@ -190,7 +190,7 @@ impl AppView {
                     let ago = (now - ts).max(0);
                     crate::i18n::relative_time(lang, ago)
                 })
-                .unwrap_or_else(|| self.tr("从未更新", "never").to_string());
+                .unwrap_or_else(|| self.tr("从未更新", "Never").to_string());
             let sub_id_refresh = sub.id.clone();
             let menu_target = MenuTarget::Subscription(sub.id.clone());
             let refreshing = self
@@ -233,7 +233,7 @@ impl AppView {
                                                 )
                                                 .when(expired, |d| {
                                                     d.child(pill(
-                                                        self.tr("已过期", "expired"),
+                                                        self.tr("已过期", "Expired"),
                                                         p.danger_text,
                                                         p.danger
                                                             .opacity(super::theme::SEMANTIC_ALPHA),

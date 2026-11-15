@@ -102,11 +102,19 @@ impl ManualNodeForm {
 
     /// Builds the draft. Only the port needs parsing here; every other rule
     /// (credentials, Reality, transport combinations) lives in the core.
-    pub fn draft(&self, cx: &App) -> std::result::Result<NodeDraft, String> {
+    pub fn draft(
+        &self,
+        lang: xrose_core::settings::Language,
+        cx: &App,
+    ) -> std::result::Result<NodeDraft, String> {
         let port_text = self.port.read(cx).value().trim().to_string();
-        let port = port_text
-            .parse::<u16>()
-            .map_err(|_| format!("端口无效：{port_text}（应为 1-65535）"))?;
+        let port = port_text.parse::<u16>().map_err(|_| {
+            format!(
+                "{}{port_text}{}",
+                crate::i18n::tr(lang, "端口无效：", "Invalid port: "),
+                crate::i18n::tr(lang, "（应为 1-65535）", " (expected 1-65535)"),
+            )
+        })?;
         let mut draft = NodeDraft {
             name: self.name.read(cx).value().to_string(),
             protocol: self.protocol,
@@ -140,8 +148,90 @@ impl ManualNodeForm {
             openvpn: Default::default(),
             openconnect: Default::default(),
         };
-        self.vpn.write(&mut draft, cx)?;
+        self.vpn.write(&mut draft, lang, cx)?;
         Ok(draft)
+    }
+
+    pub fn localize_inputs(
+        &self,
+        lang: xrose_core::settings::Language,
+        window: &mut Window,
+        cx: &mut Context<AppView>,
+    ) {
+        let tr = |zh: &'static str, en: &'static str| crate::i18n::tr(lang, zh, en);
+        for (input, placeholder) in [
+            (
+                &self.name,
+                tr(
+                    "名称（留空自动使用 地址:端口）",
+                    "Name (blank uses host:port)",
+                ),
+            ),
+            (
+                &self.server,
+                tr("example.com 或 1.2.3.4", "example.com or 1.2.3.4"),
+            ),
+            (&self.uuid, tr("UUID / 用户 ID", "UUID / user ID")),
+            (&self.password, tr("密码", "Password")),
+            (&self.username, tr("用户名（可选）", "Username (optional)")),
+            (
+                &self.flow,
+                tr("xtls-rprx-vision（可选）", "xtls-rprx-vision (optional)"),
+            ),
+            (
+                &self.sni,
+                tr(
+                    "TLS SNI（留空使用服务器地址）",
+                    "TLS SNI (blank uses server address)",
+                ),
+            ),
+            (
+                &self.alpn,
+                tr("h2,http/1.1（可选）", "h2,http/1.1 (optional)"),
+            ),
+            (&self.fingerprint, tr("chrome（可选）", "chrome (optional)")),
+            (
+                &self.reality_public_key,
+                tr("Reality 公钥 pbk", "Reality public key pbk"),
+            ),
+            (
+                &self.reality_short_id,
+                tr("Reality shortId（可选）", "Reality shortId (optional)"),
+            ),
+            (
+                &self.host,
+                tr("WS/H2 Host（可选）", "WS/H2 Host (optional)"),
+            ),
+            (
+                &self.tags,
+                tr("标签，逗号分隔（可选）", "Tags, comma separated (optional)"),
+            ),
+            (&self.wireguard_private_key, tr("本机私钥", "Private key")),
+            (
+                &self.wireguard_public_key,
+                tr("对端公钥", "Peer public key"),
+            ),
+            (
+                &self.wireguard_pre_shared_key,
+                tr("预共享密钥（可选）", "Pre-shared key (optional)"),
+            ),
+            (
+                &self.wireguard_addresses,
+                tr("本机地址（逗号分隔）", "Local addresses (comma separated)"),
+            ),
+            (
+                &self.wireguard_allowed_ips,
+                tr("允许网段", "Allowed networks"),
+            ),
+            (
+                &self.wireguard_reserved,
+                tr("保留字节（3 字节）", "Reserved (3 bytes)"),
+            ),
+        ] {
+            input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+        }
     }
 
     pub fn reset(&mut self, window: &mut Window, cx: &mut Context<AppView>) {
@@ -653,7 +743,7 @@ impl AppView {
                     .primary()
                     .label(self.tr("保存节点", "Save node"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let draft = match this.manual_form.draft(cx) {
+                        let draft = match this.manual_form.draft(this.lang(), cx) {
                             Ok(draft) => draft,
                             Err(err) => {
                                 this.manual_error = Some(err);

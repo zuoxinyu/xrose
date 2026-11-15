@@ -123,7 +123,12 @@ impl VpnForm {
         }
     }
 
-    pub fn write(&self, draft: &mut NodeDraft, cx: &App) -> Result<(), String> {
+    pub fn write(
+        &self,
+        draft: &mut NodeDraft,
+        lang: xrose_core::settings::Language,
+        cx: &App,
+    ) -> Result<(), String> {
         if !draft.protocol.is_vpn() {
             return Ok(());
         }
@@ -143,10 +148,14 @@ impl VpnForm {
             private_key_password: text(&self.key_password),
             peer_fingerprints: list(&self.fingerprints),
         };
-        let mtu = text(&self.mtu)
-            .trim()
-            .parse::<u16>()
-            .map_err(|_| "VPN MTU 必须为整数（0 表示自动）".to_string())?;
+        let mtu = text(&self.mtu).trim().parse::<u16>().map_err(|_| {
+            crate::i18n::tr(
+                lang,
+                "VPN MTU 必须为整数（0 表示自动）",
+                "VPN MTU must be an integer (0 for automatic)",
+            )
+            .to_string()
+        })?;
         if draft.protocol == Protocol::Openvpn {
             let mut o = self.openvpn.clone();
             o.certificates = certificates;

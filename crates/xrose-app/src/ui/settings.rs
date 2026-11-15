@@ -1297,9 +1297,9 @@ impl AppView {
                                 )
                                 .child(pill(
                                     if platform.helper_supported {
-                                        self.tr("受支持", "supported")
+                                        self.tr("受支持", "Supported")
                                     } else {
-                                        self.tr("不支持", "unsupported")
+                                        self.tr("不支持", "Unsupported")
                                     },
                                     p.muted_fg,
                                     p.panel_alt,
@@ -1436,7 +1436,7 @@ impl AppView {
                 .when(!platform.helper_supported, |d| {
                     d.child(
                         div().text_xs().text_color(p.muted_fg).child(self.tr(
-                            "该平台暂不支持提权助手；TUN 仍由 core 自身权限处理",
+                            "该平台暂不支持提权助手；TUN 仍由内核自身权限处理",
                             "The helper is not available on this platform; TUN relies on the core's own rights",
                         )),
                     )

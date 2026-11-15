@@ -1581,7 +1581,7 @@ impl AppView {
             body = body.child(empty_hint(
                 &p,
                 self.tr(
-                    "暂无组网配置，点击“添加网络”创建",
+                    "暂无组网配置，点击「添加网络」创建",
                     "No mesh networks configured",
                 ),
             ));

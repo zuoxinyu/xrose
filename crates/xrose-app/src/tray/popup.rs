@@ -148,7 +148,14 @@ impl PopupManager {
             }
             Err(err) => error_service.toast(
                 xrose_core::service::ToastLevel::Error,
-                format!("无法打开托盘浮窗：{err}"),
+                format!(
+                    "{}{err}",
+                    tr(
+                        error_service.settings().language,
+                        "无法打开托盘浮窗：",
+                        "Failed to open tray flyout: ",
+                    )
+                ),
             ),
         }
     }

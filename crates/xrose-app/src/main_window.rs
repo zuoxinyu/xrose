@@ -160,7 +160,14 @@ impl MainWindow {
             if let Err(err) = self.open(cx) {
                 self.service.toast(
                     xrose_core::service::ToastLevel::Error,
-                    format!("无法打开主窗口：{err}"),
+                    format!(
+                        "{}{err}",
+                        crate::i18n::tr(
+                            self.service.settings().language,
+                            "无法打开主窗口：",
+                            "Failed to open main window: ",
+                        )
+                    ),
                 );
                 return;
             }
