@@ -8,9 +8,7 @@ pub mod transfer;
 
 use std::net::IpAddr;
 
-use crate::model::{
-    AppModel, Matchers, Network, RouteAction, RouteActionKind, RouteRule, RoutingConfig,
-};
+use crate::model::{AppModel, Matchers, Network, RouteAction, RouteActionKind, RouteRule};
 
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionInfo {
@@ -360,11 +358,6 @@ fn port_in_specs(specs: &[String], port: u16) -> bool {
             }
         })
     })
-}
-
-/// Applies the "bypass LAN" switch to a custom routing config.
-pub fn apply_bypass_lan(routing: &mut RoutingConfig, enabled: bool) {
-    routing.bypass_lan = enabled;
 }
 
 #[cfg(test)]

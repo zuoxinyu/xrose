@@ -134,9 +134,6 @@ pub(crate) fn rule_set_tags(model: &AppModel, mode: WorkMode) -> BTreeSet<String
             add_dns_tags(&mut tags, server);
         }
     }
-    if mode == WorkMode::Proxy && model.routing.bypass_china_ips {
-        tags.insert("geoip-cn".into());
-    }
     tags
 }
 
@@ -177,8 +174,6 @@ fn compilation_model(model: &AppModel, warnings: &mut Vec<String>) -> AppModel {
         effective.nodes.clear();
         effective.groups.clear();
         effective.default_group = None;
-        effective.routing.bypass_lan = false;
-        effective.routing.bypass_china_ips = false;
         if effective.dns.enabled {
             effective.dns.servers.retain(|server| {
                 if server.requires_proxy() {
@@ -645,6 +640,88 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn preset_compilation_has_no_hidden_bypass_rules_and_honors_list_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let ctx = CompileContext::new(&settings, dir.path().join("data"), dir.path().join("run"));
+        let mut model = AppModel::default();
+        model.add_nodes([Node::new(
+            "Fixture proxy",
+            Protocol::Socks,
+            "proxy.example",
+            1080,
+        )]);
+        model.work_mode = WorkMode::Proxy;
+        model.dns.enabled = false;
+        let block_lan = RouteRule::new(
+            "Fixture LAN exception",
+            Matchers {
+                ip_cidrs: vec!["10.0.0.0/8".into()],
+                ..Default::default()
+            },
+            RouteAction::block(),
+        );
+        let proxy_cn = RouteRule::new(
+            "Fixture mainland exception",
+            Matchers {
+                geoips: vec!["cn".into()],
+                ..Default::default()
+            },
+            RouteAction::proxy(),
+        );
+        model.routing.rule_groups.push(RouteRuleGroup {
+            rules: vec![block_lan.clone(), proxy_cn.clone()],
+            ..Default::default()
+        });
+        for preset in RoutePreset::all() {
+            model.apply_preset(preset);
+            let count = model.routing.effective_rules().count();
+            let xray = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+            let rules = xray.json["routing"]["rules"].as_array().unwrap();
+            assert_eq!(rules.len(), count + 2, "{preset:?}");
+            assert_eq!(rules[1]["ip"], json!(["10.0.0.0/8"]));
+            assert_eq!(rules[1]["outboundTag"], "block");
+            assert_eq!(rules[2]["ip"], json!(["geoip:cn"]));
+            assert_ne!(rules[2]["outboundTag"], "direct");
+            let singbox = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+            let rules = singbox.json["route"]["rules"].as_array().unwrap();
+            assert_eq!(rules.len(), count + 1, "{preset:?}");
+            assert_eq!(rules[1]["ip_cidr"], json!(["10.0.0.0/8"]));
+            assert_eq!(rules[1]["action"], "reject");
+            assert_eq!(rules[2]["rule_set"], json!(["geoip-cn"]));
+            assert_ne!(rules[2]["outbound"], "direct");
+            let preview = crate::route::evaluate(
+                &model,
+                &crate::route::ConnectionInfo {
+                    destination_ip: Some("10.1.2.3".parse().unwrap()),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(preview.rule.unwrap().id, block_lan.id);
+        }
+        model.routing.rule_groups[0].rules.swap(0, 1);
+        let xray = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(xray.json["routing"]["rules"][1]["ip"], json!(["geoip:cn"]));
+        let singbox = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(
+            singbox.json["route"]["rules"][1]["rule_set"],
+            json!(["geoip-cn"])
+        );
+        model.routing.rule_groups[0].enabled = false;
+        model
+            .routing
+            .rules
+            .iter_mut()
+            .for_each(|rule| rule.enabled = false);
+        assert!(required_rule_sets(&model).is_empty());
+        let xray = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(xray.json["routing"]["rules"].as_array().unwrap().len(), 2);
+        let singbox = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert_eq!(singbox.json["route"]["rules"].as_array().unwrap().len(), 1);
+        assert!(singbox.json["route"].get("rule_set").is_none());
+    }
+
+    #[test]
     fn global_can_boot_without_files_and_prefetch_every_routing_preset() {
         let dir = tempfile::tempdir().unwrap();
         let settings = Settings::default();
@@ -715,7 +792,14 @@ mod tests {
         }
 
         model.apply_preset(RoutePreset::Global);
-        model.routing.bypass_china_ips = true;
+        model.routing.rules.push(RouteRule::new(
+            "大陆 IP 直连",
+            Matchers {
+                geoips: vec!["cn".into()],
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        ));
         assert_eq!(
             required_rule_sets(&model)
                 .iter()
@@ -832,12 +916,25 @@ mod tests {
                         r["outbound"] == "direct" && r["domain"] == json!(["proxy.example"])
                     })
                     .unwrap();
-                assert!(block < forward - 1);
+                let resolve = rules
+                    .iter()
+                    .position(|rule| rule == &json!({"action":"resolve"}))
+                    .unwrap();
+                let lan = rules
+                    .iter()
+                    .position(|rule| {
+                        rule["ip_cidr"]
+                            == json!(crate::model::lan_direct_rules()[0].matchers.ip_cidrs)
+                    })
+                    .unwrap();
+                assert!(block < resolve && resolve < lan && lan < forward);
                 assert_eq!(
-                    rules[forward - 1],
-                    json!({"domain":["proxy.example"], "action":"resolve"})
+                    rules
+                        .iter()
+                        .filter(|rule| **rule == json!({"action":"resolve"}))
+                        .count(),
+                    1
                 );
-                assert_eq!(rules.last().unwrap(), &json!({"action":"resolve"}));
                 assert!(config["dns"]["rules"].as_array().unwrap().iter().any(|r| r["server"] == "fakeip" && r["query_type"] == json!(["A", "AAAA"])));
                 assert_eq!(config["dns"]["final"], "secure");
             } else {

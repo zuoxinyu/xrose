@@ -379,89 +379,49 @@ impl AppView {
                 div()
                     .flex()
                     .flex_wrap()
-                    .items_stretch()
-                    .gap_1p5()
+                    .items_center()
+                    .gap_3()
                     .child(
                         div()
-                            .flex_auto()
                             .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .min_h(px(40.))
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(p.muted_fg)
-                                    .whitespace_nowrap()
-                                    .child(self.tr("域名策略", "Domain strategy")),
-                            )
-                            .child(
-                                ChoiceGroup::new(
-                                    "domain-strategy",
-                                    vec![
-                                        self.tr("保持域名", "Keep domain"),
-                                        self.tr("优先 IPv4", "Prefer IPv4"),
-                                        self.tr("优先 IPv6", "Prefer IPv6"),
-                                        self.tr("未匹配时解析", "Resolve if unmatched"),
-                                    ],
-                                    [
-                                        DomainStrategy::AsIs,
-                                        DomainStrategy::PreferIpv4,
-                                        DomainStrategy::PreferIpv6,
-                                        DomainStrategy::IpIfNonMatch,
-                                    ]
-                                    .iter()
-                                    .position(|v| *v == routing.domain_strategy)
-                                    .unwrap_or(0),
-                                )
-                                .small()
-                                .no_wrap()
-                                .on_change(cx.listener(
-                                    |this, index, _, cx| {
-                                        let route = &this.snapshot.model.routing;
-                                        this.service.set_routing_flags(
-                                            route.bypass_lan,
-                                            route.bypass_china_ips,
-                                            [
-                                                DomainStrategy::AsIs,
-                                                DomainStrategy::PreferIpv4,
-                                                DomainStrategy::PreferIpv6,
-                                                DomainStrategy::IpIfNonMatch,
-                                            ][*index],
-                                        );
-                                        this.sync(cx);
-                                    },
-                                )),
-                            ),
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.muted_fg)
+                            .child(self.tr("域名策略", "Domain strategy")),
                     )
-                    .child(route_bypass_flags_card(
-                        routing.bypass_lan,
-                        routing.bypass_china_ips,
-                        lang,
-                        p,
-                        cx.listener(|this, checked, _, cx| {
-                            let strategy = this.snapshot.model.routing.domain_strategy;
-                            let china = this.snapshot.model.routing.bypass_china_ips;
-                            this.service.set_routing_flags(*checked, china, strategy);
+                    .child(
+                        ChoiceGroup::new(
+                            "domain-strategy",
+                            vec![
+                                self.tr("保持域名", "Keep domain"),
+                                self.tr("优先 IPv4", "Prefer IPv4"),
+                                self.tr("优先 IPv6", "Prefer IPv6"),
+                                self.tr("未匹配时解析", "Resolve if unmatched"),
+                            ],
+                            [
+                                DomainStrategy::AsIs,
+                                DomainStrategy::PreferIpv4,
+                                DomainStrategy::PreferIpv6,
+                                DomainStrategy::IpIfNonMatch,
+                            ]
+                            .iter()
+                            .position(|v| *v == routing.domain_strategy)
+                            .unwrap_or(0),
+                        )
+                        .small()
+                        .no_wrap()
+                        .on_change(cx.listener(|this, index, _, cx| {
+                            this.service.set_domain_strategy(
+                                [
+                                    DomainStrategy::AsIs,
+                                    DomainStrategy::PreferIpv4,
+                                    DomainStrategy::PreferIpv6,
+                                    DomainStrategy::IpIfNonMatch,
+                                ][*index],
+                            );
                             this.sync(cx);
-                        }),
-                        cx.listener(|this, checked, _, cx| {
-                            let strategy = this.snapshot.model.routing.domain_strategy;
-                            let lan = this.snapshot.model.routing.bypass_lan;
-                            this.service.set_routing_flags(lan, *checked, strategy);
-                            this.sync(cx);
-                        }),
-                    )),
+                        })),
+                    ),
             )
     }
 
@@ -1594,20 +1554,20 @@ fn route_preset_description(
             "Block ads, direct China Mainland domains & IPs, proxy foreign traffic",
         ),
         RoutePreset::GfwList => (
-            "内置 GFWList 代理、广告拦截与大陆直连，搭配自由扩展规则",
-            "Built-in GFWList proxy, ad-block & China direct starter rules",
+            "局域网与大陆直连，代理 GFWList 网站、拦截广告，其余流量直连",
+            "Direct LAN and mainland traffic; proxy GFWList sites, block ads, and direct other traffic",
         ),
         RoutePreset::Global => (
-            "不启用预设直连与域名分流规则，按默认出站全局转发",
-            "Clear starter bypass rules and forward traffic via default outbound",
+            "局域网直连，其余流量按默认代理出站转发",
+            "Direct LAN traffic; proxy all other traffic via the default outbound",
         ),
         RoutePreset::ProxyApps => (
-            "内置进程示例规则，适合按指定应用或自定义分组定向代理",
-            "Starter process rules tailored for per-app and custom group routing",
+            "局域网直连，仅代理指定应用，其余流量直连",
+            "Direct LAN traffic; proxy specified apps and direct all other traffic",
         ),
         RoutePreset::Custom => (
-            "保留当前分组与自定义规则顺序，由规则列表完全决定分流",
-            "Keep custom group and rule order as the active routing policy",
+            "保留自定义分组，以局域网直连规则为起点配置分流",
+            "Keep custom groups and configure routing from LAN direct starter rules",
         ),
     };
     crate::i18n::tr(lang, zh, en)
@@ -1681,80 +1641,6 @@ fn route_group_tab_slots(group_count: usize, inline_open: bool) -> Vec<RouteGrou
         slots.push(RouteGroupTabSlot::AddButton);
     }
     slots
-}
-
-fn route_bypass_flags_card(
-    bypass_lan: bool,
-    bypass_china_ips: bool,
-    lang: xrose_core::settings::Language,
-    p: &super::theme::Palette,
-    on_lan_change: impl Fn(&bool, &mut Window, &mut gpui_kit::App) + 'static,
-    on_china_change: impl Fn(&bool, &mut Window, &mut gpui_kit::App) + 'static,
-) -> Div {
-    div()
-        .flex_auto()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .min_h(px(40.))
-        .px_2p5()
-        .py_1()
-        .rounded_md()
-        .bg(p.bg)
-        .border_1()
-        .border_color(p.border)
-        .child(route_flag_switch_item(
-            "route-bypass-lan-box",
-            "bypass-lan",
-            crate::i18n::tr(lang, "局域网直连", "Bypass LAN"),
-            crate::i18n::tr(lang, "私有网段绕过代理", "Bypass private subnets"),
-            bypass_lan,
-            p,
-            on_lan_change,
-        ))
-        .child(div().w(px(1.)).h(px(16.)).flex_shrink_0().bg(p.border))
-        .child(route_flag_switch_item(
-            "route-bypass-china-box",
-            "bypass-china",
-            crate::i18n::tr(lang, "中国大陆 IP 直连", "Bypass China IPs"),
-            crate::i18n::tr(lang, "geoip:cn 自动直连", "Direct for geoip:cn"),
-            bypass_china_ips,
-            p,
-            on_china_change,
-        ))
-}
-
-fn route_flag_switch_item(
-    id: &'static str,
-    switch_id: &'static str,
-    label: SharedString,
-    hint: SharedString,
-    checked: bool,
-    p: &super::theme::Palette,
-    on_change: impl Fn(&bool, &mut Window, &mut gpui_kit::App) + 'static,
-) -> gpui_kit::Stateful<Div> {
-    div()
-        .id(id)
-        .flex_auto()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .tooltip(move |window, cx| Tooltip::new(hint.clone()).build(window, cx))
-        .child(
-            div()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.fg)
-                .whitespace_nowrap()
-                .child(label.clone()),
-        )
-        .child(
-            toggle(switch_id, "", checked)
-                .accessibility_label(label)
-                .on_change(on_change),
-        )
 }
 
 #[cfg(test)]

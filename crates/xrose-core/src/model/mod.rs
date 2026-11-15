@@ -196,7 +196,6 @@ impl Default for AppModel {
         };
         model.ensure_default_groups();
         model.routing.rules = starter_rules();
-        model.routing.bypass_china_ips = true;
         crate::dns::apply_preset(&mut model.dns, crate::dns::DnsPreset::System);
         model
     }
@@ -475,9 +474,15 @@ impl AppModel {
     pub fn apply_preset(&mut self, preset: RoutePreset) {
         self.routing.preset = preset;
         self.routing.rules = preset_rules(preset);
-        self.routing.bypass_lan = preset != RoutePreset::Global;
-        self.routing.bypass_china_ips =
-            matches!(preset, RoutePreset::BypassMainland | RoutePreset::GfwList);
+        match preset {
+            RoutePreset::BypassMainland | RoutePreset::Global => {
+                self.routing.final_action = RouteAction::proxy();
+            }
+            RoutePreset::GfwList | RoutePreset::ProxyApps => {
+                self.routing.final_action = RouteAction::direct();
+            }
+            RoutePreset::Custom => {}
+        }
         self.updated_at = now_unix();
     }
 
@@ -562,67 +567,217 @@ impl AppModel {
 /// (`geosites: ["cn"]`), letting each adapter pick native geo fields or
 /// generated rule-sets.
 pub fn preset_rules(preset: RoutePreset) -> Vec<RouteRule> {
+    let mut rules = lan_direct_rules();
+    let cn_ips = || {
+        RouteRule::new(
+            "中国大陆 IP 直连",
+            Matchers {
+                geoips: vec!["cn".into()],
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        )
+    };
+    let ads = || {
+        RouteRule::new(
+            "广告拦截",
+            Matchers {
+                geosites: vec!["category-ads-all".into()],
+                ..Default::default()
+            },
+            RouteAction::block(),
+        )
+    };
+    let cn_domains = || {
+        RouteRule::new(
+            "中国大陆域名直连",
+            Matchers {
+                geosites: vec!["cn".into()],
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        )
+    };
     match preset {
         RoutePreset::BypassMainland => {
-            let mut lan = Matchers::default();
-            lan.ip_cidrs = vec![
-                "127.0.0.0/8".into(),
-                "10.0.0.0/8".into(),
-                "172.16.0.0/12".into(),
-                "192.168.0.0/16".into(),
-                "169.254.0.0/16".into(),
-                "::1/128".into(),
-                "fc00::/7".into(),
-                "fe80::/10".into(),
-            ];
-            lan.domain_suffixes = vec![
-                "lan".into(),
-                "local".into(),
-                "localhost".into(),
-                "localdomain".into(),
-            ];
-            let mut cn_domains = Matchers::default();
-            cn_domains.geosites = vec!["cn".into()];
-            let mut cn_ips = Matchers::default();
-            cn_ips.geoips = vec!["cn".into()];
-            let mut foreign = Matchers::default();
-            foreign.geosites = vec!["geolocation-!cn".into()];
-            let mut ads = Matchers::default();
-            ads.geosites = vec!["category-ads-all".into()];
-            vec![
-                RouteRule::new("广告拦截", ads, RouteAction::block()),
-                RouteRule::new("局域网直连", lan, RouteAction::direct()),
-                RouteRule::new("中国大陆域名直连", cn_domains, RouteAction::direct()),
-                RouteRule::new("中国大陆 IP 直连", cn_ips, RouteAction::direct()),
-                RouteRule::new("境外网站代理", foreign, RouteAction::proxy()),
-            ]
+            rules.insert(0, ads());
+            rules.extend([
+                cn_domains(),
+                cn_ips(),
+                RouteRule::new(
+                    "境外网站代理",
+                    Matchers {
+                        geosites: vec!["geolocation-!cn".into()],
+                        ..Default::default()
+                    },
+                    RouteAction::proxy(),
+                ),
+            ]);
         }
         RoutePreset::GfwList => {
-            let mut gfw = Matchers::default();
-            gfw.geosites = vec!["gfw".into()];
-            let mut ads = Matchers::default();
-            ads.geosites = vec!["category-ads-all".into()];
-            let mut cn = Matchers::default();
-            cn.geosites = vec!["cn".into()];
-            vec![
-                RouteRule::new("广告拦截", ads, RouteAction::block()),
-                RouteRule::new("GFWList 代理", gfw, RouteAction::proxy()),
-                RouteRule::new("中国大陆域名直连", cn, RouteAction::direct()),
-            ]
+            rules.insert(0, ads());
+            rules.extend([
+                RouteRule::new(
+                    "GFWList 代理",
+                    Matchers {
+                        geosites: vec!["gfw".into()],
+                        ..Default::default()
+                    },
+                    RouteAction::proxy(),
+                ),
+                cn_domains(),
+                cn_ips(),
+            ]);
         }
-        RoutePreset::Global => Vec::new(),
-        RoutePreset::ProxyApps => {
-            let mut apps = Matchers::default();
-            apps.process_names = vec!["telegram".into(), "chrome".into()];
-            vec![RouteRule::new("指定应用代理", apps, RouteAction::proxy())]
-        }
-        RoutePreset::Custom => Vec::new(),
+        RoutePreset::ProxyApps => rules.push(RouteRule::new(
+            "指定应用代理",
+            Matchers {
+                process_names: vec!["telegram".into(), "chrome".into()],
+                ..Default::default()
+            },
+            RouteAction::proxy(),
+        )),
+        RoutePreset::Global | RoutePreset::Custom => {}
     }
+    rules
+}
+
+/// Keep address and domain conditions separate: matcher categories are ANDed.
+pub(crate) fn lan_direct_rules() -> Vec<RouteRule> {
+    vec![
+        RouteRule::new(
+            "局域网直连",
+            Matchers {
+                ip_cidrs: [
+                    "127.0.0.0/8",
+                    "10.0.0.0/8",
+                    "172.16.0.0/12",
+                    "192.168.0.0/16",
+                    "169.254.0.0/16",
+                    "::1/128",
+                    "fc00::/7",
+                    "fe80::/10",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        ),
+        RouteRule::new(
+            "局域网域名直连",
+            Matchers {
+                domain_suffixes: ["lan", "local", "localhost", "localdomain"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        ),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_preset_has_enabled_lan_rules_for_addresses_and_domains() {
+        use crate::route::{ConnectionInfo, MatchState, matches_rule};
+        for preset in RoutePreset::all() {
+            let rules = preset_rules(preset);
+            let lan = rules.iter().find(|rule| rule.name == "局域网直连").unwrap();
+            let domains = rules
+                .iter()
+                .find(|rule| rule.name == "局域网域名直连")
+                .unwrap();
+            assert!(lan.enabled && domains.enabled, "{preset:?}");
+            assert_eq!(lan.action, RouteAction::direct());
+            assert_eq!(domains.action, RouteAction::direct());
+            for ip in [
+                "127.0.0.1",
+                "10.1.2.3",
+                "172.16.1.2",
+                "192.168.1.2",
+                "169.254.1.2",
+                "::1",
+                "fd00::1",
+                "fe80::1",
+            ] {
+                assert_eq!(
+                    matches_rule(
+                        &lan.matchers,
+                        &ConnectionInfo {
+                            destination_ip: Some(ip.parse().unwrap()),
+                            ..Default::default()
+                        }
+                    ),
+                    MatchState::Matched,
+                    "{preset:?}: {ip}"
+                );
+            }
+            for domain in [
+                "printer.lan",
+                "printer.local",
+                "localhost",
+                "host.localdomain",
+            ] {
+                assert_eq!(
+                    matches_rule(
+                        &domains.matchers,
+                        &ConnectionInfo {
+                            domain: Some(domain.into()),
+                            ..Default::default()
+                        }
+                    ),
+                    MatchState::Matched,
+                    "{preset:?}: {domain}"
+                );
+            }
+            assert_eq!(
+                rules
+                    .iter()
+                    .filter(|rule| rule.matchers == lan.matchers)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                rules
+                    .iter()
+                    .filter(|rule| rule.matchers == domains.matchers)
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn preset_switches_reset_fallback_and_expose_mainland_ip_rules() {
+        let mut model = AppModel::default();
+        for _ in 0..2 {
+            for preset in RoutePreset::all() {
+                let previous_fallback = model.routing.final_action.clone();
+                model.apply_preset(preset);
+                let fallback = match preset {
+                    RoutePreset::BypassMainland | RoutePreset::Global => RouteAction::proxy(),
+                    RoutePreset::GfwList | RoutePreset::ProxyApps => RouteAction::direct(),
+                    RoutePreset::Custom => previous_fallback,
+                };
+                assert_eq!(model.routing.final_action, fallback, "{preset:?}");
+                let cn: Vec<_> = model
+                    .routing
+                    .effective_rules()
+                    .filter(|rule| rule.matchers.geoips == ["cn"])
+                    .collect();
+                if matches!(preset, RoutePreset::BypassMainland | RoutePreset::GfwList) {
+                    assert_eq!(cn.len(), 1);
+                    assert_eq!(cn[0].action, RouteAction::direct());
+                } else {
+                    assert!(cn.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn dns_only_managed_groups_are_probed_without_traffic_proxy_rules() {

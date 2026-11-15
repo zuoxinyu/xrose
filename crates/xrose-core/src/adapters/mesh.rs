@@ -165,8 +165,6 @@ pub fn mesh_runtime_model(
     let rule_sets = super::rule_set_tags(model, WorkMode::Mesh);
     effective.routing = RoutingConfig {
         final_action: RouteAction::proxy_via(&group.id),
-        bypass_lan: model.mesh_mode.allow_lan,
-        bypass_china_ips: false,
         rule_sets: model
             .routing
             .rule_sets
@@ -178,7 +176,11 @@ pub fn mesh_runtime_model(
         custom_rule_set_template: model.routing.custom_rule_set_template.clone(),
         ..Default::default()
     };
-    effective.routing.rules.clear();
+    effective.routing.rules = if model.mesh_mode.allow_lan {
+        crate::model::lan_direct_rules()
+    } else {
+        Vec::new()
+    };
     effective.routing.rule_groups.clear();
     if !runtime.ipv6 {
         effective.routing.rules.push(RouteRule::new(
@@ -409,8 +411,6 @@ mod tests {
             },
             RouteAction::block(),
         ));
-        model.routing.bypass_china_ips = true;
-        model.routing.bypass_lan = true;
         let mut node = Node::new("Fixture mesh", Protocol::Socks, "127.0.0.1", 19081);
         node.id = "fixture-exit".into();
         node.credentials.username = Some("xrose".into());
@@ -631,8 +631,6 @@ mod tests {
         let (mut model, settings, ctx) = fixture();
         model.work_mode = WorkMode::Direct;
         model.routing.rules.clear();
-        model.routing.bypass_lan = false;
-        model.routing.bypass_china_ips = false;
         model.routing.rules.push(RouteRule::new(
             "Remote block",
             Matchers {
@@ -771,7 +769,6 @@ mod tests {
         model.dns.servers.retain(|server| !server.requires_proxy());
         model.routing.rules.clear();
         model.routing.rule_groups.clear();
-        model.routing.bypass_china_ips = false;
         model.routing.final_action = RouteAction::direct();
         model.routing.rules.push(RouteRule::new(
             "Remote block",

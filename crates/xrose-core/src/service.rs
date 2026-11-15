@@ -3224,16 +3224,9 @@ impl AppService {
         self.mark_dirty();
     }
 
-    pub fn set_routing_flags(
-        &self,
-        bypass_lan: bool,
-        bypass_china_ips: bool,
-        strategy: crate::model::DomainStrategy,
-    ) {
+    pub fn set_domain_strategy(&self, strategy: crate::model::DomainStrategy) {
         {
             let mut model = self.inner.model.write();
-            model.routing.bypass_lan = bypass_lan;
-            model.routing.bypass_china_ips = bypass_china_ips;
             model.routing.domain_strategy = strategy;
         }
         let _ = self.persist_model();
@@ -5369,9 +5362,9 @@ mod tests {
         assert_eq!(preview(), RouteAction::direct());
         service.save_rule_group(Some(&first), "renamed").unwrap();
         service.assign_rule_group(&direct.id, None);
-        assert_eq!(service.model().routing.rules[0].id, direct.id);
+        assert_eq!(service.model().routing.rules.last().unwrap().id, direct.id);
         service.delete_rule_group(&second);
-        assert!(!service.model().routing.rules[1].enabled);
+        assert!(!service.model().routing.rules.last().unwrap().enabled);
         let stored = service
             .inner
             .store
@@ -7188,10 +7181,37 @@ proxy-groups:
     }
 
     #[test]
+    fn domain_strategy_persists_without_changing_rules_or_fallback() {
+        let (service, _dir) = service();
+        let before = service.model().routing;
+        service.set_domain_strategy(crate::model::DomainStrategy::AsIs);
+        let after = service.model().routing;
+        assert_eq!(after.domain_strategy, crate::model::DomainStrategy::AsIs);
+        assert_eq!(after.rules, before.rules);
+        assert_eq!(after.rule_groups, before.rule_groups);
+        assert_eq!(after.final_action, before.final_action);
+        let profile = service
+            .store()
+            .load_profile(&service.store().active_profile_id().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(profile.model.routing, after);
+        assert!(!service.is_running());
+    }
+
+    #[test]
     fn route_preset_replaces_rules() {
         let (service, _dir) = service();
         service.set_route_preset(RoutePreset::Global);
-        assert!(service.model().routing.rules.is_empty());
+        assert_eq!(service.model().routing.rules.len(), 2);
+        assert!(
+            service
+                .model()
+                .routing
+                .rules
+                .iter()
+                .all(|rule| rule.enabled && rule.action == crate::model::RouteAction::direct())
+        );
         service.set_route_preset(RoutePreset::BypassMainland);
         assert!(!service.model().routing.rules.is_empty());
     }
@@ -7268,7 +7288,15 @@ proxy-groups:
         let (service, _dir) = service();
         service.switch_route_preset(RoutePreset::Global);
         assert_eq!(service.model().routing.preset, RoutePreset::Global);
-        assert!(service.model().routing.rules.is_empty());
+        assert_eq!(service.model().routing.rules.len(), 2);
+        assert!(
+            service
+                .model()
+                .routing
+                .rules
+                .iter()
+                .all(|rule| rule.enabled && rule.action == crate::model::RouteAction::direct())
+        );
         let profile_id = service.store().active_profile_id().unwrap();
         let saved = service.store().load_profile(&profile_id).unwrap().unwrap();
         assert_eq!(saved.model.routing.preset, RoutePreset::Global);

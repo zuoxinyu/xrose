@@ -317,10 +317,6 @@ pub struct RoutingConfig {
     pub custom_rule_set_template: String,
     #[serde(default)]
     pub domain_strategy: DomainStrategy,
-    #[serde(default = "crate::model::default_true")]
-    pub bypass_lan: bool,
-    #[serde(default)]
-    pub bypass_china_ips: bool,
 }
 
 impl Default for RoutingConfig {
@@ -334,8 +330,6 @@ impl Default for RoutingConfig {
             rule_set_source: RuleSetSource::Upstream,
             custom_rule_set_template: String::new(),
             domain_strategy: DomainStrategy::PreferIpv4,
-            bypass_lan: true,
-            bypass_china_ips: false,
         }
     }
 }

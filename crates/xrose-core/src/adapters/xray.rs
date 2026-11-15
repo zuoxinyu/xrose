@@ -353,20 +353,6 @@ impl CoreAdapter for XrayAdapter {
                 rules.push(json!({"type":"field","network":"tcp,udp","inboundTag":tags,"port":"53","outboundTag":"dns-out"}));
             }
         }
-        if model.routing.bypass_lan {
-            rules.push(json!({
-                "type": "field",
-                "ip": ["geoip:private"],
-                "outboundTag": "direct"
-            }));
-        }
-        if model.routing.bypass_china_ips {
-            rules.push(json!({
-                "type": "field",
-                "ip": ["geoip:cn"],
-                "outboundTag": "direct"
-            }));
-        }
         for rule in model.routing.rules_for_mode(model.work_mode) {
             if let Some(value) = xray_rule(model, rule, &mut warnings) {
                 rules.push(value);
@@ -1303,7 +1289,7 @@ mod tests {
             .unwrap();
         let lan = rules
             .iter()
-            .position(|r| r["ip"] == json!(["geoip:private"]))
+            .position(|r| r["ip"] == json!(crate::model::lan_direct_rules()[0].matchers.ip_cidrs))
             .unwrap();
         assert!(dns < lan);
         assert_eq!(rules[dns]["network"], "tcp,udp");

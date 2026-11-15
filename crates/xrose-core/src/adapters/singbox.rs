@@ -512,12 +512,6 @@ impl CoreAdapter for SingBoxAdapter {
         if model.dns.enabled {
             rules.push(json!({"protocol": "dns", "action": "hijack-dns"}));
         }
-        if model.routing.bypass_lan {
-            rules.push(json!({"ip_is_private": true, "outbound": "direct"}));
-        }
-        if model.routing.bypass_china_ips {
-            rules.push(json!({"rule_set": ["geoip-cn"], "outbound": "direct"}));
-        }
         let mut resolve_direct = direct && model.dns.enabled;
         for rule in model.routing.rules_for_mode(model.work_mode) {
             if let Some(value) = singbox_rule(model, rule, &mut warnings) {

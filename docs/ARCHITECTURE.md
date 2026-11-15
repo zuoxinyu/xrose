@@ -84,7 +84,7 @@
 
 ## 5. 路由、规则集与文件交换
 
-- **规则编译**：`RoutingConfig.rule_groups` 保存自定义分组；启用分组按顺序优先于未分组与预设规则展开，内核编译、本地路由预览（`effective_rules()`）与 PAC 直连收集共用同一规则顺序。
+- **规则编译**：`RoutingConfig.rule_groups` 保存自定义分组；启用分组按顺序优先于未分组与预设规则展开，内核编译、本地路由预览（`effective_rules()`）与 PAC 直连收集共用同一规则顺序。局域网与中国大陆 IP 直连仅由可见规则管理，适配器不再生成独立的优先直连规则。所有模板默认启用局域网 IP 和局域网域名直连两条规则，分别匹配地址与域名；GFWList 与指定应用模板未命中时直连，绕过大陆与全局代理模板未命中时代理，自定义模板保留当前默认动作。
 - **规则集更新**：sing-box 启动只准备当前路由和 DNS 实际引用的文件。路由页的批量更新还包括其他内置路由模板、已保存但未启用的规则和 DNS 引用，按标签去重并优先采用配置的镜像。默认上游、MetaCubeX、jsDelivr 及自定义地址模板按配置档保存，供列表、编译与下载共用；显式指定的独立地址保留。列表从本地缓存恢复最后更新时间；条件请求按下载 URL 区分，切源后首次更新重新获取内容，失败与 HTTP 304 保留上一次写入时间。
 - **路由交换**（`route/transfer.rs`）：定义独立于数据库版本的 `xrose-routing` v1 JSON（包含 `rules`、`rule_groups`、`rule_sets` 与用于跨配置解析出站组的 `outbound_names`），不含节点、订阅或运行状态。同标签且同定义的规则集直接复用，定义冲突则拒绝整批导入；规则集来源限制为无凭据与无查询参数的 HTTP(S) URL。
 - **SwitchyOmega / AutoProxy 转换**（`route/transfer/omega.rs`）：按 [SwitchyOmega 解析顺序](https://github.com/FelisCatus/SwitchyOmega/blob/master/omega-pac/src/rule_list.coffee) 转换为统一意图模型并生成预览摘要，不支持的浏览器专有条件记入跳过提示。后台解析结果仅存内存，用户确认后验证预览 ID 与引用完整性再事务提交。
@@ -193,6 +193,6 @@ Shell_NotifyIcon / AppKit status item / Linux StatusNotifierItem
 
 ## 11. 持久化与安全边界
 
-- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。v3 增加组网系统模式与远端出口策略，沿用 JSON 字段默认值迁移，保留原有工作模式与分流配置。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
+- **加密存储与迁移**：使用 SQLite WAL 模式。新库按 [v1 建表定义](../crates/xrose-core/src/storage/schema_v1.sql) 一次创建，版本由 `PRAGMA user_version` 记录。v2 停止使用旧配置中的前置节点 ID，手动 SOCKS5 地址保存在加密设置中。v3 增加组网系统模式与远端出口策略，沿用 JSON 字段默认值迁移，保留原有工作模式与分流配置。v4 将旧的局域网和中国大陆 IP 直连开关转为可见规则，并拆分旧局域网规则中的 IP 与域名条件；数据库升级在事务内解密、迁移并重新加密全部配置档，导入旧备份执行相同转换。开发版 v14、v15 使用相同表结构，首次打开时先备份数据库，再更新标识和版本号。更早的开发库须先用支持 v14 或 v15 的开发版打开，或另用新的数据目录。节点凭据、订阅令牌、局域网认证、组网配置与统计实体均使用 ChaCha20-Poly1305（`SecretBox`，`enc:v1:` 前缀）加密，密钥文件权限 `0600`（支持通过 `XROSE_SECRET_KEY` 覆盖，详见 [`storage/crypto.rs`](../crates/xrose-core/src/storage/crypto.rs)）。
 - **提权助手隔离**：GUI 以普通用户权限运行；`--helper` 在进程入口最早期分流，不加载用户配置库与界面。助手经受限单行 JSON IPC（Unix domain socket / Windows 命名管道）执行 TUN 内核代启、组网工作进程托管、系统 DNS 与透明代理规则，通过 `Ping` 校验应用版本、TUN 助手协议版本、组网协议版本与助手修订号。Unix 校验 `SO_PEERCRED` / `LOCAL_PEERCRED` euid，Windows 校验同用户 DACL、调用者 PID 与 SID，并仅对通过 SHA-256 摘要校验的已登记内核使用固定参数启动，通过进程句柄与 Job Object / 独立进程组确保异常退出回收。安装、更新与卸载通过系统原生授权（UAC / `osascript` / `pkexec`）完成，不提供 setuid 包装。
 - **系统代理还原**：在修改网络设置前保存快照。macOS 分别使用内核实际监听的 HTTP 和 SOCKS 端口，还原时先写地址，再还原启用状态并回读验证。设置页与菜单栏浮窗订阅 macOS 当前网络的代理变更，显示 Xrose、部分使用或外部代理状态。自动重载和退出还原会跳过用户或其他应用已修改的条目。还原失败会保留快照供重试，GUI 在获得单实例锁后执行崩溃恢复。

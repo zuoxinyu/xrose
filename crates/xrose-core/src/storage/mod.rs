@@ -19,7 +19,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 // Distinguish the release schema from overlapping pre-release version numbers.
 const APPLICATION_ID: i64 = i32::from_be_bytes(*b"XROS") as i64;
 
@@ -121,8 +121,8 @@ impl Store {
             // Old profile JSON may contain a chained node ID. Serde drops it when saving;
             // the application-level SOCKS5 endpoint starts empty in the separate settings file.
             (APPLICATION_ID, 1) => {}
-            // Mesh intent and exit policy are additive JSON fields with safe defaults.
-            (APPLICATION_ID, 2) => {}
+            // Earlier releases share these tables; migrate legacy routing JSON below.
+            (APPLICATION_ID, 2 | 3) => {}
             (0, 0) => tx.execute_batch(include_str!("schema_v1.sql"))?,
             (0, 14 | 15) => {
                 // These builds already use the complete v1 table layout. The two routing
@@ -145,6 +145,26 @@ impl Store {
                 )));
             }
             _ => return Err(Error::config("数据库标识与 Xrose 不符，请检查数据目录")),
+        }
+        let profiles = {
+            let mut stmt = tx.prepare("SELECT id, model FROM profiles")?;
+            stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        for (id, payload) in profiles {
+            let mut model = serde_json::from_str(&self.secrets.decrypt(&payload)?)?;
+            if migrate_routing_rules(&mut model)? {
+                let payload = self.secrets.encrypt(&serde_json::to_string(&model)?);
+                if !SecretBox::is_encrypted(&payload) {
+                    return Err(Error::config("路由配置迁移加密失败，请重试"));
+                }
+                tx.execute(
+                    "UPDATE profiles SET model = ?1 WHERE id = ?2",
+                    params![payload, id],
+                )?;
+            }
         }
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -495,6 +515,7 @@ impl Store {
         let mut imported = 0;
         for mut profile in bundle.profiles {
             migrate_work_mode(&mut profile.model_json)?;
+            migrate_routing_rules(&mut profile.model_json)?;
             let model: AppModel = serde_json::from_value(profile.model_json)?;
             let id = if self.load_profile(&profile.id)?.is_some() {
                 crate::util::new_id("profile")
@@ -515,6 +536,86 @@ impl Store {
         }
         Ok(imported)
     }
+}
+
+/// Convert legacy switches to visible rules without resetting user order or unknown fields.
+fn migrate_routing_rules(model: &mut serde_json::Value) -> Result<bool> {
+    use crate::model::{Matchers, RouteAction, RouteRule, RoutingConfig, lan_direct_rules};
+    use serde_json::{Value, json};
+
+    let Some(routing) = model.get_mut("routing").and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    let lan = routing.remove("bypass_lan");
+    let china = routing.remove("bypass_china_ips");
+    if lan.is_none() && china.is_none() {
+        return Ok(false);
+    }
+    let lan_rules = lan_direct_rules();
+    let mut legacy_lan = lan_rules[0].matchers.clone();
+    legacy_lan.domain_suffixes = lan_rules[1].matchers.domain_suffixes.clone();
+
+    let split_lan = |rules: &mut Value| -> Result<()> {
+        let Some(rules) = rules.as_array_mut() else {
+            return Err(Error::config("路由规则格式无效，请从备份恢复"));
+        };
+        let mut index = 0;
+        while index < rules.len() {
+            let rule: RouteRule = serde_json::from_value(rules[index].clone())?;
+            if rule.name == "局域网直连"
+                && rule.action == RouteAction::direct()
+                && rule.matchers == legacy_lan
+            {
+                rules[index]["matchers"] = serde_json::to_value(&lan_rules[0].matchers)?;
+                let mut domains = rules[index].clone();
+                domains["id"] = crate::util::new_id("rule").into();
+                domains["name"] = lan_rules[1].name.clone().into();
+                domains["matchers"] = serde_json::to_value(&lan_rules[1].matchers)?;
+                rules.insert(index + 1, domains);
+                index += 1;
+            }
+            index += 1;
+        }
+        Ok(())
+    };
+    split_lan(routing.entry("rules").or_insert(json!([])))?;
+    if let Some(groups) = routing.get_mut("rule_groups").and_then(Value::as_array_mut) {
+        for group in groups {
+            if let Some(rules) = group.get_mut("rules") {
+                split_lan(rules)?;
+            }
+        }
+    }
+
+    let mut required = Vec::new();
+    if lan.as_ref().and_then(Value::as_bool).unwrap_or(true) {
+        required.extend(lan_rules);
+    }
+    if china.as_ref().and_then(Value::as_bool).unwrap_or(false) {
+        required.push(RouteRule::new(
+            "中国大陆 IP 直连",
+            Matchers {
+                geoips: vec!["cn".into()],
+                ..Default::default()
+            },
+            RouteAction::direct(),
+        ));
+    }
+    for required in required {
+        let config: RoutingConfig = serde_json::from_value(Value::Object(routing.clone()))?;
+        let same_rule =
+            |rule: &RouteRule| rule.matchers == required.matchers && rule.action == required.action;
+        if config.effective_rules().any(same_rule) {
+            continue;
+        }
+        let rules = routing["rules"].as_array_mut().unwrap();
+        if let Some(index) = config.rules.iter().position(same_rule) {
+            rules[index]["enabled"] = true.into();
+        } else {
+            rules.push(serde_json::to_value(required)?);
+        }
+    }
+    Ok(true)
 }
 
 /// Retain existing choices and preserve unknown fields in older profiles.
@@ -545,6 +646,196 @@ mod tests {
         let paths = AppPaths::from_root(dir.path());
         paths.ensure().unwrap();
         (Store::open(&paths).unwrap(), dir)
+    }
+
+    #[test]
+    fn legacy_routing_switches_migrate_to_visible_rules_once() {
+        use crate::model::{RouteAction, RoutePreset, RouteRuleGroup, lan_direct_rules};
+        use serde_json::json;
+        let (store, dir) = store();
+        let paths = AppPaths::from_root(dir.path());
+        let mut model = AppModel::default();
+        model.apply_preset(RoutePreset::GfwList);
+        // Simulate the old GFWList template, whose LAN and mainland IP rules were implicit.
+        model.routing.rules.retain(|rule| {
+            rule.matchers.ip_cidrs.is_empty()
+                && rule.matchers.domain_suffixes.is_empty()
+                && rule.matchers.geoips.is_empty()
+        });
+        let mut legacy = serde_json::to_value(&model).unwrap();
+        legacy["routing"]["bypass_lan"] = true.into();
+        legacy["routing"]["bypass_china_ips"] = true.into();
+        legacy["routing"]["fixture_extra"] = json!({"keep": true});
+        let mut ids = Vec::new();
+        for name in ["Fixture active", "Fixture inactive"] {
+            let id = store.save_profile(&AppModel::new(name)).unwrap();
+            let payload = store.secrets.encrypt(&legacy.to_string());
+            store
+                .conn
+                .lock()
+                .execute(
+                    "UPDATE profiles SET model = ?1 WHERE id = ?2",
+                    params![payload, id],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        store.set_active_profile(&ids[0]).unwrap();
+        store
+            .conn
+            .lock()
+            .pragma_update(None, "user_version", 3)
+            .unwrap();
+        drop(store);
+        for _ in 0..2 {
+            let store = Store::open(&paths).unwrap();
+            for id in &ids {
+                let saved = store.load_profile(id).unwrap().unwrap();
+                assert_eq!(saved.model.routing.rules.len(), 6);
+                assert_eq!(saved.model.routing.rules[1].name, "GFWList 代理");
+                for lan in lan_direct_rules() {
+                    assert_eq!(
+                        saved
+                            .model
+                            .routing
+                            .effective_rules()
+                            .filter(
+                                |rule| rule.matchers == lan.matchers && rule.action == lan.action
+                            )
+                            .count(),
+                        1
+                    );
+                }
+                let raw: String = store
+                    .conn
+                    .lock()
+                    .query_row("SELECT model FROM profiles WHERE id = ?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert!(SecretBox::is_encrypted(&raw));
+                let value: serde_json::Value =
+                    serde_json::from_str(&store.secrets.decrypt(&raw).unwrap()).unwrap();
+                assert!(value["routing"].get("bypass_lan").is_none());
+                assert!(value["routing"].get("bypass_china_ips").is_none());
+                assert_eq!(value["routing"]["fixture_extra"], json!({"keep": true}));
+            }
+        }
+
+        // Split only the old mixed LAN preset rule, retaining its identity and disabled state.
+        let mut model = AppModel::default();
+        let mut lan = lan_direct_rules().remove(0);
+        lan.matchers.domain_suffixes = lan_direct_rules()[1].matchers.domain_suffixes.clone();
+        lan.enabled = false;
+        let lan_id = lan.id.clone();
+        model.routing.rules = vec![lan];
+        model.routing.rule_groups = vec![RouteRuleGroup {
+            enabled: false,
+            ..Default::default()
+        }];
+        let mut legacy = serde_json::to_value(&model).unwrap();
+        legacy["routing"]["bypass_lan"] = false.into();
+        legacy["routing"]["bypass_china_ips"] = false.into();
+        assert!(migrate_routing_rules(&mut legacy).unwrap());
+        let migrated: AppModel = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(migrated.routing.rules.len(), 2);
+        assert_eq!(migrated.routing.rules[0].id, lan_id);
+        assert!(
+            migrated
+                .routing
+                .rules
+                .iter()
+                .all(|rule| !rule.enabled && rule.action == RouteAction::direct())
+        );
+        assert!(!migrated.routing.rule_groups[0].enabled);
+        assert!(!migrate_routing_rules(&mut legacy).unwrap());
+    }
+
+    #[test]
+    fn routing_migration_reuses_existing_direct_rules_and_imports_old_backups() {
+        use crate::model::{RoutePreset, RouteRuleGroup};
+        let mut model = AppModel::default();
+        model.apply_preset(RoutePreset::BypassMainland);
+        model
+            .routing
+            .rules
+            .iter_mut()
+            .find(|rule| rule.matchers.geoips == ["cn"])
+            .unwrap()
+            .enabled = false;
+        let mut grouped = crate::model::lan_direct_rules();
+        model
+            .routing
+            .rules
+            .retain(|rule| !grouped.iter().any(|lan| lan.matchers == rule.matchers));
+        grouped[0].name = "Fixture renamed LAN".into();
+        model.routing.rule_groups.push(RouteRuleGroup {
+            rules: grouped,
+            ..Default::default()
+        });
+        let mut legacy = serde_json::to_value(&model).unwrap();
+        legacy["routing"]["bypass_lan"] = true.into();
+        legacy["routing"]["bypass_china_ips"] = true.into();
+        let (store, dir) = store();
+        let path = dir.path().join("fixture-backup.json");
+        let bundle = BackupBundle {
+            format: 1,
+            exported_at: now_rfc3339(),
+            profiles: vec![BackupProfile {
+                id: "fixture-import".into(),
+                name: "Fixture backup".into(),
+                model_json: legacy,
+            }],
+            subscriptions: vec![],
+        };
+        atomic_write_json(&path, &bundle).unwrap();
+        assert_eq!(store.import_json(&path).unwrap(), 1);
+        let loaded = store.load_profile("fixture-import").unwrap().unwrap().model;
+        assert_eq!(loaded.routing.rules.len(), model.routing.rules.len());
+        assert_eq!(loaded.routing.rule_groups, model.routing.rule_groups);
+        assert!(
+            loaded
+                .routing
+                .rules
+                .iter()
+                .find(|rule| rule.matchers.geoips == ["cn"])
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[test]
+    fn failed_routing_migration_keeps_schema_and_encrypted_profiles_unchanged() {
+        let (store, dir) = store();
+        let paths = AppPaths::from_root(dir.path());
+        let id = store.active_profile_id().unwrap();
+        let mut legacy = serde_json::to_value(AppModel::default()).unwrap();
+        legacy["routing"]["bypass_lan"] = true.into();
+        legacy["routing"]["rules"] = serde_json::json!([{"fixture_invalid_rule": true}]);
+        let encrypted = store.secrets.encrypt(&legacy.to_string());
+        {
+            let conn = store.conn.lock();
+            conn.execute(
+                "UPDATE profiles SET model = ?1 WHERE id = ?2",
+                params![encrypted, id],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 3).unwrap();
+        }
+        drop(store);
+        assert!(Store::open(&paths).is_err());
+        let conn = Connection::open(paths.database()).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let raw: String = conn
+            .query_row("SELECT model FROM profiles WHERE id = ?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(raw, encrypted);
     }
 
     #[test]
