@@ -311,6 +311,7 @@ impl AppView {
 
     fn settings_core_card(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
+        let lang = self.lang();
         let settings = self.snapshot.settings.clone();
         let binaries = self.snapshot.binaries.clone();
         let updates = self.snapshot.updates.clone();
@@ -327,7 +328,7 @@ impl AppView {
             .child(setting_row(
                 &p,
                 self.tr("内核", "Core"),
-                self.tr("需重载", "Reload required"),
+                reload_note(lang, settings.hot_reload),
                 ChoiceGroup::new(
                     "core",
                     CoreKind::all()
@@ -344,7 +345,7 @@ impl AppView {
             .child(setting_row(
                 &p,
                 self.tr("日志级别", "Log level"),
-                self.tr("需重载", "Reload required"),
+                reload_note(lang, settings.hot_reload),
                 ChoiceGroup::new(
                     "log-level",
                     vec!["Debug".into(), "Info".into(), "Warn".into(), "Error".into()],
@@ -771,6 +772,7 @@ impl AppView {
 
     fn settings_network_card(&self, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
+        let lang = self.lang();
         let settings = self.snapshot.settings.clone();
         let port_raw = self.port_input.read(cx).value().to_string();
         let proxy_busy = self.snapshot.busy.iter().any(|key| key == "proxy");
@@ -848,9 +850,9 @@ impl AppView {
                                 this.sync(cx);
                             }))))
             })
-            .child(setting_row(&p, "TUN", self.tr("接管系统网络流量，需要提权助手；需重载", "Route system traffic through the proxy; requires the privilege helper and a reload"),
+            .child(setting_row(&p, "TUN", with_reload_note(lang, settings.hot_reload, "接管系统网络流量，需要提权助手", "Route system traffic through the proxy (requires the privilege helper)"),
                 toggle("tun", self.tr("启用 TUN", "Enable TUN"), settings.tun_enabled || self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).disabled(self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).on_change(cx.listener(|this, checked, _, cx| { this.service.set_tun_enabled(*checked); this.sync(cx); }))))
-            .child(setting_row(&p, self.tr("严格路由", "Strict routing"), self.tr("限制流量绕过 TUN；需重载", "Restrict traffic from bypassing TUN; reload required"),
+            .child(setting_row(&p, self.tr("严格路由", "Strict routing"), with_reload_note(lang, settings.hot_reload, "限制流量绕过 TUN", "Restrict traffic from bypassing TUN"),
                 toggle("tun-strict-route", self.tr("启用严格路由", "Enable strict routing"), settings.tun_strict_route).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.tun_strict_route = *checked)))))
             .child(setting_row(&p, self.tr("系统代理", "System proxy"), proxy_hint,
                 div().flex().items_center().gap_2()
@@ -860,14 +862,14 @@ impl AppView {
                     .when(proxy_busy, |row| row.child(gpui_kit::component::spinner::Spinner::new()).child(div().text_xs().text_color(p.muted_fg).child(self.tr("正在应用…", "Applying…"))))))
             .child(setting_row(&p, "PAC", self.tr("根据路由规则自动选择代理", "Choose the proxy automatically using routing rules"),
                 toggle("pac", self.tr("启用 PAC", "Enable PAC"), settings.pac_enabled).disabled(proxy_busy || self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh).on_change(cx.listener(|this, checked, _, cx| { this.modify_settings(cx, |s| s.pac_enabled = *checked); this.service.reapply_system_proxy(); }))))
-            .child(setting_row(&p, self.tr("混合端口", "Mixed port"), self.tr("修改后应用；需重载", "Apply after editing; reload required"),
+            .child(setting_row(&p, self.tr("混合端口", "Mixed port"), with_reload_note(lang, settings.hot_reload, "修改后应用", "Apply after editing"),
                 div().flex().items_center().gap_2().child(div().w(px(super::theme::SETTING_LABEL_WIDTH)).child(Input::new(&self.port_input)))
                     .child(copy_proxy_env)
                     .when(port_dirty, |d| d.child(Button::new("save-ports").primary().label(self.tr("应用", "Apply")).disabled(port_valid.is_none())
                         .on_click(cx.listener(|this, _, _, cx| { if let Some(port) = valid_port(this.port_input.read(cx).value().as_ref()) { this.modify_settings(cx, |s| s.mixed_port = port); } }))))))
             .when(port_dirty && port_valid.is_none(), |d| d.child(div().text_sm().text_color(p.danger_text).child(self.tr("端口必须是 1–65535", "Enter a port from 1 to 65535"))))
             .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))))
-            .child(setting_row(&p, self.tr("局域网", "LAN"), self.tr("允许同一局域网的设备使用本机代理；需重载", "Allow devices on your LAN to use this proxy; reload required"),
+            .child(setting_row(&p, self.tr("局域网", "LAN"), with_reload_note(lang, settings.hot_reload, "允许同一局域网的设备使用本机代理", "Allow devices on your LAN to use this proxy"),
                 toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
             .child(div().flex().child(advanced_toggle))
             .when(self.network_advanced_open, |card| card.child(self.advanced_network_settings(&p, cx)))
@@ -1579,6 +1581,23 @@ fn valid_port(raw: &str) -> Option<u16> {
     raw.trim().parse::<u16>().ok().filter(|port| *port > 0)
 }
 
+fn reload_note(lang: Language, hot_reload: bool) -> &'static str {
+    match (lang, hot_reload) {
+        (Language::Zh, true) => "将自动重载内核",
+        (Language::Zh, false) => "需重载内核",
+        (Language::En, true) => "Core reloads automatically",
+        (Language::En, false) => "Core reload required",
+    }
+}
+
+fn with_reload_note(lang: Language, hot_reload: bool, zh: &str, en: &str) -> String {
+    let note = reload_note(lang, hot_reload);
+    match lang {
+        Language::Zh => format!("{zh}；{note}"),
+        Language::En => format!("{en}; {}", note.to_ascii_lowercase()),
+    }
+}
+
 /// Offer native materials only on the platforms that implement them.
 fn backdrop_setting_available() -> bool {
     #[cfg(target_os = "linux")]
@@ -1607,6 +1626,8 @@ fn backdrop_choices() -> Vec<(BackdropStyle, &'static str, &'static str)> {
 
 #[cfg(test)]
 mod tests {
+    use xrose_core::settings::Language;
+
     #[test]
     fn settings_tab_keyboard_navigation_wraps_and_supports_endpoints() {
         use super::SettingsTab;
@@ -1629,5 +1650,36 @@ mod tests {
         }
         assert_eq!(super::valid_port(" 7890 "), Some(7890));
         assert_eq!(super::valid_port("65535"), Some(65535));
+    }
+
+    #[test]
+    fn reload_notes_reflect_hot_reload_preference() {
+        assert_eq!(super::reload_note(Language::Zh, true), "将自动重载内核");
+        assert_eq!(super::reload_note(Language::Zh, false), "需重载内核");
+        assert_eq!(
+            super::reload_note(Language::En, true),
+            "Core reloads automatically"
+        );
+        assert_eq!(
+            super::reload_note(Language::En, false),
+            "Core reload required"
+        );
+
+        assert_eq!(
+            super::with_reload_note(Language::Zh, true, "修改后应用", "Apply after editing"),
+            "修改后应用；将自动重载内核"
+        );
+        assert_eq!(
+            super::with_reload_note(Language::Zh, false, "修改后应用", "Apply after editing"),
+            "修改后应用；需重载内核"
+        );
+        assert_eq!(
+            super::with_reload_note(Language::En, true, "修改后应用", "Apply after editing"),
+            "Apply after editing; core reloads automatically"
+        );
+        assert_eq!(
+            super::with_reload_note(Language::En, false, "修改后应用", "Apply after editing"),
+            "Apply after editing; core reload required"
+        );
     }
 }
