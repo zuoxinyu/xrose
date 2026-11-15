@@ -835,6 +835,14 @@ pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
     }))
 }
 
+pub(super) fn compile_direct_probe(port: u16) -> Value {
+    json!({
+        "log": {"loglevel": "none"},
+        "inbounds": [{"protocol":"http", "tag":"probe", "listen":"127.0.0.1", "port":port, "settings":{}}],
+        "outbounds": [{"protocol":"freedom", "tag":"direct", "settings":{}}]
+    })
+}
+
 /// Bind probe sockets before they can be captured by a running TUN.
 pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str) {
     let first_hop = config["outbounds"]

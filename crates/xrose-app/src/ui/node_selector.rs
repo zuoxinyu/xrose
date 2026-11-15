@@ -104,12 +104,15 @@ impl AppView {
                     node.name.clone()
                 };
                 let delay = theme::latency_label(
-                    snapshot.latency.get(&node.id),
+                    snapshot
+                        .latency
+                        .get(&node.id)
+                        .filter(|entry| entry.is_http()),
                     testing && self.latency_pending.contains(&node.id),
                     self.lang(),
                 );
                 choices.push(Choice {
-                    label: format!("{name}  {delay}").into(),
+                    label: format!("{name}  HTTP {delay}").into(),
                     checked: selected.is_some_and(|n| n.id == node.id),
                     command: (!automatic
                         && group.enabled

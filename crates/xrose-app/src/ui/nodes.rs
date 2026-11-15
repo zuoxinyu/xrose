@@ -15,15 +15,12 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{CoreKind, Node};
-use xrose_core::service::{LatencyScope, ToastLevel};
+use xrose_core::service::{HttpTestTarget, ToastLevel};
 use xrose_core::settings::Language;
 use xrose_core::storage::LatencyEntry;
 
 use super::menus::{self, Command, MenuTarget};
-use super::theme::{
-    LATENCY_EXCELLENT_MS, LATENCY_NORMAL_MS, LATENCY_SLOW_MS, LATENCY_STALE_SECS, Palette,
-    latency_age_secs, latency_color, palette,
-};
+use super::theme::{LATENCY_STALE_SECS, Palette, latency_age_secs, latency_color, palette};
 use super::widgets::*;
 use super::{AppView, Page};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
@@ -217,7 +214,12 @@ impl AppView {
         if sort_active {
             display_nodes.sort_by_key(|&index| {
                 let n = &model.nodes[index];
-                let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms);
+                let ms = self
+                    .snapshot
+                    .latency
+                    .get(&n.id)
+                    .filter(|entry| entry.is_http())
+                    .and_then(|l| l.delay_ms);
                 match ms {
                     Some(v) => (0, v),
                     None => (1, u32::MAX),
@@ -232,7 +234,12 @@ impl AppView {
                 .iter()
                 .filter(|n| n.enabled)
                 .filter_map(|n| {
-                    let ms = self.snapshot.latency.get(&n.id).and_then(|l| l.delay_ms)?;
+                    let ms = self
+                        .snapshot
+                        .latency
+                        .get(&n.id)
+                        .filter(|entry| entry.is_http())
+                        .and_then(|l| l.delay_ms)?;
                     (ms > 0).then(|| (n.id.clone(), ms))
                 })
                 .collect(),
@@ -265,10 +272,13 @@ impl AppView {
                 shown_exits,
                 px(super::theme::NODE_ROW_HEIGHT),
                 row_gap,
-                cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
+                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                     exits[range]
                         .iter()
-                        .map(|exit| exit.row(busy, hide_ips, lang, &p, cx).into_any_element())
+                        .map(|exit| {
+                            exit.row(busy, hide_ips, lang, &p, this, window, cx)
+                                .into_any_element()
+                        })
                         .collect()
                 }),
             )
@@ -298,10 +308,13 @@ impl AppView {
                                         && (!node.is_mesh_gateway()
                                             || this.snapshot.model.work_mode
                                                 == xrose_core::model::WorkMode::Mesh),
-                                    running: this.snapshot.runtime.running_proxy_node.as_deref()
-                                        == Some(node.id.as_str()),
+                                    virtual_exit: None,
                                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
-                                    latency: this.snapshot.latency.get(&node.id),
+                                    latency: this
+                                        .snapshot
+                                        .latency
+                                        .get(&node.id)
+                                        .filter(|entry| entry.is_http()),
                                     location: this.snapshot.node_location(node),
                                     download: this.snapshot.downloads.get(&node.id),
                                     downloading: this_busy(
@@ -331,9 +344,10 @@ impl AppView {
                                         .cloned(),
                                     core_busy,
                                     latency_busy: tests_busy,
-                                    testing: latency_busy
-                                        && node.enabled
-                                        && this.latency_pending.contains(&node.id),
+                                    testing: this_busy(
+                                        &this.snapshot.busy,
+                                        &format!("latency:{}", node.id),
+                                    ),
                                     batch_mode,
                                     batch_checked: this.batch_selected.contains(&node.id),
                                     drag_enabled: !sort_active,
@@ -482,7 +496,7 @@ impl AppView {
                                 toolbar_icon_button(
                                     "test-all",
                                     IconName::Gauge,
-                                    self.tr("全部节点测速", "Test all nodes"),
+                                    self.tr("对本机直连、已启用代理和已连接组网出口进行 HTTP 测速", "HTTP test Direct, enabled proxies and connected mesh exits"),
                                     cx,
                                 )
                                 .disabled(tests_busy)
@@ -497,7 +511,7 @@ impl AppView {
                                             .filter(|n| n.enabled)
                                             .map(|n| n.id.clone())
                                             .collect();
-                                        this.service.test_latency(LatencyScope::All);
+                                        this.service.test_all_http_latency();
                                         this.sync(cx);
                                     },
                                 )),
@@ -726,8 +740,8 @@ impl AppView {
                 })
                 .child(self.direct_entry(
                     &p,
-                    auto_mode && model.has_usable_default_group(self.snapshot.settings.core),
                     core_busy,
+                    window,
                     cx,
                 ))
                 .when(exit_busy, |d| {
@@ -887,9 +901,8 @@ impl AppView {
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.latency_pending
                                                     .extend(node_ids_for_ping.iter().cloned());
-                                                this.service.test_latency(LatencyScope::Nodes(
-                                                    node_ids_for_ping.clone(),
-                                                ));
+                                                this.service
+                                                    .test_http_latency(node_ids_for_ping.clone());
                                                 this.sync(cx);
                                             })),
                                         )
@@ -1017,7 +1030,7 @@ struct RowProps<'a> {
     node: &'a Node,
     lang: Language,
     selected: bool,
-    running: bool,
+    virtual_exit: Option<VirtualExit>,
     fastest: bool,
     latency: Option<&'a LatencyEntry>,
     location: Option<&'a xrose_core::runtime::location::NodeLocation>,
@@ -1034,6 +1047,215 @@ struct RowProps<'a> {
     batch_mode: bool,
     batch_checked: bool,
     drag_enabled: bool,
+}
+
+#[derive(Clone)]
+enum VirtualExit {
+    Direct {
+        detail: String,
+    },
+    Mesh {
+        profile: String,
+        peer: String,
+        detail: String,
+        online: bool,
+        provider: xrose_core::mesh::MeshProvider,
+        resumable: bool,
+    },
+}
+
+impl VirtualExit {
+    fn target(&self) -> HttpTestTarget {
+        match self {
+            Self::Direct { .. } => HttpTestTarget::Direct,
+            Self::Mesh { profile, peer, .. } => HttpTestTarget::MeshExit {
+                profile: profile.clone(),
+                peer: peer.clone(),
+            },
+        }
+    }
+    fn detail(&self) -> &str {
+        match self {
+            Self::Direct { detail } | Self::Mesh { detail, .. } => detail,
+        }
+    }
+}
+
+fn select_row_exit(
+    this: &mut AppView,
+    exit: Option<&VirtualExit>,
+    group: Option<&str>,
+    node: &str,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) {
+    match exit {
+        Some(VirtualExit::Direct { .. }) => this.run_command(
+            Command::SelectWorkMode(xrose_core::model::WorkMode::Direct),
+            false,
+            window,
+            cx,
+        ),
+        Some(VirtualExit::Mesh { profile, peer, .. }) => {
+            this.service
+                .select_mesh_exit_mode(profile.clone(), peer.clone());
+            this.sync(cx);
+        }
+        None => {
+            this.service.select_node(group.unwrap_or(""), node);
+            this.sync(cx);
+        }
+    }
+}
+
+fn render_virtual_node_row(
+    node: &Node,
+    exit: VirtualExit,
+    selected: bool,
+    busy: bool,
+    view: &AppView,
+    p: &Palette,
+    window: &mut Window,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement + use<> {
+    let key = exit.target().key();
+    let offline = matches!(&exit, VirtualExit::Mesh { online: false, .. });
+    render_node_row(
+        RowProps {
+            node,
+            lang: view.lang(),
+            selected,
+            virtual_exit: Some(exit),
+            fastest: false,
+            latency: view
+                .snapshot
+                .latency
+                .get(&key)
+                .filter(|entry| entry.is_http()),
+            location: None,
+            download: None,
+            downloading: false,
+            hide_ips: view.hide_ips,
+            auto_mode: false,
+            offline_exit: offline,
+            mesh_provider: None,
+            group_id: None,
+            core_busy: busy,
+            latency_busy: ["latency", "download", "auto-probe", "core", "mesh"]
+                .iter()
+                .any(|key| this_busy(&view.snapshot.busy, key)),
+            testing: this_busy(&view.snapshot.busy, &format!("latency:{key}")),
+            batch_mode: false,
+            batch_checked: false,
+            drag_enabled: false,
+        },
+        p,
+        window,
+        cx,
+    )
+}
+
+fn http_row_controls(
+    target: HttpTestTarget,
+    menu: MenuTarget,
+    entry: Option<&LatencyEntry>,
+    testing: bool,
+    disabled: bool,
+    offline: bool,
+    lang: Language,
+    p: &Palette,
+    cx: &mut Context<AppView>,
+) -> impl IntoElement + use<> {
+    let key = target.key();
+    let label = format!("HTTP {}", super::theme::latency_label(entry, false, lang));
+    let detail: SharedString = entry
+        .map(|entry| {
+            format!(
+                "{} · {}",
+                age_text(lang, latency_age_secs(entry)),
+                entry.detail.as_deref().unwrap_or("HTTP 延迟")
+            )
+        })
+        .unwrap_or_else(|| {
+            super::tr(
+                lang,
+                "尚未进行 HTTP 测速",
+                "HTTP latency has not been measured",
+            )
+            .to_string()
+        })
+        .into();
+    div()
+        .id(SharedString::from(format!("http-controls-{key}")))
+        .flex()
+        .items_center()
+        .gap_3()
+        .flex_shrink_0()
+        .on_click(|_, _, cx| cx.stop_propagation())
+        .child(
+            div()
+                .id(SharedString::from(format!("http-delay-{key}")))
+                .w(px(super::theme::NODE_HTTP_WIDTH))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .text_sm()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(latency_color(p, entry))
+                .when(
+                    entry.is_some_and(|entry| latency_age_secs(entry) > LATENCY_STALE_SECS),
+                    |d| d.opacity(super::theme::DISABLED_OPACITY),
+                )
+                .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+                .child(if testing {
+                    Spinner::new().small().color(p.muted_fg).into_any_element()
+                } else {
+                    div().child(label).into_any_element()
+                }),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    Button::new(SharedString::from(format!("http-test-{key}")))
+                        .compact()
+                        .h(px(super::theme::CONTROL_HEIGHT))
+                        .custom(icon_button_style(p, false, cx))
+                        .icon(IconName::Gauge)
+                        .tooltip(if offline {
+                            super::tr(
+                                lang,
+                                "出口设备离线，请先连接所属组网",
+                                "Exit device is offline; connect its mesh network first",
+                            )
+                        } else if disabled {
+                            super::tr(
+                                lang,
+                                "请先启用节点，并等待当前任务完成",
+                                "Enable the node and wait for the current task to finish",
+                            )
+                        } else {
+                            super::tr(lang, "HTTP 测速", "HTTP test")
+                        })
+                        .accessibility_label(super::tr(lang, "HTTP 测速", "HTTP test"))
+                        .disabled(disabled)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.service.test_http_target(target.clone());
+                            this.sync(cx);
+                        })),
+                )
+                .child(
+                    more_button(
+                        SharedString::from(format!("exit-more-{key}")),
+                        super::tr(lang, "更多操作", "More actions"),
+                        cx,
+                    )
+                    .dropdown_menu(menus::builder(cx.entity().downgrade(), menu)),
+                ),
+        )
 }
 
 /// The fastest node, but only if it leads the runner-up by at least
@@ -1089,14 +1311,14 @@ fn age_text(lang: Language, secs: i64) -> String {
 fn render_node_row(
     props: RowProps<'_>,
     p: &Palette,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement + use<> {
     let RowProps {
         node,
         lang,
         selected,
-        running,
+        virtual_exit,
         fastest: is_fastest,
         latency,
         location,
@@ -1114,14 +1336,36 @@ fn render_node_row(
         batch_checked: is_batch_checked,
         drag_enabled,
     } = props;
-    let node_id = node.id.clone();
     let node_id_select = node.id.clone();
-    let node_id_tcp = node.id.clone();
     let node_id_batch = node.id.clone();
     let mesh_gateway = node.is_mesh_gateway();
+    let http_target = virtual_exit
+        .as_ref()
+        .map(VirtualExit::target)
+        .unwrap_or_else(|| HttpTestTarget::Node(node.id.clone()));
+    let row_menu = if virtual_exit.is_some() {
+        MenuTarget::Exit(http_target.clone())
+    } else {
+        MenuTarget::Node(node.id.clone())
+    };
+    let virtual_select = virtual_exit.clone();
+    let radio_target = virtual_exit.clone();
+    let radio_group = group_id.clone();
+    let radio_node = node.id.clone();
+    let radio_name = node.name.clone();
     let can_select =
-        (group_id.is_some() || (mesh_gateway && node.enabled)) && !is_core_busy && !offline_exit;
-    let auto_mode = auto_mode && !mesh_gateway;
+        (virtual_exit.is_some() || group_id.is_some() || (mesh_gateway && node.enabled))
+            && node.enabled
+            && !is_core_busy
+            && (!offline_exit
+                || matches!(
+                    &virtual_exit,
+                    Some(VirtualExit::Mesh {
+                        resumable: true,
+                        ..
+                    })
+                ));
+    let auto_mode = auto_mode && !mesh_gateway && virtual_exit.is_none();
     let name = node.name.clone();
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
     let is_node_busy = is_core_busy && selected;
@@ -1131,19 +1375,6 @@ fn render_node_row(
     let hover_bg = p.panel_alt.opacity(0.5);
     let hover_group = SharedString::from(format!("node-group-{}", node.id));
 
-    // The test button stays hidden until the row is hovered or the button has
-    // keyboard focus; the focus handle is kept per row across frames.
-    let tcp_focus = window
-        .use_keyed_state(
-            SharedString::from(format!("tcp-focus-{}", node.id)),
-            cx,
-            |_, cx| cx.focus_handle(),
-        )
-        .read(cx)
-        .clone();
-    let tcp_focused = tcp_focus.is_focused(window);
-
-    let delay_label = super::theme::latency_label(latency, false, lang);
     let location_label = location.filter(|_| !hide_ips).map(|entry| {
         if entry.pending {
             super::tr(lang, "归属地探测中", "Locating server").to_string()
@@ -1154,32 +1385,6 @@ fn render_node_row(
                 .unwrap_or_else(|| super::tr(lang, "归属地未知", "Location unknown").to_string())
         }
     });
-    let delay_color = latency_color(p, latency);
-    let stale = latency.is_some_and(|l| latency_age_secs(l) > LATENCY_STALE_SECS);
-    let delay_tip: SharedString = match latency {
-        None => super::tr(lang, "尚未测速", "Not tested yet"),
-        Some(entry) => {
-            let grades = if lang == Language::Zh {
-                format!(
-                    "分级：<{LATENCY_EXCELLENT_MS} 优 · <{LATENCY_NORMAL_MS} 正常 · <{LATENCY_SLOW_MS} 偏慢 · 其余较差（ms）"
-                )
-            } else {
-                format!(
-                    "Grades: <{LATENCY_EXCELLENT_MS} excellent · <{LATENCY_NORMAL_MS} normal · <{LATENCY_SLOW_MS} slow · else poor (ms)"
-                )
-            };
-            SharedString::from(format!(
-                "{}\n{}\n{grades}",
-                age_text(lang, latency_age_secs(entry)),
-                match entry.detail.as_deref() {
-                    Some("HTTP 延迟") => super::tr(lang, "HTTP 延迟", "HTTP latency").to_string(),
-                    Some("TCP 延迟") => super::tr(lang, "TCP 延迟", "TCP latency").to_string(),
-                    detail => detail.unwrap_or_default().to_string(),
-                }
-            ))
-        }
-    };
-
     let radio_border = if auto_mode && selected {
         p.muted_fg
     } else if !can_select {
@@ -1229,7 +1434,7 @@ fn render_node_row(
                 .min_h(px(super::theme::NODE_ROW_HEIGHT))
                 .py_2()
                 .when(batch_mode || can_select, |d| d.cursor_pointer())
-                .on_click(cx.listener(move |this, _, _, cx| {
+                .on_click(cx.listener(move |this, _, window, cx| {
                     if batch_mode {
                         if this.batch_selected.contains(&node_id_batch) {
                             this.batch_selected.remove(&node_id_batch);
@@ -1242,17 +1447,14 @@ fn render_node_row(
                     if !can_select || selected {
                         return;
                     }
-                    if mesh_gateway || group_id.is_some() {
-                        this.service.select_node(
-                            if mesh_gateway {
-                                ""
-                            } else {
-                                group_id.as_deref().unwrap_or("")
-                            },
-                            &node_id_select,
-                        );
-                        this.sync(cx);
-                    }
+                    select_row_exit(
+                        this,
+                        virtual_select.as_ref(),
+                        group_id.as_deref(),
+                        &node_id_select,
+                        window,
+                        cx,
+                    );
                 }))
                 // Drag handle: dimmed until hover, absent while a sort is applied.
                 .child(if drag_enabled {
@@ -1305,7 +1507,30 @@ fn render_node_row(
                     )
                 })
                 // Radio: disabled in automatic groups, where the chosen node is only marked.
-                .child(radio_indicator(selected, radio_border, radio_dot))
+                .child({
+                    let select = cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        if !can_select || selected || auto_mode {
+                            return;
+                        }
+                        select_row_exit(
+                            this,
+                            radio_target.as_ref(),
+                            radio_group.as_deref(),
+                            &radio_node,
+                            window,
+                            cx,
+                        );
+                    });
+                    gpui_base::Radio::new(SharedString::from(format!("exit-choice-{}", node.id)))
+                        .checked(selected)
+                        .disabled(!can_select || auto_mode)
+                        .accessibility_label(radio_name)
+                        .on_change(move |_, event, window, cx| {
+                            cx.stop_propagation();
+                            select(event, window, cx)
+                        })
+                        .child(radio_indicator(selected, radio_border, radio_dot))
+                })
                 // Node metadata
                 .child(
                     div()
@@ -1330,16 +1555,33 @@ fn render_node_row(
                                         .child(name),
                                 )
                                 .child(pill(
-                                    if node.id.starts_with("mesh-exit-") {
+                                    if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
+                                        super::tr(lang, "直连", "Direct").to_string()
+                                    } else if let Some(VirtualExit::Mesh { provider, .. }) =
+                                        &virtual_exit
+                                    {
+                                        provider.label().to_string()
+                                    } else if node.id.starts_with("mesh-exit-") {
                                         super::tr(lang, "组网出口", "Mesh exit").to_string()
                                     } else {
                                         node.protocol.display_name().to_uppercase()
                                     },
-                                    p.primary,
+                                    if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
+                                        p.muted_fg
+                                    } else {
+                                        p.primary
+                                    },
                                     p.panel,
                                 ))
                                 .when_some(mesh_provider, |d, provider| {
                                     d.child(pill(provider.label(), p.primary, p.panel))
+                                })
+                                .when(!node.enabled, |d| {
+                                    d.child(pill(
+                                        super::tr(lang, "已禁用", "Disabled"),
+                                        p.muted_fg,
+                                        p.panel_alt,
+                                    ))
                                 })
                                 .when(offline_exit, |d| {
                                     d.child(pill(
@@ -1380,7 +1622,15 @@ fn render_node_row(
                                     ))
                                 }),
                         )
-                        .child(
+                        .child(if let Some(exit) = &virtual_exit {
+                            div()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_xs()
+                                .text_color(p.muted_fg)
+                                .child(exit.detail().to_owned())
+                                .into_any_element()
+                        } else {
                             div()
                                 .flex()
                                 .items_center()
@@ -1417,8 +1667,9 @@ fn render_node_row(
                                                 })
                                                 .child(label),
                                         )
-                                }),
-                        ),
+                                })
+                                .into_any_element()
+                        }),
                 )
                 // Download speed column: fixed width, right-aligned, mono. Placed to the left of latency.
                 .child(
@@ -1452,124 +1703,19 @@ fn render_node_row(
                             div().into_any_element()
                         }),
                 )
-                // Latency column: fixed width, right-aligned, mono. A spinner replaces
-                // the value while this node is being measured; old values are dimmed.
-                .child(
-                    div()
-                        .id(SharedString::from(format!("delay-{}", node.id)))
-                        .w(px(80.))
-                        .flex_shrink_0()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .text_sm()
-                        .font_family(cx.theme().mono_font_family.clone())
-                        .text_color(delay_color)
-                        .when(stale && !testing, |d| d.opacity(0.55))
-                        .tooltip(move |window, cx| {
-                            Tooltip::new(delay_tip.clone()).build(window, cx)
-                        })
-                        .child(if testing {
-                            Spinner::new().small().color(p.muted_fg).into_any_element()
-                        } else {
-                            div().child(delay_label).into_any_element()
-                        }),
-                )
-                // Actions: the test button is revealed by hover or keyboard focus.
-                .child(
-                    div()
-                        .id(SharedString::from(format!("node-actions-{}", node.id)))
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .flex_shrink_0()
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .when(!tcp_focused, |d| {
-                                    d.opacity(0.)
-                                        .group_hover(hover_group.clone(), |s| s.opacity(1.))
-                                })
-                                .child(
-                                    Button::new(SharedString::from(format!("tcp-{node_id_tcp}")))
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .custom(icon_button_style(p, false, cx))
-                                        .icon(IconName::Gauge)
-                                        .tooltip(super::tr(lang, "测速", "Test latency"))
-                                        .accessibility_label(super::tr(
-                                            lang,
-                                            "节点测速",
-                                            "Test node latency",
-                                        ))
-                                        .disabled(is_latency_busy)
-                                        .track_focus(&tcp_focus)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.latency_pending.clear();
-                                            this.latency_pending.insert(node_id_tcp.clone());
-                                            this.service.test_latency(LatencyScope::Node(
-                                                node_id_tcp.clone(),
-                                            ));
-                                            this.sync(cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            more_button(
-                                SharedString::from(format!("more-{}", node.id)),
-                                super::tr(lang, "更多操作", "More actions"),
-                                cx,
-                            )
-                            .dropdown_menu(menus::builder(
-                                cx.entity().downgrade(),
-                                MenuTarget::Node(node.id.clone()),
-                            )),
-                        ),
-                )
-                // Row end: enabled toggle, separated by a hairline.
-                .child(
-                    div()
-                        .id(SharedString::from(format!("node-toggle-{}", node.id)))
-                        .flex_shrink_0()
-                        .on_click(|_, _, cx| cx.stop_propagation())
-                        .pl_2()
-                        .border_l_1()
-                        .border_color(p.border)
-                        .child(
-                            toggle(
-                                SharedString::from(format!("enabled-{node_id}")),
-                                "",
-                                node.enabled,
-                            )
-                            .disabled(running)
-                            .tooltip(if running {
-                                super::tr(
-                                    lang,
-                                    "节点正在使用，请先切换节点或停止内核",
-                                    "Switch nodes or stop the core before disabling this node",
-                                )
-                            } else {
-                                super::tr(
-                                    lang,
-                                    "允许此节点参与连接与自动选择",
-                                    "Allow this node for connections and automatic selection",
-                                )
-                            })
-                            .accessibility_label(super::tr(lang, "启用节点", "Enable node"))
-                            .on_change(cx.listener(
-                                move |this, checked, _, cx| {
-                                    this.service.set_node_enabled(&node_id, *checked);
-                                    this.sync(cx);
-                                },
-                            )),
-                        ),
-                ),
+                .child(http_row_controls(
+                    http_target,
+                    row_menu.clone(),
+                    latency,
+                    testing,
+                    is_latency_busy || is_core_busy || !node.enabled || offline_exit,
+                    offline_exit,
+                    lang,
+                    p,
+                    cx,
+                )),
         )
-        .context_menu(menus::builder(
-            cx.entity().downgrade(),
-            MenuTarget::Node(node.id.clone()),
-        ))
+        .context_menu(menus::builder(cx.entity().downgrade(), row_menu))
 }
 
 #[cfg(test)]

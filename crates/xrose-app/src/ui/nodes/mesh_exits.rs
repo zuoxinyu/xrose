@@ -1,9 +1,6 @@
 //! Discovered exits select the host mesh mode independently of proxy-group membership.
 use super::*;
-use crate::ui::{
-    theme::{DISABLED_OPACITY, NODE_ROW_HEIGHT},
-    tr,
-};
+use crate::ui::tr;
 use std::net::IpAddr;
 use xrose_core::mesh::MeshProvider;
 
@@ -32,104 +29,44 @@ impl Choice {
         &self,
         disabled: bool,
         hide_ips: bool,
-        lang: Language,
+        _lang: Language,
         p: &Palette,
+        view: &AppView,
+        window: &mut Window,
         cx: &mut Context<AppView>,
     ) -> impl IntoElement + use<> {
-        let profile = self.profile.clone();
-        let peer = self.peer.clone();
-        let disabled = disabled || (!self.online && !self.resumable);
-        let selected = self.selected;
-        let primary = p.primary;
-        let mut detail = format!("{} · {}", self.network, self.provider.label());
+        let target = xrose_core::service::HttpTestTarget::MeshExit {
+            profile: self.profile.clone(),
+            peer: self.peer.clone(),
+        };
+        let mut node = Node::new(
+            self.name.clone(),
+            xrose_core::model::Protocol::Socks,
+            self.address.to_string(),
+            0,
+        );
+        node.id = target.key();
+        let mut detail = self.network.clone();
         if !hide_ips {
             detail.push_str(&format!(" · {}", self.address));
         }
-        let hover = p.panel_alt;
-        let select = cx.listener(move |this, _: &ClickEvent, _, cx| {
-            if !disabled {
-                this.service
-                    .select_mesh_exit_mode(profile.clone(), peer.clone());
-                this.sync(cx);
-            }
-        });
-        gpui_base::Radio::new(SharedString::from(format!(
-            "exit-{}-{}",
-            self.profile, self.peer
-        )))
-        .checked(selected)
-        .disabled(disabled)
-        .accessibility_label(self.name.clone())
-        .on_change(move |_, event, window, cx| select(event, window, cx))
-        .tooltip(move |window, cx| {
-            Tooltip::new(tr(
-                lang,
-                "进入组网模式，由此出口接管系统流量。",
-                "Use this exit for system traffic in Mesh mode.",
-            ))
-            .build(window, cx)
-        })
-        .relative()
-        .flex()
-        .items_center()
-        .gap_3()
-        .pl_4()
-        .pr_3()
-        .py_2()
-        .min_h(px(NODE_ROW_HEIGHT))
-        .border_1()
-        .border_color(if selected {
-            p.border.opacity(0.)
-        } else {
-            p.border
-        })
-        .rounded_lg()
-        .bg(if selected { p.accent } else { p.bg })
-        .focus_visible(move |row| row.border_color(primary))
-        .when(selected, |row| row.child(selection_bar(primary)))
-        .when(disabled, |d| d.opacity(DISABLED_OPACITY))
-        .when(!disabled && !selected, |d| {
-            d.cursor_pointer().hover(move |d| d.bg(hover))
-        })
-        .child(div().w(px(14.)).flex_shrink_0())
-        .child(radio_indicator(
-            selected,
-            if selected { primary } else { p.muted_fg },
-            primary,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w(px(0.))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .truncate()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(self.name.clone()),
-                        )
-                        .child(pill(tr(lang, "组网出口", "Mesh exit"), p.primary, p.panel))
-                        .child(pill(self.provider.label(), p.primary, p.panel)),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(p.muted_fg)
-                        .child(detail),
-                ),
+        render_virtual_node_row(
+            &node,
+            VirtualExit::Mesh {
+                profile: self.profile.clone(),
+                peer: self.peer.clone(),
+                detail,
+                online: self.online,
+                provider: self.provider,
+                resumable: self.resumable,
+            },
+            self.selected,
+            disabled || (!self.online && !self.resumable),
+            view,
+            p,
+            window,
+            cx,
         )
-        .when(!self.online, |d| {
-            d.child(pill(tr(lang, "离线", "Offline"), p.muted_fg, p.panel_alt))
-        })
     }
 }
 

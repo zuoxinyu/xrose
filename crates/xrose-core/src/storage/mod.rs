@@ -49,6 +49,15 @@ pub struct LatencyEntry {
     pub detail: Option<String>,
 }
 
+impl LatencyEntry {
+    /// TCP handshake times and peer RTTs must not enter an HTTP comparison.
+    pub fn is_http(&self) -> bool {
+        self.detail
+            .as_deref()
+            .is_some_and(|detail| detail.starts_with("HTTP "))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupBundle {
     pub format: u32,

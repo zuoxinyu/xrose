@@ -338,6 +338,14 @@ pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16
     }
 }
 
+/// A direct baseline uses the same isolated HTTP ingress as proxy probes.
+pub(crate) fn compile_direct_probe(core: CoreKind, port: u16) -> Value {
+    match core {
+        CoreKind::Xray => xray::compile_direct_probe(port),
+        CoreKind::SingBox => singbox::compile_direct_probe(port),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -638,6 +646,19 @@ mod tests {
     use super::*;
     use crate::model::{Node, Protocol, RoutePreset, RouteRule, RouteRuleGroup};
     use serde_json::json;
+
+    #[test]
+    fn direct_http_probe_has_only_a_loopback_ingress_and_direct_outbound() {
+        let xray = compile_direct_probe(CoreKind::Xray, 19090);
+        assert_eq!(xray["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(xray["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(xray["outbounds"][0]["protocol"], "freedom");
+        let singbox = compile_direct_probe(CoreKind::SingBox, 19090);
+        assert_eq!(singbox["inbounds"][0]["listen"], "127.0.0.1");
+        assert_eq!(singbox["outbounds"].as_array().unwrap().len(), 1);
+        assert_eq!(singbox["outbounds"][0]["type"], "direct");
+        assert_eq!(singbox["route"]["auto_detect_interface"], true);
+    }
 
     #[test]
     fn preset_compilation_has_no_hidden_bypass_rules_and_honors_list_order() {

@@ -202,7 +202,14 @@ pub fn latency_label(
     }
     match entry {
         Some(entry) => entry.delay_ms.map_or_else(
-            || crate::i18n::tr(lang, "超时", "Timeout").to_string(),
+            || {
+                if entry.is_http() {
+                    crate::i18n::tr(lang, "失败", "Failed")
+                } else {
+                    crate::i18n::tr(lang, "超时", "Timeout")
+                }
+                .to_string()
+            },
             |ms| format!("{ms} ms"),
         ),
         None => "—".into(),
@@ -221,6 +228,7 @@ pub const STATUS_NODE_WIDTH: f32 = 220.;
 pub const ICON_BUTTON_SIZE: f32 = 28.;
 pub const ICON_SIZE: f32 = 16.;
 pub const NODE_ROW_HEIGHT: f32 = 64.;
+pub const NODE_HTTP_WIDTH: f32 = 120.;
 pub const SETTING_LABEL_WIDTH: f32 = 120.;
 pub const FORM_FIELD_WIDTH: f32 = 240.;
 pub const EMPTY_HEIGHT: f32 = 160.;

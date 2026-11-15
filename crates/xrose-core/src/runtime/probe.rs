@@ -31,15 +31,31 @@ struct Probe {
 
 impl Probe {
     async fn start(binary: &Path, core: CoreKind, node: &Node, bypass_tun: bool) -> Result<Self> {
+        Self::start_target(binary, core, Some(node), bypass_tun).await
+    }
+
+    async fn start_target(
+        binary: &Path,
+        core: CoreKind,
+        node: Option<&Node>,
+        bypass_tun: bool,
+    ) -> Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let mut target = node.clone();
-        let interface = if core == CoreKind::Xray && bypass_tun {
-            let node = &mut target;
+        let mut target = node.cloned();
+        let loopback_gateway = node.is_some_and(|node| {
+            node.server
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        });
+        let interface = if core == CoreKind::Xray && bypass_tun && !loopback_gateway {
             let interface = default_uplink().await?;
             // Resolve before timing the request; the probe core must not recurse
             // through a TUN-controlled system resolver while dialing its server.
-            if node.server.parse::<std::net::IpAddr>().is_err() {
+            if let Some(node) = target
+                .as_mut()
+                .filter(|node| node.server.parse::<std::net::IpAddr>().is_err())
+            {
                 let address = tokio::time::timeout(
                     Duration::from_secs(5),
                     tokio::net::lookup_host((node.server.as_str(), node.port)),
@@ -68,7 +84,10 @@ impl Probe {
         } else {
             None
         };
-        let mut config = crate::adapters::compile_probe(core, &target, port)?;
+        let mut config = match target.as_ref() {
+            Some(node) => crate::adapters::compile_probe(core, node, port)?,
+            None => crate::adapters::compile_direct_probe(core, port),
+        };
         if let Some(interface) = interface {
             crate::adapters::xray::bind_probe_interface(&mut config, &interface);
         }
@@ -201,25 +220,37 @@ pub async fn http_latency(
     url: &str,
     bypass_tun: bool,
 ) -> Result<u32> {
-    let mut probe = Probe::start(binary, core, node, bypass_tun).await?;
+    http_target_latency(binary, core, Some(node), url, bypass_tun).await
+}
+
+pub async fn http_target_latency(
+    binary: &Path,
+    core: CoreKind,
+    node: Option<&Node>,
+    url: &str,
+    bypass_tun: bool,
+) -> Result<u32> {
+    let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
+    let result = measure_http_latency(&probe.client, url).await;
+    probe.stop().await;
+    result
+}
+
+async fn measure_http_latency(client: &reqwest::Client, url: &str) -> Result<u32> {
     let started = Instant::now();
-    let result = probe
-        .client
+    let response = client
         .get(url)
         .timeout(Duration::from_secs(5))
         .send()
-        .await;
-    let elapsed = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
-    probe.stop().await;
-    let response =
-        result.map_err(|_| Error::other("节点 HTTP 延迟测试失败，请检查节点或测试地址"))?;
+        .await
+        .map_err(|_| Error::other("HTTP 测速失败，请检查出口连接或测试地址"))?;
     if !response.status().is_success() {
         return Err(Error::other(format!(
-            "延迟测试地址返回 HTTP {}",
+            "测速地址返回 HTTP {}",
             response.status()
         )));
     }
-    Ok(elapsed)
+    Ok(started.elapsed().as_millis().min(u32::MAX as u128) as u32)
 }
 
 pub async fn download(
@@ -321,6 +352,38 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
         (port, task)
+    }
+
+    #[tokio::test]
+    async fn http_latency_measures_successful_requests_and_rejects_error_statuses() {
+        for response in [
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
+        ] {
+            let (port, task) = fake_proxy(response, false).await;
+            assert!(
+                measure_http_latency(&probe_client(port).unwrap(), "http://probe.invalid/test")
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                task.await
+                    .unwrap()
+                    .starts_with("GET http://probe.invalid/test HTTP/1.1")
+            );
+        }
+        for response in [
+            b"HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
+        ] {
+            let (port, task) = fake_proxy(response, false).await;
+            assert!(
+                measure_http_latency(&probe_client(port).unwrap(), "http://probe.invalid/test")
+                    .await
+                    .is_err()
+            );
+            task.await.unwrap();
+        }
     }
 
     #[tokio::test]

@@ -298,10 +298,7 @@ impl Backend {
                         .map_err(|_| Error::other("启动设备探测失败"))?;
                 if output.status.success() {
                     let text = String::from_utf8_lossy(&output.stdout);
-                    let latency = regex::Regex::new(r"[=<]\s*(\d+)\s*ms")
-                        .unwrap()
-                        .captures(&text)
-                        .and_then(|c| c[1].parse().ok());
+                    let latency = parse_ping_latency(&text);
                     Ok(latency)
                 } else {
                     Err(Error::other("设备没有响应 ICMP，可能被对端防火墙阻止"))
@@ -312,9 +309,44 @@ impl Backend {
     }
 }
 
+/// Parse per-packet RTT without confusing fractional replies with timeouts.
+fn parse_ping_latency(output: &str) -> Option<f64> {
+    let regex =
+        regex::Regex::new(r"(?i)(?:time|时间|時間)\s*[=<]\s*(\d+(?:[.,]\d+)?)\s*(?:ms|毫秒)")
+            .unwrap();
+    regex
+        .captures(output)
+        .and_then(|capture| capture[1].replace(',', ".").parse::<f64>().ok())
+        .filter(|latency| latency.is_finite() && *latency >= 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ping_latency_accepts_fractional_integer_and_localized_replies() {
+        for (output, expected) in [
+            (
+                "64 bytes from 192.0.2.1: icmp_seq=0 ttl=64 time=1.234 ms",
+                1.234,
+            ),
+            ("Reply from 192.0.2.1: bytes=32 time=12ms TTL=64", 12.0),
+            ("Reply from 192.0.2.1: bytes=32 time<1ms TTL=64", 1.0),
+            ("来自 192.0.2.1 的回复: 字节=32 时间=2.5ms TTL=64", 2.5),
+            ("64 bytes: time=0,123 ms", 0.123),
+        ] {
+            assert_eq!(parse_ping_latency(output), Some(expected));
+        }
+        for output in [
+            "Request timeout",
+            "100% packet loss",
+            "time=-1 ms",
+            "time=NaN ms",
+        ] {
+            assert_eq!(parse_ping_latency(output), None);
+        }
+    }
 
     #[tokio::test]
     async fn stop_and_pipe_close_interrupt_reads_and_preserve_queued_logout() {

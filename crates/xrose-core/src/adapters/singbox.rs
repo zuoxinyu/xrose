@@ -700,6 +700,16 @@ pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
     }))
 }
 
+pub(super) fn compile_direct_probe(port: u16) -> Value {
+    json!({
+        "log": {"disabled":true},
+        "dns": {"servers":[{"type":"local", "tag":"local"}]},
+        "inbounds": [{"type":"http", "tag":"probe", "listen":"127.0.0.1", "listen_port":port}],
+        "outbounds": [{"type":"direct", "tag":"direct"}],
+        "route": {"auto_detect_interface":true, "default_domain_resolver":"local", "final":"direct"}
+    })
+}
+
 fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
     let _ = warnings;
     let mut outbound = match node.protocol {

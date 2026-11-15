@@ -531,7 +531,7 @@ impl Render for PopupView {
             .map(|(index, node)| {
                 let delay = node
                     .delay_ms
-                    .map(|ms| format!("{ms} ms"))
+                    .map(|ms| format!("HTTP {ms} ms"))
                     .unwrap_or_else(|| "—".into());
                 let delay_color = crate::ui::theme::latency_color_ms(&p, node.delay_ms);
                 div()
@@ -676,7 +676,7 @@ impl Render for PopupView {
                             .compact()
                             .custom(icon_button_style(&p, false, cx))
                             .icon(IconName::Gauge)
-                            .tooltip(tr(lang, "全部节点测速", "Test all nodes"))
+                            .tooltip(tr(lang, "全部出口 HTTP 测速", "HTTP test all exits"))
                             .disabled(d.busy_latency)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.action(TrayAction::TestAll, window, cx)

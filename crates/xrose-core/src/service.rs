@@ -1,8 +1,10 @@
 //! The single facade the UI talks to. All heavy work is dispatched to an
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
+mod http_tests;
 mod mesh_discovery;
 mod mesh_exit;
+pub use http_tests::HttpTestTarget;
 mod mesh_gateway;
 mod mesh_mode;
 #[cfg(test)]
@@ -1972,7 +1974,7 @@ impl AppService {
     }
 
     pub fn test_http_latency(&self, ids: Vec<String>) {
-        self.test_latency_scope(LatencyScope::Nodes(ids), true);
+        self.test_http_targets(ids.into_iter().map(HttpTestTarget::Node).collect());
     }
 
     fn test_latency_scope(&self, scope: LatencyScope, force_http: bool) {
@@ -2096,62 +2098,7 @@ impl AppService {
 
     /// HTTP latency through a private core configured with exactly one node.
     pub fn test_real_latency(&self, node_id: &str) {
-        if self.is_busy("latency") || self.is_busy("download") || self.is_busy("auto-probe") {
-            return;
-        }
-        let settings = self.settings();
-        let bypass_tun = self.inner.core.native_tun_active();
-        let core = if bypass_tun {
-            self.inner.core.state().core.unwrap_or(settings.core)
-        } else {
-            settings.core
-        };
-        let model = self.model();
-        let Some(node) = model.node(node_id).cloned() else {
-            return;
-        };
-        let binary = match self.inner.core.resolve_binary(core, &settings) {
-            Ok(binary) => binary,
-            Err(err) => {
-                self.toast(ToastLevel::Error, err.to_string());
-                return;
-            }
-        };
-        if !self.try_begin_probe("latency") {
-            return;
-        }
-        let target = self.tray_probe_target();
-        let service = self.clone();
-        self.spawn(async move {
-            let result = crate::runtime::probe::http_latency(
-                &binary,
-                core,
-                &node,
-                &settings.urltest_url,
-                bypass_tun,
-            )
-            .await;
-            service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
-            let entry = LatencyEntry {
-                key: node.id.clone(),
-                delay_ms: result.as_ref().ok().copied(),
-                checked_at: now_unix(),
-                detail: Some(match &result {
-                    Ok(_) => "HTTP 延迟".into(),
-                    Err(err) => err.to_string(),
-                }),
-            };
-            let _ = service.inner.store.set_latency(&entry);
-            service.inner.latency.write().insert(node.id, entry);
-            service.set_busy("latency", false);
-            match result {
-                Ok(ms) => service.toast(
-                    ToastLevel::Success,
-                    format!("“{}”HTTP 延迟 {ms} ms", node.name),
-                ),
-                Err(err) => service.toast(ToastLevel::Warning, err.to_string()),
-            }
-        });
+        self.test_http_target(HttpTestTarget::Node(node_id.into()));
     }
 
     pub fn test_download(&self, node_id: &str) {

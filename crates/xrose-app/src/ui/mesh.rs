@@ -907,7 +907,9 @@ impl AppView {
                 };
                 let label = if probe.success {
                     match probe.latency_ms {
-                        Some(ms) => format!("{} {ms:.1} ms", tr(lang, "可达", "Reachable")),
+                        Some(ms) => {
+                            format!("{} {ms:.1} ms", tr(lang, "设备延迟", "Device latency"))
+                        }
                         None => tr(lang, "设备可达", "Device reachable").to_string(),
                     }
                 } else {
@@ -1006,12 +1008,10 @@ impl AppView {
                             .items_center()
                             .gap_2()
                             .when_some(peer.latency_ms, |d, ms| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(format!("{ms:.1} ms")),
-                                )
+                                d.child(div().text_xs().text_color(p.muted_fg).child(format!(
+                                    "{} {ms:.1} ms",
+                                    tr(lang, "设备延迟", "Device latency")
+                                )))
                             })
                             .child(pill(
                                 if peer.online {

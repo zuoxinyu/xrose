@@ -1073,33 +1073,35 @@ impl AppView {
             xrose_core::core::ProcessPhase::Failed => self.tr("启动失败", "Failed"),
         };
         let mut node_tip = format!("{node_name} · {state_label}");
-        let latency = node
-            .filter(|_| !mesh)
-            .and_then(|n| self.snapshot.latency.get(&n.id));
-        let mesh_delay = self
-            .snapshot
-            .model
-            .mesh_mode
-            .target
+        let latency_key = if mesh {
+            self.snapshot.model.mesh_mode.target.as_ref().map(|target| {
+                xrose_core::service::HttpTestTarget::MeshExit {
+                    profile: target.profile_id.clone(),
+                    peer: target.peer_id.clone(),
+                }
+                .key()
+            })
+        } else if direct {
+            Some(xrose_core::model::DIRECT_VIRTUAL_NODE_ID.to_owned())
+        } else {
+            node.map(|node| node.id.clone())
+        };
+        let latency = latency_key
             .as_ref()
-            .and_then(|target| {
-                self.snapshot.mesh.exits().find_map(|(profile, peer, _)| {
-                    (mesh && profile.id == target.profile_id && peer.id == target.peer_id)
-                        .then_some(peer.latency_ms)
-                        .flatten()
-                        .filter(|latency| latency.is_finite() && *latency >= 0.0)
-                        .map(|latency| latency.round() as u32)
-                })
-            });
-        let testing = !mesh
-            && node.is_some_and(|n| self.latency_pending.contains(&n.id))
-            && self.snapshot.busy.iter().any(|key| key == "latency");
-        let node_delay = mesh_delay.map_or_else(
-            || theme::latency_label(latency, testing, self.lang()),
-            |ms| format!("{ms} ms"),
+            .and_then(|key| self.snapshot.latency.get(key))
+            .filter(|entry| entry.is_http());
+        let testing = latency_key.as_ref().is_some_and(|key| {
+            self.snapshot
+                .busy
+                .iter()
+                .any(|busy| busy == &format!("latency:{key}"))
+        });
+        let node_delay = format!(
+            "HTTP {}",
+            theme::latency_label(latency, testing, self.lang())
         );
-        if let Some(ms) = mesh_delay.or_else(|| latency.and_then(|entry| entry.delay_ms)) {
-            node_tip.push_str(&format!(" · {ms} ms"));
+        if let Some(ms) = latency.and_then(|entry| entry.delay_ms) {
+            node_tip.push_str(&format!(" · HTTP {ms} ms"));
         }
         if running && !self.hide_ips {
             if let Some(label) = node
@@ -1223,8 +1225,6 @@ impl AppView {
                                                     )
                                                     .text_color(if testing {
                                                         p.muted_fg
-                                                    } else if mesh {
-                                                        theme::latency_color_ms(&p, mesh_delay)
                                                     } else {
                                                         theme::latency_color(&p, latency)
                                                     })
@@ -1648,8 +1648,7 @@ impl Render for AppView {
                     if let Some(page) = Page::from_shortcut(key) {
                         this.navigate(page, cx);
                     } else if key == "r" {
-                        this.service
-                            .test_latency(xrose_core::service::LatencyScope::All);
+                        this.service.test_all_http_latency();
                         cx.notify();
                     } else if key == "q" {
                         crate::tray::queue_command(crate::tray::TrayCommand::Quit);

@@ -10,7 +10,7 @@ use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
 use xrose_core::model::WorkMode;
 use xrose_core::route::transfer::ExportScope;
-use xrose_core::service::{LatencyScope, ShareTarget, ToastLevel};
+use xrose_core::service::{HttpTestTarget, ShareTarget, ToastLevel};
 
 #[derive(Clone)]
 pub(super) enum MenuTarget {
@@ -27,6 +27,7 @@ pub(super) enum MenuTarget {
     DiagnosticOutbound,
     OutboundGroup(String),
     Node(String),
+    Exit(HttpTestTarget),
     Nodes,
     Rule(String, Option<String>),
     Group(String),
@@ -40,7 +41,6 @@ pub(super) enum MenuTarget {
 #[derive(Clone)]
 pub(super) enum Command {
     ShareLogs(LogAction, LogPrivacy),
-    BatchTcp(Vec<String>),
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
     ImportRoute,
@@ -60,6 +60,9 @@ pub(super) enum Command {
     NodeOutboundGroups(String),
     EditNode(String),
     TestNode(String),
+    TestExit(HttpTestTarget),
+    SetNodeEnabled(String, bool),
+    ExitDetails(HttpTestTarget),
     DownloadNode(String),
     CopyLink(ShareTarget),
     ShowQr(ShareTarget),
@@ -219,12 +222,6 @@ impl AppView {
                 let available =
                     !ids.is_empty() && !busy("latency") && !busy("download") && !busy("auto-probe");
                 menu = menu
-                    .item(add(
-                        "TCP 测速",
-                        "TCP test",
-                        available,
-                        Command::BatchTcp(ids.clone()),
-                    ))
                     .item(add(
                         "HTTP 测速",
                         "HTTP test",
@@ -453,6 +450,39 @@ impl AppView {
                     menu = menu.label(reason);
                 }
             }
+            MenuTarget::Exit(target) => {
+                let testing = busy("latency")
+                    || busy("download")
+                    || busy("auto-probe")
+                    || busy("core")
+                    || busy("mesh");
+                menu = menu
+                    .item(add(
+                        "HTTP 测速",
+                        "HTTP test",
+                        !testing,
+                        Command::TestExit(target.clone()),
+                    ))
+                    .item(add(
+                        "查看详情",
+                        "View details",
+                        true,
+                        Command::ExitDetails(target.clone()),
+                    ));
+                if target == HttpTestTarget::Direct
+                    && self
+                        .snapshot
+                        .model
+                        .has_usable_default_group(self.snapshot.settings.core)
+                {
+                    menu = menu.item(add(
+                        "恢复代理模式",
+                        "Resume proxy mode",
+                        !busy("core"),
+                        Command::SelectWorkMode(WorkMode::Proxy),
+                    ));
+                }
+            }
             MenuTarget::Node(id) => {
                 let Some(node) = self.snapshot.model.node(&id) else {
                     return menu;
@@ -484,6 +514,22 @@ impl AppView {
                         node.enabled && !testing,
                         Command::DownloadNode(id.clone()),
                     ));
+                let running =
+                    self.snapshot.runtime.running_proxy_node.as_deref() == Some(id.as_str());
+                menu = menu.item(add(
+                    if node.enabled {
+                        "禁用节点"
+                    } else {
+                        "启用节点"
+                    },
+                    if node.enabled {
+                        "Disable node"
+                    } else {
+                        "Enable node"
+                    },
+                    !busy("core") && !running,
+                    Command::SetNodeEnabled(id.clone(), !node.enabled),
+                ));
                 menu = share_items(menu, ShareTarget::Node(id.clone()))
                     .separator()
                     .item(add(
@@ -846,7 +892,7 @@ impl AppView {
         };
         let busy = |key: &str| self.snapshot.busy.iter().any(|s| s == key);
         let exists = match &command {
-            Command::BatchTcp(_) | Command::BatchHttp(_) | Command::BatchDownload(_) => {
+            Command::BatchHttp(_) | Command::BatchDownload(_) => {
                 self.batch_mode && !busy("latency") && !busy("download") && !busy("auto-probe")
             }
             Command::SelectNode(group_id, node_id) => {
@@ -890,6 +936,7 @@ impl AppView {
             Command::DeleteMesh(id) => self.snapshot.mesh.profiles.iter().any(|p| &p.id == id),
             Command::EditNode(id)
             | Command::TestNode(id)
+            | Command::SetNodeEnabled(id, _)
             | Command::DownloadNode(id)
             | Command::DeleteNode(id) => self.snapshot.model.node(id).is_some(),
             Command::DeleteRule(id) | Command::AssignRule(id, _) | Command::MoveRule(id, _, _) => {
@@ -952,6 +999,7 @@ impl AppView {
             Command::EditNode(_)
                 | Command::DeleteNode(_)
                 | Command::TestNode(_)
+                | Command::SetNodeEnabled(_, _)
                 | Command::DownloadNode(_)
         ) && busy("core")
         {
@@ -1189,16 +1237,20 @@ impl AppView {
             Command::EditNode(id) => {
                 self.open_node_dialog(self.snapshot.model.node(&id).cloned(), true, window, cx)
             }
+            Command::SetNodeEnabled(id, enabled) => self.service.set_node_enabled(&id, enabled),
+            Command::TestExit(target) => self.service.test_http_target(target),
+            Command::ExitDetails(target) => {
+                self.page = match target {
+                    HttpTestTarget::MeshExit { .. } => super::Page::Mesh,
+                    _ => super::Page::Diagnostics,
+                };
+            }
             Command::TestNode(id) => {
                 if self.snapshot.model.node(&id).is_some_and(|n| n.enabled) {
                     self.latency_pending.clear();
                     self.latency_pending.insert(id.clone());
                     self.service.test_real_latency(&id);
                 }
-            }
-            Command::BatchTcp(ids) => {
-                self.latency_pending.extend(ids.iter().cloned());
-                self.service.test_latency(LatencyScope::Nodes(ids));
             }
             Command::BatchHttp(ids) => {
                 self.latency_pending.extend(ids.iter().cloned());

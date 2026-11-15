@@ -2,7 +2,7 @@
 
 use xrose_core::AppService;
 use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
-use xrose_core::service::{APP_VERSION, LatencyScope, TrayIndicator, TrayStatus};
+use xrose_core::service::{APP_VERSION, HttpTestTarget, TrayIndicator, TrayStatus};
 use xrose_core::settings::Language;
 use xrose_core::util::{format_bytes, format_speed};
 
@@ -190,6 +190,7 @@ pub fn build(service: &AppService) -> Dashboard {
                 let delay = snapshot
                     .latency
                     .get(&node.id)
+                    .filter(|entry| entry.is_http())
                     .and_then(|entry| entry.delay_ms);
                 DashboardNode {
                     id: node.id.clone(),
@@ -234,10 +235,17 @@ pub fn build(service: &AppService) -> Dashboard {
         nodes.push(DashboardNode {
             id: format!("mesh:{}:{}", profile.id, peer.id),
             label: format!("{} · {name}", tr(language, "组网", "Mesh")),
-            delay_ms: peer
-                .latency_ms
-                .filter(|latency| latency.is_finite() && *latency >= 0.0)
-                .map(|latency| latency.round() as u32),
+            delay_ms: snapshot
+                .latency
+                .get(
+                    &HttpTestTarget::MeshExit {
+                        profile: profile.id.clone(),
+                        peer: peer.id.clone(),
+                    }
+                    .key(),
+                )
+                .filter(|entry| entry.is_http())
+                .and_then(|entry| entry.delay_ms),
             active: model.work_mode == WorkMode::Mesh
                 && model.mesh_mode.target.as_ref().is_some_and(|target| {
                     target.profile_id == profile.id && target.peer_id == peer.id
@@ -396,7 +404,7 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
                 service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
             }
         }
-        TrayAction::TestAll => service.test_latency(LatencyScope::All),
+        TrayAction::TestAll => service.test_all_http_latency(),
         TrayAction::SelectNode { group_id, node_id } => {
             service.select_node(&group_id, &node_id);
         }
