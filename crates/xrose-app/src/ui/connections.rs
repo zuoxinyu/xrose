@@ -63,7 +63,8 @@ impl ConnectionsTab {
         match self {
             Self::Live => Some(MenuTarget::LiveConnections),
             Self::Recorded => Some(MenuTarget::RecordedConnections),
-            Self::Processes | Self::Statistics => None,
+            Self::Statistics => Some(MenuTarget::TrafficStatistics),
+            Self::Processes => None,
         }
     }
 
@@ -227,14 +228,23 @@ impl AppView {
                     .child(
                         card(&p)
                             .flex_shrink_0()
-                            .child(section_title(
-                                &p,
-                                self.tr("流量统计", "Traffic statistics"),
-                                self.tr(
-                                    "按节点、进程或主域名维度分析代理与直连流量归因",
-                                    "Analyze proxy and direct traffic attribution by node, process, or domain",
-                                ),
-                            ))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_start()
+                                    .justify_between()
+                                    .gap_3()
+                                    .flex_wrap()
+                                    .child(section_title(
+                                        &p,
+                                        self.tr("流量统计", "Traffic statistics"),
+                                        self.tr(
+                                            "按节点、进程或主域名维度分析代理与直连流量归因",
+                                            "Analyze proxy and direct traffic attribution by node, process, or domain",
+                                        ),
+                                    ))
+                                    .child(self.traffic_statistics_header_actions(cx)),
+                            )
                             .child(self.traffic_statistics_content(&p, cx)),
                     ),
             )
@@ -2125,8 +2135,11 @@ mod tests {
             ConnectionsTab::Recorded.menu_target(),
             Some(MenuTarget::RecordedConnections)
         ));
+        assert!(matches!(
+            ConnectionsTab::Statistics.menu_target(),
+            Some(MenuTarget::TrafficStatistics)
+        ));
         assert!(ConnectionsTab::Processes.menu_target().is_none());
-        assert!(ConnectionsTab::Statistics.menu_target().is_none());
 
         assert!(ConnectionsTab::Live.shows_record_action(false));
         assert!(ConnectionsTab::Recorded.shows_record_action(false));

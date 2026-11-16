@@ -6,6 +6,7 @@ use gpui_base::{Disableable, Selectable};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
@@ -18,7 +19,7 @@ use xrose_core::traffic_statistics::{
 use xrose_core::util::format_bytes;
 
 use super::connections::ConnectionsTab;
-use super::menus::Command;
+use super::menus::{self, MenuTarget};
 use super::theme::{self, Palette};
 use super::widgets::*;
 use super::{AppView, Page, text_input};
@@ -140,11 +141,49 @@ impl AppView {
         }
     }
 
+    pub(super) fn traffic_statistics_header_actions(&self, cx: &mut Context<Self>) -> Div {
+        let enabled = self.snapshot.settings.traffic_statistics_enabled;
+        let collection_label = self.tr("启用流量统计", "Collect traffic statistics");
+        let clear_busy = self.snapshot.busy.iter().any(|key| key == "traffic-clear");
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .child(
+                more_button(
+                    "traffic-statistics-actions",
+                    self.tr("统计操作", "Statistics actions"),
+                    cx,
+                )
+                .loading(clear_busy)
+                .dropdown_menu(menus::builder(
+                    cx.entity().downgrade(),
+                    MenuTarget::TrafficStatistics,
+                )),
+            )
+            .child(
+                Switch::new("traffic-enabled")
+                    .accessibility_label(collection_label.clone())
+                    .label(self.tr("流量采样", "Sampling"))
+                    .tooltip(collection_label)
+                    .checked(enabled)
+                    .disabled(
+                        self.snapshot
+                            .busy
+                            .iter()
+                            .any(|key| key == "traffic-setting"),
+                    )
+                    .on_change(cx.listener(|this, checked, _, _| {
+                        this.service.set_traffic_statistics_enabled(*checked)
+                    })),
+            )
+    }
+
     pub(super) fn traffic_statistics_content(&self, p: &Palette, cx: &mut Context<Self>) -> Div {
         let enabled = self.snapshot.settings.traffic_statistics_enabled;
         let view = &self.snapshot.traffic_statistics;
         let help_open = self.traffic_ui.help_open;
-        let collection_label = self.tr("启用流量统计", "Collect traffic statistics");
         let rules_summary = self.tr(
             "记录内核处理的代理和直连流量，关闭后保留历史。分类根据连接采样汇总，短连接可能未被采样；无法确定归属的流量计入“未归因”。",
             "Records proxy and direct traffic handled by the core; history is retained when paused. Short connections may miss sampling and unknown ownership counts as unattributed.",
@@ -249,7 +288,15 @@ impl AppView {
                                     cx.notify();
                                 },
                             )),
-                        )
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_shrink_0()
+                        .ml_auto()
                         .child(
                             Button::new("traffic-attribution-help")
                                 .xsmall()
@@ -265,49 +312,6 @@ impl AppView {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.traffic_ui.help_open = !this.traffic_ui.help_open;
                                     cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .flex_shrink_0()
-                        .ml_auto()
-                        .child(
-                            danger_icon_button(
-                                "traffic-clear",
-                                IconName::Eraser,
-                                self.tr("清空流量统计", "Clear traffic statistics"),
-                                cx,
-                            )
-                            .disabled(self.snapshot.busy.iter().any(|key| key == "traffic-clear"))
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.run_command(
-                                        Command::ClearTrafficStatistics,
-                                        false,
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                        )
-                        .child(
-                            Switch::new("traffic-enabled")
-                                .accessibility_label(collection_label.clone())
-                                .label(self.tr("流量采样", "Sampling"))
-                                .tooltip(collection_label)
-                                .checked(enabled)
-                                .disabled(
-                                    self.snapshot
-                                        .busy
-                                        .iter()
-                                        .any(|key| key == "traffic-setting"),
-                                )
-                                .on_change(cx.listener(|this, checked, _, _| {
-                                    this.service.set_traffic_statistics_enabled(*checked)
                                 })),
                         ),
                 ),

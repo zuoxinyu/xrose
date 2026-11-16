@@ -36,6 +36,7 @@ pub(super) enum MenuTarget {
     Host(String),
     LiveConnections,
     RecordedConnections,
+    TrafficStatistics,
     ConnectionRules(DiagnosticTarget),
 }
 
@@ -87,6 +88,7 @@ pub(super) enum Command {
     BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
     CloseConnections,
     UninstallHelper,
+    OpenRecordingDir,
     ClearRecording,
     ClearTrafficStatistics,
     ClearLogs,
@@ -189,7 +191,9 @@ impl AppView {
                         | Command::BatchNodes
                         | Command::ClearLogs
                         | Command::ShareLogs(..)
+                        | Command::OpenRecordingDir
                         | Command::ClearRecording
+                        | Command::ClearTrafficStatistics
                 );
             item(&view, tr(lang, zh, en), enabled && available, command)
         };
@@ -869,11 +873,27 @@ impl AppView {
                 ));
             }
             MenuTarget::RecordedConnections => {
+                menu = menu
+                    .item(add(
+                        "打开录制数据目录",
+                        "Open recording folder",
+                        true,
+                        Command::OpenRecordingDir,
+                    ))
+                    .separator()
+                    .item(add(
+                        "清空录制",
+                        "Clear recording",
+                        self.snapshot.recording.started_at.is_some(),
+                        Command::ClearRecording,
+                    ));
+            }
+            MenuTarget::TrafficStatistics => {
                 menu = menu.item(add(
-                    "清空录制",
-                    "Clear recording",
-                    self.snapshot.recording.started_at.is_some(),
-                    Command::ClearRecording,
+                    "清空统计",
+                    "Clear statistics",
+                    !busy("traffic-clear"),
+                    Command::ClearTrafficStatistics,
                 ));
             }
         }
@@ -1003,7 +1023,9 @@ impl AppView {
                 | Command::BatchNodes
                 | Command::ClearLogs
                 | Command::ShareLogs(..)
+                | Command::OpenRecordingDir
                 | Command::ClearRecording
+                | Command::ClearTrafficStatistics
                 | Command::EditForward(_, _)
                 | Command::DeleteForward(_, _)
                 | Command::EditService(_, _)
@@ -1390,6 +1412,10 @@ impl AppView {
                 {
                     self.service.close_all_connections();
                 }
+            }
+            Command::OpenRecordingDir => {
+                self.service
+                    .open_url(&format!("file://{}", self.snapshot.platform.log_dir));
             }
             Command::ClearRecording => self.service.clear_recording(),
             Command::ClearTrafficStatistics => self.service.clear_traffic_statistics(),
