@@ -21,8 +21,33 @@ pub struct DashboardNode {
 pub struct DashboardMeshStatus {
     pub provider: xrose_core::mesh::MeshProvider,
     pub phase: xrose_core::mesh::MeshPhase,
+    pub profile_id: Option<String>,
     pub profile_name: Option<String>,
     pub ip: Option<String>,
+    pub retrying: bool,
+}
+
+impl DashboardMeshStatus {
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.phase,
+            xrose_core::mesh::MeshPhase::Starting
+                | xrose_core::mesh::MeshPhase::NeedsLogin
+                | xrose_core::mesh::MeshPhase::NeedsApproval
+                | xrose_core::mesh::MeshPhase::Connected
+                | xrose_core::mesh::MeshPhase::Stopping
+        )
+    }
+
+    pub fn is_stoppable(&self) -> bool {
+        matches!(
+            self.phase,
+            xrose_core::mesh::MeshPhase::Starting
+                | xrose_core::mesh::MeshPhase::NeedsLogin
+                | xrose_core::mesh::MeshPhase::NeedsApproval
+                | xrose_core::mesh::MeshPhase::Connected
+        ) || self.retrying
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +55,7 @@ pub struct Dashboard {
     pub language: Language,
     pub direct: bool,
     pub mesh: bool,
+    pub mesh_supported: bool,
     pub automatic_group: bool,
     pub group_name: String,
     pub nodes: Vec<DashboardNode>,
@@ -47,8 +73,20 @@ pub struct Dashboard {
     pub total: String,
     pub core_name: String,
     pub busy_core: bool,
+    pub busy_mesh: bool,
+    pub busy_power: bool,
     pub busy_proxy: bool,
     pub busy_latency: bool,
+}
+
+impl Dashboard {
+    pub fn any_service_active(&self) -> bool {
+        self.running
+            || self.easytier.is_active()
+            || self.easytier.retrying
+            || self.tailscale.is_active()
+            || self.tailscale.retrying
+    }
 }
 
 pub(super) fn mesh_phase_label(
@@ -265,56 +303,23 @@ pub fn build(service: &AppService) -> Dashboard {
             action: Some(TrayAction::SelectMode(WorkMode::Mesh)),
         });
     }
-    let et_net = xrose_core::mesh::MeshRuntimeView::for_provider(
-        &snapshot.mesh.networks,
-        xrose_core::mesh::MeshProvider::EasyTier,
-    );
-    let et_phase = et_net
-        .map(|n| n.phase)
-        .unwrap_or(xrose_core::mesh::MeshPhase::Disconnected);
-    let et_profile = snapshot.mesh.profiles.iter().find(|p| {
-        p.provider == xrose_core::mesh::MeshProvider::EasyTier
-            && et_net.is_none_or(|net| p.id == net.profile_id)
-    });
-    let et_ip = et_net.and_then(|n| {
-        n.addresses
-            .first()
-            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
-    });
-    let easytier = DashboardMeshStatus {
-        provider: xrose_core::mesh::MeshProvider::EasyTier,
-        phase: et_phase,
-        profile_name: et_profile.map(|p| p.name.clone()),
-        ip: et_ip,
-    };
-
-    let ts_net = xrose_core::mesh::MeshRuntimeView::for_provider(
-        &snapshot.mesh.networks,
-        xrose_core::mesh::MeshProvider::Tailscale,
-    );
-    let ts_phase = ts_net
-        .map(|n| n.phase)
-        .unwrap_or(xrose_core::mesh::MeshPhase::Disconnected);
-    let ts_profile = snapshot.mesh.profiles.iter().find(|p| {
-        p.provider == xrose_core::mesh::MeshProvider::Tailscale
-            && ts_net.is_none_or(|net| p.id == net.profile_id)
-    });
-    let ts_ip = ts_net.and_then(|n| {
-        n.addresses
-            .first()
-            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
-    });
-    let tailscale = DashboardMeshStatus {
-        provider: xrose_core::mesh::MeshProvider::Tailscale,
-        phase: ts_phase,
-        profile_name: ts_profile.map(|p| p.name.clone()),
-        ip: ts_ip,
-    };
+    let easytier = mesh_status(&snapshot, xrose_core::mesh::MeshProvider::EasyTier);
+    let tailscale = mesh_status(&snapshot, xrose_core::mesh::MeshProvider::Tailscale);
+    let busy_core = snapshot
+        .busy
+        .iter()
+        .any(|key| key == "core" || key == "mesh-exit");
+    let busy_mesh = snapshot
+        .busy
+        .iter()
+        .any(|key| key == "mesh" || key == "mesh-exit");
+    let busy_power = busy_core || busy_mesh || snapshot.busy.iter().any(|key| key == "power");
 
     Dashboard {
         language,
         direct,
         mesh: model.work_mode == WorkMode::Mesh,
+        mesh_supported: snapshot.mesh.supported,
         automatic_group: group.as_ref().is_some_and(|g| !g.manually_selectable())
             && model.has_usable_default_group(snapshot.settings.core),
         group_name: group
@@ -340,10 +345,9 @@ pub fn build(service: &AppService) -> Dashboard {
         ),
         core_name: snapshot.settings.core.display_name().to_string(),
         busy_proxy: snapshot.busy.iter().any(|key| key == "proxy"),
-        busy_core: snapshot
-            .busy
-            .iter()
-            .any(|key| key == "core" || key == "mesh-exit"),
+        busy_core,
+        busy_mesh,
+        busy_power,
         busy_latency: snapshot
             .busy
             .iter()
@@ -351,9 +355,74 @@ pub fn build(service: &AppService) -> Dashboard {
     }
 }
 
+fn mesh_status(
+    snapshot: &xrose_core::service::UiSnapshot,
+    provider: xrose_core::mesh::MeshProvider,
+) -> DashboardMeshStatus {
+    use xrose_core::mesh::MeshPhase;
+    let net = xrose_core::mesh::MeshRuntimeView::for_provider(&snapshot.mesh.networks, provider);
+    let retrying_id = snapshot
+        .mesh
+        .profiles
+        .iter()
+        .find(|p| p.provider == provider && snapshot.mesh_reconnecting.contains(&p.id))
+        .map(|p| p.id.clone());
+    let profile_id = net
+        .map(|n| n.profile_id.clone())
+        .or(retrying_id)
+        .or_else(|| {
+            xrose_core::service::preferred_mesh_profile_id(
+                &snapshot.mesh.profiles,
+                &snapshot.settings,
+                provider,
+            )
+        });
+    let profile = profile_id
+        .as_deref()
+        .and_then(|id| snapshot.mesh.profiles.iter().find(|p| p.id == id));
+    let raw_phase = net.map(|n| n.phase).unwrap_or(MeshPhase::Disconnected);
+    let active = matches!(
+        raw_phase,
+        MeshPhase::Starting
+            | MeshPhase::NeedsLogin
+            | MeshPhase::NeedsApproval
+            | MeshPhase::Connected
+            | MeshPhase::Stopping
+    );
+    let retrying = profile_id
+        .as_deref()
+        .is_some_and(|id| snapshot.mesh_reconnecting.contains(id));
+    let has_error = profile_id
+        .as_deref()
+        .is_some_and(|id| snapshot.mesh_connection_errors.contains_key(id))
+        || net.and_then(|n| n.error.as_deref()).is_some();
+    let phase = if !active && !retrying && has_error {
+        MeshPhase::Failed
+    } else {
+        raw_phase
+    };
+    let ip = net.and_then(|n| {
+        n.addresses
+            .first()
+            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
+    });
+    DashboardMeshStatus {
+        provider,
+        phase,
+        profile_id,
+        profile_name: profile.map(|p| p.name.clone()),
+        ip,
+        retrying,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayAction {
     ToggleCore,
+    ToggleAll,
+    ConnectMesh { profile_id: String },
+    DisconnectMesh(xrose_core::mesh::MeshProvider),
+    CancelMeshReconnect { profile_id: String },
     TestAll,
     SelectMode(WorkMode),
     SelectNode { group_id: String, node_id: String },
@@ -362,7 +431,6 @@ pub enum TrayAction {
     ToggleTun,
     SetRoutePreset(RoutePreset),
     ShowWindow,
-    ShowSettings,
     Quit,
 }
 
@@ -376,7 +444,6 @@ pub enum TrayCommand {
     TrayUnavailable,
     TogglePopup,
     ShowWindow,
-    ShowSettings,
     #[cfg(target_os = "macos")]
     ShowAbout,
     #[cfg(target_os = "macos")]
@@ -387,13 +454,19 @@ pub enum TrayCommand {
 #[cfg(target_os = "linux")]
 impl TrayCommand {
     pub(super) fn shows_main_window(self) -> bool {
-        matches!(self, Self::ShowWindow | Self::ShowSettings)
+        matches!(self, Self::ShowWindow)
     }
 }
 
 pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand> {
     match action {
         TrayAction::ToggleCore => service.toggle_core(),
+        TrayAction::ToggleAll => service.toggle_proxy_and_mesh(),
+        TrayAction::ConnectMesh { profile_id } => service.mesh_connect(&profile_id),
+        TrayAction::DisconnectMesh(provider) => service.mesh_disconnect(provider),
+        TrayAction::CancelMeshReconnect { profile_id } => {
+            service.cancel_mesh_reconnect(&profile_id)
+        }
         TrayAction::SelectMode(mode) => {
             let result = match mode {
                 WorkMode::Direct => service.select_direct_mode(),
@@ -416,8 +489,79 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
         TrayAction::ToggleTun => service.set_tun_enabled(!service.settings().effective_tun()),
         TrayAction::SetRoutePreset(preset) => service.switch_route_preset(preset),
         TrayAction::ShowWindow => return Some(TrayCommand::ShowWindow),
-        TrayAction::ShowSettings => return Some(TrayCommand::ShowSettings),
         TrayAction::Quit => return Some(TrayCommand::Quit),
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Dashboard, DashboardMeshStatus};
+    use xrose_core::mesh::{MeshPhase, MeshProvider};
+    use xrose_core::model::RoutePreset;
+    use xrose_core::settings::Language;
+
+    fn mesh_stub(provider: MeshProvider) -> DashboardMeshStatus {
+        DashboardMeshStatus {
+            provider,
+            phase: MeshPhase::Disconnected,
+            profile_id: None,
+            profile_name: None,
+            ip: None,
+            retrying: false,
+        }
+    }
+
+    fn dashboard_stub() -> Dashboard {
+        Dashboard {
+            language: Language::Zh,
+            direct: false,
+            mesh: false,
+            mesh_supported: true,
+            automatic_group: false,
+            group_name: "代理".into(),
+            nodes: Vec::new(),
+            running: false,
+            easytier: mesh_stub(MeshProvider::EasyTier),
+            tailscale: mesh_stub(MeshProvider::Tailscale),
+            proxy_address: "127.0.0.1:7890".into(),
+            system_proxy: false,
+            system_proxy_status: None,
+            tun_enabled: false,
+            tun_supported: true,
+            route_preset: RoutePreset::BypassMainland,
+            down_speed: 0,
+            up_speed: 0,
+            total: "0 B".into(),
+            core_name: "sing-box".into(),
+            busy_core: false,
+            busy_mesh: false,
+            busy_power: false,
+            busy_proxy: false,
+            busy_latency: false,
+        }
+    }
+
+    #[test]
+    fn any_service_active_reflects_core_mesh_and_reconnect_state() {
+        let mut d = dashboard_stub();
+        assert!(!d.any_service_active());
+
+        d.running = true;
+        assert!(d.any_service_active());
+
+        d.running = false;
+        d.easytier.phase = MeshPhase::Connected;
+        assert!(d.any_service_active());
+        assert!(d.easytier.is_stoppable());
+
+        d.easytier.phase = MeshPhase::Stopping;
+        assert!(d.any_service_active());
+        assert!(!d.easytier.is_stoppable());
+
+        d.easytier.phase = MeshPhase::Disconnected;
+        d.tailscale.retrying = true;
+        assert!(d.any_service_active());
+        assert!(d.tailscale.is_stoppable());
+    }
 }

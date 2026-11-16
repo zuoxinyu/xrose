@@ -2377,42 +2377,14 @@ impl AppService {
                 service.check_core_release(settings.core, false);
                 service.check_app_release(false);
             }
-            for (provider, id) in [
-                (
-                    crate::mesh::MeshProvider::Tailscale,
-                    settings.startup_tailscale,
-                ),
-                (
-                    crate::mesh::MeshProvider::EasyTier,
-                    settings.startup_easytier,
-                ),
-            ] {
-                let Some(id) = id else {
-                    continue;
-                };
-                if !service
-                    .inner
-                    .mesh
-                    .snapshot()
-                    .profiles
-                    .iter()
-                    .any(|p| p.id == id && p.provider == provider)
-                {
-                    service.toast(
-                        ToastLevel::Warning,
-                        format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
-                    );
-                    continue;
-                }
-                // mesh_action has a shared operation gate; await each provider rather than dropping the second request.
-                while service.is_busy("mesh") || service.is_busy("core") {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-                service.mesh_connect(&id);
-                while service.is_busy("mesh") {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
+            let (ids, missing) = resolve_startup_mesh(&settings, &service.inner.mesh.snapshot());
+            for provider in missing {
+                service.toast(
+                    ToastLevel::Warning,
+                    format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
+                );
             }
+            service.connect_mesh_sequence(&ids).await;
         });
     }
 
@@ -2550,6 +2522,120 @@ impl AppService {
             self.stop_core();
         } else {
             self.start_core();
+        }
+    }
+
+    /// Start or stop both proxy core and mesh networks from a single control.
+    pub fn toggle_proxy_and_mesh(&self) {
+        if self.is_busy("core")
+            || self.is_busy("mesh")
+            || self.is_busy("mesh-exit")
+            || self.is_busy("power")
+        {
+            return;
+        }
+        let core_running = self.is_running();
+        let mesh = self.inner.mesh.snapshot();
+        let mut disconnect_providers = Vec::new();
+        let mut any_mesh_active = false;
+        for state in &mesh.networks {
+            if matches!(
+                state.phase,
+                crate::mesh::MeshPhase::Starting
+                    | crate::mesh::MeshPhase::NeedsLogin
+                    | crate::mesh::MeshPhase::NeedsApproval
+                    | crate::mesh::MeshPhase::Connected
+            ) {
+                any_mesh_active = true;
+                if !disconnect_providers.contains(&state.provider) {
+                    disconnect_providers.push(state.provider);
+                }
+            } else if state.phase == crate::mesh::MeshPhase::Stopping {
+                any_mesh_active = true;
+            }
+        }
+        let has_reconnecting = !self.inner.mesh_reconnect.lock().pending(&mesh).is_empty();
+        if core_running || any_mesh_active || has_reconnecting {
+            for provider in [
+                crate::mesh::MeshProvider::Tailscale,
+                crate::mesh::MeshProvider::EasyTier,
+            ] {
+                self.inner.mesh_reconnect.lock().forget_provider(provider);
+            }
+            if has_reconnecting && !core_running && disconnect_providers.is_empty() {
+                self.toast(ToastLevel::Info, "已取消组网重连");
+                return;
+            }
+            if !core_running && disconnect_providers.is_empty() {
+                return;
+            }
+            if !self.inner.busy.write().insert("power".into()) {
+                return;
+            }
+            if core_running {
+                self.stop_core();
+            }
+            let service = self.clone();
+            self.spawn(async move {
+                service
+                    .disconnect_mesh_sequence(&disconnect_providers)
+                    .await;
+                while service.is_busy("core") || service.is_busy("mesh") {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                service.set_busy("power", false);
+            });
+            return;
+        }
+
+        let settings = self.settings();
+        let plan = plan_unified_start(&settings, &mesh);
+        for provider in plan.missing_startup {
+            self.toast(
+                ToastLevel::Warning,
+                format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
+            );
+        }
+        if !plan.start_core && plan.mesh_profile_ids.is_empty() {
+            return;
+        }
+        if !self.inner.busy.write().insert("power".into()) {
+            return;
+        }
+        if plan.start_core {
+            self.start_core();
+        }
+        let service = self.clone();
+        let mesh_ids = plan.mesh_profile_ids;
+        self.spawn(async move {
+            service.connect_mesh_sequence(&mesh_ids).await;
+            while service.is_busy("core") || service.is_busy("mesh") {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            service.set_busy("power", false);
+        });
+    }
+
+    async fn connect_mesh_sequence(&self, profile_ids: &[String]) {
+        self.run_mesh_sequence(profile_ids, |id| self.mesh_connect(id))
+            .await;
+    }
+
+    async fn disconnect_mesh_sequence(&self, providers: &[crate::mesh::MeshProvider]) {
+        self.run_mesh_sequence(providers, |&provider| self.mesh_disconnect(provider))
+            .await;
+    }
+
+    async fn run_mesh_sequence<T>(&self, items: &[T], mut step: impl FnMut(&T)) {
+        for item in items {
+            // mesh_action has a shared operation gate; await each item rather than dropping the next request.
+            while self.is_busy("mesh") || self.is_busy("core") {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            step(item);
+            while self.is_busy("mesh") {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
     }
 
@@ -4985,6 +5071,99 @@ impl AppService {
     }
 }
 
+/// Resolve which saved mesh profile represents `provider`: prefer the Startup
+/// selection when valid, otherwise fall back to the first saved profile.
+pub fn preferred_mesh_profile_id(
+    profiles: &[crate::mesh::MeshProfileView],
+    settings: &Settings,
+    provider: crate::mesh::MeshProvider,
+) -> Option<String> {
+    if let Some(startup_id) = settings.mesh_startup_profile(provider)
+        && profiles
+            .iter()
+            .any(|p| p.id == startup_id && p.provider == provider)
+    {
+        return Some(startup_id.to_owned());
+    }
+    profiles
+        .iter()
+        .find(|p| p.provider == provider)
+        .map(|p| p.id.clone())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UnifiedStartPlan {
+    start_core: bool,
+    mesh_profile_ids: Vec<String>,
+    missing_startup: Vec<crate::mesh::MeshProvider>,
+}
+
+fn resolve_startup_mesh(
+    settings: &Settings,
+    mesh: &crate::mesh::MeshSnapshot,
+) -> (Vec<String>, Vec<crate::mesh::MeshProvider>) {
+    let mut ids = Vec::new();
+    let mut missing = Vec::new();
+    for (provider, id) in [
+        (
+            crate::mesh::MeshProvider::Tailscale,
+            settings.startup_tailscale.as_deref(),
+        ),
+        (
+            crate::mesh::MeshProvider::EasyTier,
+            settings.startup_easytier.as_deref(),
+        ),
+    ] {
+        let Some(id) = id else {
+            continue;
+        };
+        if mesh
+            .profiles
+            .iter()
+            .any(|p| p.id == id && p.provider == provider)
+        {
+            ids.push(id.to_owned());
+        } else {
+            missing.push(provider);
+        }
+    }
+    (ids, missing)
+}
+
+fn plan_unified_start(settings: &Settings, mesh: &crate::mesh::MeshSnapshot) -> UnifiedStartPlan {
+    let has_startup_mesh = mesh.supported
+        && (settings.startup_tailscale.is_some() || settings.startup_easytier.is_some());
+    if settings.startup_proxy || has_startup_mesh {
+        let (mesh_profile_ids, missing_startup) = if mesh.supported {
+            resolve_startup_mesh(settings, mesh)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        return UnifiedStartPlan {
+            start_core: settings.startup_proxy,
+            mesh_profile_ids,
+            missing_startup,
+        };
+    }
+
+    let mesh_profile_ids = if mesh.supported {
+        [
+            crate::mesh::MeshProvider::Tailscale,
+            crate::mesh::MeshProvider::EasyTier,
+        ]
+        .into_iter()
+        .filter_map(|provider| preferred_mesh_profile_id(&mesh.profiles, settings, provider))
+        .collect()
+    } else {
+        Vec::new()
+    };
+    UnifiedStartPlan {
+        start_core: true,
+        mesh_profile_ids,
+        missing_startup: Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LatencyScope {
     Nodes(Vec<String>),
@@ -7332,5 +7511,104 @@ proxy-groups:
                 .find_registered(&external)
                 .is_some()
         );
+    }
+
+    fn fixture_mesh_profile(
+        id: &str,
+        provider: crate::mesh::MeshProvider,
+    ) -> crate::mesh::MeshProfileView {
+        crate::mesh::MeshProfileView {
+            id: id.into(),
+            name: id.into(),
+            provider,
+            hostname: "fixture-host".into(),
+            auto_connect: false,
+            auto_reconnect: true,
+            easytier: Default::default(),
+            network_name: "fixture".into(),
+            has_secret: false,
+            peers: Vec::new(),
+            ipv4: String::new(),
+            remote_subnets: Vec::new(),
+            control_url: String::new(),
+            exit_node: String::new(),
+            advertise_exit_node: false,
+            exit_routing: Default::default(),
+            advertised_subnets: Vec::new(),
+            port_forwards: Vec::new(),
+            service_forwards: Vec::new(),
+            outbound_port: 0,
+        }
+    }
+
+    #[test]
+    fn preferred_mesh_profile_prefers_startup_then_first_saved() {
+        use crate::mesh::MeshProvider;
+        let profiles = vec![
+            fixture_mesh_profile("et-1", MeshProvider::EasyTier),
+            fixture_mesh_profile("et-2", MeshProvider::EasyTier),
+            fixture_mesh_profile("ts-1", MeshProvider::Tailscale),
+        ];
+        let mut settings = Settings::default();
+        assert_eq!(
+            preferred_mesh_profile_id(&profiles, &settings, MeshProvider::EasyTier).as_deref(),
+            Some("et-1")
+        );
+        settings.startup_easytier = Some("et-2".into());
+        assert_eq!(
+            preferred_mesh_profile_id(&profiles, &settings, MeshProvider::EasyTier).as_deref(),
+            Some("et-2")
+        );
+        settings.startup_easytier = Some("missing".into());
+        assert_eq!(
+            preferred_mesh_profile_id(&profiles, &settings, MeshProvider::EasyTier).as_deref(),
+            Some("et-1")
+        );
+        assert_eq!(
+            preferred_mesh_profile_id(&profiles, &settings, MeshProvider::Tailscale).as_deref(),
+            Some("ts-1")
+        );
+    }
+
+    #[test]
+    fn unified_start_follows_startup_when_set_and_falls_back_to_all_when_unset() {
+        use crate::mesh::{MeshProvider, MeshSnapshot};
+        let mesh = MeshSnapshot {
+            supported: true,
+            profiles: vec![
+                fixture_mesh_profile("et-1", MeshProvider::EasyTier),
+                fixture_mesh_profile("ts-1", MeshProvider::Tailscale),
+                fixture_mesh_profile("ts-2", MeshProvider::Tailscale),
+            ],
+            ..Default::default()
+        };
+        let mut settings = Settings::default();
+        // Neither startup_proxy nor startup_* mesh selected -> start core + preferred profiles.
+        let plan = plan_unified_start(&settings, &mesh);
+        assert!(plan.start_core);
+        assert_eq!(plan.mesh_profile_ids, vec!["ts-1", "et-1"]);
+        assert!(plan.missing_startup.is_empty());
+
+        // Only startup Tailscale selected -> follow startup choices only (do not start core or EasyTier).
+        settings.startup_tailscale = Some("ts-2".into());
+        let plan = plan_unified_start(&settings, &mesh);
+        assert!(!plan.start_core);
+        assert_eq!(plan.mesh_profile_ids, vec!["ts-2"]);
+        assert!(plan.missing_startup.is_empty());
+
+        // Only startup proxy selected -> follow startup choices only.
+        settings.startup_tailscale = None;
+        settings.startup_proxy = true;
+        let plan = plan_unified_start(&settings, &mesh);
+        assert!(plan.start_core);
+        assert!(plan.mesh_profile_ids.is_empty());
+
+        // Missing startup mesh profile -> reports missing provider.
+        settings.startup_proxy = false;
+        settings.startup_easytier = Some("gone".into());
+        let plan = plan_unified_start(&settings, &mesh);
+        assert!(!plan.start_core);
+        assert!(plan.mesh_profile_ids.is_empty());
+        assert_eq!(plan.missing_startup, vec![MeshProvider::EasyTier]);
     }
 }

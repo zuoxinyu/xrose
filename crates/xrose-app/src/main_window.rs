@@ -8,7 +8,6 @@ use xrose_core::{AppService, settings::ThemeMode};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ShowTarget {
     Current,
-    Settings,
     #[cfg(target_os = "macos")]
     About,
     #[cfg(target_os = "macos")]
@@ -183,7 +182,6 @@ impl MainWindow {
                     let _ = view.update(cx, |view, cx| {
                         match target {
                             ShowTarget::Current => {}
-                            ShowTarget::Settings => view.navigate(ui::Page::Settings, cx),
                             #[cfg(target_os = "macos")]
                             ShowTarget::About => view.navigate(ui::Page::About, cx),
                             #[cfg(target_os = "macos")]

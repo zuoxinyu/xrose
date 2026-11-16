@@ -76,7 +76,7 @@ impl PopupManager {
                 size(px(1280.), px(800.)),
             ));
         let desired_height =
-            452. + (dashboard.nodes.len().min(4) as f32 * NODE_ROW_HEIGHT).max(76.);
+            408. + (dashboard.nodes.len().min(4) as f32 * NODE_ROW_HEIGHT).max(76.);
         let bounds = popup_bounds(
             anchor.map(|a| a.position),
             work_area,
@@ -270,6 +270,180 @@ fn mesh_phase_info(
         Disconnected => p.muted_fg,
     };
     (color, super::dashboard::mesh_phase_label(phase, lang))
+}
+
+fn status_toggle_button(
+    id: impl Into<ElementId>,
+    active: bool,
+    disabled: bool,
+    tip: SharedString,
+    p: &crate::ui::theme::Palette,
+    cx: &App,
+) -> Button {
+    Button::new(id)
+        .xsmall()
+        .flex_shrink_0()
+        .custom(if active {
+            danger_button_style(p, cx)
+        } else {
+            start_ghost_button_style(p, cx)
+        })
+        .icon(if active {
+            IconName::Square
+        } else {
+            IconName::Play
+        })
+        .tooltip(tip.clone())
+        .accessibility_label(tip)
+        .disabled(disabled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_status_column(
+    p: &crate::ui::theme::Palette,
+    kicker_icon: IconName,
+    title: impl Into<SharedString>,
+    status_color: Hsla,
+    status_text: SharedString,
+    toggle_button: Button,
+    detail_text: String,
+    detail_active: bool,
+    cx: &App,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w(px(0.))
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(Icon::new(kicker_icon).size(px(12.)).text_color(p.muted_fg))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(p.muted_fg)
+                        .child(title.into()),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w(px(0.))
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .flex_shrink_0()
+                        .bg(status_color),
+                )
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_xs()
+                        .text_color(p.fg)
+                        .child(status_text),
+                )
+                .child(toggle_button),
+        )
+        .child(
+            div()
+                .min_w(px(0.))
+                .truncate()
+                .text_size(px(10.5))
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_color(if detail_active {
+                    p.muted_fg
+                } else {
+                    p.muted_fg.opacity(0.5)
+                })
+                .child(detail_text),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mesh_status_column(
+    status: &super::dashboard::DashboardMeshStatus,
+    busy_mesh: bool,
+    mesh_supported: bool,
+    kicker_icon: IconName,
+    title: &'static str,
+    p: &crate::ui::theme::Palette,
+    lang: Language,
+    cx: &mut Context<PopupView>,
+) -> Div {
+    let provider = status.provider;
+    let (dot_color, status_text) = if status.retrying {
+        (p.warning, tr(lang, "等待重连", "Waiting to reconnect"))
+    } else {
+        mesh_phase_info(status.phase, p, lang)
+    };
+    let stoppable = status.is_stoppable();
+    let stopping = status.phase == xrose_core::mesh::MeshPhase::Stopping;
+    let button_active = stoppable || stopping;
+    let busy = busy_mesh && !status.retrying;
+    let disabled = if button_active {
+        busy || stopping
+    } else {
+        busy || !mesh_supported || status.profile_id.is_none()
+    };
+    let tip = if status.retrying {
+        tr(lang, "取消重连", "Cancel reconnect")
+    } else if button_active {
+        tr(lang, "断开组网", "Disconnect")
+    } else if !mesh_supported {
+        tr(lang, "当前平台不支持", "Unsupported platform")
+    } else if status.profile_id.is_none() {
+        tr(lang, "尚未配置组网", "No network configured")
+    } else {
+        tr(lang, "连接组网", "Connect")
+    };
+    let retrying = status.retrying;
+    let profile_id = status.profile_id.clone();
+    let button = status_toggle_button(
+        SharedString::from(format!("tray-mesh-{}", provider.key())),
+        button_active,
+        disabled,
+        tip,
+        p,
+        cx,
+    )
+    .on_click(cx.listener(move |this, _, window, cx| {
+        if retrying {
+            if let Some(id) = profile_id.clone() {
+                this.action(
+                    TrayAction::CancelMeshReconnect { profile_id: id },
+                    window,
+                    cx,
+                );
+            }
+        } else if stoppable {
+            this.action(TrayAction::DisconnectMesh(provider), window, cx);
+        } else if let Some(id) = profile_id.clone() {
+            this.action(TrayAction::ConnectMesh { profile_id: id }, window, cx);
+        }
+    }));
+    let ip_text = status.ip.clone().unwrap_or_else(|| "-".to_string());
+    let has_ip = status.ip.is_some();
+    render_status_column(
+        p,
+        kicker_icon,
+        title,
+        dot_color,
+        status_text,
+        button,
+        ip_text,
+        has_ip,
+        cx,
+    )
 }
 
 #[derive(Default)]
@@ -676,27 +850,37 @@ impl Render for PopupView {
                             .text_base()
                             .child("Xrose"),
                     )
-                    .child(
-                        Button::new("tray-test")
+                    .child({
+                        let any_active = d.any_service_active();
+                        let power_tip = tr(
+                            lang,
+                            if d.busy_power {
+                                "处理中…"
+                            } else if any_active {
+                                "停止代理与组网"
+                            } else {
+                                "启动代理与组网"
+                            },
+                            if d.busy_power {
+                                "Working…"
+                            } else if any_active {
+                                "Stop proxy & mesh"
+                            } else {
+                                "Start proxy & mesh"
+                            },
+                        );
+                        Button::new("tray-power")
                             .compact()
-                            .custom(icon_button_style(&p, false, cx))
-                            .icon(IconName::Gauge)
-                            .tooltip(tr(lang, "全部出口 HTTP 测速", "HTTP test all exits"))
-                            .disabled(d.busy_latency)
+                            .custom(icon_button_style(&p, any_active, cx))
+                            .toggled(any_active)
+                            .icon(IconName::Power)
+                            .tooltip(power_tip.clone())
+                            .accessibility_label(power_tip)
+                            .disabled(d.busy_power)
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.action(TrayAction::TestAll, window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("tray-settings")
-                            .compact()
-                            .custom(icon_button_style(&p, false, cx))
-                            .icon(IconName::Settings)
-                            .tooltip(tr(lang, "设置", "Settings"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.action(TrayAction::ShowSettings, window, cx)
-                            })),
-                    ),
+                                this.action(TrayAction::ToggleAll, window, cx)
+                            }))
+                    }),
             )
             .child(
                 div()
@@ -715,192 +899,68 @@ impl Render for PopupView {
                                 if running { "运行中" } else { "已停止" },
                                 if running { "Running" } else { "Stopped" },
                             );
-                            let proxy_addr = d.proxy_address.clone();
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            Icon::new(IconName::Server)
-                                                .size(px(12.))
-                                                .text_color(p.muted_fg),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(11.))
-                                                .text_color(p.muted_fg)
-                                                .child(d.core_name.clone()),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .flex_shrink_0()
-                                                .bg(status_color),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_xs()
-                                                .text_color(p.fg)
-                                                .child(status_text),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w(px(0.))
-                                        .truncate()
-                                        .text_size(px(10.5))
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(if running {
-                                            p.muted_fg
-                                        } else {
-                                            p.muted_fg.opacity(0.5)
-                                        })
-                                        .child(proxy_addr),
-                                )
+                            let core_tip = tr(
+                                lang,
+                                if d.busy_core {
+                                    "处理中…"
+                                } else if running {
+                                    "停止内核"
+                                } else {
+                                    "启动内核"
+                                },
+                                if d.busy_core {
+                                    "Working…"
+                                } else if running {
+                                    "Stop core"
+                                } else {
+                                    "Start core"
+                                },
+                            );
+                            let core_toggle = status_toggle_button(
+                                "tray-core",
+                                running,
+                                d.busy_core,
+                                core_tip,
+                                &p,
+                                cx,
+                            )
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.action(TrayAction::ToggleCore, window, cx)
+                                },
+                            ));
+                            render_status_column(
+                                &p,
+                                IconName::Server,
+                                d.core_name.clone(),
+                                status_color,
+                                status_text,
+                                core_toggle,
+                                d.proxy_address.clone(),
+                                running,
+                                cx,
+                            )
                         },
-                        {
-                            let (et_color, et_text) = mesh_phase_info(d.easytier.phase, &p, lang);
-                            let et_ip = d.easytier.ip.clone().unwrap_or_else(|| "-".to_string());
-                            let has_ip = d.easytier.ip.is_some();
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            Icon::new(IconName::Network)
-                                                .size(px(12.))
-                                                .text_color(p.muted_fg),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(11.))
-                                                .text_color(p.muted_fg)
-                                                .child("EasyTier"),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .flex_shrink_0()
-                                                .bg(et_color),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_xs()
-                                                .text_color(p.fg)
-                                                .child(et_text),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w(px(0.))
-                                        .truncate()
-                                        .text_size(px(10.5))
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(if has_ip {
-                                            p.muted_fg
-                                        } else {
-                                            p.muted_fg.opacity(0.5)
-                                        })
-                                        .child(et_ip),
-                                )
-                        },
-                        {
-                            let (ts_color, ts_text) = mesh_phase_info(d.tailscale.phase, &p, lang);
-                            let ts_ip = d.tailscale.ip.clone().unwrap_or_else(|| "-".to_string());
-                            let has_ip = d.tailscale.ip.is_some();
-                            div()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
-                                        .child(
-                                            Icon::new(IconName::Globe)
-                                                .size(px(12.))
-                                                .text_color(p.muted_fg),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .text_size(px(11.))
-                                                .text_color(p.muted_fg)
-                                                .child("Tailscale"),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_1p5()
-                                        .child(
-                                            div()
-                                                .size(px(6.))
-                                                .rounded_full()
-                                                .flex_shrink_0()
-                                                .bg(ts_color),
-                                        )
-                                        .child(
-                                            div()
-                                                .truncate()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .text_xs()
-                                                .text_color(p.fg)
-                                                .child(ts_text),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .min_w(px(0.))
-                                        .truncate()
-                                        .text_size(px(10.5))
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_color(if has_ip {
-                                            p.muted_fg
-                                        } else {
-                                            p.muted_fg.opacity(0.5)
-                                        })
-                                        .child(ts_ip),
-                                )
-                        },
+                        mesh_status_column(
+                            &d.easytier,
+                            d.busy_mesh,
+                            d.mesh_supported,
+                            IconName::Network,
+                            "EasyTier",
+                            &p,
+                            lang,
+                            cx,
+                        ),
+                        mesh_status_column(
+                            &d.tailscale,
+                            d.busy_mesh,
+                            d.mesh_supported,
+                            IconName::Globe,
+                            "Tailscale",
+                            &p,
+                            lang,
+                            cx,
+                        ),
                     ]))
                     .child(
                         div().flex().gap_3().children(
@@ -984,7 +1044,22 @@ impl Render for PopupView {
                                     .text_size(px(11.))
                                     .text_color(p.muted_fg)
                                     .child(format!("{}", d.nodes.len().saturating_sub(1))),
-                            ),
+                            )
+                            .child({
+                                let test_tip =
+                                    tr(lang, "全部出口 HTTP 测速", "HTTP test all exits");
+                                Button::new("tray-test")
+                                    .xsmall()
+                                    .compact()
+                                    .custom(icon_button_style(&p, false, cx).foreground(p.muted_fg))
+                                    .icon(IconName::Gauge)
+                                    .tooltip(test_tip.clone())
+                                    .accessibility_label(test_tip)
+                                    .disabled(d.busy_latency)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.action(TrayAction::TestAll, window, cx)
+                                    }))
+                            }),
                     )
                     .child(
                         div()
@@ -1120,42 +1195,6 @@ impl Render for PopupView {
                             })),
                     ),
             )
-            .child(div().flex().flex_shrink_0().child({
-                let core_border = if running { p.danger_text } else { p.primary }
-                    .opacity(if d.busy_core { 0.25 } else { 0.5 });
-                Button::new("tray-core")
-                    .xsmall()
-                    .h(px(32.))
-                    .w_full()
-                    .custom(if running {
-                        danger_button_style(&p, cx)
-                    } else {
-                        start_ghost_button_style(&p, cx)
-                    })
-                    .outline()
-                    .border_color(core_border)
-                    .disabled(d.busy_core)
-                    .label(tr(
-                        lang,
-                        if d.busy_core {
-                            "处理中…"
-                        } else if running {
-                            "停止内核"
-                        } else {
-                            "启动内核"
-                        },
-                        if d.busy_core {
-                            "Working…"
-                        } else if running {
-                            "Stop core"
-                        } else {
-                            "Start core"
-                        },
-                    ))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.action(TrayAction::ToggleCore, window, cx)
-                    }))
-            }))
             .child(
                 div()
                     .flex()
