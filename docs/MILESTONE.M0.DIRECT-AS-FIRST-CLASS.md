@@ -203,7 +203,7 @@ flowchart TD
 
 ### Phase M0.4：网络诊断工具箱（直连 Explain、DNS 对比与免内核系统体检）
 
-此阶段同时兑现 [ROADMAP.md](../ROADMAP.md#L12-L13) 系统诊断待办，并为 Xristina §3.5 原生诊断定型 UI。
+此阶段同时兑现 [ROADMAP.md](ROADMAP.md) 系统诊断待办，并为 Xristina §3.5 原生诊断定型 UI。
 
 #### 1. 链路测试（`trace.rs`）直连与拦截可解释适配
 * **涉及文件**：[trace.rs](../crates/xrose-core/src/trace.rs)、[ui/connections.rs](../crates/xrose-app/src/ui/connections.rs)
@@ -231,7 +231,7 @@ flowchart TD
   1. **网络接口与默认路由**：枚举活跃物理网卡与虚拟网卡（TUN / EasyTier / Tailscale）、IPv4/IPv6 地址、MTU 与系统默认网关接口；
   2. **系统 DNS 与系统代理快照**：当前 OS 生效的 DNS 服务器列表、系统 HTTP/SOCKS/PAC 代理状态及是否指向本机 Xrose；
   3. **关键端口监听与进程归属**：检查 Mixed 端口、LAN 端口、Clash API 端口、PAC 端口及组网转发端口的占用情况与所属进程名/PID；
-  4. **提权助手管理合一**（完成 [ROADMAP.md](../ROADMAP.md#L12) 待办）：将提权助手的运行/版本状态及「安装 / 启动 / 更新 / 卸载」快捷动作整合进诊断检查列表；
+  4. **提权助手管理合一**（完成 [ROADMAP.md](ROADMAP.md) 待办）：将提权助手的运行/版本状态及「安装 / 启动 / 更新 / 卸载」快捷动作整合进诊断检查列表；
   5. **脱敏复制**：一键生成结构化诊断文本，开启隐私模式时自动遮罩本机局域网/公网 IP、主机名与用户名。
 
 ---
@@ -245,7 +245,7 @@ flowchart TD
 | **`xrose-core` 遥测与服务** | `flow.rs` *(新增)*, `runtime/clash.rs`, `service.rs`, `service/node_switch.rs`, `traffic_statistics.rs` | 连接/进程实时速率追踪器、Clash 连接断开 API、直连/代理模式切换事务、PAC 与自动切换适配 |
 | **`xrose-core` 网络诊断** | `trace.rs`, `dns/probe.rs` *(新增)*, `system/net_diag.rs` *(新增)*, `system/port_owner.rs`, `system/tun.rs` | 直连链路测试与 `Block` 命中解释、多上游 DNS 对比探测、免内核网卡/路由/DNS/端口/助手一体化体检 |
 | **`xrose-app` 桌面端 UI** | `ui/nodes.rs`, `ui/nodes/direct_entry.rs` *(新增)*, `ui/mod.rs`, `ui/menus.rs`, `ui/connections.rs`, `tray/dashboard.rs`, `tray/popup.rs` | 置顶不可删除「本机直连」虚拟节点、顶栏胶囊与托盘联动、连接页实时速率/活跃进程视图/一键断开与防火墙快捷拦截、测试页系统诊断卡片 |
-| **`xrose-cli` 与文档** | `crates/xrose-cli/src/main.rs`, `README.md`, `docs/ARCHITECTURE.md`, `docs/DESIGN.md`, `ROADMAP.md` | CLI `mode` 与增强版 `doctor` 命令；同步能力矩阵、UI 规范与路线图状态 |
+| **`xrose-cli` 与文档** | `crates/xrose-cli/src/main.rs`, `README.md`, `docs/ARCHITECTURE.md`, `docs/DESIGN.md`, `docs/ROADMAP.md` | CLI `mode` 与增强版 `doctor` 命令；同步能力矩阵、UI 规范与路线图状态 |
 
 ---
 

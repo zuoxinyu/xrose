@@ -6,9 +6,9 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 
 | 里程碑 | 目标定位 | 当前状态 | 技术方案 |
 | :--- | :--- | :--- | :--- |
-| **M0** | **Direct as First Class**：默认直连模式、实时进程/连接监控、应用层阻止规则与系统诊断工作台 | **已完成** | [M0 方案](docs/MILESTONE.M0.DIRECT-AS-FIRST-CLASS.md) |
-| **M1** | **Project Xristina 地基**：自研 Rust 单虚拟网卡（Monolithic TUN）、统一内置 DNS 总线、零拷贝 L3 交换与直连守护引擎 | 规划中 | [M1 蓝图](docs/MILESTONE.M1.PROJECT-XRISTINA.md) |
-| **M2** | **Xristina Link（XLP）**：自研抗探测协议（TLS Exporter SPA 鉴权、分级形态塑形、QUIC + 轮转 TCP 双载波无感热备）与轻量服务端 `xristina-server` | 规划中 | [M2 方案](docs/MILESTONE.M2.XRISTINA-LINK.md) |
+| **M0** | **Direct as First Class**：默认直连模式、实时进程/连接监控、应用层阻止规则与系统诊断工作台 | **已完成** | [M0 方案](MILESTONE.M0.DIRECT-AS-FIRST-CLASS.md) |
+| **M1** | **Project Xristina 地基**：自研 Rust 单虚拟网卡（Monolithic TUN）、统一内置 DNS 总线、零拷贝 L3 交换与直连守护引擎 | 规划中 | [M1 蓝图](MILESTONE.M1.PROJECT-XRISTINA.md) |
+| **M2** | **Xristina Link（XLP）**：自研抗探测协议（TLS Exporter SPA 鉴权、分级形态塑形、QUIC + 轮转 TCP 双载波无感热备）与轻量服务端 `xristina-server` | 规划中 | [M2 方案](MILESTONE.M2.XRISTINA-LINK.md) |
 | **M3** | **生态协议兼容与热重载**：补齐主力兼容协议栈（VLESS / Trojan / SS-2022 / Hy2 等）、uTLS 指纹层与基于 RCU 的原子热重载 | 规划中 | 见 M1 §5 & §7 |
 | **M4** | **原生组网融合**：EasyTier 内存态虚拟端口与纯 Rust Tailscale 驱动，消除多网卡与回环桥接损耗 | 规划中 | 见 M1 §6 |
 | **M5** | **全协议收口与平台拓展**：默认内核切换与低内存移动端（iOS / Android）/ 路由器（OpenWrt）拓展 | 规划中 | 见 M1 §7 |
@@ -17,15 +17,22 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 
 ## 近期待办
 
+### 节点与代理
+
+- [ ] 节点健康度分析
+- [ ] 配置导入
+- [ ] 链式代理
+- [ ] 完善策略组
+- [ ] 配置测速地址
+
 ### 系统集成
 
 - [ ] 卸载与重置清理：回收提权助手计划任务 / 系统服务等残留副作用。
 
 ### UI 与文案
 
-- [ ] 交互动画：页面切换、面板展开、列表增删与托盘浮窗统一曲线与时长，遵循系统“减少动态效果”设置。
+- [ ] 交互动画：补齐页面切换、面板展开与列表增删动画（统一曲线与时长，遵循系统“减少动态效果”设置）。
 - [ ] 补齐底层错误与警告提示的中英双语支持。
-- [ ] 首次启动引导：缺少提权助手或自定义规则集时就地提示下一步。
 
 ### 验证
 
@@ -35,7 +42,6 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 ### 构建与发布
 
 - [ ] CI：GitHub Actions 在 Windows / macOS / Linux 上构建、运行 `cargo test -p xrose-core`、检查格式与 clippy。
-- [x] 发布打包脚本与工作流：macOS DMG、Windows 便携 ZIP、Linux AppImage / deb、Arch Linux 原生包，均提供 full 与 lite。见[发布说明](docs/RELEASE.md)。
 
 ---
 

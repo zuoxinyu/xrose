@@ -16,7 +16,7 @@
 | **多网卡分裂（3-TUN Split-Brain）** | 代理 TUN + EasyTier `--mesh-worker` TUN + Tailscale 专用 `sing-box 1.14.4` TUN 三套虚拟网卡并存；靠 [`CoexistencePlan`](../crates/xrose-core/src/mesh/coexist.rs#L18-L22) 做 CIDR 差集排除、回环鉴权 SOCKS 桥接，以及 NRPT / `/etc/resolver` / `127.0.0.153:53` 等系统级 DNS 补丁。 | **单一 Monolithic TUN (`xristina0`)**：仅注册一张虚拟网卡、一套系统路由与单一内置 DNS 引擎，Mesh 与代理之间在内存内零拷贝直通，彻底告别 Teredo 抖动、`strict_route` 冲突与回环 SOCKS 损耗。 |
 | **无热重载与连接中断** | 修改规则、出站组自动切换、组网状态变更均需「重编译 JSON → 外部 `check` → 重启进程」，导致存量 TCP / SSH / 下载连接全部断开；节点测速还需拉起短期临时内核进程。 | **基于 RCU (`ArcSwap`) 的微秒级原子热更新**：路由表、防火墙策略、DNS、节点切换、Mesh 拓扑变更毫秒生效，不断流；节点探测直接在引擎内复用拨号器完成。 |
 | **双核能力割裂与观测盲区** | [`Capabilities`](../crates/xrose-core/src/model/mod.rs#L105-L124) 中 Xray 无连接列表、无进程/域名归因、无 Fake-IP、无 Hysteria2/TUIC/AnyTLS；sing-box 每 1.2 秒轮询 Clash API 导致短连接落入「未归因」。 | **单一超集能力矩阵 + 事件流遥测**：所有协议一等支持；每条连接从 SYN / 首包即产生生命周期事件，经共享内存环形缓冲区推送，短连接 100% 精确归因。 |
-| **「不翻墙即闲置」与上手门槛** | 首次启动需先下载外部 Core 并导入订阅才能产生价值（见 [ROADMAP.md](../ROADMAP.md#L23)）。 | **内置内核零下载启动 + 直连守护一等公民**：安装即用，日常办公/国内网络下作为低开销防火墙、去广告网关与网络抓包诊断仪常驻运行。 |
+| **「不翻墙即闲置」与上手门槛** | 首次启动需先下载外部 Core 并导入订阅才能产生价值（见 [ROADMAP.md](ROADMAP.md)）。 | **内置内核零下载启动 + 直连守护一等公民**：安装即用，日常办公/国内网络下作为低开销防火墙、去广告网关与网络抓包诊断仪常驻运行。 |
 | **移动端与内存上限瓶颈** | Go 运行时（Xray / sing-box / Tailscale）GC 内存占用高，未来拓展 iOS `NEPacketTunnelProvider`（系统硬限制 50 MB RAM）极易触发 OOM Jetsam。 | **零 GC 纯 Rust 引擎**：配合内存映射规则集，核心运行内存可压控在 **15–25 MB**，天然为 Xrose 移动端（iOS / Android）及路由器端（OpenWrt）铺平道路。 |
 
 ---

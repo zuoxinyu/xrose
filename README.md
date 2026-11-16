@@ -162,7 +162,7 @@ xrose-cli mesh --help                         # 异地组网命令
 - [异地组网与构建说明](docs/MESH.md)
 - [架构与编译约定](docs/ARCHITECTURE.md)
 - [UI 规范](docs/DESIGN.md)
-- [路线图与里程碑](ROADMAP.md)
+- [路线图与里程碑](docs/ROADMAP.md)
 
 ## 许可
 
