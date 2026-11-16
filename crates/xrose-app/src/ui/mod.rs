@@ -360,6 +360,9 @@ pub struct AppView {
     pub(crate) trace_input: Entity<InputState>,
     pub(crate) connection_search: Entity<InputState>,
     pub(crate) connections_tab: connections::ConnectionsTab,
+    connections_stats_scroll: ScrollHandle,
+    connections_tab_scroll: ScrollHandle,
+    connections_tab_focus: [FocusHandle; 4],
     process_icons: Option<process_icons::ProcessIcons>,
     connection_sort: xrose_core::flow::ConnectionSort,
     exact_process_filter: Option<String>,
@@ -587,6 +590,9 @@ impl AppView {
             trace_input,
             connection_search: text_input(window, cx, "搜索域名、IP、端口、进程或规则…"),
             connections_tab: connections::ConnectionsTab::default(),
+            connections_stats_scroll: ScrollHandle::new(),
+            connections_tab_scroll: ScrollHandle::new(),
+            connections_tab_focus: std::array::from_fn(|_| cx.focus_handle()),
             process_icons: None,
             connection_sort: Default::default(),
             exact_process_filter: None,
@@ -1407,14 +1413,10 @@ impl AppView {
             .w_full()
             .when(!page_scrolls, |d| d.flex().flex_col().overflow_hidden())
             .when(page_scrolls, |d| d.overflow_y_scroll())
-            .when(self.page != Page::Connections, |d| d.p(px(theme::PAGE_PAD)))
+            .p(px(theme::PAGE_PAD))
             .child(self.page_content(window, cx));
         match self.page {
-            Page::Connections => {
-                scroll_frame("connections-scrollbar", &self.connection_list, viewport)
-                    .into_any_element()
-            }
-            Page::Logs | Page::Settings => viewport.into_any_element(),
+            Page::Connections | Page::Logs | Page::Settings => viewport.into_any_element(),
             _ => scroll_frame("page-scrollbar", &self.content_scroll, viewport).into_any_element(),
         }
     }

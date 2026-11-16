@@ -16,8 +16,9 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::dialog::Dialog;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
+use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::mesh::{
@@ -1068,33 +1069,6 @@ impl AppView {
             MeshCardTab::Devices => 0,
             MeshCardTab::Forwards => 1,
         });
-        // Keep device list on the left and port forwarding on the right.
-        let tabs = SegmentedTabs::new(
-            SharedString::from(format!("mesh-card-tabs-{profile_id}")),
-            vec![
-                SegmentedTab::new(
-                    SharedString::from(format!("mesh-tab-devices-{profile_id}")),
-                    self.tr("设备列表", "Devices"),
-                    peer_count.to_string(),
-                ),
-                SegmentedTab::new(
-                    SharedString::from(format!("mesh-tab-forwards-{profile_id}")),
-                    self.tr("端口转发", "Port forwarding"),
-                    forward_count.to_string(),
-                ),
-            ],
-            selected_tab,
-        )
-        .on_change(cx.listener(move |this, index, _, cx| {
-            let tab = [MeshCardTab::Devices, MeshCardTab::Forwards][*index];
-            select_mesh_card_tab(
-                &mut this.mesh_card_tabs,
-                &mut this.collapsed_mesh_sections,
-                &profile_id,
-                tab,
-            );
-            cx.notify();
-        }));
         let toggle_profile_id = profile.id.clone();
         let toggle_label = if collapsed {
             self.tr("展开", "Expand")
@@ -1118,6 +1092,7 @@ impl AppView {
             .items_center()
             .gap_2()
             .flex_shrink_0()
+            .pl_2()
             .when(!collapsed && active_tab == MeshCardTab::Forwards, |d| {
                 d.child(
                     Button::new(SharedString::from(format!(
@@ -1167,23 +1142,59 @@ impl AppView {
                     cx.notify();
                 })),
             );
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .pt_3()
-            .border_t_1()
-            .border_color(p.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(tabs)
-                    .child(right_actions),
-            );
+        let devices_label = self.tr("设备列表", "Devices");
+        let forwards_label = self.tr("端口转发", "Port forwarding");
+        // Keep device list on the left and port forwarding on the right.
+        let tabs = TabBar::new(SharedString::from(format!("mesh-card-tabs-{profile_id}")))
+            .underline()
+            .small()
+            .w_full()
+            .when_some(selected_tab, |bar, idx| bar.selected_index(idx))
+            .children([
+                Tab::new().aria_label(devices_label.clone()).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(devices_label)
+                        .child(tab_count_badge(
+                            peer_count.to_string(),
+                            selected_tab == Some(0),
+                            p,
+                            cx,
+                        )),
+                ),
+                Tab::new().aria_label(forwards_label.clone()).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(forwards_label)
+                        .child(tab_count_badge(
+                            forward_count.to_string(),
+                            selected_tab == Some(1),
+                            p,
+                            cx,
+                        )),
+                ),
+            ])
+            .suffix(right_actions)
+            .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                let Some(tab) = [MeshCardTab::Devices, MeshCardTab::Forwards]
+                    .get(*index)
+                    .copied()
+                else {
+                    return;
+                };
+                select_mesh_card_tab(
+                    &mut this.mesh_card_tabs,
+                    &mut this.collapsed_mesh_sections,
+                    &profile_id,
+                    tab,
+                );
+                cx.notify();
+            }));
+        let mut section = div().flex().flex_col().gap_3().pt_1().child(tabs);
         if !collapsed {
             section = section.child(match active_tab {
                 MeshCardTab::Devices => {

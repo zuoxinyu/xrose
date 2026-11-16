@@ -49,16 +49,7 @@ impl SettingsTab {
     }
 
     fn keyboard_target(self, key: &str) -> Option<Self> {
-        let count = Self::ALL.len();
-        let index = self as usize;
-        match key {
-            "left" => Some(Self::ALL[(index + count - 1) % count]),
-            "right" => Some(Self::ALL[(index + 1) % count]),
-            "home" => Some(Self::Appearance),
-            "end" => Some(Self::Helper),
-            "enter" | "space" => Some(self),
-            _ => None,
-        }
+        tab_keyboard_target(self as usize, Self::ALL.len(), key).map(|index| Self::ALL[index])
     }
 }
 

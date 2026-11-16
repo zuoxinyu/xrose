@@ -357,42 +357,45 @@ pub fn danger_icon_button(
         .h(px(ICON_BUTTON_SIZE))
 }
 
-/// Option item inside a sliding [`SegmentedTabs`] track.
-pub(super) struct SegmentedTab {
-    pub(super) id: ElementId,
-    pub(super) icon: Option<IconName>,
-    pub(super) label: SharedString,
-    pub(super) badge: SharedString,
-}
-
-impl SegmentedTab {
-    pub(super) fn new(
-        id: impl Into<ElementId>,
-        label: impl Into<SharedString>,
-        badge: impl Into<SharedString>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            icon: None,
-            label: label.into(),
-            badge: badge.into(),
+/// Compact monospace count/status pill embedded inside an underline `Tab`.
+pub(super) fn tab_count_badge(
+    label: impl Into<SharedString>,
+    selected: bool,
+    p: &Palette,
+    cx: &App,
+) -> Div {
+    let badge_bg = if selected {
+        if p.is_dark {
+            p.primary.opacity(0.22)
+        } else {
+            p.accent
         }
-    }
-
-    pub(super) fn icon(mut self, icon: Option<IconName>) -> Self {
-        self.icon = icon;
-        self
-    }
+    } else {
+        p.panel_alt
+    };
+    let badge_fg = if selected { p.primary } else { p.muted_fg };
+    div()
+        .px_1p5()
+        .rounded_full()
+        .text_xs()
+        .font_family(cx.theme().mono_font_family.clone())
+        .bg(badge_bg)
+        .text_color(badge_fg)
+        .child(label.into())
 }
 
-/// Bordered segmented tab track with a sliding cyan capsule indicator, shared by
-/// Mesh card tabs and Connections primary tabs.
-#[derive(gpui_kit::IntoElement)]
-pub(super) struct SegmentedTabs {
-    id: ElementId,
-    tabs: Vec<SegmentedTab>,
-    selected: Option<usize>,
-    handler: Option<IndexChangeHandler>,
+pub(super) fn tab_keyboard_target(index: usize, count: usize, key: &str) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    match key {
+        "left" => Some((index + count - 1) % count),
+        "right" => Some((index + 1) % count),
+        "home" => Some(0),
+        "end" => Some(count - 1),
+        "enter" | "space" => Some(index),
+        _ => None,
+    }
 }
 
 /// Generic bordered track hosting heterogeneous tab items (such as draggable
@@ -465,113 +468,6 @@ impl gpui_kit::RenderOnce for SlidingTabTrack {
         let p = super::theme::palette(cx);
         let selected_child = sliding_track_selected_child(self.selected_item, self.items.len());
         sliding_track_shell(&self.id, selected_child, &p, window, cx).children(self.items)
-    }
-}
-
-impl SegmentedTabs {
-    pub(super) fn new(
-        id: impl Into<ElementId>,
-        tabs: Vec<SegmentedTab>,
-        selected: Option<usize>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            tabs,
-            selected,
-            handler: None,
-        }
-    }
-
-    pub(super) fn on_change(
-        mut self,
-        handler: impl Fn(&usize, &mut gpui_kit::Window, &mut App) + 'static,
-    ) -> Self {
-        self.handler = Some(std::rc::Rc::new(handler));
-        self
-    }
-}
-
-impl gpui_kit::RenderOnce for SegmentedTabs {
-    fn render(self, window: &mut gpui_kit::Window, cx: &mut App) -> impl IntoElement {
-        let p = super::theme::palette(cx);
-        let count = self.tabs.len();
-        let handles = group_focus_handles(&self.id, count, window, cx);
-        let key_handles = handles.clone();
-        let key_handler = self.handler.clone();
-        let selected = self.selected.filter(|&index| index < count);
-        let mono = cx.theme().mono_font_family.clone();
-        let transparent = cx.theme().transparent;
-        let mut track = sliding_track_shell(&self.id, selected.map(|i| i + 1), &p, window, cx)
-            .on_key_down(move |event, window, cx| {
-                if let Some(next) = roving_key_target(event.keystroke.key.as_str(), selected, count)
-                {
-                    key_handles[next].focus(window, cx);
-                    if let Some(handler) = &key_handler {
-                        handler(&next, window, cx);
-                    }
-                    cx.stop_propagation();
-                    window.prevent_default();
-                }
-            });
-        for (index, tab) in self.tabs.into_iter().enumerate() {
-            let checked = selected == Some(index);
-            let handler = self.handler.clone();
-            let variant = ButtonCustomVariant::new(cx)
-                .color(transparent)
-                .foreground(if checked { p.primary } else { p.muted_fg })
-                .hover(if checked {
-                    transparent
-                } else {
-                    p.neutral_hover()
-                })
-                .active(if checked {
-                    transparent
-                } else {
-                    p.neutral_active()
-                });
-            let badge_bg = if checked {
-                if p.is_dark {
-                    p.primary.opacity(0.22)
-                } else {
-                    p.panel.opacity(0.92)
-                }
-            } else {
-                p.panel_alt
-            };
-            let badge_fg = if checked { p.primary } else { p.muted_fg };
-            track = track.child(
-                Button::new(tab.id)
-                    .role(Role::Tab)
-                    .compact()
-                    .h(px(26.))
-                    .rounded(gpui_kit::component::button::ButtonRounded::Size(px(3.)))
-                    .custom(variant)
-                    .selected(checked)
-                    .tab_stop(index == selected.unwrap_or(0))
-                    .track_focus(&handles[index])
-                    .border_1()
-                    .border_color(transparent)
-                    .when_some(tab.icon, |b, icon| b.icon(icon))
-                    .when(checked, |b| b.font_weight(FontWeight::MEDIUM))
-                    .label(tab.label)
-                    .child(
-                        div()
-                            .px_1p5()
-                            .rounded_full()
-                            .text_xs()
-                            .font_family(mono.clone())
-                            .bg(badge_bg)
-                            .text_color(badge_fg)
-                            .child(tab.badge),
-                    )
-                    .on_click(move |_, window, cx| {
-                        if let Some(handler) = &handler {
-                            handler(&index, window, cx);
-                        }
-                    }),
-            );
-        }
-        track
     }
 }
 
@@ -974,5 +870,17 @@ mod tests {
         assert_eq!(sliding_track_selected_child(Some(4), 4), None);
         assert_eq!(sliding_track_selected_child(Some(0), 5), Some(1));
         assert_eq!(sliding_track_selected_child(Some(4), 5), Some(5));
+    }
+
+    #[test]
+    fn tab_keyboard_target_wraps_and_supports_endpoints() {
+        assert_eq!(tab_keyboard_target(0, 4, "left"), Some(3));
+        assert_eq!(tab_keyboard_target(3, 4, "right"), Some(0));
+        assert_eq!(tab_keyboard_target(2, 4, "home"), Some(0));
+        assert_eq!(tab_keyboard_target(1, 4, "end"), Some(3));
+        assert_eq!(tab_keyboard_target(2, 4, "enter"), Some(2));
+        assert_eq!(tab_keyboard_target(2, 4, "space"), Some(2));
+        assert_eq!(tab_keyboard_target(0, 4, "tab"), None);
+        assert_eq!(tab_keyboard_target(0, 0, "right"), None);
     }
 }

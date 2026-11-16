@@ -16,6 +16,7 @@ pub(crate) struct TrayWindowState {
     content_offset: Point<Pixels>,
     connection_list: ListState,
     connections_limit: usize,
+    connections_stats_offset: Point<Pixels>,
     settings_offset: Point<Pixels>,
     log_filter: LogFilter,
     rule_group_id: Option<String>,
@@ -53,6 +54,7 @@ impl AppView {
             content_offset: self.content_scroll.offset(),
             connection_list: self.connection_list.clone(),
             connections_limit: self.connections_limit,
+            connections_stats_offset: self.connections_stats_scroll.offset(),
             settings_offset: self.settings_scroll.offset(),
             exact_process_filter: self.exact_process_filter.clone(),
             hide_ips: self.hide_ips,
@@ -89,6 +91,8 @@ impl AppView {
         self.collapsed_mesh_sections = state.collapsed_mesh_sections;
         self.connection_list = state.connection_list;
         self.connections_limit = state.connections_limit;
+        self.connections_stats_scroll
+            .set_offset(state.connections_stats_offset);
         self.content_scroll.set_offset(state.content_offset);
         self.settings_scroll.set_offset(state.settings_offset);
         self.exact_process_filter = state.exact_process_filter;

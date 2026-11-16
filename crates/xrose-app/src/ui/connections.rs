@@ -2,9 +2,10 @@
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::{ActiveTheme, Icon};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::diagnostics::{
@@ -14,6 +15,7 @@ use xrose_core::flow::{ConnectionMetrics, ConnectionSort, ProcessLiveTraffic};
 use xrose_core::model::{CoreKind, RouteAction, RouteActionKind, WorkMode};
 use xrose_core::runtime::ClashConnection;
 use xrose_core::service::ToastLevel;
+use xrose_core::settings::Language;
 use xrose_core::trace::{
     TracePhase, TraceProtocol, TraceSession, TraceStatus, TraceStepKind, parse_target,
 };
@@ -27,13 +29,54 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 
 const CONNECTIONS_PAGE_STEP: usize = 50;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ConnectionsTab {
     #[default]
     Live,
     Processes,
     Recorded,
     Statistics,
+}
+
+impl ConnectionsTab {
+    const ALL: [Self; 4] = [
+        Self::Live,
+        Self::Processes,
+        Self::Recorded,
+        Self::Statistics,
+    ];
+
+    fn label(self, lang: Language) -> SharedString {
+        match self {
+            Self::Live => super::tr(lang, "实时连接", "Live"),
+            Self::Processes => super::tr(lang, "活跃进程", "Active processes"),
+            Self::Recorded => super::tr(lang, "录制回放", "Recorded"),
+            Self::Statistics => super::tr(lang, "流量统计", "Traffic stats"),
+        }
+    }
+
+    fn keyboard_target(self, key: &str) -> Option<Self> {
+        tab_keyboard_target(self as usize, Self::ALL.len(), key).map(|index| Self::ALL[index])
+    }
+
+    fn menu_target(self) -> Option<MenuTarget> {
+        match self {
+            Self::Live => Some(MenuTarget::LiveConnections),
+            Self::Recorded => Some(MenuTarget::RecordedConnections),
+            Self::Processes | Self::Statistics => None,
+        }
+    }
+
+    fn shows_record_action(self, recording_active: bool) -> bool {
+        recording_active || matches!(self, Self::Live | Self::Recorded)
+    }
+
+    fn post_start_recording_tab(self) -> Self {
+        match self {
+            Self::Live => Self::Recorded,
+            _ => self,
+        }
+    }
 }
 
 enum MonitorRow<'a> {
@@ -74,21 +117,24 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.connections_tab == tab {
-            return;
+        if self.connections_tab != tab {
+            self.connections_tab = tab;
+            self.exact_process_filter = None;
+            self.connections_limit = CONNECTIONS_PAGE_STEP;
+            self.connection_list.reset(0);
+            self.connections_stats_scroll
+                .set_offset(point(px(0.), px(0.)));
+            let placeholder = self.connection_search_placeholder();
+            self.connection_search.update(cx, |input, cx| {
+                input.set_placeholder(placeholder, window, cx)
+            });
+            if tab == ConnectionsTab::Statistics {
+                self.refresh_statistics(false, cx);
+            }
         }
-        self.connections_tab = tab;
-        self.exact_process_filter = None;
-        self.connections_limit = CONNECTIONS_PAGE_STEP;
-        let placeholder = self.connection_search_placeholder();
-        self.connection_search.update(cx, |input, cx| {
-            input.set_placeholder(placeholder, window, cx)
-        });
-        if tab == ConnectionsTab::Statistics {
-            self.refresh_statistics(false, cx);
-        } else {
-            cx.notify();
-        }
+        self.connections_tab_focus[tab as usize].focus(window, cx);
+        self.connections_tab_scroll.scroll_to_item(tab as usize);
+        cx.notify();
     }
 
     fn reset_connection_filters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -110,168 +156,259 @@ impl AppView {
 
     pub(crate) fn page_connections(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let lang = self.lang();
         let tab = self.connections_tab;
-        let supported = self
-            .snapshot
-            .process
-            .core
-            .unwrap_or(self.snapshot.settings.core)
-            == CoreKind::SingBox;
-        let running = self.snapshot.process.phase.is_alive();
-        let query = self.connection_search.read(cx).value().trim().to_string();
-        let limit = self.connections_limit.max(CONNECTIONS_PAGE_STEP);
-
-        let live = &self.snapshot.runtime.live_traffic;
-        let matches = |c: &ClashConnection| {
-            if query.is_empty() {
-                true
-            } else if tab == ConnectionsTab::Live
-                && self.exact_process_filter.as_ref() == Some(&query)
-            {
-                c.process_name() == query
-            } else {
-                connection_matches_query(c, &query)
-            }
-        };
-        // Store indices in display order. The list resolves rich rows and icons only
-        // when it measures or paints them, including variable-height wrapped rows.
-        let (visible, count): (Vec<usize>, usize) = match tab {
-            ConnectionsTab::Statistics => (Vec::new(), 0),
-            ConnectionsTab::Recorded => {
-                let all = &self.snapshot.recording.connections;
-                let mut rows = (0..all.len())
-                    .rev()
-                    .filter(|&i| matches(&all[i].connection));
-                let visible: Vec<_> = rows.by_ref().take(limit).collect();
-                let count = if query.is_empty() {
-                    all.len()
-                } else {
-                    visible.len() + rows.count()
+        let focus_bg = p.accent;
+        let active_conn_len = self.snapshot.runtime.connections.len();
+        let active_process_len = self.snapshot.runtime.live_traffic.processes.len();
+        let recorded_conn_len = self.snapshot.recording.connections.len();
+        let recording_active = self.snapshot.recording.active;
+        let top_tabs = TabBar::new("connections-tabs")
+            .underline()
+            .track_scroll(&self.connections_tab_scroll)
+            .w_full()
+            .flex_shrink_0()
+            .selected_index(tab as usize)
+            .children(ConnectionsTab::ALL.map(|item| {
+                let active = item == tab;
+                let label = item.label(lang);
+                let badge = match item {
+                    ConnectionsTab::Live => active_conn_len.to_string(),
+                    ConnectionsTab::Processes => active_process_len.to_string(),
+                    ConnectionsTab::Recorded => recorded_conn_len.to_string(),
+                    ConnectionsTab::Statistics => self.traffic_statistics_badge(),
                 };
-                (visible, count)
-            }
-            ConnectionsTab::Processes => {
-                let text = query.to_lowercase();
-                let mut rows = (0..live.processes.len()).filter(|&i| {
-                    text.is_empty()
-                        || live.processes[i]
-                            .process_name
-                            .to_lowercase()
-                            .contains(&text)
-                });
-                let visible: Vec<_> = rows.by_ref().take(limit).collect();
-                let count = if query.is_empty() {
-                    live.processes.len()
-                } else {
-                    visible.len() + rows.count()
-                };
-                (visible, count)
-            }
-            ConnectionsTab::Live => {
-                let all = &self.snapshot.runtime.connections;
-                let mut rows = live
-                    .ordered(self.connection_sort)
-                    .iter()
-                    .copied()
-                    .filter(|&i| all.get(i).is_some_and(matches));
-                let visible: Vec<_> = rows.by_ref().take(limit).collect();
-                let count = if query.is_empty() {
-                    all.len()
-                } else {
-                    visible.len() + rows.count()
-                };
-                (visible, count)
-            }
-        };
-        let shown = visible.len();
-        let is_live_tab = matches!(tab, ConnectionsTab::Live | ConnectionsTab::Processes);
-        let has_hint = tab != ConnectionsTab::Statistics
-            && ((is_live_tab && (!supported || !running)) || count == 0);
-        let has_footer =
-            tab != ConnectionsTab::Statistics && (count > shown || limit > CONNECTIONS_PAGE_STEP);
-        let panel_count = usize::from(has_hint) + shown + usize::from(has_footer);
-        let item_count = 1 + panel_count;
-        let old_count = self.connection_list.item_count();
-        if old_count != item_count {
-            self.connection_list.splice(
-                old_count.min(item_count)..old_count,
-                item_count.saturating_sub(old_count),
-            );
-        }
-        let filtered = !query.is_empty();
-        list(
-            self.connection_list.clone(),
-            cx.processor(move |this, index: usize, _, cx| {
-                let pad = px(super::theme::PAGE_PAD);
-                let first = index == 0;
-                let last = index + 1 == item_count;
-                let content = if first {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(this.connection_header(supported, running, cx))
-                        .when(tab == ConnectionsTab::Statistics, |panel| {
-                            panel.child(this.traffic_statistics_content(&p, cx))
-                        })
-                        .into_any_element()
-                } else if has_hint && index == 1 {
-                    this.connection_hint(supported, running, filtered, count, &p, cx)
-                        .into_any_element()
-                } else if last && has_footer {
-                    this.connection_footer(count, shown, limit, &p, cx)
-                        .into_any_element()
-                } else {
-                    let i = visible[index - 1 - usize::from(has_hint)];
-                    let row = match tab {
-                        ConnectionsTab::Recorded => {
-                            let r = &this.snapshot.recording.connections[i];
-                            MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
+                Tab::new()
+                    .aria_label(label.clone())
+                    .track_focus(&self.connections_tab_focus[item as usize])
+                    .tab_stop(active)
+                    .focus_visible(move |style| style.bg(focus_bg))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        if let Some(next) = item.keyboard_target(&event.keystroke.key) {
+                            this.select_connections_tab(next, window, cx);
+                            window.prevent_default();
+                            cx.stop_propagation();
                         }
-                        ConnectionsTab::Processes => {
-                            MonitorRow::Process(&this.snapshot.runtime.live_traffic.processes[i])
-                        }
-                        ConnectionsTab::Live | ConnectionsTab::Statistics => {
-                            MonitorRow::Connection(
-                                &this.snapshot.runtime.connections[i],
-                                false,
-                                this.snapshot.runtime.live_traffic.metrics.get(i).copied(),
-                            )
-                        }
-                    };
-                    let icon = this
-                        .process_icons
-                        .as_ref()
-                        .map(|icons| icons.view(row.icon_key(&this.snapshot.runtime.connections)));
-                    match row {
-                        MonitorRow::Connection(connection, closed, metrics) => this
-                            .connection_row(connection.clone(), closed, metrics, icon, &p, cx)
-                            .into_any_element(),
-                        MonitorRow::Process(process) => this
-                            .live_process_row(process, icon, &p, cx)
-                            .into_any_element(),
-                    }
-                };
-                div()
-                    .px(pad)
-                    .when(first, |d| d.pt(pad))
-                    .when(last, |d| d.pb(pad))
+                    }))
                     .child(
                         div()
-                            .px_4()
-                            .border_x_1()
-                            .bg(p.panel)
-                            .border_color(p.border)
-                            .when(first, |d| d.pt_4().border_t_1().rounded_t_lg())
-                            .when(first && !last, |d| d.pb_3())
-                            .when(!first && !last, |d| d.pb_2())
-                            .when(last, |d| d.pb_4().border_b_1().rounded_b_lg())
-                            .child(content),
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .when(item == ConnectionsTab::Statistics, |d| {
+                                d.child(Icon::new(IconName::ChartColumn).size(px(14.)))
+                            })
+                            .child(label)
+                            .when(item == ConnectionsTab::Recorded && recording_active, |d| {
+                                d.child(dot(p.danger))
+                            })
+                            .child(tab_count_badge(badge, active, &p, cx)),
                     )
+            }))
+            .on_click(cx.listener(|this, index: &usize, window, cx| {
+                if let Some(next) = ConnectionsTab::ALL.get(*index) {
+                    this.select_connections_tab(*next, window, cx);
+                }
+            }));
+
+        let card_content: AnyElement = if tab == ConnectionsTab::Statistics {
+            scroll_frame(
+                "connections-stats-scrollbar",
+                &self.connections_stats_scroll,
+                div()
+                    .id("connections-stats-panel")
+                    .track_scroll(&self.connections_stats_scroll)
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .w_full()
+                    .overflow_y_scroll()
+                    .child(
+                        card(&p)
+                            .flex_shrink_0()
+                            .child(section_title(
+                                &p,
+                                self.tr("流量统计", "Traffic statistics"),
+                                self.tr(
+                                    "按节点、进程或主域名维度分析代理与直连流量归因",
+                                    "Analyze proxy and direct traffic attribution by node, process, or domain",
+                                ),
+                            ))
+                            .child(self.traffic_statistics_content(&p, cx)),
+                    ),
+            )
+            .into_any_element()
+        } else {
+            let supported = self
+                .snapshot
+                .process
+                .core
+                .unwrap_or(self.snapshot.settings.core)
+                == CoreKind::SingBox;
+            let running = self.snapshot.process.phase.is_alive();
+            let query = self.connection_search.read(cx).value().trim().to_string();
+            let limit = self.connections_limit.max(CONNECTIONS_PAGE_STEP);
+
+            let live = &self.snapshot.runtime.live_traffic;
+            let matches = |c: &ClashConnection| {
+                if query.is_empty() {
+                    true
+                } else if tab == ConnectionsTab::Live
+                    && self.exact_process_filter.as_ref() == Some(&query)
+                {
+                    c.process_name() == query
+                } else {
+                    connection_matches_query(c, &query)
+                }
+            };
+            // Store indices in display order. The list resolves rich rows and icons only
+            // when it measures or paints them, including variable-height wrapped rows.
+            let (visible, count): (Vec<usize>, usize) = match tab {
+                ConnectionsTab::Statistics => unreachable!(),
+                ConnectionsTab::Recorded => {
+                    let all = &self.snapshot.recording.connections;
+                    let mut rows = (0..all.len())
+                        .rev()
+                        .filter(|&i| matches(&all[i].connection));
+                    let visible: Vec<_> = rows.by_ref().take(limit).collect();
+                    let count = if query.is_empty() {
+                        all.len()
+                    } else {
+                        visible.len() + rows.count()
+                    };
+                    (visible, count)
+                }
+                ConnectionsTab::Processes => {
+                    let text = query.to_lowercase();
+                    let mut rows = (0..live.processes.len()).filter(|&i| {
+                        text.is_empty()
+                            || live.processes[i]
+                                .process_name
+                                .to_lowercase()
+                                .contains(&text)
+                    });
+                    let visible: Vec<_> = rows.by_ref().take(limit).collect();
+                    let count = if query.is_empty() {
+                        live.processes.len()
+                    } else {
+                        visible.len() + rows.count()
+                    };
+                    (visible, count)
+                }
+                ConnectionsTab::Live => {
+                    let all = &self.snapshot.runtime.connections;
+                    let mut rows = live
+                        .ordered(self.connection_sort)
+                        .iter()
+                        .copied()
+                        .filter(|&i| all.get(i).is_some_and(matches));
+                    let visible: Vec<_> = rows.by_ref().take(limit).collect();
+                    let count = if query.is_empty() {
+                        all.len()
+                    } else {
+                        visible.len() + rows.count()
+                    };
+                    (visible, count)
+                }
+            };
+            let shown = visible.len();
+            let is_live_tab = matches!(tab, ConnectionsTab::Live | ConnectionsTab::Processes);
+            let has_hint = (is_live_tab && (!supported || !running)) || count == 0;
+            let has_footer = !has_hint && (count > shown || limit > CONNECTIONS_PAGE_STEP);
+            let item_count = if has_hint {
+                0
+            } else {
+                shown + usize::from(has_footer)
+            };
+            let old_count = self.connection_list.item_count();
+            if old_count != item_count {
+                self.connection_list.splice(
+                    old_count.min(item_count)..old_count,
+                    item_count.saturating_sub(old_count),
+                );
+            }
+            let filtered = !query.is_empty();
+            let body = if has_hint {
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .child(self.connection_hint(supported, running, filtered, count, &p, cx))
                     .into_any_element()
-            }),
-        )
-        .size_full()
+            } else {
+                let viewport = list(
+                    self.connection_list.clone(),
+                    cx.processor(move |this, index: usize, _, cx| {
+                        if has_footer && index + 1 == item_count {
+                            return div()
+                                .pt_1()
+                                .child(this.connection_footer(count, shown, limit, &p, cx))
+                                .into_any_element();
+                        }
+                        let i = visible[index];
+                        let row = match tab {
+                            ConnectionsTab::Recorded => {
+                                let r = &this.snapshot.recording.connections[i];
+                                MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
+                            }
+                            ConnectionsTab::Processes => MonitorRow::Process(
+                                &this.snapshot.runtime.live_traffic.processes[i],
+                            ),
+                            ConnectionsTab::Live | ConnectionsTab::Statistics => {
+                                MonitorRow::Connection(
+                                    &this.snapshot.runtime.connections[i],
+                                    false,
+                                    this.snapshot.runtime.live_traffic.metrics.get(i).copied(),
+                                )
+                            }
+                        };
+                        let icon = this.process_icons.as_ref().map(|icons| {
+                            icons.view(row.icon_key(&this.snapshot.runtime.connections))
+                        });
+                        let element = match row {
+                            MonitorRow::Connection(connection, closed, metrics) => this
+                                .connection_row(connection.clone(), closed, metrics, icon, &p, cx)
+                                .into_any_element(),
+                            MonitorRow::Process(process) => this
+                                .live_process_row(process, icon, &p, cx)
+                                .into_any_element(),
+                        };
+                        div().pb_2().child(element).into_any_element()
+                    }),
+                )
+                .flex_1()
+                .min_h(px(0.))
+                .w_full();
+                // `scroll_frame` expands via `flex_1()`, so it must sit directly inside the
+                // card's flex column rather than inside a block wrapper.
+                scroll_frame("connections-scrollbar", &self.connection_list, viewport)
+                    .into_any_element()
+            };
+            card(&p)
+                .flex_1()
+                .min_h(px(0.))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .child(self.connection_header(supported, running, cx)),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .size_full()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .child(top_tabs)
+            .child(card_content)
     }
 
     fn connection_header(
@@ -284,7 +421,6 @@ impl AppView {
         let tab = self.connections_tab;
         let recording_active = self.snapshot.recording.active;
         let recording_started = self.snapshot.recording.started_at.is_some();
-        let recorded_conn_len = self.snapshot.recording.connections.len();
         let evicted_conns = self.snapshot.recording.evicted_connections;
         let evicted_traces = self.snapshot.recording.evicted_traces;
         let export_busy = self
@@ -292,8 +428,6 @@ impl AppView {
             .busy
             .iter()
             .any(|key| key == "recording-export");
-        let active_conn_len = self.snapshot.runtime.connections.len();
-        let active_process_len = self.snapshot.runtime.live_traffic.processes.len();
 
         let sort_choice = ChoiceGroup::new(
             "connection-sort",
@@ -321,58 +455,30 @@ impl AppView {
             && running
             && self.snapshot.model.work_mode == WorkMode::Direct
             && !self.snapshot.settings.tun_enabled;
-        let title = div().flex().items_center().flex_wrap().gap_2().child(
-            div()
-                .text_lg()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(p.fg)
-                .child(self.tr("实时连接与统计", "Live connections & statistics")),
-        );
-
-        let selected_tab = match tab {
-            ConnectionsTab::Live => 0,
-            ConnectionsTab::Processes => 1,
-            ConnectionsTab::Recorded => 2,
-            ConnectionsTab::Statistics => 3,
+        let (card_title, card_caption) = match tab {
+            ConnectionsTab::Live => (
+                self.tr("实时连接", "Live connections"),
+                self.tr(
+                    "查看当前活动连接的域名、进程、命中规则与实时速率",
+                    "Inspect active domains, processes, matched rules, and live throughput",
+                ),
+            ),
+            ConnectionsTab::Processes => (
+                self.tr("活跃进程", "Active processes"),
+                self.tr(
+                    "按进程汇总当前活跃连接数量、实时速率与累计流量",
+                    "Summarize active connections, throughput, and traffic totals by process",
+                ),
+            ),
+            ConnectionsTab::Recorded => (
+                self.tr("录制回放", "Recorded"),
+                self.tr(
+                    "捕获瞬时短连接与已结束连接的历史记录，供排查与导出",
+                    "Capture short-lived and closed connection history for inspection and export",
+                ),
+            ),
+            ConnectionsTab::Statistics => unreachable!(),
         };
-        let primary_tabs = div().flex().items_center().child(
-            SegmentedTabs::new(
-                "connections-primary-tabs",
-                vec![
-                    SegmentedTab::new(
-                        "connections-tab-live",
-                        self.tr("实时连接", "Live"),
-                        active_conn_len.to_string(),
-                    ),
-                    SegmentedTab::new(
-                        "connections-tab-processes",
-                        self.tr("活跃进程", "Active processes"),
-                        active_process_len.to_string(),
-                    ),
-                    SegmentedTab::new(
-                        "connections-tab-recorded",
-                        self.tr("录制回放", "Recorded"),
-                        recorded_conn_len.to_string(),
-                    ),
-                    SegmentedTab::new(
-                        "connections-tab-stats",
-                        self.tr("流量统计", "Traffic stats"),
-                        self.traffic_statistics_badge(),
-                    )
-                    .icon(Some(IconName::ChartColumn)),
-                ],
-                Some(selected_tab),
-            )
-            .on_change(cx.listener(|this, index, window, cx| {
-                let next = [
-                    ConnectionsTab::Live,
-                    ConnectionsTab::Processes,
-                    ConnectionsTab::Recorded,
-                    ConnectionsTab::Statistics,
-                ][*index];
-                this.select_connections_tab(next, window, cx);
-            })),
-        );
 
         let process_icons_shown = self.process_icons.is_some();
         let refresh_busy = self.service.is_busy("connections-refresh");
@@ -416,80 +522,78 @@ impl AppView {
             .min_w(px(180.))
             .child(Input::new(&self.connection_search));
 
-        let mut header = div()
+        let record_button = || {
+            Button::new("record-connections")
+                .when(recording_active, |b| b.danger())
+                .label(if recording_active {
+                    self.tr("停止录制", "Stop recording")
+                } else {
+                    self.tr("开始录制", "Start recording")
+                })
+                .icon(if recording_active {
+                    IconName::Square
+                } else {
+                    IconName::Play
+                })
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.snapshot.recording.active {
+                        this.service.stop_recording();
+                        this.sync(cx);
+                    } else {
+                        let next_tab = this.connections_tab.post_start_recording_tab();
+                        this.service.start_recording();
+                        this.sync(cx);
+                        if next_tab != this.connections_tab {
+                            this.select_connections_tab(next_tab, window, cx);
+                        }
+                    }
+                }))
+        };
+
+        let actions = div()
             .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(title)
-                            .child(div().text_sm().text_color(p.muted_fg).child(self.tr(
-                                "查看实时连接详情、录制瞬时连接或按维度分析历史流量归因",
-                                "Inspect live connections, record short-lived links, or analyze traffic attribution",
-                            ))),
+            .items_center()
+            .gap_2()
+            .when_some(tab.menu_target(), |d, target| {
+                let (button_id, tip) = if tab == ConnectionsTab::Recorded {
+                    (
+                        "recorded-connection-actions",
+                        self.tr("录制操作", "Recording actions"),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                more_button(
-                                    "connection-actions",
-                                    self.tr("连接操作", "Connection actions"),
-                                    cx,
-                                )
-                                .dropdown_menu(menus::builder(
-                                    cx.entity().downgrade(),
-                                    MenuTarget::Connections,
-                                )),
-                            )
-                            .child(
-                                Button::new("export-recording")
-                                    .label(self.tr("导出录制", "Export recording"))
-                                    .disabled(!recording_started)
-                                    .loading(export_busy)
-                                    .on_click(
-                                        cx.listener(|this, _, _, _| {
-                                            this.service.export_recording()
-                                        }),
-                                    ),
-                            )
-                            .child(
-                                Button::new("record-connections")
-                                    .when(recording_active, |b| b.danger())
-                                    .label(if recording_active {
-                                        self.tr("停止录制", "Stop recording")
-                                    } else {
-                                        self.tr("开始录制", "Start recording")
-                                    })
-                                    .icon(if recording_active {
-                                        IconName::Square
-                                    } else {
-                                        IconName::Play
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.snapshot.recording.active {
-                                            this.service.stop_recording();
-                                        } else {
-                                            this.service.start_recording();
-                                        }
-                                        this.sync(cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(primary_tabs);
+                } else {
+                    (
+                        "connection-actions",
+                        self.tr("连接操作", "Connection actions"),
+                    )
+                };
+                d.child(
+                    more_button(button_id, tip, cx)
+                        .dropdown_menu(menus::builder(cx.entity().downgrade(), target)),
+                )
+            })
+            .when(tab == ConnectionsTab::Recorded, |d| {
+                d.child(
+                    Button::new("export-recording")
+                        .label(self.tr("导出录制", "Export recording"))
+                        .disabled(!recording_started)
+                        .loading(export_busy)
+                        .on_click(cx.listener(|this, _, _, _| this.service.export_recording())),
+                )
+            })
+            .when(tab.shows_record_action(recording_active), |d| {
+                d.child(record_button())
+            });
+
+        let mut header = div().flex().flex_col().gap_3().child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .flex_wrap()
+                .child(section_title(&p, card_title, card_caption))
+                .child(actions),
+        );
         match tab {
             ConnectionsTab::Live => {
                 let toolbar_controls = build_toolbar_controls(true, cx);
@@ -1133,6 +1237,9 @@ impl AppView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.connections_tab = ConnectionsTab::Live;
                                 this.exact_process_filter = Some(filter.clone());
+                                this.connection_list.reset(0);
+                                this.connections_tab_scroll
+                                    .scroll_to_item(ConnectionsTab::Live as usize);
                                 let placeholder = this.connection_search_placeholder();
                                 this.connection_search.update(cx, |input, cx| {
                                     input.set_placeholder(placeholder, window, cx);
@@ -1976,9 +2083,63 @@ fn rule_label(c: &ClashConnection, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::ConnectionsTab;
+    use super::MenuTarget;
 
     #[test]
     fn default_connections_tab_is_live() {
         assert!(ConnectionsTab::default() == ConnectionsTab::Live);
+    }
+
+    #[test]
+    fn connections_tab_keyboard_navigation_wraps_and_supports_endpoints() {
+        assert_eq!(
+            ConnectionsTab::Live.keyboard_target("left"),
+            Some(ConnectionsTab::Statistics)
+        );
+        assert_eq!(
+            ConnectionsTab::Statistics.keyboard_target("right"),
+            Some(ConnectionsTab::Live)
+        );
+        assert_eq!(
+            ConnectionsTab::Processes.keyboard_target("home"),
+            Some(ConnectionsTab::Live)
+        );
+        assert_eq!(
+            ConnectionsTab::Live.keyboard_target("end"),
+            Some(ConnectionsTab::Statistics)
+        );
+        assert_eq!(
+            ConnectionsTab::Recorded.keyboard_target("enter"),
+            Some(ConnectionsTab::Recorded)
+        );
+        assert_eq!(ConnectionsTab::Live.keyboard_target("tab"), None);
+    }
+
+    #[test]
+    fn recording_actions_and_menus_scope_to_the_active_tab() {
+        assert!(matches!(
+            ConnectionsTab::Live.menu_target(),
+            Some(MenuTarget::LiveConnections)
+        ));
+        assert!(matches!(
+            ConnectionsTab::Recorded.menu_target(),
+            Some(MenuTarget::RecordedConnections)
+        ));
+        assert!(ConnectionsTab::Processes.menu_target().is_none());
+        assert!(ConnectionsTab::Statistics.menu_target().is_none());
+
+        assert!(ConnectionsTab::Live.shows_record_action(false));
+        assert!(ConnectionsTab::Recorded.shows_record_action(false));
+        assert!(!ConnectionsTab::Processes.shows_record_action(false));
+        assert!(ConnectionsTab::Processes.shows_record_action(true));
+
+        assert_eq!(
+            ConnectionsTab::Live.post_start_recording_tab(),
+            ConnectionsTab::Recorded
+        );
+        assert_eq!(
+            ConnectionsTab::Recorded.post_start_recording_tab(),
+            ConnectionsTab::Recorded
+        );
     }
 }

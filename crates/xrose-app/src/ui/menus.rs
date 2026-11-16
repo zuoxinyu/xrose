@@ -34,7 +34,8 @@ pub(super) enum MenuTarget {
     Subscription(String),
     Dns(String),
     Host(String),
-    Connections,
+    LiveConnections,
+    RecordedConnections,
     ConnectionRules(DiagnosticTarget),
 }
 
@@ -851,28 +852,29 @@ impl AppView {
                     ));
                 }
             }
-            MenuTarget::Connections => {
+            MenuTarget::LiveConnections => {
                 let available = self.snapshot.process.phase.is_alive()
                     && self
                         .snapshot
                         .process
                         .core
                         .is_some_and(|core| core.capabilities().clash_connections);
-                menu = menu
-                    .item(add(
-                        "全部断开",
-                        "Close all connections",
-                        available
-                            && !self.snapshot.runtime.connections.is_empty()
-                            && !self.service.is_busy("connection-close"),
-                        Command::CloseConnections,
-                    ))
-                    .item(add(
-                        "清空录制",
-                        "Clear recording",
-                        self.snapshot.recording.started_at.is_some(),
-                        Command::ClearRecording,
-                    ));
+                menu = menu.item(add(
+                    "全部断开",
+                    "Close all connections",
+                    available
+                        && !self.snapshot.runtime.connections.is_empty()
+                        && !self.service.is_busy("connection-close"),
+                    Command::CloseConnections,
+                ));
+            }
+            MenuTarget::RecordedConnections => {
+                menu = menu.item(add(
+                    "清空录制",
+                    "Clear recording",
+                    self.snapshot.recording.started_at.is_some(),
+                    Command::ClearRecording,
+                ));
             }
         }
         menu
