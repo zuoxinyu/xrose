@@ -60,10 +60,6 @@ Xrose 正式读作 **k'rose**，口语也可读作 **ex-rose**。
 
 ![设置](docs/screenshots/settings.png)
 
-**10. 关于**
-
-![关于](docs/screenshots/about.png)
-
 </details>
 
 ### 三种工作模式
@@ -100,12 +96,33 @@ Xrose 提供三种独立工作模式，切换时完整保留原有节点、出�
 
 ## 快速开始
 
-推荐使用 **full** 安装包开始使用，包内已自带 `sing-box` 内核、预置规则集与 `xrose-cli`，无需额外下载内核或规则集即可直接运行；已有安装可使用 **lite** 包更新应用。各平台的包格式与安装方式见[发布说明](docs/RELEASE.md)。
+前往本仓库 GitHub **Releases** 页面下载对应平台与架构的安装包（可对照 `SHA256SUMS` 校验完整性）：
+
+- **full 包**：内置 `sing-box` 内核、预置规则集与 `xrose-cli`，推荐初次安装下载，开箱即用。
+- **lite 包**：仅含应用更新文件，适合已有内核与规则集的环境升级。各平台包格式与安装细节见[发布说明](docs/RELEASE.md)。
 
 ### 初次使用
 
-1. **直连或代理启动**：启动后默认处于「本机直连」模式，直接点击顶栏「启动」即可开启流量监控与网络诊断；如需代理分流，在「订阅」或「节点」页导入配置并切换节点即可。
-2. **开启 TUN 或组网**：首次启用 TUN 模式或异地组网时，按界面提示安装「提权助手」即可。
+1. **系统安全拦截放行**（当前未附带商业代码签名，首次打开可能触发拦截）：
+   - **macOS（Gatekeeper）**：若提示无法验证开发者或已损坏，可在「系统设置 → 隐私与安全性」点击 **仍要打开**，或拖入「应用程序」后在终端执行 `xattr -dr com.apple.quarantine /Applications/Xrose.app`。
+   - **Windows（SmartScreen）**：若弹出“Windows 已保护你的电脑”，点击 **详细信息** → **仍要运行**。
+2. **直连或代理启动**：启动后默认处于「本机直连」模式，直接点击顶栏「启动」即可开启流量监控与网络诊断；如需代理分流，在「订阅」或「节点」页导入配置并切换节点即可。
+3. **开启 TUN 或组网**：首次启用 TUN 模式或异地组网时，按界面提示安装「提权助手」即可。
+
+### 提权助手（后台常驻）
+
+- **权限隔离**：主界面始终以普通用户权限运行，仅由独立的「提权助手」代为执行创建 TUN 虚拟网卡、异地组网及系统网络配置等高权限操作。
+- **后台驻留**：安装或更新时经一次管理员授权后，注册为系统后台服务（Windows 计划任务 / macOS LaunchDaemon / Linux systemd 服务）在后台待命，避免每次使用重复弹窗授权，且仅响应当前用户的本地请求。
+- **按需与卸载**：仅使用普通直连或系统代理时无需安装；安装后可随时在「设置 → 提权助手」或「诊断」页启动、更新或彻底卸载。
+
+### 卸载与数据清理
+
+1. **卸载后台项**：删除应用前，先在「设置 → 提权助手」点击 **卸载**（若启用过自启，一并在「设置 → 启动与窗口」关闭「登录时启动应用」），再退出 Xrose。
+2. **移除主程序**：macOS 删除 `/Applications/Xrose.app`；Windows 删除解压目录（便携版配置与内核位于同级 `XroseData` 目录，删包即清除）；Linux 执行 `sudo apt remove xrose`、`sudo pacman -R xrose` 或删除 AppImage。
+3. **清理残留数据**（如使用 `--home` / `XROSE_HOME` 指定目录，直接删除该目录即可）：
+   - **macOS**：`~/Library/Application Support/io.xrose.Xrose`、`~/Library/Caches/io.xrose.Xrose`
+   - **Windows**（非便携模式）：`%APPDATA%\xrose\Xrose`、`%LOCALAPPDATA%\xrose\Xrose`
+   - **Linux**：`~/.config/xrose`、`~/.local/share/xrose`、`~/.cache/xrose`
 
 ### 从源码构建
 
