@@ -712,7 +712,7 @@ impl Render for PopupView {
             .map(|(index, node)| {
                 let delay = node
                     .delay_ms
-                    .map(|ms| format!("HTTP {ms} ms"))
+                    .map(|ms| format!("{ms} ms"))
                     .unwrap_or_else(|| "—".into());
                 let delay_color = crate::ui::theme::latency_color_ms(&p, node.delay_ms);
                 div()

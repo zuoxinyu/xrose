@@ -31,6 +31,13 @@ impl LogStream {
             LogStream::App => "app",
         }
     }
+
+    pub fn source_label(&self) -> &'static str {
+        match self {
+            LogStream::App => "app",
+            LogStream::Core | LogStream::Stdout | LogStream::Stderr => "core",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,5 +547,15 @@ mod tests {
         }
         assert!(dir.path().join("xrose.log").exists());
         assert!(dir.path().join("xrose.1.log").exists());
+    }
+
+    #[test]
+    fn stream_source_label_groups_core_pipes() {
+        assert_eq!(LogStream::Core.source_label(), "core");
+        assert_eq!(LogStream::Stdout.source_label(), "core");
+        assert_eq!(LogStream::Stderr.source_label(), "core");
+        assert_eq!(LogStream::App.source_label(), "app");
+        assert_eq!(LogStream::Stdout.label(), "stdout");
+        assert_eq!(LogStream::Stderr.label(), "stderr");
     }
 }

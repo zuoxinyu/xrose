@@ -293,7 +293,7 @@ pub(super) fn summarize_traffic_mode(
     .to_string();
     TrafficModeSummary {
         icon: IconName::Plug,
-        label: SharedString::from(format!("SOCKS :{port}")),
+        label: SharedString::from(format!("Mixed :{port}")),
         tooltip: finalize(tip),
         tone: TrafficTriggerTone::Neutral,
     }
@@ -753,12 +753,12 @@ mod tests {
         let mut state = base_state();
         let zh = summarize_traffic_mode(&state, Language::Zh);
         assert!(matches!(zh.icon, IconName::Plug));
-        assert_eq!(zh.label, "SOCKS :7890");
+        assert_eq!(zh.label, "Mixed :7890");
         assert_eq!(zh.tone, TrafficTriggerTone::Neutral);
         assert!(zh.tooltip.contains(":7890"));
 
         let en = summarize_traffic_mode(&state, Language::En);
-        assert_eq!(en.label, "SOCKS :7890");
+        assert_eq!(en.label, "Mixed :7890");
         assert!(en.tooltip.contains("Mixed port :7890"));
 
         state.hide_ips = false;

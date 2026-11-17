@@ -714,7 +714,7 @@ fn log_row(row: &LogRow, p: Palette) -> impl IntoElement {
                 .w(px(48.))
                 .flex_shrink_0()
                 .text_color(p.muted_fg)
-                .child(SelectableText::new("stream", entry.stream.label())),
+                .child(SelectableText::new("stream", entry.stream.source_label())),
         )
         .child(
             div()

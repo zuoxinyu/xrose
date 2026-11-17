@@ -11,9 +11,9 @@ use super::AppView;
 use super::menus::{self, MenuTarget};
 use super::theme::palette;
 use super::widgets::*;
-use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon};
 
 fn visible_dns_servers(servers: &[DnsServer]) -> Vec<&DnsServer> {
     servers.iter().filter(|s| !s.is_fakeip()).collect()
@@ -105,38 +105,58 @@ impl AppView {
                     ChoiceGroup::new("dns-presets", labels, current_preset.and_then(|p| DnsPreset::all().iter().position(|v| *v == p)).unwrap_or(4)).cards()
                         .on_change(cx.listener(|this, index, _, cx| { if let Some(preset) = DnsPreset::all().get(*index) { this.service.set_dns_preset(*preset); this.sync(cx); } }))
                 })
-                .child(
+                .child({
+                    let tip = self.tr("仅 sing-box 下支持", "Supported on sing-box only");
                     div()
                         .flex()
                         .items_center()
                         .gap_6()
                         .child(
-                            toggle("fake-ip", self.tr("fake-ip", "fake-ip"), dns_config.fake_ip)
-                                .on_change(cx.listener(|this, checked, _, cx| {
-                                    this.service.set_fake_ip(*checked);
-                                    this.sync(cx);
-                                })),
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .child(
+                                    toggle("fake-ip", self.tr("fake-ip", "fake-ip"), dns_config.fake_ip)
+                                        .on_change(cx.listener(|this, checked, _, cx| {
+                                            this.service.set_fake_ip(*checked);
+                                            this.sync(cx);
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id("fake-ip-support-tip")
+                                        .aria_label(tip.clone())
+                                        .flex()
+                                        .items_center()
+                                        .text_color(p.muted_fg)
+                                        .hover(|s| s.text_color(p.fg))
+                                        .child(Icon::new(IconName::Info).size(px(14.)))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(tip.clone()).build(window, cx)
+                                        }),
+                                ),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .child(div().text_xs().text_color(p.muted_fg).child(self.tr("fake-ip 网段", "fake-ip range")))
-                                .child(div().text_sm().font_family(cx.theme().mono_font_family.clone()).text_color(p.fg).child(dns_config.fake_ip_range.clone()))
-                                .child(pill(self.tr("只读", "Read only"), p.muted_fg, p.panel_alt)),
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(self.tr("fake-ip 网段", "fake-ip range")),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_family(cx.theme().mono_font_family.clone())
+                                        .text_color(p.fg)
+                                        .child(dns_config.fake_ip_range.clone()),
+                                ),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(p.muted_fg)
-                                .child(if self.snapshot.settings.core.capabilities().fake_ip {
-                                    self.tr("sing-box 原生支持", "native on sing-box")
-                                } else {
-                                    self.tr("Xray 不支持 fake-ip，编译时会跳过", "Xray cannot compile fake-ip")
-                                }),
-                        ),
-                ),
+                }),
         );
 
         // Servers.
