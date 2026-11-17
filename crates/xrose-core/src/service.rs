@@ -626,15 +626,20 @@ impl AppService {
         let mut model = self.inner.model.read().clone();
         let mut mesh = self.inner.mesh.snapshot();
         self.annotate_peers(&mut mesh);
+        let suffixes = mesh.magic_dns_suffixes();
         // Use the connected peer's name throughout the UI while leaving stored gateway IDs and names stable.
         for (profile, peer, _) in mesh.exits().filter(|(_, peer, _)| peer.exit_selected) {
             if let Some(node) = model.node_mut(&format!("mesh-exit-{}", profile.id))
                 && !peer.name.is_empty()
-                && !(settings.privacy_mode && peer.name.parse::<std::net::IpAddr>().is_ok())
             {
+                let peer_name = if settings.privacy_mode {
+                    crate::privacy::mask_magic_dns_name(&peer.name, &suffixes)
+                } else {
+                    peer.name.clone()
+                };
                 node.name = format!(
                     "{} · {} · {}",
-                    peer.name,
+                    peer_name,
                     profile.provider.label(),
                     profile.name
                 );

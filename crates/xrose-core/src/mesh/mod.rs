@@ -700,6 +700,14 @@ pub struct MeshSnapshot {
 }
 
 impl MeshSnapshot {
+    pub fn magic_dns_suffixes(&self) -> Vec<&str> {
+        self.networks
+            .iter()
+            .filter_map(|n| n.dns_suffix.as_deref())
+            .filter(|s| !s.is_empty())
+            .collect()
+    }
+
     pub fn exits(&self) -> impl Iterator<Item = (&MeshProfileView, &MeshPeer, std::net::IpAddr)> {
         self.networks
             .iter()

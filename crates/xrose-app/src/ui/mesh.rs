@@ -288,6 +288,7 @@ fn empty_grid_field(label: SharedString, p: &Palette) -> Div {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MeshTextKind {
     Plain,
+    MagicDns,
     Address,
     Routes,
 }
@@ -304,8 +305,29 @@ impl AppView {
     ) -> impl IntoElement {
         let overflow = self.mesh_overflow.get(&id).copied().unwrap_or(false);
         let expanded = overflow && self.mesh_expanded.contains(&id);
-        let value = values.join(", ");
-        let summary = value.clone();
+        let copy_value = values.join(", ");
+        let display_values: Vec<String> = if self.hide_ips {
+            match kind {
+                MeshTextKind::Address | MeshTextKind::Routes => values
+                    .iter()
+                    .map(|v| xrose_core::privacy::mask_ip_or_cidr(v))
+                    .collect(),
+                MeshTextKind::MagicDns => values
+                    .iter()
+                    .map(|v| xrose_core::privacy::mask_magic_dns_suffix(v))
+                    .collect(),
+                MeshTextKind::Plain => {
+                    let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+                    values
+                        .iter()
+                        .map(|v| xrose_core::privacy::mask_magic_dns_name(v, &suffixes))
+                        .collect()
+                }
+            }
+        } else {
+            values
+        };
+        let summary = display_values.join(", ");
         let group = SharedString::from(format!("{id}-hover"));
         let measure_id = id.clone();
         let measure_text = SharedString::from(summary.replace(['\r', '\n'], " "));
@@ -367,28 +389,30 @@ impl AppView {
         });
         // Keep the trailing disclosure aligned for addresses and routes so leading values stay flush.
         let has_label = !label.is_empty();
-        let trailing_disclosure = kind != MeshTextKind::Plain;
+        let trailing_disclosure = matches!(kind, MeshTextKind::Address | MeshTextKind::Routes);
         let fill_width = expanded || (trailing_disclosure && overflow);
-        let content =
-            div()
-                .id(SharedString::from(format!("{id}-content")))
-                .group(group.clone())
-                .flex()
-                .items_start()
-                .gap_1()
-                .max_w_full()
-                .min_w(px(0.))
-                .when(fill_width, |d| d.w_full())
-                .children(disclosure.take_if(|_| !trailing_disclosure))
-                .child(
-                    div()
-                        .min_w(px(0.))
-                        .py_1()
-                        .when(fill_width, |d| d.flex_1())
-                        .when(!expanded, |d| d.truncate().child(summary))
-                        .when(expanded, |d| {
-                            d.flex().flex_col().gap_1().children(
-                                values.into_iter().enumerate().map(|(index, value)| {
+        let content = div()
+            .id(SharedString::from(format!("{id}-content")))
+            .group(group.clone())
+            .flex()
+            .items_start()
+            .gap_1()
+            .max_w_full()
+            .min_w(px(0.))
+            .when(fill_width, |d| d.w_full())
+            .children(disclosure.take_if(|_| !trailing_disclosure))
+            .child(
+                div()
+                    .min_w(px(0.))
+                    .py_1()
+                    .when(fill_width, |d| d.flex_1())
+                    .when(!expanded, |d| d.truncate().child(summary))
+                    .when(expanded, |d| {
+                        d.flex().flex_col().gap_1().children(
+                            display_values
+                                .into_iter()
+                                .enumerate()
+                                .map(|(index, value)| {
                                     div().min_w(px(0.)).whitespace_normal().child(
                                         SelectableText::new(
                                             SharedString::from(format!("{id}-value-{index}")),
@@ -396,29 +420,29 @@ impl AppView {
                                         ),
                                     )
                                 }),
-                            )
-                        }),
-                )
-                .children(disclosure)
-                .child(
-                    Button::new(SharedString::from(format!("{id}-copy")))
-                        .compact()
-                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                        .custom(icon_button_style(p, false, cx))
-                        .w(px(26.))
-                        .h(px(26.))
-                        .icon(IconName::Copy)
-                        .text_color(p.muted_fg)
-                        .flex_shrink_0()
-                        .opacity(0.)
-                        .group_hover(group, |s| s.opacity(1.))
-                        .tooltip(self.tr("复制", "Copy"))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                            this.service
-                                .toast(ToastLevel::Success, this.tr("已复制", "Copied"));
-                        })),
-                );
+                        )
+                    }),
+            )
+            .children(disclosure)
+            .child(
+                Button::new(SharedString::from(format!("{id}-copy")))
+                    .compact()
+                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                    .custom(icon_button_style(p, false, cx))
+                    .w(px(26.))
+                    .h(px(26.))
+                    .icon(IconName::Copy)
+                    .text_color(p.muted_fg)
+                    .flex_shrink_0()
+                    .opacity(0.)
+                    .group_hover(group, |s| s.opacity(1.))
+                    .tooltip(self.tr("复制", "Copy"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_value.clone()));
+                        this.service
+                            .toast(ToastLevel::Success, this.tr("已复制", "Copied"));
+                    })),
+            );
         let text = div()
             .relative()
             .flex()
@@ -428,9 +452,10 @@ impl AppView {
             .when(has_label, |d| {
                 d.text_sm().font_weight(FontWeight::MEDIUM).text_color(p.fg)
             })
-            .when(kind != MeshTextKind::Plain, |d| {
-                d.font_family(cx.theme().mono_font_family.clone())
-            })
+            .when(
+                matches!(kind, MeshTextKind::Address | MeshTextKind::Routes),
+                |d| d.font_family(cx.theme().mono_font_family.clone()),
+            )
             .child(measure)
             .child(content);
         div()
@@ -920,7 +945,7 @@ impl AppView {
                     format!("mesh-{}-dns", profile.id),
                     "MagicDNS",
                     vec![format!("*.{suffix}")],
-                    MeshTextKind::Plain,
+                    MeshTextKind::MagicDns,
                     p,
                     cx,
                 )));
@@ -956,6 +981,7 @@ impl AppView {
                     )
                 });
         }
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
         let mut members = div().flex().flex_col().gap_2().w_full().min_w(px(0.));
         for peer in peers {
             let has_address = !peer.addresses.is_empty();
@@ -1032,17 +1058,27 @@ impl AppView {
                                     .when(expanded, |d| d.whitespace_normal())
                                     .child(SelectableText::new(
                                         SharedString::from(format!("{peer_id}-name")),
-                                        peer.name.clone(),
+                                        if self.hide_ips {
+                                            xrose_core::privacy::mask_magic_dns_name(
+                                                &peer.name, &suffixes,
+                                            )
+                                        } else {
+                                            peer.name.clone()
+                                        },
                                     )),
                             )
                             .child(badges)
-                            .when(!subnets.is_empty() && !self.hide_ips, |d| {
-                                d.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(subnets.join(", ")),
-                                )
+                            .when(!subnets.is_empty(), |d| {
+                                let subnet_text = if self.hide_ips {
+                                    subnets
+                                        .iter()
+                                        .map(|s| xrose_core::privacy::mask_ip_or_cidr(s))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                } else {
+                                    subnets.join(", ")
+                                };
+                                d.child(div().text_xs().text_color(p.muted_fg).child(subnet_text))
                             })
                             .when(has_address, |d| {
                                 d.child(div().text_xs().text_color(p.muted_fg).child(

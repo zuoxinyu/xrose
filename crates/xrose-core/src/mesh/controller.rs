@@ -95,7 +95,13 @@ impl MeshController {
             rules.mesh_profile(profile);
         }
         for network in self.networks.read().iter() {
+            if let Some(suffix) = &network.dns_suffix {
+                rules.host(suffix, true);
+            }
             for peer in &network.peers {
+                if !peer.name.is_empty() {
+                    rules.host(&peer.name, true);
+                }
                 for address in &peer.addresses {
                     rules.peer_address(address);
                 }

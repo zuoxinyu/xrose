@@ -164,6 +164,8 @@ pub(super) fn tooltip(status: &TrayStatus) -> String {
 pub fn build(service: &AppService) -> Dashboard {
     let snapshot = service.snapshot();
     let language = snapshot.settings.language;
+    let hide_ips = snapshot.settings.privacy_mode;
+    let suffixes = snapshot.mesh.magic_dns_suffixes();
     let running = snapshot.process.phase.is_alive();
     let model = &snapshot.model;
     let group = model
@@ -234,6 +236,13 @@ pub fn build(service: &AppService) -> Dashboard {
                     id: node.id.clone(),
                     label: if node.is_mesh_gateway() {
                         format!("{} · {}", tr(language, "组网", "Mesh"), node.name)
+                    } else if hide_ips {
+                        xrose_core::privacy::mask_server_in_label(
+                            &node.name,
+                            &node.server,
+                            "•••",
+                            &suffixes,
+                        )
                     } else {
                         node.name.clone()
                     },
@@ -266,9 +275,11 @@ pub fn build(service: &AppService) -> Dashboard {
             .is_some_and(|target| target.profile_id == profile.id && target.peer_id == peer.id);
         target_listed |= current;
         let name = if peer.name.is_empty() {
-            &profile.name
+            profile.name.clone()
+        } else if hide_ips {
+            xrose_core::privacy::mask_magic_dns_name(&peer.name, &suffixes)
         } else {
-            &peer.name
+            peer.name.clone()
         };
         nodes.push(DashboardNode {
             id: format!("mesh:{}:{}", profile.id, peer.id),
@@ -295,9 +306,19 @@ pub fn build(service: &AppService) -> Dashboard {
         });
     }
     if !target_listed && let Some(target) = &model.mesh_mode.target {
+        let name = if hide_ips {
+            xrose_core::privacy::mask_server_in_label(
+                &target.name,
+                &target.address,
+                "•••",
+                &suffixes,
+            )
+        } else {
+            target.name.clone()
+        };
         nodes.push(DashboardNode {
             id: format!("mesh:{}:{}", target.profile_id, target.peer_id),
-            label: format!("{} · {}", tr(language, "组网", "Mesh"), target.name),
+            label: format!("{} · {name}", tr(language, "组网", "Mesh")),
             delay_ms: None,
             active: model.work_mode == WorkMode::Mesh,
             action: Some(TrayAction::SelectMode(WorkMode::Mesh)),
@@ -329,7 +350,11 @@ pub fn build(service: &AppService) -> Dashboard {
         running,
         easytier,
         tailscale,
-        proxy_address: format!("127.0.0.1:{}", snapshot.settings.mixed_port),
+        proxy_address: if hide_ips {
+            format!("127.*.*.*:{}", snapshot.settings.mixed_port)
+        } else {
+            format!("127.0.0.1:{}", snapshot.settings.mixed_port)
+        },
         down_speed: snapshot.runtime.down_speed,
         up_speed: snapshot.runtime.up_speed,
         system_proxy: snapshot.system_proxy_active,
@@ -402,9 +427,14 @@ fn mesh_status(
         raw_phase
     };
     let ip = net.and_then(|n| {
-        n.addresses
-            .first()
-            .map(|addr| addr.split('/').next().unwrap_or(addr).to_string())
+        n.addresses.first().map(|addr| {
+            let raw = addr.split('/').next().unwrap_or(addr);
+            if snapshot.settings.privacy_mode {
+                xrose_core::privacy::mask_ip_or_cidr(raw)
+            } else {
+                raw.to_string()
+            }
+        })
     });
     DashboardMeshStatus {
         provider,

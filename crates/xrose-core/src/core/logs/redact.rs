@@ -112,7 +112,7 @@ impl RedactionRules {
         }
     }
 
-    fn host(&mut self, host: &str, peer: bool) {
+    pub(crate) fn host(&mut self, host: &str, peer: bool) {
         let host = host.trim_matches(['[', ']']);
         let label = if peer { "<mesh-peer>" } else { "<node-server>" };
         if let Ok(ip) = host.parse::<IpAddr>() {

@@ -1091,6 +1091,7 @@ impl AppView {
         let node = self.snapshot.selected_node(None);
         let direct = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Direct;
         let mesh = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Mesh;
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
         let node_name = if mesh {
             self.snapshot
                 .model
@@ -1099,7 +1100,12 @@ impl AppView {
                 .as_ref()
                 .map(|target| {
                     let name = if self.hide_ips {
-                        target.name.replace(&target.address, "•••")
+                        xrose_core::privacy::mask_server_in_label(
+                            &target.name,
+                            &target.address,
+                            "•••",
+                            &suffixes,
+                        )
                     } else {
                         target.name.clone()
                     };
@@ -1107,21 +1113,15 @@ impl AppView {
                 })
                 .unwrap_or_else(|| self.tr("选择组网出口", "Select mesh exit").to_string())
         } else {
-            node.map(|n| {
-                if self.hide_ips && !n.server.is_empty() {
-                    n.name.replace(&n.server, "•••")
-                } else {
-                    n.name.clone()
-                }
-            })
-            .unwrap_or_else(|| {
-                if direct {
-                    self.tr("本机直连", "Direct")
-                } else {
-                    self.tr("选择节点", "Select node")
-                }
-                .to_string()
-            })
+            node.map(|n| nodes::display_node_name(n, self.hide_ips, &suffixes))
+                .unwrap_or_else(|| {
+                    if direct {
+                        self.tr("本机直连", "Direct")
+                    } else {
+                        self.tr("选择节点", "Select node")
+                    }
+                    .to_string()
+                })
         };
         let state_label = match self.snapshot.process.phase {
             xrose_core::core::ProcessPhase::Stopped => self.tr("已停止", "Stopped"),

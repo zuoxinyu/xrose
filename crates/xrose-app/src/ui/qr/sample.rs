@@ -142,15 +142,22 @@ pub(super) fn scan_summary(preview: SharePreview, privacy: bool, lang: Language)
             count,
         } => {
             let endpoint = if privacy {
-                let masked = super::super::nodes::format_endpoint(&endpoint, true);
-                // Unnamed links often use the server address as part of their default name.
-                if let Some((host, _)) = endpoint.rsplit_once(':') {
-                    let host = host.trim_matches(['[', ']']);
-                    if !host.is_empty() {
-                        name = name.replace(host, "••••••");
-                    }
+                let raw_host = if let Some(rest) = endpoint.strip_prefix('[')
+                    && let Some((host, _)) = rest.rsplit_once("]:")
+                {
+                    host
+                } else if let Some((host, _)) = endpoint.rsplit_once(':')
+                    && !host.contains(':')
+                {
+                    host
+                } else {
+                    endpoint.trim_matches(['[', ']'])
+                };
+                if !raw_host.is_empty() {
+                    name =
+                        xrose_core::privacy::mask_server_in_label(&name, raw_host, "••••••", &[]);
                 }
-                masked
+                super::super::nodes::format_endpoint(&endpoint, true)
             } else {
                 endpoint
             };
@@ -169,7 +176,14 @@ pub(super) fn scan_summary(preview: SharePreview, privacy: bool, lang: Language)
             format!(
                 "{} · {}",
                 tr(lang, "节点订阅", "Subscription"),
-                if privacy { "••••••" } else { &host }
+                if privacy {
+                    host.trim_matches(['[', ']'])
+                        .parse::<std::net::IpAddr>()
+                        .map(xrose_core::privacy::mask_ip)
+                        .unwrap_or_else(|_| "••••••".to_string())
+                } else {
+                    host
+                }
             )
             .into(),
         ),
@@ -273,5 +287,31 @@ mod tests {
         let label = scan_summary(preview("SOCKS node.example"), true, Language::En);
         assert_eq!(label.name.as_deref(), Some("SOCKS ••••••"));
         assert_eq!(label.detail.as_ref(), "SOCKS · ••••••:1080");
+
+        let ip_label = scan_summary(
+            SharePreview::Node {
+                name: "SOCKS 192.0.2.5".into(),
+                protocol: "SOCKS",
+                endpoint: "192.0.2.5:1080".into(),
+                count: 1,
+            },
+            true,
+            Language::En,
+        );
+        assert_eq!(ip_label.name.as_deref(), Some("SOCKS 192.*.*.*"));
+        assert_eq!(ip_label.detail.as_ref(), "SOCKS · 192.*.*.*:1080");
+
+        let v6_label = scan_summary(
+            SharePreview::Node {
+                name: "VLESS 2001:db8::1".into(),
+                protocol: "VLESS",
+                endpoint: "[2001:db8::1]:443".into(),
+                count: 1,
+            },
+            true,
+            Language::En,
+        );
+        assert_eq!(v6_label.name.as_deref(), Some("VLESS 2001:*:*:*"));
+        assert_eq!(v6_label.detail.as_ref(), "VLESS · [2001:*:*:*]:443");
     }
 }

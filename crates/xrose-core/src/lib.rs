@@ -15,6 +15,7 @@ pub mod flow;
 pub mod mesh;
 pub mod model;
 pub mod paths;
+pub mod privacy;
 pub mod route;
 pub mod runtime;
 pub mod service;

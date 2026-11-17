@@ -55,10 +55,17 @@ impl AppView {
             return body;
         };
 
+        let privacy = self.snapshot.settings.privacy_mode;
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let host = if privacy {
+            xrose_core::privacy::mask_magic_dns_name(&result.host, &suffixes)
+        } else {
+            result.host.clone()
+        };
         let addresses = format!(
             "{} · {}",
             self.tr("地址与归属地", "Addresses and locations"),
-            result.host
+            host
         );
         let columns = div()
             .flex()
@@ -93,12 +100,19 @@ impl AppView {
     }
 
     fn dns_result_row(&self, row: &ProbeRow, p: &Palette) -> Div {
+        let privacy = self.snapshot.settings.privacy_mode;
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let resolver = if privacy {
+            xrose_core::privacy::mask_magic_dns_name(&row.resolver, &suffixes)
+        } else {
+            row.resolver.clone()
+        };
         let mut answers = div().flex_1().min_w(px(0.)).flex().flex_col().gap_1();
         for (ip, location) in row.addresses.iter().zip(&row.locations) {
             // Results can outlive a privacy toggle. Do not expose a location
             // gathered before privacy mode was enabled.
-            let value = if self.snapshot.settings.privacy_mode {
-                ip.to_string()
+            let value = if privacy {
+                xrose_core::privacy::mask_ip(*ip)
             } else {
                 format!("{ip} · {location}")
             };
@@ -116,12 +130,7 @@ impl AppView {
             .border_t_1()
             .border_color(p.border)
             .pt_2()
-            .child(
-                div()
-                    .w(px(RESOLVER_WIDTH))
-                    .text_sm()
-                    .child(row.resolver.clone()),
-            )
+            .child(div().w(px(RESOLVER_WIDTH)).text_sm().child(resolver))
             .child(answers)
             .child(
                 div()

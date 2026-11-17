@@ -303,6 +303,7 @@ impl AppView {
                     ),
             );
         let members: BTreeSet<_> = draft.members.iter().cloned().collect();
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
         let nodes: Vec<_> = self
             .snapshot
             .model
@@ -310,11 +311,7 @@ impl AppView {
             .iter()
             .filter(|node| query.is_empty() || node.name.to_lowercase().contains(&query))
             .map(|node| {
-                let name = if self.hide_ips && !node.server.is_empty() {
-                    node.name.replace(&node.server, "•••")
-                } else {
-                    node.name.clone()
-                };
+                let name = display_node_name(node, self.hide_ips, &suffixes);
                 let status = if !node.enabled {
                     self.tr("已禁用", "Disabled")
                 } else if !node.usable_with(self.snapshot.settings.core) {
@@ -454,11 +451,8 @@ impl AppView {
         let Some(node) = self.snapshot.model.node(&node_id) else {
             return;
         };
-        let name = if self.hide_ips && !node.server.is_empty() {
-            node.name.replace(&node.server, "•••")
-        } else {
-            node.name.clone()
-        };
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let name = display_node_name(node, self.hide_ips, &suffixes);
         let original: BTreeSet<_> = self
             .snapshot
             .model

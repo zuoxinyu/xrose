@@ -90,6 +90,7 @@ impl AppView {
                     command: Some(Command::SelectWorkMode(WorkMode::Proxy)),
                 });
             }
+            let suffixes = snapshot.mesh.magic_dns_suffixes();
             let selected = snapshot.selected_node(Some(&group.id));
             let testing = snapshot.busy.iter().any(|key| key == "latency");
             for node in group
@@ -98,11 +99,7 @@ impl AppView {
                 .filter_map(|id| snapshot.model.node(id))
                 .filter(|node| !node.is_mesh_gateway())
             {
-                let name = if self.hide_ips && !node.server.is_empty() {
-                    node.name.replace(&node.server, "•••")
-                } else {
-                    node.name.clone()
-                };
+                let name = super::nodes::display_node_name(node, self.hide_ips, &suffixes);
                 let delay = theme::latency_label(
                     snapshot
                         .latency
@@ -121,16 +118,17 @@ impl AppView {
                 });
             }
         }
+        let suffixes = snapshot.mesh.magic_dns_suffixes();
         let target = snapshot.model.mesh_mode.target.as_ref();
         let mut target_listed = false;
         for (profile, peer, _) in snapshot.mesh.exits() {
             let current = target
                 .is_some_and(|target| target.profile_id == profile.id && target.peer_id == peer.id);
             target_listed |= current;
-            let name = if self.hide_ips && peer.name.parse::<std::net::IpAddr>().is_ok() {
-                self.tr("出口设备", "Exit device").to_string()
-            } else if peer.name.is_empty() {
+            let name = if peer.name.is_empty() {
                 profile.name.clone()
+            } else if self.hide_ips {
+                xrose_core::privacy::mask_magic_dns_name(&peer.name, &suffixes)
             } else {
                 peer.name.clone()
             };
@@ -143,7 +141,12 @@ impl AppView {
         }
         if !target_listed && let Some(target) = target {
             let name = if self.hide_ips {
-                target.name.replace(&target.address, "•••")
+                xrose_core::privacy::mask_server_in_label(
+                    &target.name,
+                    &target.address,
+                    "•••",
+                    &suffixes,
+                )
             } else {
                 target.name.clone()
             };

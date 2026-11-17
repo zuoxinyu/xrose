@@ -25,6 +25,15 @@ impl Choice {
             || (!hide_ips && self.address.to_string().contains(query))
     }
 
+    pub(super) fn detail(&self, hide_ips: bool) -> String {
+        let address = if hide_ips {
+            xrose_core::privacy::mask_ip(self.address)
+        } else {
+            self.address.to_string()
+        };
+        format!("{} · {}", self.network, address)
+    }
+
     pub(super) fn row(
         &self,
         disabled: bool,
@@ -46,10 +55,7 @@ impl Choice {
             0,
         );
         node.id = target.key();
-        let mut detail = self.network.clone();
-        if !hide_ips {
-            detail.push_str(&format!(" · {}", self.address));
-        }
+        let detail = self.detail(hide_ips);
         render_virtual_node_row(
             &node,
             VirtualExit::Mesh {
@@ -76,11 +82,14 @@ pub(super) fn choices(
     hide_ips: bool,
     lang: Language,
 ) -> Vec<Choice> {
+    let suffixes = mesh.magic_dns_suffixes();
     let mut choices = Vec::new();
     for (profile, peer, address) in mesh.exits() {
         let gateway = format!("mesh-exit-{}", profile.id);
-        let name = if peer.name.is_empty() || (hide_ips && peer.name.parse::<IpAddr>().is_ok()) {
+        let name = if peer.name.is_empty() {
             tr(lang, "出口设备", "Exit device").to_string()
+        } else if hide_ips {
+            xrose_core::privacy::mask_magic_dns_name(&peer.name, &suffixes)
         } else {
             peer.name.clone()
         };
@@ -114,7 +123,12 @@ pub(super) fn choices(
             target.address.parse(),
         ) {
             let name = if hide_ips {
-                target.name.replace(&target.address, "•••")
+                xrose_core::privacy::mask_server_in_label(
+                    &target.name,
+                    &target.address,
+                    "•••",
+                    &suffixes,
+                )
             } else {
                 target.name.clone()
             };
@@ -189,8 +203,45 @@ mod tests {
         assert_eq!(options.len(), 2);
         let offline = options.iter().find(|choice| choice.peer == "b").unwrap();
         assert!(!offline.online);
+        assert_eq!(offline.name, "192.*.*.*");
+        assert_eq!(offline.detail(true), "异地组网 · 192.*.*.*");
         assert!(!offline.matches("192.0.2.6", true));
         assert!(offline.matches("easytier", true));
+    }
+
+    #[test]
+    fn privacy_mode_masks_magic_dns_and_ip_in_exit_choices() {
+        let profile = MeshProfile {
+            name: "Office net".into(),
+            provider: xrose_core::mesh::MeshProvider::Tailscale,
+            ..Default::default()
+        }
+        .summary();
+        let peer = MeshPeer {
+            id: "ts-a".into(),
+            name: "desktop.alpha-bravo.ts.net".into(),
+            offers_exit: true,
+            online: true,
+            addresses: vec!["100.64.0.9".into()],
+            ..Default::default()
+        };
+        let mesh = MeshSnapshot {
+            profiles: vec![profile.clone()],
+            networks: vec![MeshRuntimeView {
+                profile_id: profile.id.clone(),
+                provider: profile.provider,
+                phase: MeshPhase::Connected,
+                dns_suffix: Some("alpha-bravo.ts.net".into()),
+                peers: vec![peer],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let model = AppModel::default();
+        let hidden = choices(&mesh, &model, true, Language::En);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].name, "desktop.***.ts.net");
+        assert_eq!(hidden[0].detail(true), "Office net · 100.*.*.*");
     }
 
     #[test]

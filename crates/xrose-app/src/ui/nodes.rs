@@ -296,6 +296,7 @@ impl AppView {
         let render_rows = std::rc::Rc::new(
             move |indices: &[usize], window: &mut Window, cx: &mut App| {
                 view.update(cx, |this, cx| {
+                    let suffixes = this.snapshot.mesh.magic_dns_suffixes();
                     indices
                         .iter()
                         .map(|&index| {
@@ -322,6 +323,7 @@ impl AppView {
                                         &format!("download:{}", node.id),
                                     ),
                                     hide_ips,
+                                    magic_dns_suffixes: &suffixes,
                                     auto_mode,
                                     offline_exit: offline_exits.contains(&node.id),
                                     mesh_provider: node
@@ -994,29 +996,14 @@ fn this_busy(busy: &[String], key: &str) -> bool {
 
 /// Helper function to format and optionally mask host addresses for privacy.
 pub(super) fn format_endpoint(endpoint: &str, hide: bool) -> String {
-    if hide {
-        if let Some((host, port)) = endpoint.rsplit_once(':') {
-            if host.starts_with('[') && host.ends_with(']') {
-                format!("[••••:••••]:{port}")
-            } else if host.contains('.') {
-                let parts: Vec<&str> = host.split('.').collect();
-                if parts.len() == 4 {
-                    format!("{}.*.*.*:{}", parts[0], port)
-                } else {
-                    format!("••••••:{port}")
-                }
-            } else {
-                format!("••••••:{port}")
-            }
-        } else {
-            "••••••••".to_string()
-        }
-    } else if endpoint.len() > 32 {
-        let start = &endpoint[..14];
-        let end = &endpoint[endpoint.len() - 12..];
-        format!("{start}…{end}")
+    xrose_core::privacy::mask_proxy_endpoint(endpoint, hide)
+}
+
+pub(in crate::ui) fn display_node_name(node: &Node, hide_ips: bool, suffixes: &[&str]) -> String {
+    if hide_ips {
+        xrose_core::privacy::mask_server_in_label(&node.name, &node.server, "•••", suffixes)
     } else {
-        endpoint.to_string()
+        node.name.clone()
     }
 }
 
@@ -1032,6 +1019,7 @@ struct RowProps<'a> {
     download: Option<&'a xrose_core::runtime::probe::DownloadResult>,
     downloading: bool,
     hide_ips: bool,
+    magic_dns_suffixes: &'a [&'a str],
     auto_mode: bool,
     offline_exit: bool,
     mesh_provider: Option<xrose_core::mesh::MeshProvider>,
@@ -1115,6 +1103,7 @@ fn render_virtual_node_row(
 ) -> impl IntoElement + use<> {
     let key = exit.target().key();
     let offline = matches!(&exit, VirtualExit::Mesh { online: false, .. });
+    let magic_dns_suffixes = view.snapshot.mesh.magic_dns_suffixes();
     render_node_row(
         RowProps {
             node,
@@ -1131,6 +1120,7 @@ fn render_virtual_node_row(
             download: None,
             downloading: false,
             hide_ips: view.hide_ips,
+            magic_dns_suffixes: &magic_dns_suffixes,
             auto_mode: false,
             offline_exit: offline,
             mesh_provider: None,
@@ -1329,6 +1319,7 @@ fn render_node_row(
         download,
         downloading,
         hide_ips,
+        magic_dns_suffixes,
         auto_mode,
         offline_exit,
         mesh_provider,
@@ -1352,11 +1343,13 @@ fn render_node_row(
     } else {
         MenuTarget::Node(node.id.clone())
     };
+    let name = display_node_name(node, hide_ips, magic_dns_suffixes);
     let virtual_select = virtual_exit.clone();
     let radio_target = virtual_exit.clone();
     let radio_group = group_id.clone();
     let radio_node = node.id.clone();
-    let radio_name = node.name.clone();
+    let radio_name = name.clone();
+    let drag_name = name.clone();
     let can_select =
         (virtual_exit.is_some() || group_id.is_some() || (mesh_gateway && node.enabled))
             && node.enabled
@@ -1370,7 +1363,6 @@ fn render_node_row(
                     })
                 ));
     let auto_mode = auto_mode && !mesh_gateway && virtual_exit.is_none();
-    let name = node.name.clone();
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
     let is_node_busy = is_core_busy && selected;
     let drop_target = node.id.clone();
@@ -1472,7 +1464,7 @@ fn render_node_row(
                         .on_drag(
                             DraggedNode {
                                 id: node.id.clone(),
-                                name: node.name.clone(),
+                                name: drag_name,
                             },
                             |dragged, _, _, cx| cx.new(|_| dragged.clone()),
                         )

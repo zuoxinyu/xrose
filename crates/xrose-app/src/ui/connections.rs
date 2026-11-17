@@ -991,22 +991,18 @@ impl AppView {
         let row_hover_bg = p.panel_alt.opacity(0.45);
         let inspect_tip = self.tr("连接透视", "Inspect connection");
         let test_tip = self.tr("测试目标", "Test target");
-        let host_label = if connection.metadata.host.is_empty()
-            && connection.metadata.sniff_host.is_empty()
-            && self.hide_ips
-        {
-            self.tr("已隐藏 IP", "IP hidden").to_string()
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let raw_host = connection.host();
+        let host_label = if self.hide_ips {
+            xrose_core::privacy::mask_magic_dns_name(&raw_host, &suffixes)
         } else {
-            connection.host()
+            raw_host
         };
-        let endpoint = if self.hide_ips || connection.metadata.destination_ip.is_empty() {
-            format!(":{}", connection.metadata.destination_port)
-        } else {
-            format!(
-                "{}:{}",
-                connection.metadata.destination_ip, connection.metadata.destination_port
-            )
-        };
+        let endpoint = xrose_core::privacy::format_ip_port(
+            &connection.metadata.destination_ip,
+            &connection.metadata.destination_port,
+            self.hide_ips,
+        );
 
         div()
             .id(SharedString::from(format!("conn-{id}")))
@@ -1355,19 +1351,37 @@ impl AppView {
         let p = palette(cx);
         let m = &c.metadata;
         let process = c.process_name();
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let source_endpoint =
+            xrose_core::privacy::format_ip_port(&m.source_ip, &m.source_port, self.hide_ips);
+        let process_path = if self.hide_ips && !m.process_path.is_empty() {
+            "•••".to_string()
+        } else {
+            m.process_path.clone()
+        };
+        let raw_host = c.host();
+        let inspect_host = if self.hide_ips {
+            xrose_core::privacy::mask_magic_dns_name(&raw_host, &suffixes)
+        } else {
+            raw_host
+        };
+        let dest_endpoint = xrose_core::privacy::format_ip_port(
+            &m.destination_ip,
+            &m.destination_port,
+            self.hide_ips,
+        );
         let fields = [
             (
                 self.tr("01 · 发起方", "01 · Source"),
                 format!(
-                    "{}\n{}:{}\n{}",
+                    "{}\n{}\n{}",
                     if process.is_empty() {
                         self.tr("进程未提供", "Process unavailable").to_string()
                     } else {
                         process
                     },
-                    m.source_ip,
-                    m.source_port,
-                    m.process_path
+                    source_endpoint,
+                    process_path
                 ),
             ),
             (
@@ -1393,10 +1407,9 @@ impl AppView {
             (
                 self.tr("06 · 目标 / 返回", "06 · Target / return"),
                 format!(
-                    "{} → {}:{}\n{}\n↓{} · ↑{}",
-                    c.host(),
-                    m.destination_ip,
-                    m.destination_port,
+                    "{} → {}\n{}\n↓{} · ↑{}",
+                    inspect_host,
+                    dest_endpoint,
                     self.tr("经原连接返回", "Returns over the established connection"),
                     format_bytes(c.download),
                     format_bytes(c.upload)

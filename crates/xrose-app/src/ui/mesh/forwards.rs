@@ -72,7 +72,7 @@ impl AppView {
             );
             let endpoint = |addr: std::net::SocketAddr| {
                 if self.hide_ips {
-                    format!("•••:{}", addr.port())
+                    xrose_core::privacy::mask_socket_addr(addr)
                 } else {
                     addr.to_string()
                 }
