@@ -301,6 +301,7 @@ impl AppView {
                         .iter()
                         .map(|&index| {
                             let node = &this.snapshot.model.nodes[index];
+                            let usable = node.usable_with(this.snapshot.settings.core);
                             render_node_row(
                                 RowProps {
                                     node,
@@ -324,6 +325,7 @@ impl AppView {
                                     ),
                                     hide_ips,
                                     magic_dns_suffixes: &suffixes,
+                                    usable,
                                     auto_mode,
                                     offline_exit: offline_exits.contains(&node.id),
                                     mesh_provider: node
@@ -339,10 +341,7 @@ impl AppView {
                                         .map(|profile| profile.provider),
                                     group_id: row_group
                                         .as_ref()
-                                        .filter(|_| {
-                                            selectable_members.contains(&node.id)
-                                                && node.usable_with(this.snapshot.settings.core)
-                                        })
+                                        .filter(|_| selectable_members.contains(&node.id) && usable)
                                         .cloned(),
                                     core_busy,
                                     latency_busy: tests_busy,
@@ -1020,6 +1019,7 @@ struct RowProps<'a> {
     downloading: bool,
     hide_ips: bool,
     magic_dns_suffixes: &'a [&'a str],
+    usable: bool,
     auto_mode: bool,
     offline_exit: bool,
     mesh_provider: Option<xrose_core::mesh::MeshProvider>,
@@ -1103,6 +1103,10 @@ fn render_virtual_node_row(
 ) -> impl IntoElement + use<> {
     let key = exit.target().key();
     let offline = matches!(&exit, VirtualExit::Mesh { online: false, .. });
+    let mesh_provider = match &exit {
+        VirtualExit::Mesh { provider, .. } => Some(*provider),
+        VirtualExit::Direct { .. } => None,
+    };
     let magic_dns_suffixes = view.snapshot.mesh.magic_dns_suffixes();
     render_node_row(
         RowProps {
@@ -1121,9 +1125,10 @@ fn render_virtual_node_row(
             downloading: false,
             hide_ips: view.hide_ips,
             magic_dns_suffixes: &magic_dns_suffixes,
+            usable: true,
             auto_mode: false,
             offline_exit: offline,
-            mesh_provider: None,
+            mesh_provider,
             group_id: None,
             core_busy: busy,
             latency_busy: ["latency", "download", "auto-probe", "core", "mesh"]
@@ -1138,6 +1143,131 @@ fn render_virtual_node_row(
         window,
         cx,
     )
+}
+
+fn primary_badge_label(node: &Node, virtual_exit: Option<&VirtualExit>, lang: Language) -> String {
+    if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
+        super::tr(lang, "直连", "Direct").to_string()
+    } else if matches!(virtual_exit, Some(VirtualExit::Mesh { .. }))
+        || node.id.starts_with("mesh-exit-")
+    {
+        super::tr(lang, "组网出口", "Mesh exit").to_string()
+    } else {
+        node.protocol.display_name().to_uppercase()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_tooltip(
+    node: &Node,
+    virtual_exit: Option<&VirtualExit>,
+    selected: bool,
+    usable: bool,
+    auto_mode: bool,
+    in_selectable_group: bool,
+    offline_exit: bool,
+    batch_mode: bool,
+    lang: Language,
+) -> SharedString {
+    if batch_mode {
+        return super::tr(
+            lang,
+            "点击勾选或取消勾选此节点",
+            "Click to select or deselect this node",
+        );
+    }
+    if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
+        return if selected {
+            super::tr(
+                lang,
+                "当前处于本机直连模式；右键查看更多操作",
+                "Direct mode active; right-click for more actions",
+            )
+        } else {
+            super::tr(
+                lang,
+                "点击切换为本机直连；右键查看更多操作",
+                "Click to switch to Direct mode; right-click for more actions",
+            )
+        };
+    }
+    if matches!(virtual_exit, Some(VirtualExit::Mesh { .. })) || node.is_mesh_gateway() {
+        let resumable = matches!(
+            virtual_exit,
+            Some(VirtualExit::Mesh {
+                resumable: true,
+                ..
+            })
+        );
+        return if !node.enabled {
+            super::tr(
+                lang,
+                "节点已禁用，可在右键或更多操作中启用",
+                "Node is disabled; enable it from the context menu or More actions",
+            )
+        } else if offline_exit && !resumable {
+            super::tr(
+                lang,
+                "出口设备离线，请先连接所属组网",
+                "Exit device is offline; connect its mesh network first",
+            )
+        } else if selected {
+            super::tr(
+                lang,
+                "当前由该组网出口接管系统流量；右键查看更多操作",
+                "This mesh exit is handling system traffic; right-click for more actions",
+            )
+        } else if offline_exit {
+            super::tr(
+                lang,
+                "点击重连所属组网，由此出口接管系统流量",
+                "Click to reconnect its mesh network and use this exit for system traffic",
+            )
+        } else {
+            super::tr(
+                lang,
+                "进入组网模式，由此出口接管系统流量",
+                "Use this exit for system traffic in Mesh mode",
+            )
+        };
+    }
+    if !node.enabled {
+        super::tr(
+            lang,
+            "节点已禁用，可在右键或更多操作中启用",
+            "Node is disabled; enable it from the context menu or More actions",
+        )
+    } else if !usable {
+        super::tr(
+            lang,
+            "当前内核不支持此协议，请切换内核后再使用",
+            "Unsupported by current core; switch cores to use this node",
+        )
+    } else if auto_mode {
+        super::tr(
+            lang,
+            "默认出站组为自动选择模式；右键管理节点",
+            "Default outbound group selects nodes automatically; right-click to manage",
+        )
+    } else if !in_selectable_group {
+        super::tr(
+            lang,
+            "未加入当前默认出站组，可在右键菜单配置所属出站组",
+            "Not in the default outbound group; configure membership from the context menu",
+        )
+    } else if selected {
+        super::tr(
+            lang,
+            "当前选中的代理节点；右键查看更多操作",
+            "Currently selected proxy node; right-click for more actions",
+        )
+    } else {
+        super::tr(
+            lang,
+            "点击切换至此代理节点；右键查看更多操作",
+            "Click to switch to this proxy node; right-click for more actions",
+        )
+    }
 }
 
 fn http_row_controls(
@@ -1320,6 +1450,7 @@ fn render_node_row(
         downloading,
         hide_ips,
         magic_dns_suffixes,
+        usable,
         auto_mode,
         offline_exit,
         mesh_provider,
@@ -1363,6 +1494,19 @@ fn render_node_row(
                     })
                 ));
     let auto_mode = auto_mode && !mesh_gateway && virtual_exit.is_none();
+    let row_tip = row_tooltip(
+        node,
+        virtual_exit.as_ref(),
+        selected,
+        usable,
+        auto_mode,
+        group_id.is_some(),
+        offline_exit,
+        batch_mode,
+        lang,
+    );
+    let drag_tip = super::tr(lang, "拖拽调整节点顺序", "Drag to reorder");
+    let primary_badge = primary_badge_label(node, virtual_exit.as_ref(), lang);
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
     let is_node_busy = is_core_busy && selected;
     let drop_target = node.id.clone();
@@ -1429,6 +1573,7 @@ fn render_node_row(
                 .pr_3()
                 .min_h(px(super::theme::NODE_ROW_HEIGHT))
                 .py_2()
+                .tooltip(move |window, cx| Tooltip::new(row_tip.clone()).build(window, cx))
                 .when(batch_mode || can_select, |d| d.cursor_pointer())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if batch_mode {
@@ -1460,6 +1605,7 @@ fn render_node_row(
                         .cursor_pointer()
                         .opacity(0.35)
                         .group_hover(hover_group.clone(), |s| s.opacity(1.))
+                        .tooltip(move |window, cx| Tooltip::new(drag_tip.clone()).build(window, cx))
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .on_drag(
                             DraggedNode {
@@ -1551,17 +1697,7 @@ fn render_node_row(
                                         .child(name),
                                 )
                                 .child(pill(
-                                    if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
-                                        super::tr(lang, "直连", "Direct").to_string()
-                                    } else if let Some(VirtualExit::Mesh { provider, .. }) =
-                                        &virtual_exit
-                                    {
-                                        provider.label().to_string()
-                                    } else if node.id.starts_with("mesh-exit-") {
-                                        super::tr(lang, "组网出口", "Mesh exit").to_string()
-                                    } else {
-                                        node.protocol.display_name().to_uppercase()
-                                    },
+                                    primary_badge,
                                     if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
                                         p.muted_fg
                                     } else {
@@ -1762,5 +1898,208 @@ mod tests {
     fn a_single_measurement_has_nothing_to_beat() {
         assert_eq!(clear_winner(nodes(&[50])), None);
         assert_eq!(clear_winner(Vec::new()), None);
+    }
+
+    #[test]
+    fn mesh_exit_badges_match_across_discovered_and_saved_gateway_rows() {
+        use super::{VirtualExit, primary_badge_label};
+        use xrose_core::{
+            mesh::MeshProvider,
+            model::{Node, Protocol},
+            settings::Language,
+        };
+
+        let mut gateway = Node::new("HomeNet · 出口", Protocol::Socks, "127.0.0.1", 19081);
+        gateway.id = "mesh-exit-fixture".into();
+        gateway.tags = vec!["mesh-exit".into()];
+
+        let discovered = VirtualExit::Mesh {
+            profile: "fixture".into(),
+            peer: "peer-a".into(),
+            detail: "HomeNet".into(),
+            online: true,
+            provider: MeshProvider::EasyTier,
+            resumable: false,
+        };
+
+        assert_eq!(
+            primary_badge_label(&gateway, None, Language::Zh),
+            "组网出口"
+        );
+        assert_eq!(
+            primary_badge_label(&gateway, Some(&discovered), Language::Zh),
+            "组网出口"
+        );
+        assert_eq!(
+            primary_badge_label(&gateway, Some(&discovered), Language::En),
+            "Mesh exit"
+        );
+
+        let direct = VirtualExit::Direct {
+            detail: "direct".into(),
+        };
+        assert_eq!(
+            primary_badge_label(&gateway, Some(&direct), Language::Zh),
+            "直连"
+        );
+
+        let proxy = Node::new("Example", Protocol::Vless, "198.51.100.1", 443);
+        assert_eq!(primary_badge_label(&proxy, None, Language::Zh), "VLESS");
+    }
+
+    #[test]
+    fn row_tooltips_describe_action_and_unavailable_reasons() {
+        use super::{VirtualExit, row_tooltip};
+        use xrose_core::{
+            mesh::MeshProvider,
+            model::{Node, Protocol},
+            settings::Language,
+        };
+
+        let proxy = Node::new("Example", Protocol::Vless, "198.51.100.1", 443);
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                true,
+                false,
+                true,
+                false,
+                false,
+                Language::Zh
+            ),
+            "点击切换至此代理节点；右键查看更多操作"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                Language::Zh
+            ),
+            "当前选中的代理节点；右键查看更多操作"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Language::Zh
+            ),
+            "当前内核不支持此协议，请切换内核后再使用"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                true,
+                true,
+                false,
+                false,
+                false,
+                Language::Zh
+            ),
+            "默认出站组为自动选择模式；右键管理节点"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                Language::Zh
+            ),
+            "未加入当前默认出站组，可在右键菜单配置所属出站组"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                true,
+                false,
+                true,
+                false,
+                true,
+                Language::Zh
+            ),
+            "点击勾选或取消勾选此节点"
+        );
+
+        let mesh_online = VirtualExit::Mesh {
+            profile: "fixture".into(),
+            peer: "peer-a".into(),
+            detail: "HomeNet".into(),
+            online: true,
+            provider: MeshProvider::Tailscale,
+            resumable: false,
+        };
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                Some(&mesh_online),
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                Language::Zh,
+            ),
+            "进入组网模式，由此出口接管系统流量"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                Some(&mesh_online),
+                false,
+                true,
+                false,
+                false,
+                true,
+                false,
+                Language::Zh,
+            ),
+            "出口设备离线，请先连接所属组网"
+        );
+
+        let mesh_resumable = VirtualExit::Mesh {
+            profile: "fixture".into(),
+            peer: "peer-a".into(),
+            detail: "HomeNet".into(),
+            online: false,
+            provider: MeshProvider::Tailscale,
+            resumable: true,
+        };
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                Some(&mesh_resumable),
+                false,
+                true,
+                false,
+                false,
+                true,
+                false,
+                Language::Zh,
+            ),
+            "点击重连所属组网，由此出口接管系统流量"
+        );
     }
 }
