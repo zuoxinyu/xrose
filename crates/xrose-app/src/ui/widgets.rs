@@ -3,6 +3,7 @@ use gpui_base::{Scrollbar, ScrollbarHandle, ScrollbarMode, Selectable};
 use gpui_kit::App;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon};
@@ -300,8 +301,11 @@ pub(super) fn form_feedback(message: String, success: bool, p: &Palette) -> Stat
         .id("form-feedback")
         .role(if success { Role::Status } else { Role::Alert })
         .aria_label(message.clone())
+        .w_full()
+        .min_w(px(0.))
         .text_sm()
         .text_color(if success { p.ok_text } else { p.danger_text })
+        .whitespace_normal()
         .child(message)
 }
 
@@ -355,6 +359,178 @@ pub fn danger_icon_button(
         .accessibility_label(label)
         .w(px(ICON_BUTTON_SIZE))
         .h(px(ICON_BUTTON_SIZE))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FieldWidth {
+    Compact,
+    Medium,
+    Full,
+}
+
+impl FieldWidth {
+    pub(super) fn fixed_width(self) -> Option<Pixels> {
+        match self {
+            Self::Compact => Some(px(SETTING_LABEL_WIDTH)),
+            Self::Medium => Some(px(FORM_FIELD_WIDTH)),
+            Self::Full => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RowWidth {
+    Auto,
+    Fixed(Pixels),
+    Full,
+}
+
+impl From<FieldWidth> for RowWidth {
+    fn from(value: FieldWidth) -> Self {
+        match value.fixed_width() {
+            Some(width) => Self::Fixed(width),
+            None => Self::Full,
+        }
+    }
+}
+
+fn form_label_text(
+    line_height: f32,
+    label: SharedString,
+    style_text: impl FnOnce(Div) -> Div,
+) -> Div {
+    style_text(
+        div()
+            .block()
+            .w_full()
+            .min_w(px(0.))
+            .overflow_x_hidden()
+            .line_height(px(line_height))
+            .whitespace_normal(),
+    )
+    .child(label)
+}
+
+/// Fixed-width form label cell that centers single-line labels against 32px controls and wraps
+/// multi-line text inside a block child so horizontal flex `min-width: auto` cannot overflow.
+pub(super) fn form_label_cell(
+    width: f32,
+    line_height: f32,
+    label: impl Into<SharedString>,
+    style_text: impl FnOnce(Div) -> Div,
+) -> Div {
+    div()
+        .w(px(width))
+        .min_h(px(CONTROL_HEIGHT))
+        .py_1()
+        .pr_1()
+        .flex()
+        .items_center()
+        .flex_shrink_0()
+        .min_w(px(0.))
+        .child(form_label_text(line_height, label.into(), style_text))
+}
+
+/// Two-column modal form row with a wrapping fixed-width label column and aligned control.
+pub(super) fn dialog_form_row(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+    width: RowWidth,
+) -> Div {
+    let description = description.into();
+    let control_wrap = div()
+        .flex()
+        .items_center()
+        .min_h(px(CONTROL_HEIGHT))
+        .min_w(px(0.))
+        .max_w_full();
+    let control_wrap = match width {
+        RowWidth::Auto => control_wrap,
+        RowWidth::Fixed(width) => control_wrap.w(width),
+        RowWidth::Full => control_wrap.w_full(),
+    }
+    .child(control);
+
+    div()
+        .flex()
+        .items_start()
+        .flex_shrink_0()
+        .gap_3()
+        .py_0p5()
+        .w_full()
+        .min_w(px(0.))
+        .child(form_label_cell(DIALOG_LABEL_WIDTH, 18., label, |d| {
+            d.text_sm().text_color(p.muted_fg)
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap_1()
+                .flex_1()
+                .min_w(px(0.))
+                .child(control_wrap)
+                .when(!description.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .min_w(px(0.))
+                            .text_xs()
+                            .line_height(px(18.))
+                            .text_color(p.muted_fg)
+                            .whitespace_normal()
+                            .child(description),
+                    )
+                }),
+        )
+}
+
+pub(super) fn dialog_field(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    input: &gpui_kit::Entity<InputState>,
+    width: FieldWidth,
+) -> Div {
+    dialog_field_with_desc(p, label, "", input, width)
+}
+
+pub(super) fn dialog_field_with_desc(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    input: &gpui_kit::Entity<InputState>,
+    width: FieldWidth,
+) -> Div {
+    dialog_form_row(p, label, description, Input::new(input), width.into())
+}
+
+pub(super) fn dialog_control_row(
+    p: &Palette,
+    label: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    dialog_form_row(p, label, description, control, RowWidth::Auto)
+}
+
+pub(super) fn dialog_section_heading(p: &Palette, label: impl Into<SharedString>) -> Div {
+    div()
+        .pt_1()
+        .text_sm()
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(p.fg)
+        .child(label.into())
+}
+
+pub(super) fn inline_field_label(p: &Palette, label: impl Into<SharedString>) -> Div {
+    form_label_cell(INLINE_LABEL_WIDTH, 16., label, |d| {
+        d.text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.muted_fg)
+    })
 }
 
 /// Compact monospace count/status pill embedded inside an underline `Tab`.
@@ -882,5 +1058,35 @@ mod tests {
         assert_eq!(tab_keyboard_target(2, 4, "space"), Some(2));
         assert_eq!(tab_keyboard_target(0, 4, "tab"), None);
         assert_eq!(tab_keyboard_target(0, 0, "right"), None);
+    }
+
+    #[test]
+    fn form_label_cell_keeps_text_in_block_wrapper_for_wrapping() {
+        use gpui_kit::{Display, Overflow, WhiteSpace, relative};
+
+        let mut cell = form_label_cell(
+            DIALOG_LABEL_WIDTH,
+            18.,
+            "Client private key PEM (optional)",
+            |d| d,
+        );
+        let outer = cell.style();
+        assert_eq!(outer.display, Some(Display::Flex));
+        assert_eq!(outer.size.width, Some(px(DIALOG_LABEL_WIDTH).into()));
+        assert_eq!(outer.min_size.height, Some(px(CONTROL_HEIGHT).into()));
+        assert_eq!(outer.flex_shrink, Some(0.));
+        assert_eq!(outer.min_size.width, Some(px(0.).into()));
+
+        let mut inner_div = form_label_text(
+            18.,
+            SharedString::from("Client private key PEM (optional)"),
+            |d| d,
+        );
+        let inner = inner_div.style();
+        assert_eq!(inner.display, Some(Display::Block));
+        assert_eq!(inner.size.width, Some(relative(1.).into()));
+        assert_eq!(inner.min_size.width, Some(px(0.).into()));
+        assert_eq!(inner.overflow.x, Some(Overflow::Hidden));
+        assert_eq!(inner.text.white_space, Some(WhiteSpace::Normal));
     }
 }

@@ -1,9 +1,6 @@
 //! Profile-scoped port forwarding overview and single-rule editor.
 use super::*;
-use crate::ui::{
-    text_input,
-    theme::{CONTROL_HEIGHT, DIALOG_WIDTH},
-};
+use crate::ui::{text_input, theme::CONTROL_HEIGHT};
 use xrose_core::mesh::{ForwardProtocol, ForwardRule, PortForward, ServiceForward};
 
 fn local_rule(rule: &ServiceForward) -> PortForward {
@@ -255,14 +252,10 @@ impl AppView {
         let selected = profiles.iter().position(|p| p.id == editor.profile_id);
         let service = editor.service;
         let network_label = |p: &MeshProfileView| format!("{} · {}", p.name, p.provider.label());
-        let mut network = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().text_sm().child(self.tr("所属网络", "Network")));
-        if editor.original.is_none() && !profiles.is_empty() {
+        let static_network = editor.original.is_some() || profiles.is_empty();
+        let network_control = if !static_network {
             let ids: Vec<_> = profiles.iter().map(|p| p.id.clone()).collect();
-            let choices = ChoiceGroup::new(
+            ChoiceGroup::new(
                 "forward-network",
                 profiles.iter().map(|p| network_label(p).into()).collect(),
                 selected,
@@ -275,36 +268,35 @@ impl AppView {
                     editor.error = None;
                     cx.notify();
                 }
-            }));
-            network = network.child(choices);
+            }))
+            .into_any_element()
         } else if let Some(index) = selected {
-            network = network.child(
-                div()
-                    .text_sm()
-                    .text_color(p.muted_fg)
-                    .child(network_label(&profiles[index])),
-            );
-        } else {
-            network = network.child(
-                div()
-                    .text_sm()
-                    .text_color(p.muted_fg)
-                    .child(self.tr("网络已移除", "Network removed")),
-            );
-        }
-        let field = |label: SharedString, input: &Entity<InputState>| {
             div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().text_sm().child(label))
-                .child(Input::new(input))
+                .block()
+                .w_full()
+                .min_w(px(0.))
+                .text_sm()
+                .text_color(p.fg)
+                .whitespace_normal()
+                .child(network_label(&profiles[index]))
+                .into_any_element()
+        } else {
+            div()
+                .block()
+                .w_full()
+                .min_w(px(0.))
+                .text_sm()
+                .text_color(p.muted_fg)
+                .whitespace_normal()
+                .child(self.tr("网络已移除", "Network removed"))
+                .into_any_element()
         };
         let protocol = ChoiceGroup::new(
             "forward-protocol",
             vec!["TCP".into(), "UDP".into()],
             usize::from(editor.protocol == ForwardProtocol::Udp),
         )
+        .small()
         .on_change(cx.listener(|this, index, _, cx| {
             if let Some(edit) = &mut this.forward_editor {
                 edit.protocol = if *index == 0 {
@@ -323,6 +315,7 @@ impl AppView {
             ],
             usize::from(service),
         )
+        .small()
         .on_change(cx.listener(|this, index, window, cx| {
             if let Some(editor) = &mut this.forward_editor {
                 let service = *index == 1;
@@ -359,39 +352,67 @@ impl AppView {
         let body = div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .pb_1()
-            .child(div().flex().flex_col().gap_1()
-                .child(div().text_sm().child(self.tr("转发方向", "Direction")))
-                .child(direction))
-            .child(network)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(self.tr("协议", "Protocol"))
-                    .child(protocol),
-            )
-            .child(field(
-                if service { self.tr("组网服务端口", "Mesh service port") } else { self.tr("本地监听地址和端口", "Local listen address and port") },
+            .child(dialog_control_row(
+                &p,
+                self.tr("转发方向", "Direction"),
+                "",
+                direction,
+            ))
+            .child(dialog_form_row(
+                &p,
+                self.tr("所属网络", "Network"),
+                "",
+                network_control,
+                if static_network {
+                    RowWidth::Full
+                } else {
+                    RowWidth::Auto
+                },
+            ))
+            .child(dialog_control_row(
+                &p,
+                self.tr("协议", "Protocol"),
+                "",
+                protocol,
+            ))
+            .child(dialog_field(
+                &p,
+                if service {
+                    self.tr("组网服务端口", "Mesh service port")
+                } else {
+                    self.tr("本地监听地址和端口", "Local listen address and port")
+                },
                 &editor.listen,
+                if service {
+                    FieldWidth::Compact
+                } else {
+                    FieldWidth::Medium
+                },
             ))
-            .child(field(
-                if service { self.tr("本机可达的服务地址和端口", "Host-reachable service address and port") } else { self.tr("目标设备地址和端口", "Destination address and port") },
+            .child(dialog_field_with_desc(
+                &p,
+                if service {
+                    self.tr("本机服务地址和端口", "Host service address and port")
+                } else {
+                    self.tr("目标设备地址和端口", "Destination address and port")
+                },
+                if service {
+                    self.tr(
+                        "目标可填写回环或局域网 IP。组网成员通过本机虚拟地址访问此端口；连接期间保存立即生效。",
+                        "Use a loopback or LAN IP as the target. Peers access this port on your mesh address. Changes apply immediately while connected.",
+                    )
+                } else {
+                    self.tr(
+                        "仅本机访问请监听 127.0.0.1；IPv6 地址请使用方括号。",
+                        "Listen on 127.0.0.1 for local access only; enclose IPv6 addresses in brackets.",
+                    )
+                },
                 &editor.target,
-            ))
-            .child(div().text_xs().text_color(p.muted_fg).child(if service { self.tr(
-                "目标可填写回环或局域网 IP。组网成员通过本机虚拟地址访问此端口；连接期间保存立即生效。",
-                "Use a loopback or LAN IP as the target. Peers access this port on your mesh address. Changes apply immediately while connected."
-            ) } else { self.tr(
-                "仅本机访问请监听 127.0.0.1。IPv6 地址使用方括号。",
-                "Listen on 127.0.0.1 for local access only. Enclose IPv6 addresses in brackets.",
-            ) }))
-            .when_some(editor.error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(p.danger_text).child(error))
-            });
-        let footer = div()
+                FieldWidth::Medium,
+            ));
+        let actions = div()
             .flex()
             .justify_end()
             .gap_2()
@@ -457,25 +478,22 @@ impl AppView {
                         }
                     })),
             );
-        dialog
-            .centered()
-            .w(px(DIALOG_WIDTH))
-            .bg(p.panel)
-            .text_color(p.fg)
-            .border_color(p.border)
-            .entrance(crate::ui::dialogs::DIALOG_ENTRANCE)
-            .overlay_closable(false)
-            .on_ok(|_, _, _| false)
-            .title(if editor.original.is_some() {
+        crate::ui::dialogs::settings_dialog(
+            dialog,
+            if editor.original.is_some() {
                 self.tr("编辑端口转发", "Edit port forward")
             } else {
                 self.tr("添加端口转发", "Add port forward")
-            })
-            .child(crate::ui::dialogs::dialog_scroll_body(
-                "forward-editor-body",
-                window.viewport_size().height * 0.62,
-                body,
-            ))
-            .footer(footer)
+            },
+            body,
+            &p,
+            window,
+        )
+        .overlay_closable(false)
+        .footer(crate::ui::dialogs::dialog_footer(
+            &p,
+            editor.error.clone(),
+            actions,
+        ))
     }
 }

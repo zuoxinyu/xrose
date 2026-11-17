@@ -393,7 +393,7 @@ impl AppView {
         let snapshot = service.snapshot();
         let log_revision = service.logs().revision();
         let mixed_port = snapshot.settings.mixed_port.to_string();
-        let sub_name = text_input(window, cx, "订阅名称（可选）");
+        let sub_name = text_input(window, cx, "留空自动使用订阅标题或域名");
         let sub_url = text_input(
             window,
             cx,
@@ -448,8 +448,8 @@ impl AppView {
             cx,
             "域名条件，例如 geosite:geolocation-!cn（逗号分隔）",
         );
-        let host_domain = text_input(window, cx, "example.com");
-        let host_ips = text_input(window, cx, "1.2.3.4, 5.6.7.8");
+        let host_domain = text_input(window, cx, "例如 example.com");
+        let host_ips = text_input(window, cx, "1.2.3.4, 2001:db8::1");
         let port_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("7890")
@@ -718,7 +718,7 @@ impl AppView {
             ),
             (
                 &self.sub_name,
-                self.tr("订阅名称（可选）", "Subscription name (optional)"),
+                self.tr("留空自动使用订阅标题或域名", "Optional display name"),
             ),
             (&self.rule_name, self.tr("规则名称", "Rule name")),
             (&self.rule_search, self.tr("过滤规则…", "Filter rules…")),
@@ -744,6 +744,14 @@ impl AppView {
                     "域名条件，例如 geosite:geolocation-!cn（逗号分隔）",
                     "Domain conditions, e.g. geosite:geolocation-!cn (comma separated)",
                 ),
+            ),
+            (
+                &self.host_domain,
+                self.tr("例如 example.com", "e.g. example.com"),
+            ),
+            (
+                &self.host_ips,
+                self.tr("1.2.3.4, 2001:db8::1", "1.2.3.4, 2001:db8::1"),
             ),
             (
                 &self.trace_input,

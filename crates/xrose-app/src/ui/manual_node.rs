@@ -6,7 +6,7 @@
 use gpui_base::Disableable;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{InputState, Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
@@ -14,7 +14,7 @@ use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
 mod vpn;
 
 use super::AppView;
-use super::theme::{CONTROL_HEIGHT, FORM_FIELD_WIDTH, Palette, SETTING_LABEL_WIDTH, palette};
+use super::theme::{Palette, palette};
 use super::widgets::*;
 
 pub(crate) struct ManualNodeForm {
@@ -314,113 +314,8 @@ impl ManualNodeForm {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FieldWidth {
-    Compact,
-    Medium,
-    Full,
-}
-
-impl FieldWidth {
-    pub(super) fn fixed_width(self) -> Option<Pixels> {
-        match self {
-            Self::Compact => Some(px(SETTING_LABEL_WIDTH)),
-            Self::Medium => Some(px(FORM_FIELD_WIDTH)),
-            Self::Full => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RowWidth {
-    Auto,
-    Fixed(Pixels),
-    Full,
-}
-
-impl From<FieldWidth> for RowWidth {
-    fn from(value: FieldWidth) -> Self {
-        match value.fixed_width() {
-            Some(width) => Self::Fixed(width),
-            None => Self::Full,
-        }
-    }
-}
-
 fn show_reality_fields(protocol: Protocol, public_key: &str, short_id: &str) -> bool {
     protocol == Protocol::Vless || !public_key.trim().is_empty() || !short_id.trim().is_empty()
-}
-
-/// Two-column form row aligned to the shared `SETTING_LABEL_WIDTH` / `CONTROL_HEIGHT` grid.
-fn form_row(
-    p: &Palette,
-    label: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    control: impl IntoElement,
-    width: RowWidth,
-) -> Div {
-    let description = description.into();
-    let control_wrap = div()
-        .flex()
-        .items_center()
-        .min_h(px(CONTROL_HEIGHT))
-        .max_w_full();
-    let control_wrap = match width {
-        RowWidth::Auto => control_wrap,
-        RowWidth::Fixed(width) => control_wrap.w(width),
-        RowWidth::Full => control_wrap.w_full(),
-    }
-    .child(control);
-
-    div()
-        .flex()
-        .items_start()
-        .flex_shrink_0()
-        .gap_3()
-        .py_0p5()
-        .child(
-            div()
-                .w(px(SETTING_LABEL_WIDTH))
-                .min_h(px(CONTROL_HEIGHT))
-                .flex()
-                .items_center()
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(p.muted_fg)
-                .child(label.into()),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .items_start()
-                .gap_1()
-                .flex_1()
-                .min_w(px(0.))
-                .child(control_wrap)
-                .when(!description.is_empty(), |d| {
-                    d.child(div().text_xs().text_color(p.muted_fg).child(description))
-                }),
-        )
-}
-
-pub(super) fn field(
-    p: &Palette,
-    label: impl Into<SharedString>,
-    input: Entity<InputState>,
-    width: FieldWidth,
-) -> Div {
-    field_with_desc(p, label, "", input, width)
-}
-
-pub(super) fn field_with_desc(
-    p: &Palette,
-    label: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    input: Entity<InputState>,
-    width: FieldWidth,
-) -> Div {
-    form_row(p, label, description, Input::new(&input), width.into())
 }
 
 pub(super) fn textarea_field(
@@ -429,31 +324,13 @@ pub(super) fn textarea_field(
     description: impl Into<SharedString>,
     input: &Entity<TextareaState>,
 ) -> Div {
-    form_row(
+    dialog_form_row(
         p,
         label,
         description,
         Textarea::new(input).h(px(80.)),
         RowWidth::Full,
     )
-}
-
-fn control_row(
-    p: &Palette,
-    label: impl Into<SharedString>,
-    description: impl Into<SharedString>,
-    control: impl IntoElement,
-) -> Div {
-    form_row(p, label, description, control, RowWidth::Auto)
-}
-
-fn section_heading(p: &Palette, label: impl Into<SharedString>) -> impl IntoElement {
-    div()
-        .pt_1()
-        .text_sm()
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(p.fg)
-        .child(label.into())
 }
 
 impl AppView {
@@ -499,50 +376,50 @@ impl AppView {
 
         let mut credentials = div().flex().flex_col().gap_2();
         if needs_uuid {
-            credentials = credentials.child(field(
+            credentials = credentials.child(dialog_field(
                 &p,
                 if protocol == Protocol::Tuic {
                     self.tr("UUID（TUIC）", "UUID (TUIC)")
                 } else {
                     self.tr("UUID / 用户 ID", "UUID / user id")
                 },
-                form.uuid.clone(),
+                &form.uuid,
                 FieldWidth::Full,
             ));
         }
         if protocol == Protocol::Vless {
-            credentials = credentials.child(field(
+            credentials = credentials.child(dialog_field(
                 &p,
                 self.tr("Flow（可选）", "Flow (optional)"),
-                form.flow.clone(),
+                &form.flow,
                 FieldWidth::Medium,
             ));
         }
         if protocol == Protocol::Shadowsocks {
-            credentials = credentials.child(field(
+            credentials = credentials.child(dialog_field(
                 &p,
                 self.tr("加密方式", "Cipher"),
-                form.method.clone(),
+                &form.method,
                 FieldWidth::Medium,
             ));
         }
         if needs_username {
-            credentials = credentials.child(field(
+            credentials = credentials.child(dialog_field(
                 &p,
                 self.tr("用户名", "Username"),
-                form.username.clone(),
+                &form.username,
                 FieldWidth::Full,
             ));
         }
         if needs_password {
-            credentials = credentials.child(field(
+            credentials = credentials.child(dialog_field(
                 &p,
                 if needs_username {
                     self.tr("密码", "Password")
                 } else {
                     self.tr("密码 / 密钥", "Password")
                 },
-                form.password.clone(),
+                &form.password,
                 FieldWidth::Full,
             ));
         }
@@ -553,23 +430,23 @@ impl AppView {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("路径 Path", "Path"),
-                        form.path.clone(),
+                        &form.path,
                         FieldWidth::Full,
                     ))
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("Host / CDN（可选）", "Host / CDN (optional)"),
-                        form.host.clone(),
+                        &form.host,
                         FieldWidth::Full,
                     )),
             ),
-            TransportKind::Grpc => Some(div().flex().flex_col().gap_2().child(field(
+            TransportKind::Grpc => Some(div().flex().flex_col().gap_2().child(dialog_field(
                 &p,
                 self.tr("serviceName", "serviceName"),
-                form.service_name.clone(),
+                &form.service_name,
                 FieldWidth::Medium,
             ))),
             TransportKind::Tcp | TransportKind::Kcp | TransportKind::Quic => None,
@@ -610,7 +487,7 @@ impl AppView {
             .gap_2()
             .min_w(px(0.))
             .pb_1()
-            .child(control_row(
+            .child(dialog_control_row(
                 &p,
                 self.tr("协议", "Protocol"),
                 "",
@@ -664,93 +541,93 @@ impl AppView {
                 })),
             ))
             .child(divider(&p))
-            .child(section_heading(&p, self.tr("基础", "Basics")))
+            .child(dialog_section_heading(&p, self.tr("基础", "Basics")))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("名称（可选）", "Name (optional)"),
-                        form.name.clone(),
+                        &form.name,
                         FieldWidth::Full,
                     ))
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("服务器", "Server"),
-                        form.server.clone(),
+                        &form.server,
                         FieldWidth::Full,
                     ))
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("端口", "Port"),
-                        form.port.clone(),
+                        &form.port,
                         FieldWidth::Compact,
                     )),
             )
             .when(has_credentials, |d| {
                 d.child(divider(&p))
-                    .child(section_heading(&p, self.tr("凭据", "Credentials")))
+                    .child(dialog_section_heading(&p, self.tr("凭据", "Credentials")))
                     .child(credentials)
             })
             .when(protocol == Protocol::Wireguard, |d| {
                 d.child(divider(&p))
-                    .child(section_heading(&p, "WireGuard"))
+                    .child(dialog_section_heading(&p, "WireGuard"))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("私钥", "Private key"),
-                                form.wireguard_private_key.clone(),
+                                &form.wireguard_private_key,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("对端公钥", "Peer public key"),
-                                form.wireguard_public_key.clone(),
+                                &form.wireguard_public_key,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("预共享密钥（可选）", "Pre-shared key (optional)"),
-                                form.wireguard_pre_shared_key.clone(),
+                                &form.wireguard_pre_shared_key,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("本地地址（逗号分隔）", "Local addresses"),
-                                form.wireguard_addresses.clone(),
+                                &form.wireguard_addresses,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("允许网段", "Allowed networks"),
-                                form.wireguard_allowed_ips.clone(),
+                                &form.wireguard_allowed_ips,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("MTU", "MTU"),
-                                form.wireguard_mtu.clone(),
+                                &form.wireguard_mtu,
                                 FieldWidth::Compact,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("Reserved（3 字节）", "Reserved (3 bytes)"),
-                                form.wireguard_reserved.clone(),
+                                &form.wireguard_reserved,
                                 FieldWidth::Compact,
                             )),
                     )
             })
             .when(protocol.is_vpn(), |d| {
                 d.child(divider(&p))
-                    .child(section_heading(&p, self.tr("VPN 参数", "VPN settings")))
+                    .child(dialog_section_heading(&p, self.tr("VPN 参数", "VPN settings")))
                     .child(form.vpn.fields(protocol, &p, |zh, en| self.tr(zh, en)))
-                    .child(control_row(
+                    .child(dialog_control_row(
                         &p,
                         self.tr("分域 DNS", "Split DNS"),
                         "",
@@ -764,14 +641,14 @@ impl AppView {
                             cx.notify();
                         })),
                     ))
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("服务器证书名称（可选）", "Server cert name (optional)"),
-                        form.sni.clone(),
+                        &form.sni,
                         FieldWidth::Full,
                     ))
                     .when(protocol == Protocol::Openconnect, |d| {
-                        d.child(control_row(
+                        d.child(dialog_control_row(
                             &p,
                             self.tr("传输模式", "Transport"),
                             self.tr(
@@ -788,7 +665,7 @@ impl AppView {
                                 cx.notify();
                             })),
                         ))
-                        .child(control_row(
+                        .child(dialog_control_row(
                             &p,
                             self.tr("证书校验", "Verification"),
                             self.tr(
@@ -809,7 +686,7 @@ impl AppView {
             })
             .when(tls_capable, |d| {
                 d.child(divider(&p))
-                    .child(section_heading(
+                    .child(dialog_section_heading(
                         &p,
                         if show_reality {
                             self.tr("TLS / Reality", "TLS / Reality")
@@ -822,7 +699,7 @@ impl AppView {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(control_row(
+                            .child(dialog_control_row(
                                 &p,
                                 "TLS",
                                 if !transport_capable {
@@ -846,7 +723,7 @@ impl AppView {
                                     },
                                 )),
                             ))
-                            .child(control_row(
+                            .child(dialog_control_row(
                                 &p,
                                 self.tr("证书校验", "Verification"),
                                 self.tr(
@@ -865,39 +742,39 @@ impl AppView {
                                     },
                                 )),
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("SNI（可选）", "SNI (optional)"),
-                                form.sni.clone(),
+                                &form.sni,
                                 FieldWidth::Full,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("ALPN（可选）", "ALPN (optional)"),
-                                form.alpn.clone(),
+                                &form.alpn,
                                 FieldWidth::Medium,
                             ))
-                            .child(field(
+                            .child(dialog_field(
                                 &p,
                                 self.tr("uTLS 指纹（可选）", "uTLS fingerprint"),
-                                form.fingerprint.clone(),
+                                &form.fingerprint,
                                 FieldWidth::Medium,
                             ))
                             .when(show_reality, |d| {
-                                d.child(field(
+                                d.child(dialog_field(
                                     &p,
                                     self.tr("Reality 公钥 pbk", "Reality public key"),
-                                    form.reality_public_key.clone(),
+                                    &form.reality_public_key,
                                     FieldWidth::Full,
                                 ))
-                                .child(field_with_desc(
+                                .child(dialog_field_with_desc(
                                     &p,
                                     self.tr("Reality shortId", "Reality shortId"),
                                     self.tr(
                                         "填写公钥即启用 Reality（自动开启 TLS），shortId 可留空。",
                                         "Setting a public key enables Reality and TLS automatically; shortId is optional.",
                                     ),
-                                    form.reality_short_id.clone(),
+                                    &form.reality_short_id,
                                     FieldWidth::Medium,
                                 ))
                             }),
@@ -905,13 +782,13 @@ impl AppView {
             })
             .when(transport_capable, |d| {
                 d.child(divider(&p))
-                    .child(section_heading(&p, self.tr("传输层", "Transport")))
+                    .child(dialog_section_heading(&p, self.tr("传输层", "Transport")))
                     .child(
                         div()
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(control_row(
+                            .child(dialog_control_row(
                                 &p,
                                 self.tr("类型", "Mode"),
                                 transport_note,
@@ -938,14 +815,14 @@ impl AppView {
                     )
             })
             .child(divider(&p))
-            .child(section_heading(&p, self.tr("其他", "Options")))
+            .child(dialog_section_heading(&p, self.tr("其他", "Options")))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
                     .when(!protocol.is_vpn(), |d| {
-                        d.child(control_row(
+                        d.child(dialog_control_row(
                             &p,
                             self.tr("UDP 转发", "UDP"),
                             self.tr(
@@ -959,10 +836,10 @@ impl AppView {
                                 })),
                         ))
                     })
-                    .child(field(
+                    .child(dialog_field(
                         &p,
                         self.tr("标签（可选）", "Tags (optional)"),
-                        form.tags.clone(),
+                        &form.tags,
                         FieldWidth::Full,
                     )),
             )
@@ -1016,21 +893,14 @@ impl AppView {
                         }
                     })),
             );
-        div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .w_full()
-            .when_some(self.manual_error.clone(), |d, error| {
-                d.child(super::widgets::form_feedback(error, false, &p))
-            })
-            .child(actions)
+        super::dialogs::dialog_footer(&p, self.manual_error.clone(), actions)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FORM_FIELD_WIDTH, FieldWidth, Protocol, SETTING_LABEL_WIDTH, show_reality_fields};
+    use super::super::theme::{FORM_FIELD_WIDTH, SETTING_LABEL_WIDTH};
+    use super::{FieldWidth, Protocol, show_reality_fields};
     use gpui_kit::px;
 
     #[test]

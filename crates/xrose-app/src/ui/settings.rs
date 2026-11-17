@@ -1524,17 +1524,12 @@ fn setting_row(
         .items_start()
         .gap_3()
         .py_1()
-        .child(
-            div()
-                .w(px(super::theme::SETTING_LABEL_WIDTH))
-                .h(px(super::theme::CONTROL_HEIGHT))
-                .flex()
-                .items_center()
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(p.muted_fg)
-                .child(label.into()),
-        )
+        .child(super::widgets::form_label_cell(
+            super::theme::SETTING_LABEL_WIDTH,
+            18.,
+            label,
+            |d| d.text_sm().text_color(p.muted_fg),
+        ))
         .child(
             div()
                 .flex()
@@ -1548,6 +1543,8 @@ fn setting_row(
                         .flex()
                         .items_center()
                         .min_h(px(super::theme::CONTROL_HEIGHT))
+                        .min_w(px(0.))
+                        .max_w_full()
                         .child(control),
                 )
                 .when(!description.is_empty(), |d| {

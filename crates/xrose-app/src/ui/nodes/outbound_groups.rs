@@ -1,7 +1,7 @@
 //! Outbound-group management and node membership editors.
 
 use super::*;
-use crate::ui::dialogs::settings_dialog;
+use crate::ui::dialogs::{dialog_footer, settings_dialog};
 use crate::ui::theme::{CONTROL_HEIGHT, FORM_FIELD_WIDTH, MEMBER_LIST_HEIGHT};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::checkbox::Checkbox;
@@ -134,6 +134,13 @@ impl AppView {
                     &p,
                     window,
                 )
+                .footer(dialog_footer(
+                    &p,
+                    None,
+                    Button::new("close-outbound-groups")
+                        .label(this.tr("关闭", "Close"))
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ))
             })
         });
     }
@@ -200,11 +207,14 @@ impl AppView {
                 } else {
                     this.tr("新建出站组", "New outbound group")
                 };
+                let dialog_error = editor.read(cx).error.clone();
                 let save_editor = editor.clone();
                 let profile = profile.clone();
                 settings_dialog(dialog, title, body, &p, window)
                     .overlay_closable(false)
-                    .footer(
+                    .footer(dialog_footer(
+                        &p,
+                        dialog_error,
                         div()
                             .flex()
                             .justify_end()
@@ -249,7 +259,7 @@ impl AppView {
                                         }
                                     })),
                             ),
-                    )
+                    ))
             })
         });
     }
@@ -258,32 +268,34 @@ impl AppView {
         let p = palette(cx);
         let state = editor.read(cx);
         let draft = state.draft.clone();
-        let error = state.error.clone();
         let query = state.search.read(cx).value().trim().to_lowercase();
         let busy = this_busy(&self.snapshot.busy, "core");
         let mut body = div()
             .flex()
             .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(div().text_sm().child(self.tr("名称", "Name")))
-                    .child(div().w(px(FORM_FIELD_WIDTH)).child(Input::new(&state.name))),
-            )
+            .gap_2()
+            .pb_1()
+            .child(dialog_field(
+                &p,
+                self.tr("名称", "Name"),
+                &state.name,
+                FieldWidth::Medium,
+            ))
+            .child(divider(&p))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_2()
-                    .child(div().text_sm().child(format!(
-                        "{} · {}",
-                        self.tr("成员节点", "Member nodes"),
-                        draft.members.len()
-                    )))
+                    .child(dialog_section_heading(
+                        &p,
+                        format!(
+                            "{} · {}",
+                            self.tr("成员节点", "Member nodes"),
+                            draft.members.len()
+                        ),
+                    ))
                     .child(
                         div()
                             .w(px(FORM_FIELD_WIDTH))
@@ -323,88 +335,114 @@ impl AppView {
         let preferred = draft.selected.clone();
         let preferred_label = self.tr("首选", "Preferred");
         let list_height = (nodes.len() as f32 * CONTROL_HEIGHT).min(MEMBER_LIST_HEIGHT);
-        body = body.child(if nodes.is_empty() {
-            empty_hint(&p, self.tr("没有匹配的节点", "No matching nodes")).into_any_element()
-        } else {
-            uniform_list("outbound-group-members", nodes.len(), move |range, _, _| {
-                range
-                    .map(|index| {
-                        let (id, name, status, usable) = &nodes[index];
-                        let selected = members.contains(id);
-                        let id = id.clone();
-                        let editor = list_editor.clone();
-                        let view = view.clone();
-                        let preferred_id = id.clone();
-                        let preferred_editor = editor.clone();
-                        let preferred_view = view.clone();
-                        div()
-                            .w_full()
-                            .h(px(CONTROL_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                Checkbox::new(("group-member", index))
-                                    .label(name.clone())
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .checked(selected)
-                                    .disabled(busy)
-                                    .on_change(move |checked, _, cx| {
-                                        editor.update(cx, |state, _| {
-                                            if *checked {
-                                                state.draft.members.push(id.clone());
-                                            } else {
-                                                state.draft.members.retain(|member| member != &id);
-                                            }
-                                            state.draft.repair();
-                                            state.error = None;
-                                        });
-                                        let _ = view.update(cx, |_, cx| cx.notify());
-                                    }),
-                            )
-                            .child(div().text_xs().text_color(p.muted_fg).child(status.clone()))
-                            .child(
-                                Radio::new(("group-preferred", index))
-                                    .label(preferred_label.clone())
-                                    .accessibility_label(format!("{} {}", preferred_label, name))
-                                    .checked(preferred.as_ref() == Some(&preferred_id))
-                                    .disabled(busy || !selected || !usable)
-                                    .on_change(move |_, _, cx| {
-                                        preferred_editor.update(cx, |state, _| {
-                                            state.draft.selected = Some(preferred_id.clone())
-                                        });
-                                        let _ = preferred_view.update(cx, |_, cx| cx.notify());
-                                    }),
-                            )
-                            .into_any_element()
+        body = body.child(
+            div()
+                .p_2()
+                .rounded_md()
+                .bg(p.bg)
+                .border_1()
+                .border_color(p.border)
+                .child(if nodes.is_empty() {
+                    empty_hint(&p, self.tr("没有匹配的节点", "No matching nodes"))
+                        .into_any_element()
+                } else {
+                    uniform_list("outbound-group-members", nodes.len(), move |range, _, _| {
+                        range
+                            .map(|index| {
+                                let (id, name, status, usable) = &nodes[index];
+                                let selected = members.contains(id);
+                                let id = id.clone();
+                                let editor = list_editor.clone();
+                                let view = view.clone();
+                                let preferred_id = id.clone();
+                                let preferred_editor = editor.clone();
+                                let preferred_view = view.clone();
+                                div()
+                                    .w_full()
+                                    .h(px(CONTROL_HEIGHT))
+                                    .px_2()
+                                    .rounded_sm()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new(("group-member", index))
+                                            .label(name.clone())
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .checked(selected)
+                                            .disabled(busy)
+                                            .on_change(move |checked, _, cx| {
+                                                editor.update(cx, |state, _| {
+                                                    if *checked {
+                                                        state.draft.members.push(id.clone());
+                                                    } else {
+                                                        state
+                                                            .draft
+                                                            .members
+                                                            .retain(|member| member != &id);
+                                                    }
+                                                    state.draft.repair();
+                                                    state.error = None;
+                                                });
+                                                let _ = view.update(cx, |_, cx| cx.notify());
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .child(status.clone()),
+                                    )
+                                    .child(
+                                        Radio::new(("group-preferred", index))
+                                            .label(preferred_label.clone())
+                                            .accessibility_label(format!(
+                                                "{} {}",
+                                                preferred_label, name
+                                            ))
+                                            .checked(preferred.as_ref() == Some(&preferred_id))
+                                            .disabled(busy || !selected || !usable)
+                                            .on_change(move |_, _, cx| {
+                                                preferred_editor.update(cx, |state, _| {
+                                                    state.draft.selected =
+                                                        Some(preferred_id.clone())
+                                                });
+                                                let _ =
+                                                    preferred_view.update(cx, |_, cx| cx.notify());
+                                            }),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect()
                     })
-                    .collect()
-            })
-            .h(px(list_height))
-            .w_full()
-            .into_any_element()
-        });
+                    .h(px(list_height))
+                    .w_full()
+                    .into_any_element()
+                }),
+        );
         let policy_editor = editor.clone();
-        body.child(self.node_policy_fields(
-            &draft,
-            move |_, policy, interval, cx| {
-                policy_editor.update(cx, |state, _| {
-                    state.draft.switch_policy = policy;
-                    state.draft.interval_secs = interval;
-                    state.error = None;
-                });
-                cx.notify();
-            },
-            cx,
-        ))
-        .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-            "配置在内核重载后生效。",
-            "Changes take effect when the core reloads.",
-        )))
-        .when_some(error, |d, error| {
-            d.child(div().text_sm().text_color(p.danger_text).child(error))
-        })
+        body.child(divider(&p))
+            .child(dialog_section_heading(
+                &p,
+                self.tr("自动切换策略", "Auto-switch policy"),
+            ))
+            .child(self.node_policy_fields(
+                &draft,
+                move |_, policy, interval, cx| {
+                    policy_editor.update(cx, |state, _| {
+                        state.draft.switch_policy = policy;
+                        state.draft.interval_secs = interval;
+                        state.error = None;
+                    });
+                    cx.notify();
+                },
+                cx,
+            ))
+            .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                "配置在内核重载后生效。",
+                "Changes take effect when the core reloads.",
+            )))
     }
 
     pub(in crate::ui) fn open_node_outbound_groups(
@@ -444,59 +482,131 @@ impl AppView {
                 let state = editor.read(cx);
                 let selected = state.selected.clone();
                 let error = state.error.clone();
-                let body = div().flex().flex_col().gap_3()
-                    .child(div().text_sm().child(name.clone()))
-                    .children(this.snapshot.model.groups.iter().map(|group| {
-                        let id = group.id.clone();
-                        let editor = editor.clone();
-                        div().flex().items_center().gap_2().min_h(px(CONTROL_HEIGHT))
-                            .child(Checkbox::new((ElementId::from("node-membership"), id.clone()))
-                                .label(this.outbound_group_label(group)).checked(selected.contains(&id)).disabled(busy)
-                                .on_change(cx.listener(move |_, checked: &bool, _, cx| {
-                                    editor.update(cx, |state, _| {
-                                        if *checked { state.selected.insert(id.clone()); }
-                                        else { state.selected.remove(&id); }
-                                        state.error = None;
-                                    });
-                                    cx.notify();
-                                })))
-                            .child(div().text_xs().text_color(p.muted_fg).child(this.outbound_policy_label(group)))
-                    }))
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .pb_1()
+                    .child(dialog_form_row(
+                        &p,
+                        this.tr("节点", "Node"),
+                        "",
+                        div()
+                            .block()
+                            .w_full()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.fg)
+                            .whitespace_normal()
+                            .child(name.clone()),
+                        RowWidth::Full,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .p_2()
+                            .rounded_md()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .children(this.snapshot.model.groups.iter().map(|group| {
+                                let id = group.id.clone();
+                                let editor = editor.clone();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .min_h(px(CONTROL_HEIGHT))
+                                    .px_2()
+                                    .child(
+                                        Checkbox::new((
+                                            ElementId::from("node-membership"),
+                                            id.clone(),
+                                        ))
+                                        .label(this.outbound_group_label(group))
+                                        .checked(selected.contains(&id))
+                                        .disabled(busy)
+                                        .on_change(cx.listener(move |_, checked: &bool, _, cx| {
+                                            editor.update(cx, |state, _| {
+                                                if *checked {
+                                                    state.selected.insert(id.clone());
+                                                } else {
+                                                    state.selected.remove(&id);
+                                                }
+                                                state.error = None;
+                                            });
+                                            cx.notify();
+                                        })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .child(this.outbound_policy_label(group)),
+                                    )
+                            })),
+                    )
                     .child(div().text_xs().text_color(p.muted_fg).child(this.tr(
                         "可同时加入多个出站组。配置在内核重载后生效。",
                         "A node can belong to multiple groups. Changes take effect when the core reloads.",
-                    )))
-                    .when_some(error, |d, error| d.child(div().text_sm().text_color(p.danger_text).child(error)));
+                    )));
                 let editor = editor.clone();
                 let node_id = node_id.clone();
                 let profile = profile.clone();
                 settings_dialog(dialog, this.tr("所属出站组", "Outbound group membership"), body, &p, window)
                     .overlay_closable(false)
-                    .footer(div().flex().justify_end().gap_2()
-                        .child(Button::new("cancel-node-memberships").label(this.tr("取消", "Cancel"))
-                            .on_click(|_, window, cx| window.close_dialog(cx)))
-                        .child(Button::new("save-node-memberships").primary().label(this.tr("保存", "Save")).disabled(busy)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let state = editor.read(cx);
-                                let result = if this.snapshot.active_profile == profile {
-                                    this.service.set_node_outbound_groups(&node_id, &state.original, &state.selected)
-                                } else {
-                                    Err(xrose_core::error::Error::config(
-                                        this.tr(
-                                            "当前配置已切换，请重新打开后编辑",
-                                            "Configuration changed. Reopen to edit.",
-                                        )
-                                        .to_string(),
-                                    ))
-                                };
-                                match result {
-                                    Ok(()) => { this.sync(cx); window.close_dialog(cx); }
-                                    Err(error) => {
-                                        editor.update(cx, |state, _| state.error = Some(error.to_string()));
-                                        cx.notify();
-                                    }
-                                }
-                            }))))
+                    .footer(dialog_footer(
+                        &p,
+                        error,
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                Button::new("cancel-node-memberships")
+                                    .label(this.tr("取消", "Cancel"))
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            )
+                            .child(
+                                Button::new("save-node-memberships")
+                                    .primary()
+                                    .label(this.tr("保存", "Save"))
+                                    .disabled(busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let state = editor.read(cx);
+                                        let result = if this.snapshot.active_profile == profile {
+                                            this.service.set_node_outbound_groups(
+                                                &node_id,
+                                                &state.original,
+                                                &state.selected,
+                                            )
+                                        } else {
+                                            Err(xrose_core::error::Error::config(
+                                                this.tr(
+                                                    "当前配置已切换，请重新打开后编辑",
+                                                    "Configuration changed. Reopen to edit.",
+                                                )
+                                                .to_string(),
+                                            ))
+                                        };
+                                        match result {
+                                            Ok(()) => {
+                                                this.sync(cx);
+                                                window.close_dialog(cx);
+                                            }
+                                            Err(error) => {
+                                                editor.update(cx, |state, _| {
+                                                    state.error = Some(error.to_string())
+                                                });
+                                                cx.notify();
+                                            }
+                                        }
+                                    })),
+                            ),
+                    ))
             })
         });
     }

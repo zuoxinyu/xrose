@@ -156,14 +156,14 @@ impl AppView {
                         .child(
                             Button::new("toggle-dns-form")
                                 .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .primary()
+                                .when(!self.show_dns_form, |b| b.primary())
                                 .icon(if self.show_dns_form {
                                     IconName::X
                                 } else {
                                     IconName::Plus
                                 })
                                 .label(if self.show_dns_form {
-                                    self.tr("收起", "Close")
+                                    self.tr("收起面板", "Collapse")
                                 } else {
                                     self.tr("添加服务器", "Add server")
                                 })
@@ -178,7 +178,7 @@ impl AppView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
+                            .gap_3()
                             .p_3()
                             .rounded_md()
                             .bg(p.bg)
@@ -187,77 +187,137 @@ impl AppView {
                             .child(
                                 div()
                                     .flex()
+                                    .items_center()
                                     .gap_2()
-                                    .child(div().w(px(140.)).child(Input::new(&self.dns_tag)))
-                                    .child(div().w(px(260.)).child(Input::new(&self.dns_address)))
-                                    .child(div().flex_1().child(Input::new(&self.dns_domains))),
+                                    .child(inline_field_label(&p, self.tr("服务器标识", "Tag")))
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .max_w_full()
+                                            .child(Input::new(&self.dns_tag)),
+                                    ),
                             )
                             .child(
                                 div()
                                     .flex()
-                                    .justify_between()
                                     .items_center()
+                                    .gap_2()
+                                    .child(inline_field_label(&p, self.tr("服务器地址", "Address")))
                                     .child(
                                         div()
+                                            .w(px(360.))
+                                            .max_w_full()
+                                            .child(Input::new(&self.dns_address)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(inline_field_label(&p, self.tr("域名条件", "Domains")))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .child(Input::new(&self.dns_domains)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_3()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(p.border)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(220.))
                                             .text_xs()
                                             .text_color(p.muted_fg)
                                             .child(self.tr(
-                                                "地址支持 1.1.1.1、https://…、tls://…、quic://…；条件支持 geosite:cn、domain:foo",
-                                                "Address: 1.1.1.1, https://…, tls://…, quic://…; conditions: geosite:cn, domain:foo",
+                                                "地址支持 1.1.1.1、https://…、tls://…、quic://…；留空域名条件表示匹配所有域名",
+                                                "Supports 1.1.1.1, https://…, tls://…, quic://…; leave domains blank to match all",
                                             )),
                                     )
                                     .child(
-                                        Button::new("save-dns-server")
-                                            .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                            .primary()
-                                            .label(self.tr("保存", "Save"))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                let tag = this.dns_tag.read(cx).value().trim().to_string();
-                                                let address = this.dns_address.read(cx).value().trim().to_string();
-                                                if tag.is_empty() || address.is_empty() {
-                                                    this.service.toast(
-                                                        xrose_core::service::ToastLevel::Warning,
-                                                        this.tr(
-                                                            "标识与地址不能为空",
-                                                            "Tag and address are required",
-                                                        )
-                                                        .to_string(),
-                                                    );
-                                                    return;
-                                                }
-                                                let server_type = if address.starts_with("https://") {
-                                                    DnsServerType::Https
-                                                } else if address.starts_with("tls://") {
-                                                    DnsServerType::Tls
-                                                } else if address.starts_with("quic://") {
-                                                    DnsServerType::Quic
-                                                } else if address.starts_with("h3://") {
-                                                    DnsServerType::H3
-                                                } else {
-                                                    DnsServerType::Udp
-                                                };
-                                                let domains = this
-                                                    .dns_domains
-                                                    .read(cx)
-                                                    .value()
-                                                    .split(',')
-                                                    .map(|s| s.trim().to_string())
-                                                    .filter(|s| !s.is_empty())
-                                                    .collect();
-                                                let server = DnsServer {
-                                                    tag,
-                                                    server_type,
-                                                    address,
-                                                    domains,
-                                                    detour: Some("proxy".into()),
-                                                    strategy: None,
-                                                    expect_ips: Vec::new(),
-                                                    client_subnet: None,
-                                                };
-                                                this.service.upsert_dns_server(server);
-                                                this.show_dns_form = false;
-                                                this.sync(cx);
-                                            })),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_shrink_0()
+                                            .child(
+                                                Button::new("cancel-dns-form")
+                                                    .compact()
+                                                    .ghost()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                                    .label(self.tr("取消", "Cancel"))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.show_dns_form = false;
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("save-dns-server")
+                                                    .compact()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                                    .primary()
+                                                    .label(self.tr("保存服务器", "Save server"))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        let tag = this.dns_tag.read(cx).value().trim().to_string();
+                                                        let address = this.dns_address.read(cx).value().trim().to_string();
+                                                        if tag.is_empty() || address.is_empty() {
+                                                            this.service.toast(
+                                                                xrose_core::service::ToastLevel::Warning,
+                                                                this.tr(
+                                                                    "标识与地址不能为空",
+                                                                    "Tag and address are required",
+                                                                )
+                                                                .to_string(),
+                                                            );
+                                                            return;
+                                                        }
+                                                        let server_type = if address.starts_with("https://") {
+                                                            DnsServerType::Https
+                                                        } else if address.starts_with("tls://") {
+                                                            DnsServerType::Tls
+                                                        } else if address.starts_with("quic://") {
+                                                            DnsServerType::Quic
+                                                        } else if address.starts_with("h3://") {
+                                                            DnsServerType::H3
+                                                        } else {
+                                                            DnsServerType::Udp
+                                                        };
+                                                        let domains = this
+                                                            .dns_domains
+                                                            .read(cx)
+                                                            .value()
+                                                            .split(',')
+                                                            .map(|s| s.trim().to_string())
+                                                            .filter(|s| !s.is_empty())
+                                                            .collect();
+                                                        let server = DnsServer {
+                                                            tag,
+                                                            server_type,
+                                                            address,
+                                                            domains,
+                                                            detour: Some("proxy".into()),
+                                                            strategy: None,
+                                                            expect_ips: Vec::new(),
+                                                            client_subnet: None,
+                                                        };
+                                                        this.service.upsert_dns_server(server);
+                                                        for input in [&this.dns_tag, &this.dns_address, &this.dns_domains] {
+                                                            input.update(cx, |s, cx| s.set_value("", window, cx));
+                                                        }
+                                                        this.show_dns_form = false;
+                                                        this.sync(cx);
+                                                    })),
+                                            ),
                                     ),
                             ),
                     )
@@ -411,14 +471,14 @@ impl AppView {
                             Button::new("toggle-host-form")
                                 .compact()
                                 .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .primary()
+                                .when(!self.show_host_form, |b| b.primary())
                                 .icon(if self.show_host_form {
                                     IconName::X
                                 } else {
                                     IconName::Plus
                                 })
                                 .label(if self.show_host_form {
-                                    self.tr("收起", "Close")
+                                    self.tr("收起面板", "Collapse")
                                 } else {
                                     self.tr("添加解析", "Add host")
                                 })
@@ -432,44 +492,116 @@ impl AppView {
                     d.child(
                         div()
                             .flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().w(px(240.)).child(Input::new(&self.host_domain)))
-                            .child(div().flex_1().child(Input::new(&self.host_ips)))
+                            .flex_col()
+                            .gap_3()
+                            .p_3()
+                            .rounded_md()
+                            .bg(p.bg)
+                            .border_1()
+                            .border_color(p.border)
                             .child(
-                                Button::new("save-host")
-                                    .compact()
-                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .primary()
-                                    .label(self.tr("保存", "Save"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let domain =
-                                            this.host_domain.read(cx).value().trim().to_string();
-                                        let ips: Vec<String> = this
-                                            .host_ips
-                                            .read(cx)
-                                            .value()
-                                            .split(',')
-                                            .map(|s| s.trim().to_string())
-                                            .filter(|s| !s.is_empty())
-                                            .collect();
-                                        if domain.is_empty() || ips.is_empty() {
-                                            this.service.toast(
-                                                xrose_core::service::ToastLevel::Warning,
-                                                this.tr(
-                                                    "域名与 IP 不能为空",
-                                                    "Domain and IP are required",
-                                                )
-                                                .to_string(),
-                                            );
-                                            return;
-                                        }
-                                        let mut hosts = this.snapshot.model.dns.hosts.clone();
-                                        hosts.insert(domain, ips);
-                                        this.service.set_hosts(hosts);
-                                        this.show_host_form = false;
-                                        this.sync(cx);
-                                    })),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(inline_field_label(&p, self.tr("目标域名", "Domain")))
+                                    .child(
+                                        div()
+                                            .w(px(280.))
+                                            .max_w_full()
+                                            .child(Input::new(&self.host_domain)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(inline_field_label(&p, self.tr("映射地址", "IP addresses")))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .child(Input::new(&self.host_ips)),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(p.border)
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(220.))
+                                            .text_xs()
+                                            .text_color(p.muted_fg)
+                                            .child(self.tr(
+                                                "支持 IPv4 / IPv6 地址，多个地址用逗号分隔",
+                                                "IPv4 or IPv6 addresses, comma-separated",
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_2()
+                                            .flex_shrink_0()
+                                            .child(
+                                                Button::new("cancel-host-form")
+                                                    .compact()
+                                                    .ghost()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                                    .label(self.tr("取消", "Cancel"))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.show_host_form = false;
+                                                        cx.notify();
+                                                    })),
+                                            )
+                                            .child(
+                                                Button::new("save-host")
+                                                    .compact()
+                                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                                    .primary()
+                                                    .label(self.tr("保存解析", "Save mapping"))
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        let domain =
+                                                            this.host_domain.read(cx).value().trim().to_string();
+                                                        let ips: Vec<String> = this
+                                                            .host_ips
+                                                            .read(cx)
+                                                            .value()
+                                                            .split(',')
+                                                            .map(|s| s.trim().to_string())
+                                                            .filter(|s| !s.is_empty())
+                                                            .collect();
+                                                        if domain.is_empty() || ips.is_empty() {
+                                                            this.service.toast(
+                                                                xrose_core::service::ToastLevel::Warning,
+                                                                this.tr(
+                                                                    "域名与 IP 不能为空",
+                                                                    "Domain and IP are required",
+                                                                )
+                                                                .to_string(),
+                                                            );
+                                                            return;
+                                                        }
+                                                        let mut hosts = this.snapshot.model.dns.hosts.clone();
+                                                        hosts.insert(domain, ips);
+                                                        this.service.set_hosts(hosts);
+                                                        for input in [&this.host_domain, &this.host_ips] {
+                                                            input.update(cx, |s, cx| s.set_value("", window, cx));
+                                                        }
+                                                        this.show_host_form = false;
+                                                        this.sync(cx);
+                                                    })),
+                                            ),
+                                    ),
                             ),
                     )
                 })

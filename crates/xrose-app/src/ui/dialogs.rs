@@ -7,14 +7,18 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::dialog::{Dialog, DialogEntrance};
-use gpui_kit::component::input::{Input, Textarea};
+use gpui_kit::component::input::Textarea;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::Node;
 use xrose_core::service::ToastLevel;
 
-use super::{AppView, theme::palette, widgets::ChoiceGroup};
+use super::{
+    AppView,
+    theme::{DIALOG_WIDE, DIALOG_WIDTH, Palette, palette},
+    widgets::{ChoiceGroup, FieldWidth, dialog_field},
+};
 
 /// Shared motion policy for form, detail, and confirmation dialogs.
 pub(super) const DIALOG_ENTRANCE: DialogEntrance = DialogEntrance::SlideDown;
@@ -24,10 +28,12 @@ pub(super) fn dialog_scroll_body(
     max_height: Pixels,
     body: impl IntoElement,
 ) -> Div {
-    // Extend the viewport horizontally and keep vertical padding for top/bottom focus rings.
-    div().mx_neg_1().child(
+    // Pull 12px into the dialog's horizontal padding so the overlay scrollbar sits in
+    // the outer gutter while form controls stay aligned with the title and footer.
+    div().mx_neg_3().child(
         div()
-            .p_1()
+            .px_3()
+            .py_1()
             .max_h(max_height)
             .child(body)
             .overflow_y_scrollbar()
@@ -35,28 +41,71 @@ pub(super) fn dialog_scroll_body(
     )
 }
 
-/// Places settings in a scrollable surface so the close control stays reachable.
-pub(super) fn settings_dialog(
-    dialog: Dialog,
-    title: SharedString,
-    body: impl IntoElement,
-    p: &super::theme::Palette,
-    window: &Window,
-) -> Dialog {
+/// Shared modal shell styling across confirmation, settings, and editor dialogs.
+pub(super) fn dialog_shell(dialog: Dialog, title: SharedString, width: f32, p: &Palette) -> Dialog {
     dialog
         .centered()
-        .w(px(super::theme::DIALOG_WIDE))
+        .w(px(width))
         .bg(p.panel)
         .text_color(p.fg)
         .border_color(p.border)
         .entrance(DIALOG_ENTRANCE)
         .on_ok(|_, _, _| false)
         .title(title)
-        .child(dialog_scroll_body(
-            "settings-dialog-body",
-            window.viewport_size().height * 0.68,
-            body,
-        ))
+}
+
+pub(super) fn dialog_toolbar(p: &Palette, content: impl IntoElement) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .pb_3()
+        .mb_1()
+        .border_b_1()
+        .border_color(p.border)
+        .child(content)
+}
+
+pub(super) fn dialog_footer(p: &Palette, error: Option<String>, actions: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .w_full()
+        .mt_neg_1()
+        .pt_3()
+        .border_t_1()
+        .border_color(p.border)
+        .when_some(error, |d, message| {
+            d.child(super::widgets::form_feedback(message, false, p))
+        })
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .w_full()
+                .child(actions),
+        )
+}
+
+/// Places settings in a scrollable surface so the close control stays reachable.
+pub(super) fn settings_dialog(
+    dialog: Dialog,
+    title: SharedString,
+    body: impl IntoElement,
+    p: &Palette,
+    window: &Window,
+) -> Dialog {
+    dialog_shell(dialog, title, DIALOG_WIDE, p).child(dialog_scroll_body(
+        "settings-dialog-body",
+        window.viewport_size().height * 0.68,
+        body,
+    ))
 }
 
 impl AppView {
@@ -104,53 +153,43 @@ impl AppView {
         let editing = self.editing_node.is_some();
         let p = palette(cx);
         let view = cx.entity().downgrade();
-        let mut dialog = dialog
-            .centered()
-            .w(px(super::theme::DIALOG_WIDE))
-            .bg(p.panel)
-            .text_color(p.fg)
-            .border_color(p.border)
-            .entrance(DIALOG_ENTRANCE)
+        let title = if editing {
+            self.tr("编辑节点", "Edit node")
+        } else if self.show_subscription_form {
+            self.tr("添加订阅", "Add subscription")
+        } else {
+            self.tr("添加节点", "Add node")
+        };
+        let mut dialog = dialog_shell(dialog, title, DIALOG_WIDE, &p)
             .overlay_closable(false)
-            .on_ok(|_, _, _| false)
-            .title(if editing {
-                self.tr("编辑节点", "Edit node")
-            } else if self.show_subscription_form {
-                self.tr("添加订阅", "Add subscription")
-            } else {
-                self.tr("添加节点", "Add node")
-            })
             .on_close(move |_, window, cx| {
                 let _ = view.update(cx, |this, cx| {
                     this.clear_node_editor(window, cx);
                 });
             });
         if !editing {
-            dialog = dialog.child(
-                div().flex().pb_3().child(
-                    ChoiceGroup::new(
-                        "add-node-mode",
-                        vec![
-                            self.tr("链接与二维码", "Links and QR codes"),
-                            self.tr("手动填写", "Enter manually"),
-                        ],
-                        usize::from(self.show_manual_form),
-                    )
-                    .on_change(cx.listener(
-                        |this, index: &usize, window, cx| {
-                            this.show_import_box = *index == 0;
-                            this.show_manual_form = *index == 1;
-                            this.manual_error = None;
-                            if this.show_import_box {
-                                this.import_input.focus_handle(cx).focus(window, cx);
-                            } else if this.show_manual_form {
-                                this.manual_form.server.focus_handle(cx).focus(window, cx);
-                            }
-                            cx.notify();
-                        },
-                    )),
-                ),
-            );
+            dialog = dialog.child(dialog_toolbar(
+                &p,
+                ChoiceGroup::new(
+                    "add-node-mode",
+                    vec![
+                        self.tr("链接与二维码", "Links and QR codes"),
+                        self.tr("手动填写", "Enter manually"),
+                    ],
+                    usize::from(self.show_manual_form),
+                )
+                .on_change(cx.listener(|this, index: &usize, window, cx| {
+                    this.show_import_box = *index == 0;
+                    this.show_manual_form = *index == 1;
+                    this.manual_error = None;
+                    if this.show_import_box {
+                        this.import_input.focus_handle(cx).focus(window, cx);
+                    } else if this.show_manual_form {
+                        this.manual_form.server.focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                })),
+            ));
         }
         if self.show_manual_form && self.show_subscription_form {
             dialog
@@ -158,24 +197,42 @@ impl AppView {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_3()
+                        .gap_2()
                         .pb_1()
-                        .child(Input::new(&self.sub_name))
-                        .child(Input::new(&self.sub_url))
-                        .when_some(self.manual_error.clone(), |d, message| {
-                            d.child(super::widgets::form_feedback(message, false, &p))
-                        }),
+                        .child(dialog_field(
+                            &p,
+                            self.tr("名称（可选）", "Name (optional)"),
+                            &self.sub_name,
+                            FieldWidth::Medium,
+                        ))
+                        .child(dialog_field(
+                            &p,
+                            self.tr("订阅地址", "Subscription URL"),
+                            &self.sub_url,
+                            FieldWidth::Full,
+                        )),
                 )
-                .footer(
+                .footer(dialog_footer(
+                    &p,
+                    self.manual_error.clone(),
                     div()
                         .flex()
+                        .flex_wrap()
                         .justify_end()
                         .gap_2()
                         .child(self.scan_button(cx))
                         .child(
+                            Button::new("cancel-sub-add")
+                                .label(self.tr("取消", "Cancel"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    window.close_dialog(cx);
+                                    this.clear_node_editor(window, cx);
+                                })),
+                        )
+                        .child(
                             Button::new("save-subscription")
                                 .primary()
-                                .label(self.tr("添加", "Add"))
+                                .label(self.tr("添加订阅", "Add subscription"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     let name = this.sub_name.read(cx).value().to_string();
                                     let url = this.sub_url.read(cx).value().to_string();
@@ -196,7 +253,7 @@ impl AppView {
                                     }
                                 })),
                         ),
-                )
+                ))
         } else if self.show_manual_form {
             dialog
                 .child(dialog_scroll_body(
@@ -206,47 +263,70 @@ impl AppView {
                 ))
                 .footer(self.manual_node_footer(cx))
         } else {
-            let p = palette(cx);
             let empty = self.import_input.read(cx).value().trim().is_empty();
             dialog
                 .child(
-                    div().flex().flex_col().gap_3().min_w(px(0.)).pb_1()
-                        .capture_action(cx.listener(|this, _: &gpui_base::input::Paste, window, cx| {
-                            if this.paste_into_import(window,cx) { cx.stop_propagation(); }
-                        }))
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .min_w(px(0.))
+                        .pb_1()
+                        .capture_action(cx.listener(
+                            |this, _: &gpui_base::input::Paste, window, cx| {
+                                if this.paste_into_import(window, cx) {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
                         .child(Textarea::new(&self.import_input))
                         .child(div().text_sm().text_color(p.muted_fg).child(self.tr(
                             "支持 v2rayN、Shadowrocket 分享链接，以及 Clash YAML、SIP008 和 sing-box JSON。",
                             "Supports v2rayN and Shadowrocket share links, Clash YAML, SIP008 and sing-box JSON.",
-                        )))
-                        .when_some(self.manual_error.clone(), |d, error| {
-                            d.child(super::widgets::form_feedback(error,false,&p))
-                        }),
+                        ))),
                 )
-                .footer(
-                    div().flex().flex_wrap().justify_end().gap_2()
+                .footer(dialog_footer(
+                    &p,
+                    self.manual_error.clone(),
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap_2()
                         .child(self.scan_button(cx))
-                        .child(Button::new("import-clipboard")
-                            .icon(IconName::ClipboardPaste)
-                            .label(self.tr("从剪贴板粘贴", "Paste from clipboard"))
-                            .tooltip(if cfg!(target_os = "macos") { "⌘V" } else { "Ctrl+V" })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.paste_into_import(window,cx);
-                            })))
-                        .child(Button::new("cancel-import")
-                            .label(self.tr("取消", "Cancel"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                window.close_dialog(cx);
-                                this.clear_node_editor(window, cx);
-                            })))
-                        .child(Button::new("import-link")
-                            .primary().disabled(empty || self.import_busy).loading(self.import_busy)
-                            .label(self.tr("导入", "Import"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let content = this.import_input.read(cx).value().to_string();
-                                this.submit_editor_content(content,window,cx);
-                            }))),
-                )
+                        .child(
+                            Button::new("import-clipboard")
+                                .icon(IconName::ClipboardPaste)
+                                .label(self.tr("从剪贴板粘贴", "Paste from clipboard"))
+                                .tooltip(if cfg!(target_os = "macos") {
+                                    "⌘V"
+                                } else {
+                                    "Ctrl+V"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.paste_into_import(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-import")
+                                .label(self.tr("取消", "Cancel"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    window.close_dialog(cx);
+                                    this.clear_node_editor(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("import-link")
+                                .primary()
+                                .disabled(empty || self.import_busy)
+                                .loading(self.import_busy)
+                                .label(self.tr("导入", "Import"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    let content = this.import_input.read(cx).value().to_string();
+                                    this.submit_editor_content(content, window, cx);
+                                })),
+                        ),
+                ))
         }
     }
 
@@ -293,14 +373,7 @@ impl AppView {
             let available = (window.viewport_size().width - px(96.)).min(px(360.));
             let module_size = (f32::from(available) / modules as f32).floor().max(1.);
             let size = px(module_size * modules as f32);
-            dialog
-                .centered()
-                .w(px(440.))
-                .bg(p.panel)
-                .text_color(p.fg)
-                .border_color(p.border)
-                .entrance(DIALOG_ENTRANCE)
-                .title(title.clone())
+            dialog_shell(dialog, title.clone(), DIALOG_WIDTH, &p)
                 .child(
                     div()
                         .flex()
@@ -317,7 +390,9 @@ impl AppView {
                         )
                         .child(img(qr.clone()).w(size).h(size)),
                 )
-                .footer(
+                .footer(dialog_footer(
+                    &p,
+                    None,
                     div()
                         .flex()
                         .flex_wrap()
@@ -334,7 +409,7 @@ impl AppView {
                                 .label(close.clone())
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         ),
-                )
+                ))
         });
     }
 }

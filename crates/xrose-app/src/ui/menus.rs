@@ -1092,7 +1092,7 @@ impl AppView {
             if let Some((title, description)) = confirmation {
                 let view = cx.entity().downgrade();
                 let cancel = self.tr("取消", "Cancel");
-                let panel = super::theme::palette(cx).panel;
+                let p = super::theme::palette(cx);
                 window.open_alert_dialog(cx, move |dialog, _, _| {
                     let view = view.clone();
                     let command = command.clone();
@@ -1101,7 +1101,9 @@ impl AppView {
                         .entrance(super::dialogs::DIALOG_ENTRANCE)
                         .centered()
                         .w(px(super::theme::DIALOG_WIDTH))
-                        .bg(panel)
+                        .bg(p.panel)
+                        .text_color(p.fg)
+                        .border_color(p.border)
                         .title(title.clone())
                         .description(description.clone())
                         .ok_text(title.clone())

@@ -3,7 +3,7 @@ use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
@@ -41,13 +41,19 @@ impl AppView {
                     .flex_col()
                     .gap_2()
                     .pb_1()
-                    .child(this.tr("名称", "Name"))
-                    .child(Input::new(&name))
-                    .child(this.tr("订阅地址", "Subscription URL"))
-                    .child(Input::new(&url))
-                    .when_some(error.read(cx).clone(), |d, message| {
-                        d.child(form_feedback(message, false, &p))
-                    });
+                    .child(dialog_field(
+                        &p,
+                        this.tr("名称（可选）", "Name (optional)"),
+                        &name,
+                        FieldWidth::Medium,
+                    ))
+                    .child(dialog_field(
+                        &p,
+                        this.tr("订阅地址", "Subscription URL"),
+                        &url,
+                        FieldWidth::Full,
+                    ));
+                let dialog_error = error.read(cx).clone();
                 let (name, url, id, error) = (name.clone(), url.clone(), id.clone(), error.clone());
                 super::dialogs::settings_dialog(
                     dialog,
@@ -56,20 +62,21 @@ impl AppView {
                     &p,
                     window,
                 )
-                .footer(
+                .overlay_closable(false)
+                .footer(super::dialogs::dialog_footer(
+                    &p,
+                    dialog_error,
                     div()
                         .flex()
                         .justify_end()
                         .gap_2()
                         .child(
                             Button::new("cancel-sub-edit")
-                                .compact()
                                 .label(this.tr("取消", "Cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("save-sub-edit")
-                                .compact()
                                 .primary()
                                 .label(this.tr("保存", "Save"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -89,7 +96,7 @@ impl AppView {
                                     }
                                 })),
                         ),
-                )
+                ))
             })
         });
     }

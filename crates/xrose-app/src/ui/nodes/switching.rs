@@ -1,9 +1,9 @@
 //! Live, per-group automatic switching settings.
 use super::*;
-use crate::ui::dialogs::settings_dialog;
+use crate::ui::dialogs::{dialog_footer, settings_dialog};
 use gpui_kit::component::WindowExt;
+use std::collections::BTreeMap;
 use xrose_core::model::{FallbackScope, GroupKind, NodeSwitchPolicy, OutboundGroup, SwitchMode};
-use xrose_core::service::ToastLevel;
 
 const MODES: [SwitchMode; 4] = [
     SwitchMode::Off,
@@ -11,6 +11,27 @@ const MODES: [SwitchMode; 4] = [
     SwitchMode::Latency,
     SwitchMode::Throughput,
 ];
+
+struct SwitchDialogState {
+    selected_group_id: String,
+    drafts: BTreeMap<String, (NodeSwitchPolicy, u64)>,
+    error: Option<String>,
+}
+
+fn changed_switch_policies(
+    groups: &[OutboundGroup],
+    drafts: &BTreeMap<String, (NodeSwitchPolicy, u64)>,
+) -> Vec<(String, NodeSwitchPolicy, u64)> {
+    groups
+        .iter()
+        .filter_map(|group| {
+            let (policy, interval) = drafts.get(&group.id)?;
+            let changed =
+                *policy != group.switch_policy || *interval != group.interval_secs.max(30);
+            changed.then(|| (group.id.clone(), *policy, *interval))
+        })
+        .collect()
+}
 
 impl AppView {
     pub(in crate::ui) fn outbound_group_label(&self, group: &OutboundGroup) -> SharedString {
@@ -25,7 +46,24 @@ impl AppView {
         let Some(initial) = self.snapshot.model.default_group_id() else {
             return;
         };
-        let selection = cx.new(|_| initial);
+        let drafts = self
+            .snapshot
+            .model
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    group.id.clone(),
+                    (group.switch_policy, group.interval_secs.max(30)),
+                )
+            })
+            .collect();
+        let editor = cx.new(|_| SwitchDialogState {
+            selected_group_id: initial,
+            drafts,
+            error: None,
+        });
+        let profile = self.snapshot.active_profile.clone();
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
             let Some(view) = view.upgrade() else {
@@ -33,8 +71,24 @@ impl AppView {
             };
             view.update(cx, |this, cx| {
                 let p = palette(cx);
-                let body = match this.snapshot.model.group(selection.read(cx)) {
-                    Some(group) => this.node_switch_controls(group, selection.clone(), &p, cx),
+                let busy = this_busy(&this.snapshot.busy, "core");
+                let state = editor.read(cx);
+                let selected_id = state.selected_group_id.clone();
+                let dialog_error = state.error.clone();
+                let group = this
+                    .snapshot
+                    .model
+                    .group(&selected_id)
+                    .cloned()
+                    .map(|mut g| {
+                        if let Some((policy, interval)) = state.drafts.get(&g.id) {
+                            g.switch_policy = *policy;
+                            g.interval_secs = *interval;
+                        }
+                        g
+                    });
+                let body = match group {
+                    Some(group) => this.node_switch_controls(&group, editor.clone(), &p, cx),
                     None => empty_hint(
                         &p,
                         this.tr(
@@ -44,6 +98,54 @@ impl AppView {
                     )
                     .into_any_element(),
                 };
+                let save_editor = editor.clone();
+                let profile = profile.clone();
+                let actions = div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("cancel-node-switch")
+                            .label(this.tr("取消", "Cancel"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("save-node-switch")
+                            .primary()
+                            .label(this.tr("保存", "Save"))
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let result = if this.snapshot.active_profile != profile {
+                                    Err(xrose_core::error::Error::config(
+                                        this.tr(
+                                            "当前配置已切换，请重新打开后编辑",
+                                            "Configuration changed. Reopen to edit.",
+                                        )
+                                        .to_string(),
+                                    ))
+                                } else {
+                                    let updates = changed_switch_policies(
+                                        &this.snapshot.model.groups,
+                                        &save_editor.read(cx).drafts,
+                                    );
+                                    updates.into_iter().try_for_each(|(id, policy, interval)| {
+                                        this.service.set_node_switch_policy(&id, policy, interval)
+                                    })
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        this.sync(cx);
+                                        window.close_dialog(cx);
+                                    }
+                                    Err(err) => {
+                                        save_editor.update(cx, |state, _| {
+                                            state.error = Some(err.to_string());
+                                        });
+                                        cx.notify();
+                                    }
+                                }
+                            })),
+                    );
                 settings_dialog(
                     dialog,
                     this.tr("自动切换设置", "Auto-switch settings"),
@@ -51,6 +153,8 @@ impl AppView {
                     &p,
                     window,
                 )
+                .overlay_closable(false)
+                .footer(dialog_footer(&p, dialog_error, actions))
             })
         });
     }
@@ -58,14 +162,15 @@ impl AppView {
     fn node_switch_controls(
         &self,
         group: &OutboundGroup,
-        selection: Entity<String>,
+        editor: Entity<SwitchDialogState>,
         p: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let controls = div().flex().flex_col().gap_3();
+        let mut controls = div().flex().flex_col().gap_2().pb_1();
         let groups = &self.snapshot.model.groups;
-        let controls = controls.when(groups.len() > 1, |d| {
+        if groups.len() > 1 {
             let ids: Vec<_> = groups.iter().map(|g| g.id.clone()).collect();
+            let group_editor = editor.clone();
             let choices = ChoiceGroup::new(
                 "switch-policy-group",
                 groups
@@ -74,39 +179,38 @@ impl AppView {
                     .collect(),
                 groups.iter().position(|g| g.id == group.id),
             )
+            .small()
             .on_change(cx.listener(move |this, index: &usize, _, cx| {
                 let id = &ids[*index];
                 if this.snapshot.model.group(id).is_some() {
-                    selection.update(cx, |selected, _| *selected = id.clone());
+                    group_editor.update(cx, |state, _| {
+                        state.selected_group_id = id.clone();
+                        state.error = None;
+                    });
                     cx.notify();
                 }
             }));
-            d.child(
-                self.policy_row(self.tr("配置出站组", "Configure group"), p)
-                    .child(choices),
-            )
-        });
+            controls = controls.child(dialog_control_row(
+                p,
+                self.tr("配置出站组", "Configure group"),
+                "",
+                choices,
+            ));
+        }
         let id = group.id.clone();
         controls
             .child(self.node_policy_fields(
                 group,
-                move |this, policy, interval, cx| {
-                    this.save_node_switch(&id, policy, interval, cx);
+                move |_, policy, interval, cx| {
+                    editor.update(cx, |state, _| {
+                        state.drafts.insert(id.clone(), (policy, interval));
+                        state.error = None;
+                    });
+                    cx.notify();
                 },
                 cx,
             ))
             .into_any_element()
-    }
-
-    fn policy_row(&self, label: SharedString, p: &Palette) -> Div {
-        div().flex().flex_wrap().items_center().gap_2().child(
-            div()
-                .w(px(crate::ui::theme::SETTING_LABEL_WIDTH))
-                .flex_shrink_0()
-                .text_xs()
-                .text_color(p.muted_fg)
-                .child(label),
-        )
     }
 
     pub(super) fn node_policy_fields(
@@ -134,6 +238,7 @@ impl AppView {
             ],
             MODES.iter().position(|m| *m == mode),
         )
+        .small()
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
             mode_handler(
@@ -146,16 +251,6 @@ impl AppView {
                 cx,
             );
         }));
-        let mut controls = div().flex().flex_col().gap_3().child(
-            self.policy_row(self.tr("自动切换", "Auto switch"), &p)
-                .child(modes),
-        );
-        if mode == SwitchMode::GroupDefault {
-            controls = controls.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
-                "此组沿用导入的负载均衡设置。选择切换模式可更改策略。",
-                "This group uses imported load balancing. Choose a mode to change its policy.",
-            )));
-        }
         let policy = NodeSwitchPolicy { mode, ..policy };
         let scopes = [
             FallbackScope::Group,
@@ -172,6 +267,7 @@ impl AppView {
             ],
             scopes.iter().position(|s| *s == policy.fallback),
         )
+        .small()
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
             scope_handler(
@@ -195,6 +291,7 @@ impl AppView {
             counts.iter().map(|n| n.to_string().into()).collect(),
             counts.iter().position(|n| *n == count),
         )
+        .small()
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
             count_handler(
@@ -218,56 +315,114 @@ impl AppView {
             intervals.iter().map(|s| format!("{s} s").into()).collect(),
             intervals.iter().position(|s| *s == interval),
         )
+        .small()
         .disabled(disabled)
         .on_change(cx.listener(move |this, i: &usize, _, cx| {
             on_change(this, policy, intervals[*i], cx);
         }));
-        let row = |label| self.policy_row(label, &p);
-        let note = |label: SharedString| div().text_xs().text_color(p.muted_fg).child(label);
-        let explanation = if mode == SwitchMode::Off {
+        let mode_note = if mode == SwitchMode::GroupDefault {
+            self.tr(
+                "此组沿用导入的负载均衡设置。选择切换模式可更改策略。",
+                "This group uses imported load balancing. Choose a mode to change its policy.",
+            )
+        } else if mode == SwitchMode::Throughput {
+            self.tr(
+                "每轮每个节点最多下载 1 MiB，下载速度至少提高 10% 时切换。",
+                "Each round downloads up to 1 MiB per node. Switching requires a speed gain of at least 10%.",
+            )
+        } else if mode == SwitchMode::Off {
             self.tr(
                 "启用自动切换后使用这些条件。",
                 "These conditions take effect when auto switch is enabled.",
             )
         } else if group.managed() {
-            self.tr("仅检查路由使用的出站组。切换时会重载内核，现有连接将中断。",
-                "Only groups used by routing are checked. Reloading the core interrupts active connections.")
+            self.tr(
+                "仅检查路由使用的出站组。切换时会重载内核，现有连接将中断。",
+                "Only groups used by routing are checked. Reloading the core interrupts active connections.",
+            )
         } else {
-            self.tr("此组沿用内核测速。修改回退条件或检查间隔后，将使用这里设置的条件。",
-                "This group uses native latency checks. Editing a fallback condition or the interval enables the settings shown here.")
+            self.tr(
+                "此组沿用内核测速。修改回退条件或检查间隔后，将使用这里设置的条件。",
+                "This group uses native latency checks. Editing a fallback condition or the interval enables the settings shown here.",
+            )
         };
-        controls
-            .child(row(self.tr("故障回退范围", "Fallback scope")).child(scope))
-            .child(row(self.tr("连续失败次数", "Consecutive failures")).child(failures))
-            .child(row(self.tr("检查间隔", "Check interval")).child(timing))
-            .child(note(explanation))
-            .when(mode == SwitchMode::Throughput, |d| {
-                d.child(note(self.tr(
-                    "每轮每个节点最多下载 1 MiB，下载速度至少提高 10% 时切换。",
-                    "Each round downloads up to 1 MiB per node. Switching requires a speed gain of at least 10%.",
-                )))
-            })
-            .when(policy.fallback == FallbackScope::SameRegion, |d| {
-                d.child(note(self.tr(
-                    "按服务器 IP 匹配国家或地区，归属地未知时跳过。",
-                    "Regions are matched by server IP. Nodes with an unknown region are skipped.",
-                )))
-            })
-            .when(group.managed() && this_busy(&self.snapshot.busy, "auto-probe"), |d| {
-                d.child(note(self.tr("正在检查节点…", "Checking nodes…")))
-            })
+        let scope_note = if policy.fallback == FallbackScope::SameRegion {
+            self.tr(
+                "按服务器 IP 匹配国家或地区，归属地未知时跳过。",
+                "Regions are matched by server IP. Nodes with an unknown region are skipped.",
+            )
+        } else {
+            "".into()
+        };
+        let interval_note = if group.managed() && this_busy(&self.snapshot.busy, "auto-probe") {
+            self.tr("正在检查节点…", "Checking nodes…")
+        } else {
+            "".into()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(dialog_control_row(
+                &p,
+                self.tr("自动切换", "Auto switch"),
+                mode_note,
+                modes,
+            ))
+            .child(dialog_control_row(
+                &p,
+                self.tr("故障回退范围", "Fallback scope"),
+                scope_note,
+                scope,
+            ))
+            .child(dialog_control_row(
+                &p,
+                self.tr("连续失败次数", "Consecutive failures"),
+                "",
+                failures,
+            ))
+            .child(dialog_control_row(
+                &p,
+                self.tr("检查间隔", "Check interval"),
+                interval_note,
+                timing,
+            ))
     }
+}
 
-    fn save_node_switch(
-        &mut self,
-        group: &str,
-        policy: NodeSwitchPolicy,
-        interval: u64,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(err) = self.service.set_node_switch_policy(group, policy, interval) {
-            self.service.toast(ToastLevel::Error, err.to_string());
-        }
-        self.sync(cx);
+#[cfg(test)]
+mod tests {
+    use super::changed_switch_policies;
+    use std::collections::BTreeMap;
+    use xrose_core::model::{
+        FallbackScope, GroupKind, NodeSwitchPolicy, OutboundGroup, SwitchMode,
+    };
+
+    #[test]
+    fn changed_switch_policies_returns_only_modified_groups() {
+        let mut a = OutboundGroup::new("A", GroupKind::Selector);
+        a.id = "a".into();
+        a.switch_policy = NodeSwitchPolicy {
+            mode: SwitchMode::Off,
+            fallback: FallbackScope::Group,
+            consecutive_failures: 2,
+        };
+        a.interval_secs = 300;
+
+        let mut b = OutboundGroup::new("B", GroupKind::Selector);
+        b.id = "b".into();
+        b.switch_policy = NodeSwitchPolicy {
+            mode: SwitchMode::Failover,
+            fallback: FallbackScope::SameSubscription,
+            consecutive_failures: 1,
+        };
+        b.interval_secs = 15; // Below minimum 30s normalized in dialog drafts.
+
+        let mut drafts = BTreeMap::new();
+        drafts.insert("a".into(), (a.switch_policy, 60));
+        drafts.insert("b".into(), (b.switch_policy, 30));
+
+        let updates = changed_switch_policies(&[a.clone(), b], &drafts);
+        assert_eq!(updates, vec![("a".into(), a.switch_policy, 60)]);
     }
 }

@@ -30,33 +30,90 @@ impl AppView {
         window.open_dialog(cx, move |dialog, window, cx| {
             let p = palette(cx);
             let tr = |zh, en| super::tr(lang, zh, en);
-            let form = div().flex().flex_col().gap_2().pb_1()
-                .child(tr("下载目录或 URL 模板", "Download directory or URL template"))
-                .child(Input::new(&input))
-                .child(div().text_xs().text_color(p.muted_fg).child(tr(
-                    "目录下按 {tag}.srs 下载。模板可使用 {tag}（geoip-cn）、{kind}（geoip）和 {name}（cn）。单独指定地址的规则集保留原来源。",
-                    "A directory serves {tag}.srs. Templates accept {tag} (geoip-cn), {kind} (geoip), and {name} (cn). Individually configured URLs are kept.",
-                )))
-                .when_some(error.read(cx).clone(), |d, e| d.child(form_feedback(e, false, &p)));
+            let form = div().flex().flex_col().gap_2().pb_1().child(
+                dialog_field_with_desc(
+                    &p,
+                    tr("规则源地址", "Source URL or dir"),
+                    tr(
+                        "目录下按 {tag}.srs 下载。模板可使用 {tag}（geoip-cn）、{kind}（geoip）和 {name}（cn）。单独指定地址的规则集保留原来源。",
+                        "A directory serves {tag}.srs. Templates accept {tag} (geoip-cn), {kind} (geoip), and {name} (cn). Individually configured URLs are kept.",
+                    ),
+                    &input,
+                    FieldWidth::Full,
+                ),
+            );
+            let dialog_error = error.read(cx).clone();
             let (input, error, view) = (input.clone(), error.clone(), view.clone());
             let focus = input.read(cx).focus_handle(cx);
-            super::dialogs::settings_dialog(dialog, tr("自定义规则源", "Custom rule set source"), form, &p, window)
-                .footer(div().flex().justify_end().gap_2()
-                    .child(Button::new("rule-set-source-cancel").compact().label(tr("取消","Cancel")).on_click(|_,w,cx| w.close_dialog(cx)))
-                    .child(Button::new("rule-set-source-save").compact().primary().label(tr("保存并使用","Save and use")).on_click(move |_, w, cx| {
-                        focus.dispatch_action(&gpui_kit::component::dialog::Confirm { secondary: false }, w, cx);
-                    })))
-                .on_ok(move |_, _, cx| view.update(cx, |this, cx| {
+            super::dialogs::settings_dialog(
+                dialog,
+                tr("自定义规则源", "Custom rule set source"),
+                form,
+                &p,
+                window,
+            )
+            .overlay_closable(false)
+            .footer(super::dialogs::dialog_footer(
+                &p,
+                dialog_error,
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("rule-set-source-cancel")
+                            .label(tr("取消", "Cancel"))
+                            .on_click(|_, w, cx| w.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("rule-set-source-save")
+                            .primary()
+                            .label(tr("保存并使用", "Save and use"))
+                            .on_click(move |_, w, cx| {
+                                focus.dispatch_action(
+                                    &gpui_kit::component::dialog::Confirm { secondary: false },
+                                    w,
+                                    cx,
+                                );
+                            }),
+                    ),
+            ))
+            .on_ok(move |_, _, cx| {
+                view.update(cx, |this, cx| {
                     let value = input.read(cx).value();
                     let result = xrose_core::model::route::rule_set_source_template(&value)
-                        .map_err(|_| this.tr("请输入有效的 HTTP(S) 目录地址或模板。变量仅可用于路径，地址不能包含认证信息、查询参数或片段。",
-                            "Enter a valid HTTP(S) directory or template. Use placeholders only in the path and omit credentials, query strings, and fragments.").to_string())
-                        .and_then(|template| this.service.set_rule_set_source(xrose_core::model::RuleSetSource::Custom, Some(&template)).map_err(|e| e.to_string()));
+                        .map_err(|_| {
+                            this.tr(
+                                "请输入有效的 HTTP(S) 目录地址或模板。变量仅可用于路径，地址不能包含认证信息、查询参数或片段。",
+                                "Enter a valid HTTP(S) directory or template. Use placeholders only in the path and omit credentials, query strings, and fragments.",
+                            )
+                            .to_string()
+                        })
+                        .and_then(|template| {
+                            this.service
+                                .set_rule_set_source(
+                                    xrose_core::model::RuleSetSource::Custom,
+                                    Some(&template),
+                                )
+                                .map_err(|e| e.to_string())
+                        });
                     match result {
-                        Ok(()) => { this.sync(cx); true }
-                        Err(e) => { error.update(cx, |error, cx| { *error = Some(e); cx.notify(); }); cx.notify(); false }
+                        Ok(()) => {
+                            this.sync(cx);
+                            true
+                        }
+                        Err(e) => {
+                            error.update(cx, |error, cx| {
+                                *error = Some(e);
+                                cx.notify();
+                            });
+                            cx.notify();
+                            false
+                        }
                     }
-                }).unwrap_or(false))
+                })
+                .unwrap_or(false)
+            })
         });
     }
 
@@ -83,7 +140,7 @@ impl AppView {
         });
         let error = cx.new(|_| None::<SharedString>);
         let view = cx.entity().downgrade();
-        window.open_dialog(cx, move |dialog, window, cx| {
+        window.open_dialog(cx, move |dialog, _window, cx| {
             let Some(view) = view.upgrade() else {
                 return dialog;
             };
@@ -94,36 +151,42 @@ impl AppView {
                 let failure = error.clone();
                 let editing_id = group_id.clone();
                 let save_view = cx.entity().downgrade();
-                super::dialogs::settings_dialog(
+                let dialog_error = error.read(cx).as_ref().map(ToString::to_string);
+                super::dialogs::dialog_shell(
                     dialog,
                     this.tr("重命名分组", "Rename group"),
+                    super::theme::DIALOG_WIDTH,
+                    &p,
+                )
+                .overlay_closable(false)
+                .child(
                     div()
                         .flex()
                         .flex_col()
                         .gap_2()
                         .pb_1()
-                        .child(Input::new(&name))
-                        .when_some(error.read(cx).clone(), |d, message| {
-                            d.child(div().text_sm().text_color(p.danger_text).child(message))
-                        }),
-                    &p,
-                    window,
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(p.muted_fg)
+                                .child(this.tr("分组名称", "Group name")),
+                        )
+                        .child(Input::new(&name)),
                 )
-                .w(px(super::theme::DIALOG_WIDTH))
-                .footer(
+                .footer(super::dialogs::dialog_footer(
+                    &p,
+                    dialog_error,
                     div()
                         .flex()
                         .justify_end()
                         .gap_2()
                         .child(
                             Button::new("cancel-rule-group")
-                                .compact()
                                 .label(this.tr("取消", "Cancel"))
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
                             Button::new("save-rule-group")
-                                .compact()
                                 .primary()
                                 .label(this.tr("保存", "Save"))
                                 .on_click(move |_, window, cx| {
@@ -134,7 +197,7 @@ impl AppView {
                                     );
                                 }),
                         ),
-                )
+                ))
                 .on_ok(move |_, _, cx| {
                     save_view
                         .update(cx, |this, cx| {
@@ -979,15 +1042,7 @@ impl AppView {
                 .unwrap_or_else(|| self.tr("请重新选择", "Select again")),
             None => self.tr("默认出站组", "Default outbound group"),
         };
-        let field_label = |text: SharedString| {
-            div()
-                .w(px(64.))
-                .flex_shrink_0()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.muted_fg)
-                .child(text)
-        };
+        let field_label = |text: SharedString| inline_field_label(p, text);
 
         div()
             .flex()

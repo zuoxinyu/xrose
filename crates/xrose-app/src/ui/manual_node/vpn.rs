@@ -1,6 +1,7 @@
 //! Client VPN form controls. Hidden advanced imported options survive normal edits.
 
-use super::{AppView, FieldWidth, Palette, field, field_with_desc, textarea_field};
+use super::super::widgets::{FieldWidth, dialog_field, dialog_field_with_desc};
+use super::{AppView, Palette, textarea_field};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use xrose_core::model::{NodeDraft, OpenConnectOptions, OpenVpnOptions, Protocol, VpnCertificates};
@@ -233,14 +234,14 @@ impl VpnForm {
                 ),
             ]
         } else {
-            form = form.child(field_with_desc(
+            form = form.child(dialog_field_with_desc(
                 p,
                 tr("类型", "Flavor"),
                 tr(
                     "支持 anyconnect / gp / fortinet / f5 / pulse / nc。",
                     "Supports anyconnect / gp / fortinet / f5 / pulse / nc.",
                 ),
-                self.flavor.clone(),
+                &self.flavor,
                 FieldWidth::Medium,
             ));
             vec![
@@ -272,19 +273,19 @@ impl VpnForm {
             ]
         };
         for (label, input, width) in fields {
-            form = form.child(field(p, label, input, width));
+            form = form.child(dialog_field(p, label, &input, width));
         }
         form = form
-            .child(field(
+            .child(dialog_field(
                 p,
                 tr("MTU（0 为自动）", "MTU (0 = auto)"),
-                self.mtu.clone(),
+                &self.mtu,
                 FieldWidth::Compact,
             ))
-            .child(field(
+            .child(dialog_field(
                 p,
                 tr("服务器指纹（可选）", "Peer fingerprints (optional)"),
-                self.fingerprints.clone(),
+                &self.fingerprints,
                 FieldWidth::Full,
             ));
         for (label, input) in [
@@ -320,10 +321,10 @@ impl VpnForm {
                 &self.control_key,
             ));
         } else {
-            form = form.child(field(
+            form = form.child(dialog_field(
                 p,
                 tr("私钥密码（可选）", "Private key password (optional)"),
-                self.key_password.clone(),
+                &self.key_password,
                 FieldWidth::Full,
             ));
         }
