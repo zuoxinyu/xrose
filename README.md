@@ -108,7 +108,27 @@ Xrose 提供三种独立工作模式，切换时完整保留原有节点、出�
 
 ## 快速开始
 
-前往本仓库 GitHub **Releases** 页面下载对应平台与架构的安装包（可对照 `SHA256SUMS` 校验完整性）：
+### 使用包管理器安装
+
+**macOS（Homebrew）**
+
+```bash
+brew tap zuoxinyu/tap
+brew install --cask zuoxinyu/tap/xrose
+```
+
+**Windows（Scoop）**
+
+```powershell
+scoop bucket add xrose https://github.com/zuoxinyu/scoop-bucket
+scoop install xrose/xrose
+```
+
+两种方式均安装 **full 包**。
+
+### 手动下载安装
+
+前往 [GitHub Releases](https://github.com/zuoxinyu/xrose/releases) 下载对应平台与架构的安装包，可对照 `SHA256SUMS` 校验完整性。
 
 - **full 包**：内置 `sing-box` 内核、预置规则集与 `xrose-cli`，推荐初次安装下载，开箱即用。
 - **lite 包**：仅含应用更新文件，适合已有内核与规则集的环境升级。各平台包格式与安装细节见[发布说明](docs/RELEASE.md)。
