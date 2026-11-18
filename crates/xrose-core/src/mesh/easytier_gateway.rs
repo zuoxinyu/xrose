@@ -318,6 +318,17 @@ pub(super) async fn authenticate(socket: &mut TcpStream, password: &str) -> std:
     socket.write_all(&[1, 0]).await
 }
 
+fn is_routable_target(addr: &SocketAddr) -> bool {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let [a, b, ..] = v4.ip().octets();
+            // Reject host TUN FakeIP addresses (198.18.0.0/15) leaked via host DNS.
+            !(a == 198 && (b & 0xfe) == 18)
+        }
+        SocketAddr::V6(_) => false,
+    }
+}
+
 async fn read_target(socket: &mut TcpStream) -> std::io::Result<SocketAddr> {
     let ip = match socket.read_u8().await? {
         1 => {
@@ -335,12 +346,16 @@ async fn read_target(socket: &mut TcpStream) -> std::io::Result<SocketAddr> {
             // policy. Keep SOCKS clients with domain requests interoperable.
             return tokio::net::lookup_host((name.as_str(), port))
                 .await?
-                .find(SocketAddr::is_ipv4)
+                .find(is_routable_target)
                 .ok_or_else(invalid);
         }
         _ => return Err(invalid()),
     };
-    Ok(SocketAddr::new(ip, socket.read_u16().await?))
+    let addr = SocketAddr::new(ip, socket.read_u16().await?);
+    if !is_routable_target(&addr) {
+        return Err(invalid());
+    }
+    Ok(addr)
 }
 
 async fn serve(
@@ -441,7 +456,12 @@ fn decode_udp(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
 }
 
 async fn udp_destination(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
-    if let Some(destination) = decode_udp(data) {
+    let destination = match decode_udp(data) {
+        Some(destination) if is_routable_target(&destination.0) => Some(destination),
+        Some(_) => None,
+        None => None,
+    };
+    if let Some(destination) = destination {
         return Some(destination);
     }
     if data.len() < 7 || data[..4] != [0, 0, 0, 3] {
@@ -460,7 +480,7 @@ async fn udp_destination(data: &[u8]) -> Option<(SocketAddr, &[u8])> {
     .await
     .ok()?
     .ok()?;
-    Some((addresses.find(SocketAddr::is_ipv4)?, &data[end + 2..]))
+    Some((addresses.find(is_routable_target)?, &data[end + 2..]))
 }
 
 #[cfg(test)]
