@@ -54,6 +54,7 @@ EOF
   export GIT_TERMINAL_PROMPT=0
 fi
 
+source_dir="$PWD"
 repo_dir="$workdir/repo"
 git clone --depth 1 "$remote" "$repo_dir"
 cd "$repo_dir"
@@ -75,6 +76,10 @@ for mapping in "${mappings[@]}"; do
   if [[ -z "$src" || -z "$dst" || "$src" == "$mapping" ]]; then
     echo "无效的文件映射：$mapping（需要 <源路径>:<目标相对路径>）" >&2
     exit 2
+  fi
+  # Relative source paths are based on the caller's directory, not the clone.
+  if [[ "$src" != /* ]]; then
+    src="$source_dir/$src"
   fi
   mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst"
