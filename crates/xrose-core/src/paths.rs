@@ -133,10 +133,30 @@ impl AppPaths {
     }
 }
 
+fn resolve_instance_path(path: &Path) -> PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut tail = Vec::new();
+    let mut current: &Path = &abs;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if let Ok(mut canon_parent) = std::fs::canonicalize(parent) {
+            for name in tail.into_iter().rev() {
+                canon_parent.push(name);
+            }
+            return canon_parent;
+        }
+        current = parent;
+    }
+    abs
+}
+
 fn normalize_instance_path(path: &Path) -> String {
-    let resolved = std::fs::canonicalize(path)
-        .or_else(|_| std::path::absolute(path))
-        .unwrap_or_else(|_| path.to_path_buf());
+    let resolved = resolve_instance_path(path);
     #[cfg(windows)]
     {
         let raw = resolved.to_string_lossy().replace('/', "\\");
