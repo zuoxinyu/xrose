@@ -144,6 +144,8 @@ pub struct PlatformInfo {
     pub mesh_protocol: u32,
     #[serde(default)]
     pub helper_running_mesh_protocol: Option<u32>,
+    #[serde(default)]
+    pub database_schema: i64,
     pub log_dir: String,
     pub data_dir: String,
 }
@@ -206,6 +208,10 @@ pub struct UiSnapshot {
     #[serde(default)]
     pub traffic_statistics: Arc<crate::traffic_statistics::TrafficStatisticsView>,
     pub latency: BTreeMap<String, LatencyEntry>,
+    #[serde(default)]
+    pub node_health: Arc<BTreeMap<String, crate::runtime::health::NodeHealthView>>,
+    #[serde(default)]
+    pub probe_budget_used_bytes: u64,
     #[serde(default)]
     pub downloads: BTreeMap<String, crate::runtime::probe::DownloadResult>,
     #[serde(default)]
@@ -394,6 +400,10 @@ struct Inner {
     )>,
     proxies: RwLock<Arc<BTreeMap<String, ClashProxy>>>,
     latency: RwLock<BTreeMap<String, LatencyEntry>>,
+    health: Mutex<crate::runtime::health::HealthEngine>,
+    health_views: RwLock<Arc<BTreeMap<String, crate::runtime::health::NodeHealthView>>>,
+    probe_budget_used: AtomicU64,
+    probe_budget_day: Mutex<String>,
     downloads: RwLock<BTreeMap<String, crate::runtime::probe::DownloadResult>>,
     node_locations: RwLock<BTreeMap<String, NodeLocation>>,
     busy: RwLock<BTreeSet<String>>,
@@ -500,6 +510,14 @@ impl AppService {
         let statistics =
             traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
         let rule_set_updates = updates::cached_rule_set_updates(&paths.rule_sets_dir());
+        let now = now_unix();
+        let mut health_engine = crate::runtime::health::HealthEngine::new();
+        if let Ok((samples, buckets, reachability)) = store.load_health_snapshot(now) {
+            health_engine.load_persisted(samples, buckets, reachability, now);
+        }
+        let initial_health_views = Arc::new(health_engine.build_all_views(now));
+        let budget_day = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let probe_budget_used = store.probe_budget_usage(&budget_day);
         let inner = Arc::new(Inner {
             local_binaries: Default::default(),
             statistics,
@@ -527,6 +545,10 @@ impl AppService {
             rate_tracker: Default::default(),
             proxies: Default::default(),
             latency: RwLock::new(latency),
+            health: Mutex::new(health_engine),
+            health_views: RwLock::new(initial_health_views),
+            probe_budget_used: AtomicU64::new(probe_budget_used),
+            probe_budget_day: Mutex::new(budget_day),
             downloads: RwLock::new(BTreeMap::new()),
             node_locations: RwLock::new(BTreeMap::new()),
             busy: RwLock::new(BTreeSet::new()),
@@ -691,6 +713,20 @@ impl AppService {
                 _ => settings.system_proxy,
             }
         };
+        let node_health = {
+            let views = self.inner.health_views.read().clone();
+            if settings.privacy_mode {
+                Arc::new(
+                    views
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.masked_for_privacy()))
+                        .collect(),
+                )
+            } else {
+                views
+            }
+        };
+        let probe_budget_used_bytes = self.current_probe_budget_used();
         UiSnapshot {
             nat_probe: self
                 .inner
@@ -713,6 +749,8 @@ impl AppService {
             runtime,
             traffic_statistics: self.inner.statistics.view.read().clone(),
             latency: self.inner.latency.read().clone(),
+            node_health,
+            probe_budget_used_bytes,
             downloads: self.inner.downloads.read().clone(),
             node_locations: self.inner.node_locations.read().clone(),
             validation,
@@ -743,6 +781,7 @@ impl AppService {
                 helper_running_tun_protocol: helper.running_tun_protocol,
                 mesh_protocol: crate::mesh::PROTOCOL_VERSION,
                 helper_running_mesh_protocol: helper.running_mesh_protocol,
+                database_schema: crate::storage::SCHEMA_VERSION,
                 log_dir: self.inner.paths.logs_dir().display().to_string(),
                 data_dir: self.inner.paths.data_dir.display().to_string(),
             },
@@ -1312,13 +1351,20 @@ impl AppService {
             self.inner.store.delete_subscription(id)?;
             subs.retain(|s| s.id != id);
         }
+        let mut removed_ids = Vec::new();
         self.commit_model_change(|model| {
+            removed_ids = model
+                .nodes_of_subscription(id)
+                .into_iter()
+                .map(|n| n.id.clone())
+                .collect();
             let removed = model.remove_subscription_nodes(id);
             for group in &mut model.groups {
                 group.repair();
             }
             Ok(removed > 0)
         })?;
+        self.remove_health_targets(&removed_ids);
         self.refresh_doctor();
         self.toast(ToastLevel::Info, "订阅及对应节点已删除");
         Ok(())
@@ -1671,6 +1717,7 @@ impl AppService {
         if let Err(err) = self.inner.store.remove_latency(node_id) {
             self.toast(ToastLevel::Warning, format!("清除节点测速缓存失败：{err}"));
         }
+        self.remove_health_targets(&[node_id.to_owned()]);
         self.refresh_doctor();
         self.mark_dirty();
         self.toast(ToastLevel::Success, "节点已保存");
@@ -1883,6 +1930,7 @@ impl AppService {
         }
         let _ = self.persist_model();
         self.inner.latency.write().remove(node_id);
+        self.remove_health_targets(&[node_id.to_owned()]);
         self.refresh_doctor();
         self.mark_dirty();
         self.toast(ToastLevel::Info, "节点已删除");
@@ -1906,6 +1954,7 @@ impl AppService {
                 lat.remove(id);
             }
         }
+        self.remove_health_targets(node_ids);
         self.refresh_doctor();
         self.mark_dirty();
         self.toast(ToastLevel::Info, format!("已批量删除 {count} 个节点"));
@@ -1965,7 +2014,7 @@ impl AppService {
 
     fn try_begin_probe(&self, key: &str) -> bool {
         let mut busy = self.inner.busy.write();
-        if ["latency", "download", "auto-probe"]
+        if ["latency", "download", "reachability", "auto-probe"]
             .iter()
             .any(|k| busy.contains(*k))
         {
@@ -2030,11 +2079,15 @@ impl AppService {
         if !self.try_begin_probe("latency") {
             return;
         }
+        let total_count = targets.len();
+        for node in &targets {
+            self.set_busy(&format!("latency:{}", node.id), true);
+        }
         let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
             use futures_util::{StreamExt, stream};
-            let results: Vec<_> = stream::iter(targets)
+            let mut pending = stream::iter(targets)
                 .map(|node| {
                     let binary = binary.clone();
                     let url = settings.urltest_url.clone();
@@ -2059,44 +2112,59 @@ impl AppService {
                         (node.id, result)
                     }
                 })
-                .buffer_unordered(4)
-                .collect()
-                .await;
-            if use_http {
-                for (id, result) in &results {
-                    service.record_proxy_probe(target.as_ref(), id, result.ok);
-                }
-            }
+                .buffer_unordered(4);
             let mut ok_count = 0;
-            {
-                let mut cache = service.inner.latency.write();
-                for (key, result) in &results {
-                    if result.ok {
-                        ok_count += 1;
-                    }
-                    let entry = LatencyEntry {
-                        key: key.clone(),
-                        delay_ms: result.delay_ms,
-                        checked_at: now_unix(),
-                        detail: result.error.clone().or_else(|| {
-                            Some(
-                                if use_http {
-                                    "HTTP 延迟"
-                                } else {
-                                    "TCP 延迟"
-                                }
-                                .into(),
-                            )
-                        }),
-                    };
-                    let _ = service.inner.store.set_latency(&entry);
-                    cache.insert(key.clone(), entry);
+            while let Some((key, result)) = pending.next().await {
+                if use_http {
+                    service.record_proxy_probe(target.as_ref(), &key, result.ok);
                 }
+                if result.ok {
+                    ok_count += 1;
+                }
+                let ts = now_unix();
+                let err_stage = result
+                    .error
+                    .as_deref()
+                    .map(crate::runtime::health::classify_error)
+                    .unwrap_or(crate::runtime::health::ErrStage::None);
+                let sample = crate::runtime::health::ProbeSampleRecord {
+                    target_key: key.clone(),
+                    kind: if use_http {
+                        crate::runtime::health::ProbeKind::Http
+                    } else {
+                        crate::runtime::health::ProbeKind::Tcp
+                    },
+                    ts,
+                    ok: result.ok,
+                    rtt_ms: result.delay_ms,
+                    bps: None,
+                    bytes_used: if use_http { 512 } else { 0 },
+                    err_stage,
+                };
+                let entry = LatencyEntry {
+                    key: key.clone(),
+                    delay_ms: result.delay_ms,
+                    checked_at: ts,
+                    detail: result.error.clone().or_else(|| {
+                        Some(
+                            if use_http {
+                                "HTTP 延迟"
+                            } else {
+                                "TCP 延迟"
+                            }
+                            .into(),
+                        )
+                    }),
+                };
+                let _ = service.inner.store.set_latency(&entry);
+                service.inner.latency.write().insert(key.clone(), entry);
+                service.record_health_sample(sample);
+                service.set_busy(&format!("latency:{key}"), false);
             }
             service.set_busy("latency", false);
             service.toast(
                 ToastLevel::Info,
-                format!("测速完成：{ok_count}/{} 个节点可用", results.len()),
+                format!("测速完成：{ok_count}/{total_count} 个节点可用"),
             );
         });
     }
@@ -2142,6 +2210,9 @@ impl AppService {
         if !self.try_begin_probe("download") {
             return;
         }
+        if let Some(first) = nodes.first() {
+            self.set_busy(&format!("download:{}", first.id), true);
+        }
         let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
@@ -2154,7 +2225,7 @@ impl AppService {
                 let result =
                     crate::runtime::probe::download(&binary, core, &node, bypass_tun).await;
                 service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
-                let entry = match result {
+                let (entry, err_stage) = match result {
                     Ok(entry) => {
                         successful += 1;
                         if count == 1 {
@@ -2167,21 +2238,36 @@ impl AppService {
                                 ),
                             );
                         }
-                        entry
+                        (entry, crate::runtime::health::ErrStage::None)
                     }
                     Err(err) => {
+                        let msg = err.to_string();
                         if count == 1 {
-                            service.toast(ToastLevel::Warning, err.to_string());
+                            service.toast(ToastLevel::Warning, msg.clone());
                         }
-                        crate::runtime::probe::DownloadResult {
-                            bytes: 0,
-                            elapsed_ms: 0,
-                            bytes_per_second: 0,
-                            checked_at: now_unix(),
-                            error: Some(err.to_string()),
-                        }
+                        let stage = crate::runtime::health::classify_error(&msg);
+                        (
+                            crate::runtime::probe::DownloadResult {
+                                bytes: 0,
+                                elapsed_ms: 0,
+                                bytes_per_second: 0,
+                                checked_at: now_unix(),
+                                error: Some(msg),
+                            },
+                            stage,
+                        )
                     }
                 };
+                service.record_health_sample(crate::runtime::health::ProbeSampleRecord {
+                    target_key: node.id.clone(),
+                    kind: crate::runtime::health::ProbeKind::Download,
+                    ts: entry.checked_at,
+                    ok: entry.error.is_none() && entry.bytes_per_second > 0,
+                    rtt_ms: None,
+                    bps: (entry.bytes_per_second > 0).then_some(entry.bytes_per_second),
+                    bytes_used: entry.bytes,
+                    err_stage,
+                });
                 service
                     .inner
                     .downloads
@@ -2203,6 +2289,296 @@ impl AppService {
         self.inner.latency.write().clear();
         let _ = self.inner.store.clear_latency();
         self.toast(ToastLevel::Info, "已清除测速结果");
+    }
+
+    pub(crate) fn current_probe_budget_used(&self) -> u64 {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let mut day = self.inner.probe_budget_day.lock();
+        if *day != today {
+            *day = today.clone();
+            let used = self.inner.store.probe_budget_usage(&today);
+            self.inner.probe_budget_used.store(used, Ordering::Release);
+            used
+        } else {
+            self.inner.probe_budget_used.load(Ordering::Acquire)
+        }
+    }
+
+    pub fn probe_budget_exhausted(&self) -> bool {
+        let limit_mb = self.settings().daily_probe_budget_mb;
+        if limit_mb == 0 {
+            return false;
+        }
+        let limit_bytes = u64::from(limit_mb) * 1024 * 1024;
+        self.current_probe_budget_used() >= limit_bytes
+    }
+
+    pub(crate) fn add_probe_budget_usage(&self, bytes: u64) -> u64 {
+        if bytes == 0 {
+            return self.current_probe_budget_used();
+        }
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        {
+            let mut day = self.inner.probe_budget_day.lock();
+            if *day != today {
+                *day = today.clone();
+            }
+        }
+        let total = self.inner.store.add_probe_budget_usage(&today, bytes);
+        self.inner.probe_budget_used.store(total, Ordering::Release);
+        total
+    }
+
+    pub fn set_daily_probe_budget_mb(&self, mb: u32) -> Result<()> {
+        let mut settings = self.settings();
+        settings.daily_probe_budget_mb = mb.min(4096);
+        self.save_settings(&settings)?;
+        Ok(())
+    }
+
+    pub(crate) fn record_health_sample(&self, sample: crate::runtime::health::ProbeSampleRecord) {
+        if sample.bytes_used > 0 {
+            self.add_probe_budget_usage(sample.bytes_used);
+        }
+        let target_key = sample.target_key.clone();
+        let stored = {
+            let mut health = self.inner.health.lock();
+            if health.record_probe(sample.clone()) {
+                let _ = self.inner.store.record_health_probe(&sample);
+                true
+            } else {
+                false
+            }
+        };
+        if stored {
+            self.refresh_health_view(&target_key);
+        }
+    }
+
+    pub(crate) fn record_reachability_outcome(
+        &self,
+        target_key: &str,
+        outcome: &crate::runtime::reachability::ReachabilityOutcome,
+    ) {
+        if outcome.bytes_used > 0 {
+            self.add_probe_budget_usage(outcome.bytes_used);
+        }
+        if let Err(err) = self.inner.store.save_reachability(
+            target_key,
+            outcome.egress_ip.as_deref(),
+            &outcome.report,
+        ) {
+            tracing::warn!(target: "xrose::health", error = %err, "save reachability failed");
+        }
+        if let Some(delay_ms) = outcome.latency_ms {
+            let entry = crate::storage::LatencyEntry {
+                key: target_key.to_owned(),
+                delay_ms: Some(delay_ms),
+                checked_at: outcome.report.checked_at,
+                detail: Some("HTTP 延迟".into()),
+            };
+            let _ = self.inner.store.set_latency(&entry);
+            self.inner
+                .latency
+                .write()
+                .insert(target_key.to_owned(), entry);
+        }
+        let rtt_ms = outcome.latency_ms.or(outcome.trace_rtt_ms);
+        let ok = outcome.bytes_used > 0 || rtt_ms.is_some();
+        let sample = crate::runtime::health::ProbeSampleRecord {
+            target_key: target_key.to_owned(),
+            kind: crate::runtime::health::ProbeKind::Reachability,
+            ts: outcome.report.checked_at,
+            ok,
+            rtt_ms,
+            bps: None,
+            bytes_used: outcome.bytes_used,
+            err_stage: if ok {
+                crate::runtime::health::ErrStage::None
+            } else {
+                crate::runtime::health::ErrStage::Timeout
+            },
+        };
+        {
+            let mut health = self.inner.health.lock();
+            health.set_reachability(target_key, outcome.report.clone());
+            if (!outcome.from_cache || rtt_ms.is_some()) && health.record_probe(sample.clone()) {
+                let _ = self.inner.store.record_health_probe(&sample);
+            }
+        }
+        self.refresh_health_view(target_key);
+    }
+
+    pub(crate) fn refresh_health_view(&self, target_key: &str) {
+        let now = now_unix();
+        let view = self.inner.health.lock().build_view(target_key, now);
+        let mut views = self.inner.health_views.write();
+        let map = Arc::make_mut(&mut *views);
+        match view {
+            Some(v) => {
+                map.insert(target_key.to_owned(), v);
+            }
+            None => {
+                map.remove(target_key);
+            }
+        }
+    }
+
+    pub(crate) fn refresh_health_targets(&self, keys: &BTreeSet<String>) {
+        if keys.is_empty() {
+            return;
+        }
+        let now = now_unix();
+        let computed: Vec<_> = {
+            let health = self.inner.health.lock();
+            keys.iter()
+                .map(|k| (k.clone(), health.build_view(k, now)))
+                .collect()
+        };
+        let mut views = self.inner.health_views.write();
+        let map = Arc::make_mut(&mut *views);
+        for (k, view) in computed {
+            match view {
+                Some(v) => {
+                    map.insert(k, v);
+                }
+                None => {
+                    map.remove(&k);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn refresh_health_views(&self) {
+        let now = now_unix();
+        let all = self.inner.health.lock().build_all_views(now);
+        *self.inner.health_views.write() = Arc::new(all);
+    }
+
+    pub fn evaluate_node_health(
+        &self,
+        target_key: &str,
+        profile: crate::model::HealthProfile,
+    ) -> Option<crate::runtime::health::ProfileEvaluation> {
+        self.inner
+            .health
+            .lock()
+            .evaluate_for_profile(target_key, profile, now_unix())
+    }
+
+    pub(crate) fn remove_health_targets(&self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        self.inner.health.lock().remove_targets(keys);
+        let _ = self.inner.store.remove_health_targets(keys);
+        {
+            let mut views = self.inner.health_views.write();
+            let map = Arc::make_mut(&mut *views);
+            for key in keys {
+                map.remove(key);
+            }
+        }
+    }
+
+    pub fn clear_health_data(&self) {
+        self.inner.health.lock().clear_all();
+        *self.inner.health_views.write() = Arc::default();
+        let _ = self.inner.store.clear_health_data();
+        self.toast(ToastLevel::Info, "已清除节点健康记录");
+    }
+
+    pub(crate) fn resolve_chain_target_key(model: &AppModel, chains: &[String]) -> Option<String> {
+        chains.iter().find_map(|tag| {
+            if tag == "direct" {
+                None
+            } else {
+                model
+                    .nodes
+                    .iter()
+                    .find(|n| n.outbound_tag() == *tag || n.id == *tag)
+                    .map(|n| n.id.clone())
+            }
+        })
+    }
+
+    /// Seeds representative offline health & reachability samples for `xrose-cli seed-demo`.
+    pub fn seed_demo_health(&self) {
+        use crate::runtime::health::{
+            ErrStage, ProbeKind, ProbeSampleRecord, ReachabilityCheckStatus as S,
+            ReachabilityReport, ServiceCheckResult,
+        };
+        let nodes = self.model().nodes;
+        let now = now_unix();
+        let regions = ["HK", "JP", "SG", "US", "TW", "DE", "KR"];
+        for (idx, node) in nodes.iter().enumerate() {
+            let region = regions[idx % regions.len()].to_string();
+            let base_rtt = 65 + (idx as u32) * 35;
+            for offset in 0..4 {
+                let ok = !(idx % 7 == 6 && offset == 3);
+                self.record_health_sample(ProbeSampleRecord {
+                    target_key: node.id.clone(),
+                    kind: ProbeKind::Http,
+                    ts: now - (3 - offset as i64) * 180,
+                    ok,
+                    rtt_ms: ok.then_some(base_rtt + offset * 12),
+                    bps: None,
+                    bytes_used: 0,
+                    err_stage: if ok {
+                        ErrStage::None
+                    } else {
+                        ErrStage::Timeout
+                    },
+                });
+            }
+            let bps = 28_000_000u64
+                .saturating_sub((idx as u64) * 3_200_000)
+                .max(2_500_000);
+            self.record_health_sample(ProbeSampleRecord {
+                target_key: node.id.clone(),
+                kind: ProbeKind::Download,
+                ts: now - 120,
+                ok: true,
+                rtt_ms: None,
+                bps: Some(bps),
+                bytes_used: 0,
+                err_stage: ErrStage::None,
+            });
+            let (ai, nf) = match idx % 4 {
+                0 => (S::Blocked, S::Limited),
+                1 => (S::Pass, S::Pass),
+                2 => (S::Pass, S::Pass),
+                _ => (S::Limited, S::Pass),
+            };
+            let report = ReachabilityReport {
+                checked_at: now - 60,
+                egress_region: Some(region.clone()),
+                chatgpt: ServiceCheckResult::new(ai),
+                claude: ServiceCheckResult::new(if ai == S::Blocked {
+                    S::Blocked
+                } else {
+                    S::Pass
+                }),
+                gemini: ServiceCheckResult::new(if idx % 5 == 0 { S::Limited } else { ai }),
+                copilot: ServiceCheckResult::new(S::Pass),
+                netflix: ServiceCheckResult::new(nf).with_region(Some(region.clone())),
+                youtube: ServiceCheckResult::new(S::Pass).with_region(Some(region)),
+                disney: ServiceCheckResult::new(nf),
+                tiktok: ServiceCheckResult::new(if idx % 3 == 0 { S::Limited } else { S::Pass }),
+                web_clean: ServiceCheckResult::new(if idx % 7 == 6 { S::Limited } else { S::Pass }),
+                scholar: ServiceCheckResult::new(if idx % 4 == 3 { S::Limited } else { S::Pass }),
+                dev_hub: ServiceCheckResult::new(S::Pass),
+                udp_stun: ServiceCheckResult::new(if node.udp { S::Pass } else { S::Blocked }),
+            };
+            let _ = self.inner.store.save_reachability(&node.id, None, &report);
+            self.inner.health.lock().set_reachability(&node.id, report);
+        }
+        let hourly = self.inner.health.lock().take_dirty_hourly_buckets();
+        if !hourly.is_empty() {
+            let min_bucket = (now_unix().div_euclid(3600) - 168) * 3600;
+            let _ = self.inner.store.save_hourly_buckets(&hourly, min_bucket);
+        }
+        self.refresh_health_views();
     }
 
     // ------------------------------------------------------------------
@@ -4167,10 +4543,12 @@ impl AppService {
         connections: Vec<ClashConnection>,
     ) {
         // Aggregate and rank off the snapshot lock: rendering only clones two Arcs.
+        let mut epoch_changed = false;
         let live = {
             let mut tracking = self.inner.rate_tracker.lock();
             let (previous_epoch, tracker) = &mut *tracking;
             if *previous_epoch != epoch {
+                epoch_changed = true;
                 *tracker = Default::default();
                 *previous_epoch = epoch.clone();
             }
@@ -4180,8 +4558,33 @@ impl AppService {
                 chrono::Utc::now(),
             )
         };
+        if epoch.is_none() || epoch_changed {
+            self.inner.health.lock().clear_active_flows();
+        }
         if epoch != CoreEpoch::from_state(&self.process_state()) {
             return;
+        }
+        if epoch.is_some() {
+            let speeds: Vec<(u64, u64)> = live
+                .metrics
+                .iter()
+                .map(|m| (m.up_speed, m.down_speed))
+                .collect();
+            let model = self
+                .inner
+                .core
+                .statistics_context()
+                .map(|(m, _, _)| m)
+                .unwrap_or_else(|| self.model());
+            let changed = self.inner.health.lock().observe_passive_singbox(
+                &connections,
+                &speeds,
+                |chains| Self::resolve_chain_target_key(&model, chains),
+                now_unix(),
+            );
+            if !changed.is_empty() {
+                self.refresh_health_targets(&changed);
+            }
         }
         let mut current = self.inner.connections.write();
         self.inner
@@ -4491,6 +4894,17 @@ impl AppService {
             .model
             .write()
             .remove_node(&format!("mesh-exit-{id}"));
+        let peer_prefix = format!("mesh-http:{id}:");
+        let mut stale_health = vec![format!("mesh-exit-{id}")];
+        stale_health.extend(
+            self.inner
+                .health_views
+                .read()
+                .keys()
+                .filter(|k| k.starts_with(&peer_prefix))
+                .cloned(),
+        );
+        self.remove_health_targets(&stale_health);
         self.persist_model()?;
         self.mark_dirty();
         let mut settings = self.settings();
@@ -4844,6 +5258,51 @@ impl AppService {
                             service.toast(ToastLevel::Error, error.to_string());
                         } else {
                             service.schedule_mesh_reconnect();
+                        }
+                    }
+                }
+                if tick.is_multiple_of(25) {
+                    let mesh_snapshot = inner.mesh.snapshot();
+                    let ts = now_unix();
+                    for net in &mesh_snapshot.networks {
+                        if net.phase != crate::mesh::MeshPhase::Connected {
+                            continue;
+                        }
+                        for peer in &net.peers {
+                            if !peer.offers_exit || peer.id.is_empty() || !peer.online {
+                                continue;
+                            }
+                            let Some(ms) = peer.latency_ms.filter(|&v| v > 0.0) else {
+                                continue;
+                            };
+                            let rtt_ms = Some((ms.round() as u32).max(1));
+                            let peer_key = format!("mesh-http:{}:{}", net.profile_id, peer.id);
+                            service.record_health_sample(
+                                crate::runtime::health::ProbeSampleRecord {
+                                    target_key: peer_key,
+                                    kind: crate::runtime::health::ProbeKind::MeshPeer,
+                                    ts,
+                                    ok: true,
+                                    rtt_ms,
+                                    bps: None,
+                                    bytes_used: 0,
+                                    err_stage: crate::runtime::health::ErrStage::None,
+                                },
+                            );
+                            if peer.exit_selected {
+                                service.record_health_sample(
+                                    crate::runtime::health::ProbeSampleRecord {
+                                        target_key: format!("mesh-exit-{}", net.profile_id),
+                                        kind: crate::runtime::health::ProbeKind::MeshPeer,
+                                        ts,
+                                        ok: true,
+                                        rtt_ms,
+                                        bps: None,
+                                        bytes_used: 0,
+                                        err_stage: crate::runtime::health::ErrStage::None,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
@@ -7082,6 +7541,7 @@ proxy-groups:
             mode: SwitchMode::Throughput,
             fallback: FallbackScope::SameSubscription,
             consecutive_failures: 3,
+            ..Default::default()
         };
         service.set_node_switch_policy("proxy", policy, 60).unwrap();
         service.select_node("proxy", &b.id);
@@ -7615,5 +8075,62 @@ proxy-groups:
         assert!(!plan.start_core);
         assert!(plan.mesh_profile_ids.is_empty());
         assert_eq!(plan.missing_startup, vec![MeshProvider::EasyTier]);
+    }
+
+    #[test]
+    fn health_updates_and_passive_flows_never_mark_config_dirty() {
+        use crate::runtime::health::{ErrStage, ProbeKind, ProbeSampleRecord, ReachabilityReport};
+        use crate::runtime::reachability::ReachabilityOutcome;
+        let (service, _dir) = service();
+        let mut model = service.model();
+        let node = Node::new("Demo", Protocol::Vless, "example.com", 443);
+        let node_id = node.id.clone();
+        model.add_nodes([node]);
+        *service.inner.model.write() = model;
+
+        service.inner.reload.lock().dirty = false;
+
+        service.record_health_sample(ProbeSampleRecord {
+            target_key: node_id.clone(),
+            kind: ProbeKind::Http,
+            ts: now_unix(),
+            ok: true,
+            rtt_ms: Some(90),
+            bps: None,
+            bytes_used: 512,
+            err_stage: ErrStage::None,
+        });
+        service.record_health_sample(ProbeSampleRecord {
+            target_key: node_id.clone(),
+            kind: ProbeKind::Download,
+            ts: now_unix(),
+            ok: true,
+            rtt_ms: None,
+            bps: Some(12_000_000),
+            bytes_used: 1024 * 1024,
+            err_stage: ErrStage::None,
+        });
+        service.record_reachability_outcome(
+            &node_id,
+            &ReachabilityOutcome {
+                egress_ip: None,
+                report: ReachabilityReport {
+                    checked_at: now_unix(),
+                    ..Default::default()
+                },
+                bytes_used: 4096,
+                trace_rtt_ms: Some(110),
+                latency_ms: Some(110),
+                from_cache: false,
+            },
+        );
+        service.set_daily_probe_budget_mb(250).unwrap();
+        service.seed_demo_health();
+        service.update_connections(None, Vec::new());
+        service.remove_health_targets(&[node_id]);
+        service.clear_health_data();
+
+        assert!(!service.snapshot().config_dirty);
+        assert!(!service.inner.reload.lock().dirty);
     }
 }

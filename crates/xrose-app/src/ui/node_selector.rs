@@ -105,7 +105,11 @@ impl AppView {
                         .latency
                         .get(&node.id)
                         .filter(|entry| entry.is_http()),
-                    testing && self.latency_pending.contains(&node.id),
+                    testing
+                        && snapshot
+                            .busy
+                            .iter()
+                            .any(|k| k == &format!("latency:{}", node.id)),
                     self.lang(),
                 );
                 choices.push(Choice {

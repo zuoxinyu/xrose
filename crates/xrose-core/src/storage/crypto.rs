@@ -12,6 +12,7 @@ use std::path::Path;
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, Generate, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result, io_context};
 
@@ -20,6 +21,7 @@ const PREFIX: &str = "enc:v1:";
 #[derive(Clone)]
 pub struct SecretBox {
     cipher: ChaCha20Poly1305,
+    hash_key: [u8; 32],
 }
 
 impl SecretBox {
@@ -48,8 +50,22 @@ impl SecretBox {
                 .map_err(|e| io_context(key_path, e))?;
             key
         };
+        let mut hasher = Sha256::new();
+        hasher.update(b"xrose-keyed-hash-v1:");
+        hasher.update(key.as_slice());
+        let hash_key: [u8; 32] = hasher.finalize().into();
         let cipher = ChaCha20Poly1305::new(&key);
-        Ok(Self { cipher })
+        Ok(Self { cipher, hash_key })
+    }
+
+    /// Computes a domain-separated, deterministic keyed hash without leaking `value`.
+    pub fn keyed_hash(&self, namespace: &str, value: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.hash_key);
+        hasher.update(namespace.as_bytes());
+        hasher.update(b":");
+        hasher.update(value.as_bytes());
+        hex::encode(hasher.finalize())
     }
 
     pub fn encrypt(&self, plaintext: &str) -> String {
@@ -120,5 +136,11 @@ mod tests {
         let second = SecretBox::load_or_create(&path).unwrap();
         let value = first.encrypt("x");
         assert_eq!(second.decrypt(&value).unwrap(), "x");
+        let h1 = first.keyed_hash("egress-v1", "198.51.100.24");
+        let h2 = second.keyed_hash("egress-v1", "198.51.100.24");
+        let h_other_ns = second.keyed_hash("other-ns", "198.51.100.24");
+        assert_eq!(h1, h2);
+        assert_ne!(h1, h_other_ns);
+        assert!(!h1.contains("198.51.100.24"));
     }
 }

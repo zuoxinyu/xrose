@@ -35,7 +35,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::AppService;
@@ -277,6 +277,14 @@ impl Render for WindowRegion {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeSort {
+    #[default]
+    Order,
+    Health,
+    Latency,
+}
+
 pub struct AppView {
     scan_pending: bool,
     import_editor_epoch: u64,
@@ -308,7 +316,7 @@ pub struct AppView {
     /// Nodes of the latency run started from this window; they show a spinner
     /// instead of a stale value while the run is busy.
     pub(crate) latency_pending: std::collections::HashSet<String>,
-    pub(crate) sort_by_latency: bool,
+    pub(crate) node_sort: NodeSort,
     pub(crate) group_by_subscription: bool,
     pub(crate) collapsed_subs: std::collections::HashSet<String>,
     pub(crate) batch_mode: bool,
@@ -355,6 +363,8 @@ pub struct AppView {
     lan_port_input: Entity<InputState>,
     lan_user_input: Entity<InputState>,
     lan_password_input: Entity<InputState>,
+    domestic_urltest_input: Entity<InputState>,
+    overseas_urltest_input: Entity<InputState>,
     update_proxy_input: Entity<InputState>,
     update_agent_input: Entity<InputState>,
     pub(crate) trace_input: Entity<InputState>,
@@ -483,6 +493,24 @@ impl AppView {
                 )
                 .default_value("https://www.gstatic.com/generate_204")
         });
+        let domestic_urltest_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(xrose_core::settings::DEFAULT_DOMESTIC_URLTEST_URL)
+                .default_value(snapshot.settings.domestic_urltest_url.clone())
+        });
+        let overseas_urltest_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(xrose_core::settings::DEFAULT_OVERSEAS_URLTEST_URL)
+                .default_value(snapshot.settings.urltest_url.clone())
+        });
+        for input in [&domestic_urltest_input, &overseas_urltest_input] {
+            cx.subscribe(input, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
         cx.subscribe(&trace_input, |_, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -536,7 +564,7 @@ impl AppView {
             hide_ips,
             hide_traffic_chart: false,
             latency_pending: std::collections::HashSet::new(),
-            sort_by_latency: false,
+            node_sort: NodeSort::Order,
             group_by_subscription: false,
             collapsed_subs: std::collections::HashSet::new(),
             batch_mode: false,
@@ -585,6 +613,8 @@ impl AppView {
             lan_port_input,
             lan_user_input,
             lan_password_input,
+            domestic_urltest_input,
+            overseas_urltest_input,
             update_proxy_input,
             update_agent_input,
             trace_input,
@@ -1154,6 +1184,12 @@ impl AppView {
                 .iter()
                 .any(|busy| busy == &format!("latency:{key}"))
         });
+        let downloading = latency_key.as_ref().is_some_and(|key| {
+            self.snapshot
+                .busy
+                .iter()
+                .any(|busy| busy == &format!("download:{key}"))
+        });
         let node_delay = theme::latency_label(latency, testing, self.lang());
         if let Some(ms) = latency.and_then(|entry| entry.delay_ms) {
             node_tip.push_str(&format!(" · {ms} ms"));
@@ -1255,29 +1291,42 @@ impl AppView {
                                                 .text_xs()
                                                 .child(node_name),
                                         )
-                                        .when(node.is_some() || mesh, |d| {
-                                            d.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .text_xs()
-                                                    .font_family(
-                                                        cx.theme().mono_font_family.clone(),
-                                                    )
-                                                    .text_color(if testing {
-                                                        p.muted_fg
-                                                    } else {
-                                                        theme::latency_color(&p, latency)
-                                                    })
-                                                    .when(
-                                                        latency.is_some_and(|entry| {
-                                                            theme::latency_age_secs(entry)
-                                                                > theme::LATENCY_STALE_SECS
-                                                        }),
-                                                        |d| d.opacity(theme::DISABLED_OPACITY),
-                                                    )
-                                                    .child(node_delay),
-                                            )
-                                        })
+                                        .when(
+                                            testing || downloading || node.is_some() || mesh,
+                                            |d| {
+                                                d.child(if testing || downloading {
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .flex()
+                                                        .items_center()
+                                                        .child(
+                                                            Spinner::new()
+                                                                .small()
+                                                                .color(p.muted_fg),
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_xs()
+                                                        .font_family(
+                                                            cx.theme().mono_font_family.clone(),
+                                                        )
+                                                        .text_color(theme::latency_color(
+                                                            &p, latency,
+                                                        ))
+                                                        .when(
+                                                            latency.is_some_and(|entry| {
+                                                                theme::latency_age_secs(entry)
+                                                                    > theme::LATENCY_STALE_SECS
+                                                            }),
+                                                            |d| d.opacity(theme::DISABLED_OPACITY),
+                                                        )
+                                                        .child(node_delay)
+                                                        .into_any_element()
+                                                })
+                                            },
+                                        )
                                         .child(
                                             Icon::new(IconName::ChevronDown)
                                                 .size(px(theme::ICON_SIZE))

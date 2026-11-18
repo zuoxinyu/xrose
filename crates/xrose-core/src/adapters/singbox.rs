@@ -83,6 +83,12 @@ pub fn compile_mesh(
             0,
             json!({"inbound":"mesh-exit","action":"route","outbound":"mesh-ts"}),
         );
+        if !profile.exit_node.is_empty() {
+            config["dns"]["rules"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"inbound":"mesh-exit","action":"route","server":"mesh-dns"}));
+        }
     }
     config["inbounds"].as_array_mut().unwrap().push(json!({
         "type":"socks", "tag":"mesh-forwards", "listen":"127.0.0.1", "listen_port":forward_bridge.0,
@@ -682,32 +688,123 @@ fn tun_inbound(inbound: &Inbound) -> Value {
 
 /// Minimal configuration used only by private per-node probes.
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
-    let mut endpoints = Vec::new();
-    let mut outbounds = Vec::new();
-    let outbound = node_outbound(node, &mut [])?;
-    if node.protocol == Protocol::Wireguard || node.protocol.is_vpn() {
-        endpoints.push(outbound);
-    } else {
-        outbounds.push(outbound);
-    }
-    Ok(json!({
-        "endpoints": endpoints,
-        "log": {"disabled": true},
-        "dns": {"servers": [{"type": "local", "tag": "local"}]},
-        "inbounds": [{"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port}],
-        "outbounds": outbounds,
-        "route": {"auto_detect_interface": true, "default_domain_resolver": "local", "final": node.outbound_tag()}
-    }))
+    compile_probe_with_inbounds(
+        Some(node),
+        vec![json!({"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
+    )
 }
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
-    json!({
-        "log": {"disabled":true},
-        "dns": {"servers":[{"type":"local", "tag":"local"}]},
-        "inbounds": [{"type":"http", "tag":"probe", "listen":"127.0.0.1", "listen_port":port}],
-        "outbounds": [{"type":"direct", "tag":"direct"}],
-        "route": {"auto_detect_interface":true, "default_domain_resolver":"local", "final":"direct"}
-    })
+    compile_probe_with_inbounds(
+        None,
+        vec![json!({"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
+    )
+    .expect("direct probe compiles")
+}
+
+pub(super) fn compile_reachability_probe(
+    node: Option<&Node>,
+    http_port: u16,
+    socks_port: u16,
+) -> Result<Value> {
+    compile_probe_with_inbounds(
+        node,
+        vec![
+            json!({"type": "http", "tag": "probe-http", "listen": "127.0.0.1", "listen_port": http_port}),
+            json!({"type": "socks", "tag": "probe-socks", "listen": "127.0.0.1", "listen_port": socks_port}),
+        ],
+    )
+}
+
+fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {
+    let mut endpoints = Vec::new();
+    let mut outbounds = Vec::new();
+    let is_mesh_exit = node.is_some_and(Node::is_mesh_gateway);
+    let final_tag = match node {
+        Some(node) => {
+            let outbound = node_outbound(node, &mut [])?;
+            if node.protocol == Protocol::Wireguard || node.protocol.is_vpn() {
+                endpoints.push(outbound);
+            } else {
+                outbounds.push(outbound);
+            }
+            node.outbound_tag()
+        }
+        None => {
+            outbounds.push(json!({"type": "direct", "tag": "direct"}));
+            "direct".into()
+        }
+    };
+    let (dns, route) = if is_mesh_exit {
+        (
+            json!({
+                "servers": [
+                    {"type": "local", "tag": "local"},
+                    {"type": "udp", "tag": "exit-dns", "server": "1.1.1.1", "server_port": 53, "detour": final_tag}
+                ],
+                "final": "exit-dns",
+                "strategy": "ipv4_only"
+            }),
+            json!({
+                "auto_detect_interface": true,
+                "default_domain_resolver": "local",
+                "rules": [{"action": "resolve", "server": "exit-dns", "strategy": "ipv4_only"}],
+                "final": final_tag
+            }),
+        )
+    } else {
+        (
+            json!({"servers": [{"type": "local", "tag": "local"}]}),
+            json!({"auto_detect_interface": true, "default_domain_resolver": "local", "final": final_tag}),
+        )
+    };
+    Ok(json!({
+        "endpoints": endpoints,
+        "log": {"disabled": true},
+        "dns": dns,
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": route
+    }))
+}
+
+pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str, is_direct: bool) {
+    if let Some(last) = config["outbounds"]
+        .as_array_mut()
+        .and_then(|arr| arr.last_mut())
+    {
+        last["bind_interface"] = json!(interface);
+    } else if let Some(last) = config["endpoints"]
+        .as_array_mut()
+        .and_then(|arr| arr.last_mut())
+    {
+        last["bind_interface"] = json!(interface);
+    }
+    if is_direct {
+        config["dns"] = json!({
+            "servers": [{
+                "type": "udp",
+                "tag": "local",
+                "server": "223.5.5.5",
+                "server_port": 53,
+                "bind_interface": interface
+            }],
+            "final": "local"
+        });
+        config["route"]["rules"] = json!([{"action": "resolve", "server": "local"}]);
+    } else if let Some(servers) = config["dns"]["servers"].as_array_mut() {
+        for server in servers {
+            if server["type"] == "local" {
+                *server = json!({
+                    "type": "udp",
+                    "tag": "local",
+                    "server": "223.5.5.5",
+                    "server_port": 53,
+                    "bind_interface": interface
+                });
+            }
+        }
+    }
 }
 
 fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
@@ -2120,5 +2217,36 @@ mod tests {
         settings.sync_inbounds(&mut model);
         let shared = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
         assert_eq!(shared.json["inbounds"][0]["users"][0]["password"], password);
+    }
+
+    #[test]
+    fn bind_probe_interface_routes_dns_and_keeps_mesh_exit_dns() {
+        use crate::adapters::singbox::bind_probe_interface;
+
+        let mut direct = super::super::compile_direct_probe(CoreKind::SingBox, 18080);
+        bind_probe_interface(&mut direct, "en0", true);
+        assert_eq!(direct["outbounds"][0]["bind_interface"], "en0");
+        assert_eq!(direct["dns"]["servers"][0]["type"], "udp");
+        assert_eq!(direct["dns"]["servers"][0]["server"], "223.5.5.5");
+        assert_eq!(direct["dns"]["servers"][0]["server_port"], 53);
+        assert_eq!(direct["dns"]["servers"][0]["bind_interface"], "en0");
+        assert_eq!(direct["route"]["rules"][0]["action"], "resolve");
+
+        let mut gateway = Node::new("mesh-exit", Protocol::Socks, "127.0.0.1", 19080);
+        gateway.id = "mesh-exit-test".into();
+        gateway.tags.push("mesh-exit".into());
+        let mut mesh_probe =
+            super::super::compile_probe(CoreKind::SingBox, &gateway, 18081).unwrap();
+        bind_probe_interface(&mut mesh_probe, "en0", false);
+        assert_eq!(mesh_probe["outbounds"][0]["bind_interface"], "en0");
+        assert_eq!(mesh_probe["dns"]["final"], "exit-dns");
+        let servers = mesh_probe["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 2);
+        let local = servers.iter().find(|s| s["tag"] == "local").unwrap();
+        assert_eq!(local["type"], "udp");
+        assert_eq!(local["server"], "223.5.5.5");
+        assert_eq!(local["bind_interface"], "en0");
+        let exit_dns = servers.iter().find(|s| s["tag"] == "exit-dns").unwrap();
+        assert_eq!(exit_dns["detour"], gateway.outbound_tag());
     }
 }

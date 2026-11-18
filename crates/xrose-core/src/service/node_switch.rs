@@ -13,6 +13,15 @@ struct RoundState {
     failures: u8,
     no_match_reported: bool,
     due: Option<Instant>,
+    cooldown_until: Option<Instant>,
+    candidate_streak: Option<(String, u8)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SwitchDecision {
+    id: String,
+    recover: bool,
+    scores: Option<(f32, f32)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +52,107 @@ impl RoundState {
             Search::Recover
         } else {
             Search::Stay
+        }
+    }
+
+    fn observe_health_active(
+        &mut self,
+        group: &OutboundGroup,
+        probe_ok: bool,
+        live_active: bool,
+        budget_exhausted: bool,
+        now: Instant,
+    ) -> Search {
+        if !probe_ok {
+            if live_active {
+                self.candidate_streak = None;
+                return Search::Stay;
+            }
+            self.failures = self.failures.saturating_add(1);
+            if self.failures >= group.switch_policy.consecutive_failures.max(1) {
+                return Search::Recover;
+            }
+            self.candidate_streak = None;
+            return Search::Stay;
+        }
+        self.failures = 0;
+        self.no_match_reported = false;
+        if group.switch_policy.sticky_session
+            || self.cooldown_until.is_some_and(|until| now < until)
+            || budget_exhausted
+        {
+            self.candidate_streak = None;
+            return Search::Stay;
+        }
+        Search::Improve
+    }
+
+    fn decide_health_switch(
+        &mut self,
+        search: Search,
+        active_eval: Option<&crate::runtime::health::ProfileEvaluation>,
+        candidates: &[(String, crate::runtime::health::ProfileEvaluation)],
+    ) -> Option<SwitchDecision> {
+        match search {
+            Search::Stay => {
+                self.candidate_streak = None;
+                None
+            }
+            Search::Recover => {
+                self.candidate_streak = None;
+                let mut best: Option<&(String, crate::runtime::health::ProfileEvaluation)> = None;
+                for cand in candidates {
+                    if cand.1.gate.is_some() {
+                        continue;
+                    }
+                    if best.is_none_or(|b| cand.1.score > b.1.score) {
+                        best = Some(cand);
+                    }
+                }
+                let best = best?;
+                let active_score = active_eval.map(|e| e.score).unwrap_or(0.0);
+                Some(SwitchDecision {
+                    id: best.0.clone(),
+                    recover: true,
+                    scores: Some((active_score, best.1.score)),
+                })
+            }
+            Search::Improve => {
+                let active_short = active_eval.map(|e| e.short_score).unwrap_or(0.0);
+                let mut best: Option<&(String, crate::runtime::health::ProfileEvaluation)> = None;
+                for cand in candidates {
+                    if cand.1.gate.is_some() || cand.1.confidence < 0.40 {
+                        continue;
+                    }
+                    if cand.1.short_score - active_short < 12.0 {
+                        continue;
+                    }
+                    if best.is_none_or(|b| cand.1.short_score > b.1.short_score) {
+                        best = Some(cand);
+                    }
+                }
+                let Some(best) = best else {
+                    self.candidate_streak = None;
+                    return None;
+                };
+                let count = match &self.candidate_streak {
+                    Some((prev_id, prev_count)) if prev_id == &best.0 => {
+                        prev_count.saturating_add(1)
+                    }
+                    _ => 1,
+                };
+                if count >= 3 {
+                    self.candidate_streak = None;
+                    Some(SwitchDecision {
+                        id: best.0.clone(),
+                        recover: false,
+                        scores: Some((active_short, best.1.short_score)),
+                    })
+                } else {
+                    self.candidate_streak = Some((best.0.clone(), count));
+                    None
+                }
+            }
         }
     }
 }
@@ -183,6 +293,11 @@ impl AppService {
                     .filter(|g| g.members.len() > 1 && due(g).is_none_or(|t| t <= Instant::now()))
                     .min_by_key(due);
                 let Some(group) = group else { continue };
+                if service.probe_budget_exhausted() {
+                    states.entry(group.id.clone()).or_default().due =
+                        Instant::now().checked_add(Duration::from_secs(60));
+                    continue;
+                }
                 if !service.try_begin_probe("auto-probe") {
                     continue;
                 }
@@ -194,14 +309,25 @@ impl AppService {
                 };
                 service.set_busy("auto-probe", false);
                 match result {
-                    Ok(Some((id, recover)))
+                    Ok(Some(decision))
                         if service.switch_session_current(&process)
                             && service.inner.busy.write().insert("core".into()) =>
                     {
-                        let switched = service.apply_switch(&process, &group, &id, recover).await;
+                        let switched = service
+                            .apply_switch(
+                                &process,
+                                &group,
+                                &decision.id,
+                                decision.recover,
+                                decision.scores,
+                            )
+                            .await;
                         if switched {
                             state.failures = 0;
                             state.no_match_reported = false;
+                            state.cooldown_until =
+                                Instant::now().checked_add(Duration::from_secs(300));
+                            state.candidate_streak = None;
                         }
                         // Rollback may also start a new PID. Wait a full interval before retrying.
                         let new = service.process_state();
@@ -252,6 +378,11 @@ impl AppService {
                     .filter(|g| g.members.len() > 1 && due(g).is_none_or(|t| t <= Instant::now()))
                     .min_by_key(due);
                 let Some(group) = group else { continue };
+                if service.probe_budget_exhausted() {
+                    states.entry(group.id.clone()).or_default().due =
+                        Instant::now().checked_add(Duration::from_secs(60));
+                    continue;
+                }
                 if !service.try_begin_probe("auto-probe") {
                     continue;
                 }
@@ -266,21 +397,37 @@ impl AppService {
                 };
                 service.set_busy("auto-probe", false);
                 match result {
-                    Ok(Some((id, recover)))
-                        if service.exit_switch_session_current(&core, &process) =>
-                    {
+                    Ok(Some(decision)) if service.exit_switch_session_current(&core, &process) => {
                         // The manager locks its operation and rechecks the process
                         // epoch and applied group before replacing its configuration.
-                        match core.switch_managed_node(&process, &group, &id).await {
+                        match core
+                            .switch_managed_node(&process, &group, &decision.id)
+                            .await
+                        {
                             Ok(true) => {
                                 state.failures = 0;
                                 state.no_match_reported = false;
+                                state.cooldown_until =
+                                    Instant::now().checked_add(Duration::from_secs(300));
+                                state.candidate_streak = None;
+                                let delta = decision
+                                    .scores
+                                    .map(|(old, new)| {
+                                        format!(
+                                            "（{} → {}）",
+                                            old.round() as u32,
+                                            new.round() as u32
+                                        )
+                                    })
+                                    .unwrap_or_default();
                                 service.toast(
                                     ToastLevel::Success,
-                                    if recover {
-                                        "出口分流已切换到备用节点"
+                                    if decision.recover {
+                                        format!("出口分流已切换到备用节点{delta}")
+                                    } else if !delta.is_empty() {
+                                        format!("出口分流已按健康评分切换节点{delta}")
                                     } else {
-                                        "出口分流已按性能优先策略切换节点"
+                                        "出口分流已按性能优先策略切换节点".into()
                                     },
                                 );
                             }
@@ -321,6 +468,7 @@ impl AppService {
         group: &OutboundGroup,
         id: &str,
         recover: bool,
+        scores: Option<(f32, f32)>,
     ) -> bool {
         self.toast(
             ToastLevel::Info,
@@ -340,12 +488,19 @@ impl AppService {
                 self.inner.traffic.lock().reset();
                 self.inner.connections.write().clear();
                 *self.inner.proxies.write() = Default::default();
+                let delta = scores
+                    .map(|(old, new)| {
+                        format!("（{} → {}）", old.round() as u32, new.round() as u32)
+                    })
+                    .unwrap_or_default();
                 self.toast(
                     ToastLevel::Success,
                     if recover {
-                        "已切换到备用节点"
+                        format!("已切换到备用节点{delta}")
+                    } else if !delta.is_empty() {
+                        format!("已按健康评分切换节点{delta}")
                     } else {
-                        "已按性能优先策略切换节点"
+                        "已按性能优先策略切换节点".into()
                     },
                 );
                 true
@@ -365,7 +520,7 @@ impl AppService {
         group: &OutboundGroup,
         state: &mut RoundState,
         report_main: bool,
-    ) -> Result<Option<(String, bool)>> {
+    ) -> Result<Option<SwitchDecision>> {
         let (Some(core), Some(binary), Some((model, settings, _))) = (
             process.core,
             process.binary.as_deref(),
@@ -380,20 +535,43 @@ impl AppService {
         };
         let url = group.url.as_deref().unwrap_or(&settings.urltest_url);
         let bypass_tun = self.inner.core.native_tun_active();
+        let mode = group.switch_mode();
         let probe = GroupProbe {
             service: self,
             binary: Path::new(binary),
             core,
             url,
             bypass_tun,
-            mode: group.switch_mode(),
+            mode,
         };
         let target = report_main.then(|| self.tray_probe_target()).flatten();
         let current = probe.measure(active).await;
         if report_main {
             self.record_proxy_probe(target.as_ref(), &active.id, current.is_some());
         }
-        let search = state.observe(group, current.is_some());
+        let is_health = mode == SwitchMode::Health;
+        let active_eval = is_health
+            .then(|| self.evaluate_node_health(&active.id, group.switch_policy.health_profile))
+            .flatten();
+        let search = if is_health {
+            let live_active = self
+                .inner
+                .health_views
+                .read()
+                .get(&active.id)
+                .is_some_and(|v| {
+                    v.last_active_at > 0 && now_unix().saturating_sub(v.last_active_at) <= 30
+                });
+            state.observe_health_active(
+                group,
+                current.is_some(),
+                live_active,
+                self.probe_budget_exhausted(),
+                Instant::now(),
+            )
+        } else {
+            state.observe(group, current.is_some())
+        };
         if search == Search::Stay {
             return Ok(None);
         }
@@ -407,11 +585,11 @@ impl AppService {
         } else {
             None
         };
-        // Keep ordering deterministic. Only latency comparisons can share the uplink.
-        let concurrency = if group.switch_mode() == SwitchMode::Latency {
-            4
-        } else {
-            1
+        // Keep ordering deterministic. Latency can probe 4 at once; health mode limits to 2.
+        let concurrency = match mode {
+            SwitchMode::Latency => 4,
+            SwitchMode::Health => 2,
+            _ => 1,
         };
         let tasks: Vec<_> = group
             .members
@@ -439,13 +617,29 @@ impl AppService {
         while let Some(measurement) = measurements.next().await {
             if let Some(sample) = measurement {
                 samples.push(sample);
-                if group.switch_mode() == SwitchMode::Failover {
+                if mode == SwitchMode::Failover {
                     break;
                 }
             }
         }
-        let best = winner(group, current, &samples);
-        if best.is_none() && search == Search::Recover && !state.no_match_reported {
+        let decision = if is_health {
+            let profile = group.switch_policy.health_profile;
+            let cand_evals: Vec<_> = samples
+                .iter()
+                .filter_map(|(id, _)| {
+                    self.evaluate_node_health(id, profile)
+                        .map(|eval| (id.clone(), eval))
+                })
+                .collect();
+            state.decide_health_switch(search, active_eval.as_ref(), &cand_evals)
+        } else {
+            winner(group, current, &samples).map(|id| SwitchDecision {
+                id: id.to_owned(),
+                recover: search == Search::Recover,
+                scores: None,
+            })
+        };
+        if decision.is_none() && search == Search::Recover && !state.no_match_reported {
             self.toast(
                 ToastLevel::Warning,
                 if report_main {
@@ -456,7 +650,7 @@ impl AppService {
             );
             state.no_match_reported = true;
         }
-        Ok(best.map(|id| (id.to_owned(), search == Search::Recover)))
+        Ok(decision)
     }
 
     async fn switch_country(
@@ -503,6 +697,22 @@ impl GroupProbe<'_> {
                 checked_at: now_unix(),
                 error: Some(e.to_string()),
             });
+            let err_stage = entry
+                .error
+                .as_deref()
+                .map(crate::runtime::health::classify_error)
+                .unwrap_or(crate::runtime::health::ErrStage::None);
+            self.service
+                .record_health_sample(crate::runtime::health::ProbeSampleRecord {
+                    target_key: node.id.clone(),
+                    kind: crate::runtime::health::ProbeKind::Download,
+                    ts: entry.checked_at,
+                    ok: entry.error.is_none() && entry.bytes_per_second > 0,
+                    rtt_ms: None,
+                    bps: speed,
+                    bytes_used: entry.bytes,
+                    err_stage,
+                });
             self.service
                 .inner
                 .downloads
@@ -512,17 +722,34 @@ impl GroupProbe<'_> {
         } else {
             let result =
                 probe::http_latency(self.binary, self.core, node, self.url, self.bypass_tun).await;
+            let ok = result.is_ok();
             let ms = result.as_ref().ok().copied();
+            let checked_at = now_unix();
+            let detail = result
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "HTTP 延迟".into());
+            let err_stage = if ok {
+                crate::runtime::health::ErrStage::None
+            } else {
+                crate::runtime::health::classify_error(&detail)
+            };
+            self.service
+                .record_health_sample(crate::runtime::health::ProbeSampleRecord {
+                    target_key: node.id.clone(),
+                    kind: crate::runtime::health::ProbeKind::Http,
+                    ts: checked_at,
+                    ok,
+                    rtt_ms: ms,
+                    bps: None,
+                    bytes_used: if ok { 512 } else { 0 },
+                    err_stage,
+                });
             let entry = LatencyEntry {
                 key: node.id.clone(),
                 delay_ms: ms,
-                checked_at: now_unix(),
-                detail: Some(
-                    result
-                        .err()
-                        .map(|e| e.to_string())
-                        .unwrap_or_else(|| "HTTP 延迟".into()),
-                ),
+                checked_at,
+                detail: Some(detail),
             };
             self.service
                 .inner
@@ -537,7 +764,27 @@ impl GroupProbe<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{GroupKind, Protocol};
+    use crate::model::{GroupKind, HealthProfile, Protocol};
+    use crate::runtime::health::{HealthGate, HealthGrade, ProfileEvaluation};
+
+    fn eval(
+        score: f32,
+        short_score: f32,
+        confidence: f32,
+        gate: Option<HealthGate>,
+    ) -> ProfileEvaluation {
+        ProfileEvaluation {
+            profile: HealthProfile::General,
+            score,
+            short_score,
+            long_score: score,
+            grade: HealthGrade::from_score(score),
+            gate,
+            confidence,
+            dims: Vec::new(),
+            deductions: Vec::new(),
+        }
+    }
 
     #[test]
     fn switch_rounds_only_accept_results_from_the_same_running_process() {
@@ -628,5 +875,129 @@ mod tests {
         assert!(!in_scope(region, &a, &b, Some("Japan"), None));
         assert!(!in_scope(region, &a, &b, Some("Japan"), Some("Singapore")));
         assert!(in_scope(region, &a, &b, Some("Japan"), Some("Japan")));
+    }
+
+    #[test]
+    fn health_hysteresis_requires_twelve_point_lead_for_three_rounds_and_low_conf_filtered() {
+        let mut group = OutboundGroup::new("健康切换", GroupKind::Selector);
+        group.switch_policy.mode = SwitchMode::Health;
+        let now = Instant::now();
+        let mut state = RoundState::default();
+        let active = eval(76.0, 76.0, 0.9, None);
+
+        // Low-confidence or +11.9 lead is rejected and resets streak.
+        let low_conf = vec![("cand".into(), eval(95.0, 95.0, 0.35, None))];
+        let small_lead = vec![("cand".into(), eval(87.9, 87.9, 0.9, None))];
+        let strong = vec![("cand".into(), eval(89.0, 89.0, 0.8, None))];
+
+        assert_eq!(
+            state.observe_health_active(&group, true, false, false, now),
+            Search::Improve
+        );
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &strong)
+                .is_none()
+        );
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &strong)
+                .is_none()
+        );
+        // Interrupted by < +12 lead resets the streak back to 0.
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &small_lead)
+                .is_none()
+        );
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &low_conf)
+                .is_none()
+        );
+
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &strong)
+                .is_none()
+        );
+        assert!(
+            state
+                .decide_health_switch(Search::Improve, Some(&active), &strong)
+                .is_none()
+        );
+        let decision = state
+            .decide_health_switch(Search::Improve, Some(&active), &strong)
+            .expect("third consecutive qualifying round triggers switch");
+        assert_eq!(decision.id, "cand");
+        assert!(!decision.recover);
+        assert_eq!(decision.scores, Some((76.0, 89.0)));
+    }
+
+    #[test]
+    fn health_sticky_and_cooldown_protect_working_nodes_and_recover_only_on_failure() {
+        let mut group = OutboundGroup::new("AI 粘性", GroupKind::Selector);
+        group.switch_policy.mode = SwitchMode::Health;
+        group.switch_policy.health_profile = HealthProfile::Ai;
+        group.switch_policy.sticky_session = true;
+        group.switch_policy.consecutive_failures = 2;
+
+        let now = Instant::now();
+        let mut state = RoundState::default();
+        assert_eq!(
+            state.observe_health_active(&group, true, false, false, now),
+            Search::Stay
+        );
+
+        // Even with cooldown active, a reachable node or a node carrying live download traffic
+        // is never force-switched.
+        state.cooldown_until = Some(now + Duration::from_secs(300));
+        assert_eq!(
+            state.observe_health_active(&group, true, false, false, now),
+            Search::Stay
+        );
+        assert_eq!(
+            state.observe_health_active(&group, false, true, false, now),
+            Search::Stay
+        );
+        assert_eq!(
+            state.observe_health_active(&group, false, true, false, now),
+            Search::Stay
+        );
+
+        // Consecutive connectivity failures without live traffic trigger failover despite
+        // sticky_session and cooldown, preferring a non-gated backup node.
+        assert_eq!(
+            state.observe_health_active(&group, false, false, false, now),
+            Search::Stay
+        );
+        assert_eq!(
+            state.observe_health_active(&group, false, false, false, now),
+            Search::Recover
+        );
+        let active_gated = eval(25.0, 25.0, 0.8, Some(HealthGate::Down));
+        let candidates = vec![
+            (
+                "restricted".into(),
+                eval(40.0, 40.0, 0.9, Some(HealthGate::ServiceRestricted)),
+            ),
+            ("clean".into(), eval(82.0, 82.0, 0.5, None)),
+        ];
+        let recover = state
+            .decide_health_switch(Search::Recover, Some(&active_gated), &candidates)
+            .expect("connectivity failure recovers to non-gated node");
+        assert_eq!(recover.id, "clean");
+        assert!(recover.recover);
+
+        // Without sticky_session, cooldown still blocks proactive improvement until expiry.
+        group.switch_policy.sticky_session = false;
+        assert_eq!(
+            state.observe_health_active(&group, true, false, false, now),
+            Search::Stay
+        );
+        assert_eq!(
+            state.observe_health_active(&group, true, false, false, now + Duration::from_secs(301)),
+            Search::Improve
+        );
     }
 }

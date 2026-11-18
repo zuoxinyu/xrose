@@ -578,6 +578,10 @@ pub(crate) fn collect(
             settings.language,
         ),
     ));
+    rows.push(ReportRow::plain(
+        t("数据库版本", "Database schema"),
+        format!("v{}", crate::storage::SCHEMA_VERSION),
+    ));
     NetworkReport { rows }
 }
 

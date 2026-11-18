@@ -1,12 +1,19 @@
 //! Runtime monitoring: connections, traffic history and latency.
 
 pub mod clash;
+pub mod health;
 pub mod latency;
 pub mod location;
 pub mod probe;
+pub mod reachability;
 pub mod xray_stats;
 
 pub use clash::{ClashClient, ClashConnection, ClashProxy, ConnectionsResponse};
+pub use health::{
+    DimBreakdown, ErrStage, HealthDeduction, HealthDim, HealthEngine, HealthGate, HealthGrade,
+    HourlyBucket, HourlySummarySlot, NodeHealthView, PeakDegradation, ProbeKind, ProbeSampleRecord,
+    ProfileEvaluation, ReachabilityCheckStatus, ReachabilityReport, ServiceCheckResult,
+};
 pub use latency::{LatencyResult, tcping, test_many};
 pub use xray_stats::{XrayStatsClient, XrayTraffic};
 

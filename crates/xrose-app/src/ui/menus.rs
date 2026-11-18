@@ -63,6 +63,11 @@ pub(super) enum Command {
     EditNode(String),
     TestNode(String),
     TestExit(HttpTestTarget),
+    DownloadExit(HttpTestTarget),
+    TestReachability(HttpTestTarget),
+    HealthDetails(HttpTestTarget, String),
+    BatchReachability(Vec<String>),
+    CheckGroupReachability,
     SetNodeEnabled(String, bool),
     ExitDetails(HttpTestTarget),
     DownloadNode(String),
@@ -228,8 +233,11 @@ impl AppView {
                 }
             }
             MenuTarget::BatchTests(ids) => {
-                let available =
-                    !ids.is_empty() && !busy("latency") && !busy("download") && !busy("auto-probe");
+                let available = !ids.is_empty()
+                    && !busy("latency")
+                    && !busy("download")
+                    && !busy("reachability")
+                    && !busy("auto-probe");
                 menu = menu
                     .item(add(
                         "HTTP 测速",
@@ -241,7 +249,13 @@ impl AppView {
                         "下载测速",
                         "Download test",
                         available,
-                        Command::BatchDownload(ids),
+                        Command::BatchDownload(ids.clone()),
+                    ))
+                    .item(add(
+                        "健康检查",
+                        "Health check",
+                        available,
+                        Command::BatchReachability(ids),
                     ));
             }
             MenuTarget::Mesh(id) => {
@@ -462,15 +476,52 @@ impl AppView {
             MenuTarget::Exit(target) => {
                 let testing = busy("latency")
                     || busy("download")
+                    || busy("reachability")
                     || busy("auto-probe")
                     || busy("core")
                     || busy("mesh");
+                let exit_title = match &target {
+                    HttpTestTarget::Direct => tr(lang, "本机直连", "Direct").to_string(),
+                    HttpTestTarget::MeshExit { peer, .. } => self
+                        .snapshot
+                        .mesh
+                        .networks
+                        .iter()
+                        .flat_map(|net| net.peers.iter())
+                        .find(|p| &p.id == peer)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| tr(lang, "组网出口", "Mesh exit").to_string()),
+                    HttpTestTarget::Node(id) => self
+                        .snapshot
+                        .model
+                        .node(id)
+                        .map(|n| n.name.clone())
+                        .unwrap_or_else(|| id.clone()),
+                };
                 menu = menu
                     .item(add(
                         "HTTP 测速",
                         "HTTP test",
                         !testing,
                         Command::TestExit(target.clone()),
+                    ))
+                    .item(add(
+                        "下载测速",
+                        "Download test",
+                        !testing,
+                        Command::DownloadExit(target.clone()),
+                    ))
+                    .item(add(
+                        "检测可达性",
+                        "Check reachability",
+                        !testing,
+                        Command::TestReachability(target.clone()),
+                    ))
+                    .item(add(
+                        "健康详情…",
+                        "Health details…",
+                        true,
+                        Command::HealthDetails(target.clone(), exit_title),
                     ))
                     .item(add(
                         "查看详情",
@@ -496,8 +547,11 @@ impl AppView {
                 let Some(node) = self.snapshot.model.node(&id) else {
                     return menu;
                 };
-                let testing =
-                    busy("latency") || busy("download") || busy("auto-probe") || busy("core");
+                let testing = busy("latency")
+                    || busy("download")
+                    || busy("reachability")
+                    || busy("auto-probe")
+                    || busy("core");
                 menu = menu
                     .item(add(
                         "编辑",
@@ -522,6 +576,18 @@ impl AppView {
                         "Download test",
                         node.enabled && !testing,
                         Command::DownloadNode(id.clone()),
+                    ))
+                    .item(add(
+                        "检测可达性",
+                        "Check reachability",
+                        node.enabled && !testing,
+                        Command::TestReachability(HttpTestTarget::Node(id.clone())),
+                    ))
+                    .item(add(
+                        "健康详情…",
+                        "Health details…",
+                        true,
+                        Command::HealthDetails(HttpTestTarget::Node(id.clone()), node.name.clone()),
                     ));
                 let running =
                     self.snapshot.runtime.running_proxy_node.as_deref() == Some(id.as_str());
@@ -550,6 +616,12 @@ impl AppView {
             }
             MenuTarget::Nodes => {
                 let failed = self.snapshot.latency.values().any(|e| e.delay_ms.is_none());
+                let group_testing = busy("latency")
+                    || busy("download")
+                    || busy("reachability")
+                    || busy("auto-probe")
+                    || busy("core")
+                    || busy("mesh");
                 menu = menu
                     .item(add(
                         "管理出站组…",
@@ -562,6 +634,12 @@ impl AppView {
                         "Auto-switch settings…",
                         self.snapshot.model.default_group_id().is_some(),
                         Command::NodeSwitchSettings,
+                    ))
+                    .item(add(
+                        "检测当前出站组可达性",
+                        "Check active group reachability",
+                        !group_testing && !self.snapshot.model.nodes.is_empty(),
+                        Command::CheckGroupReachability,
                     ))
                     .item(add(
                         if self.batch_mode {
@@ -928,8 +1006,34 @@ impl AppView {
         };
         let busy = |key: &str| self.snapshot.busy.iter().any(|s| s == key);
         let exists = match &command {
-            Command::BatchHttp(_) | Command::BatchDownload(_) => {
-                self.batch_mode && !busy("latency") && !busy("download") && !busy("auto-probe")
+            Command::BatchHttp(_) | Command::BatchDownload(_) | Command::BatchReachability(_) => {
+                self.batch_mode
+                    && !busy("latency")
+                    && !busy("download")
+                    && !busy("reachability")
+                    && !busy("auto-probe")
+            }
+            Command::CheckGroupReachability => {
+                !busy("latency")
+                    && !busy("download")
+                    && !busy("reachability")
+                    && !busy("auto-probe")
+                    && !busy("core")
+                    && !busy("mesh")
+            }
+            Command::TestReachability(target) => {
+                let target_ready = match target {
+                    HttpTestTarget::Node(id) => {
+                        self.snapshot.model.node(id).is_some_and(|n| n.enabled)
+                    }
+                    HttpTestTarget::Direct | HttpTestTarget::MeshExit { .. } => !busy("mesh"),
+                };
+                target_ready
+                    && !busy("latency")
+                    && !busy("download")
+                    && !busy("reachability")
+                    && !busy("auto-probe")
+                    && !busy("core")
             }
             Command::SelectNode(group_id, node_id) => {
                 self.snapshot.model.node(node_id).is_some_and(|n| {
@@ -1053,8 +1157,14 @@ impl AppView {
         {
             return;
         }
-        if matches!(&command, Command::TestNode(_) | Command::DownloadNode(_))
-            && (busy("latency") || busy("download") || busy("auto-probe"))
+        if matches!(
+            &command,
+            Command::TestNode(_)
+                | Command::DownloadNode(_)
+                | Command::TestExit(_)
+                | Command::DownloadExit(_)
+                | Command::TestReachability(_)
+        ) && (busy("latency") || busy("download") || busy("reachability") || busy("auto-probe"))
         {
             return;
         }
@@ -1289,6 +1399,19 @@ impl AppView {
             }
             Command::SetNodeEnabled(id, enabled) => self.service.set_node_enabled(&id, enabled),
             Command::TestExit(target) => self.service.test_http_target(target),
+            Command::DownloadExit(target) => self.service.test_download_target(target),
+            Command::TestReachability(target) => {
+                self.service.test_reachability_target(target, true);
+            }
+            Command::HealthDetails(target, title) => {
+                self.open_health_detail(target, title, window, cx);
+            }
+            Command::BatchReachability(ids) => {
+                self.service.test_reachability_nodes(ids, true);
+            }
+            Command::CheckGroupReachability => {
+                self.service.test_default_group_reachability(true);
+            }
             Command::ExitDetails(target) => {
                 self.page = match target {
                     HttpTestTarget::MeshExit { .. } => super::Page::Mesh,

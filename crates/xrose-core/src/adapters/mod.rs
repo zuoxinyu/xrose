@@ -346,6 +346,25 @@ pub(crate) fn compile_direct_probe(core: CoreKind, port: u16) -> Value {
     }
 }
 
+/// Minimal HTTP + SOCKS5 (UDP-enabled) probe listeners routed exclusively through
+/// the requested node (or direct when `node` is `None`).
+pub(crate) fn compile_reachability_probe(
+    core: CoreKind,
+    node: Option<&crate::model::Node>,
+    http_port: u16,
+    socks_port: u16,
+) -> Result<Value> {
+    if let Some(node) = node
+        && !node.usable_with(core)
+    {
+        return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
+    }
+    match core {
+        CoreKind::SingBox => singbox::compile_reachability_probe(node, http_port, socks_port),
+        CoreKind::Xray => xray::compile_reachability_probe(node, http_port, socks_port),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------

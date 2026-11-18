@@ -122,6 +122,9 @@ impl ProxyAccount {
     }
 }
 
+pub const DEFAULT_OVERSEAS_URLTEST_URL: &str = "https://www.gstatic.com/generate_204";
+pub const DEFAULT_DOMESTIC_URLTEST_URL: &str = "https://connect.rom.miui.com/generate_204";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
@@ -170,6 +173,8 @@ pub struct Settings {
     pub watchdog: bool,
     pub watchdog_max_retries: u32,
     pub urltest_url: String,
+    #[serde(default = "default_domestic_urltest_url")]
+    pub domestic_urltest_url: String,
     pub urltest_interval_secs: u64,
     pub subscription_update_hours: u64,
     /// Selected managed version per core. Without a version, use the local executable.
@@ -184,6 +189,24 @@ pub struct Settings {
     pub privacy_mode: bool,
     /// Collect local, persistent traffic aggregates independently of diagnostics.
     pub traffic_statistics_enabled: bool,
+    /// Daily active probing bandwidth cap in MiB (`0` disables the cap).
+    #[serde(default = "default_probe_budget_mb")]
+    pub daily_probe_budget_mb: u32,
+}
+
+fn default_probe_budget_mb() -> u32 {
+    100
+}
+
+fn default_domestic_urltest_url() -> String {
+    DEFAULT_DOMESTIC_URLTEST_URL.into()
+}
+
+pub fn valid_http_test_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !trimmed.is_empty()
+        && url::Url::parse(trimmed)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 impl Default for Settings {
@@ -225,7 +248,8 @@ impl Default for Settings {
             hot_reload: true,
             watchdog: true,
             watchdog_max_retries: 5,
-            urltest_url: "https://www.gstatic.com/generate_204".into(),
+            urltest_url: DEFAULT_OVERSEAS_URLTEST_URL.into(),
+            domestic_urltest_url: DEFAULT_DOMESTIC_URLTEST_URL.into(),
             urltest_interval_secs: 300,
             subscription_update_hours: 12,
             check_app_updates: true,
@@ -234,6 +258,7 @@ impl Default for Settings {
             show_tray_indicator: false,
             privacy_mode: true,
             traffic_statistics_enabled: false,
+            daily_probe_budget_mb: default_probe_budget_mb(),
             active_versions: BTreeMap::new(),
             binary_paths: BTreeMap::new(),
         }
@@ -304,6 +329,16 @@ impl Settings {
             settings.autostart |= value["autostart_proxy"].as_bool().unwrap_or(false)
                 || value["autostart_tailscale"].as_str().is_some()
                 || value["autostart_easytier"].as_str().is_some();
+        }
+        if valid_http_test_url(&settings.urltest_url) {
+            settings.urltest_url = settings.urltest_url.trim().to_string();
+        } else {
+            settings.urltest_url = DEFAULT_OVERSEAS_URLTEST_URL.into();
+        }
+        if valid_http_test_url(&settings.domestic_urltest_url) {
+            settings.domestic_urltest_url = settings.domestic_urltest_url.trim().to_string();
+        } else {
+            settings.domestic_urltest_url = DEFAULT_DOMESTIC_URLTEST_URL.into();
         }
         Ok(settings)
     }
@@ -742,5 +777,36 @@ mod tests {
         let mut new = old.clone();
         new.traffic_statistics_enabled = true;
         assert!(!new.requires_core_restart(&old, &crate::model::AppModel::default()));
+    }
+
+    #[test]
+    fn domestic_and_overseas_urltest_defaults_validate_and_normalize() {
+        let defaults: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(defaults.urltest_url, DEFAULT_OVERSEAS_URLTEST_URL);
+        assert_eq!(defaults.domestic_urltest_url, DEFAULT_DOMESTIC_URLTEST_URL);
+
+        assert!(valid_http_test_url("https://example.com/generate_204"));
+        assert!(valid_http_test_url(
+            "  http://cp.cloudflare.com/generate_204 "
+        ));
+        assert!(!valid_http_test_url(""));
+        assert!(!valid_http_test_url("ftp://example.com/204"));
+        assert!(!valid_http_test_url("https://"));
+        assert!(!valid_http_test_url("://example.com"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"urltest_url":"  ","domestic_urltest_url":"invalid-url"}"#,
+        )
+        .unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert_eq!(loaded.urltest_url, DEFAULT_OVERSEAS_URLTEST_URL);
+        assert_eq!(loaded.domestic_urltest_url, DEFAULT_DOMESTIC_URLTEST_URL);
+
+        let mut changed = loaded.clone();
+        changed.domestic_urltest_url = "https://connect.rom.miui.com/generate_204?v=2".into();
+        assert!(!changed.requires_core_restart(&loaded, &crate::model::AppModel::default()));
     }
 }

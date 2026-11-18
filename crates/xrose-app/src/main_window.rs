@@ -101,7 +101,7 @@ impl MainWindow {
                 }
                 false
             });
-            cx.new(|cx| {
+            let view = cx.new(|cx| {
                 let view = ui::AppView::new(service.clone(), window, cx);
                 #[cfg(target_os = "linux")]
                 let view = if let Some(state) = self.withdrawn.take() {
@@ -110,7 +110,15 @@ impl MainWindow {
                     view
                 };
                 view
-            })
+            });
+            window
+                .observe(&view, cx, |_, window, cx| {
+                    if window.has_active_dialog(cx) || window.has_active_sheet(cx) {
+                        window.refresh();
+                    }
+                })
+                .detach();
+            view
         })?;
         self.visible = Some((handle, view.downgrade()));
         Ok(())

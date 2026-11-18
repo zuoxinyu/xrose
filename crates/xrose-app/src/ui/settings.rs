@@ -1,7 +1,7 @@
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::Input;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
@@ -68,11 +68,129 @@ impl AppView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn urltest_setting_row(
+        &self,
+        p: &Palette,
+        label: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        input: &Entity<InputState>,
+        saved: &str,
+        default_url: &'static str,
+        ids: (&'static str, &'static str),
+        set_value: fn(&mut Settings, String),
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let value = input.read(cx).value();
+        let trimmed = value.trim().to_string();
+        let valid = xrose_core::settings::valid_http_test_url(&trimmed);
+        let dirty = trimmed != saved.trim();
+        let can_reset = trimmed != default_url || saved.trim() != default_url;
+        let input_handle = input.clone();
+        let reset_handle = input.clone();
+        let saved_for_reset = saved.trim().to_string();
+        let (save_id, reset_id) = ids;
+
+        setting_row(
+            p,
+            label,
+            description,
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(super::theme::SETTING_LABEL_WIDTH * 2.))
+                                .child(Input::new(input)),
+                        )
+                        .when(dirty, |d| {
+                            d.child(
+                                Button::new(save_id)
+                                    .primary()
+                                    .label(self.tr("应用", "Apply"))
+                                    .disabled(!valid)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let next = input_handle.read(cx).value().trim().to_string();
+                                        if xrose_core::settings::valid_http_test_url(&next) {
+                                            input_handle.update(cx, |state, cx| {
+                                                state.set_value(next.clone(), window, cx);
+                                            });
+                                            this.modify_settings(cx, |s| set_value(s, next));
+                                        }
+                                    })),
+                            )
+                        })
+                        .when(can_reset, |d| {
+                            d.child(
+                                Button::new(reset_id)
+                                    .label(self.tr("重置", "Reset"))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        reset_handle.update(cx, |state, cx| {
+                                            state.set_value(default_url, window, cx);
+                                        });
+                                        if saved_for_reset != default_url {
+                                            this.modify_settings(cx, |s| {
+                                                set_value(s, default_url.to_string())
+                                            });
+                                        }
+                                    })),
+                            )
+                        }),
+                )
+                .when(!valid, |d| {
+                    d.child(div().text_xs().text_color(p.danger_text).child(self.tr(
+                        "请输入有效的 HTTP/HTTPS 地址",
+                        "Enter a valid HTTP/HTTPS URL",
+                    )))
+                }),
+        )
+    }
+
     fn advanced_network_settings(&self, p: &Palette, cx: &mut Context<Self>) -> Div {
         let settings = &self.snapshot.settings;
+        let lang = self.lang();
         let lan_account = self.lan_account_input(cx);
         let lan_port = valid_port(self.lan_port_input.read(cx).value().as_ref());
+        let domestic_row = self.urltest_setting_row(
+            p,
+            self.tr("国内出口测速地址", "Domestic URL test"),
+            self.tr(
+                "用于本机直连 HTTP 测速；本机吞吐测速默认使用国内镜像源。",
+                "Used for direct HTTP latency probes; local throughput probes use a domestic CDN by default.",
+            ),
+            &self.domestic_urltest_input,
+            &settings.domestic_urltest_url,
+            xrose_core::settings::DEFAULT_DOMESTIC_URLTEST_URL,
+            ("save-domestic-urltest", "reset-domestic-urltest"),
+            |s, v| s.domestic_urltest_url = v,
+            cx,
+        );
+        let overseas_row = self.urltest_setting_row(
+            p,
+            self.tr("国外出口测速地址", "Overseas URL test"),
+            with_reload_note(
+                lang,
+                settings.hot_reload,
+                "用于节点与组网出口 HTTP 测速及自动切换测速",
+                "Used for node, mesh exit, and automatic group URL tests",
+            ),
+            &self.overseas_urltest_input,
+            &settings.urltest_url,
+            xrose_core::settings::DEFAULT_OVERSEAS_URLTEST_URL,
+            ("save-overseas-urltest", "reset-overseas-urltest"),
+            |s, v| s.urltest_url = v,
+            cx,
+        );
         div().flex().flex_col().gap_3()
+            .child(domestic_row)
+            .child(overseas_row)
+            .child(divider(p))
             .when(settings.allow_lan, |card| card
                 .child(setting_row(p, self.tr("第二端口", "Second port"),
                     self.tr("启用后主端口仅供本机使用，局域网设备使用第二端口", "Use the main port locally and the second port for LAN devices"),
@@ -1452,6 +1570,11 @@ impl AppView {
                                 platform.helper_running_mesh_protocol,
                                 lang,
                             )
+                        ),
+                        format!(
+                            "{}{colon}v{}",
+                            self.tr("数据库版本", "Database schema"),
+                            platform.database_schema,
                         ),
                     ];
                     if let Some(path) = &platform.helper_path {

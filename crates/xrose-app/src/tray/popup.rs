@@ -1055,6 +1055,7 @@ impl Render for PopupView {
                                     .icon(IconName::Gauge)
                                     .tooltip(test_tip.clone())
                                     .accessibility_label(test_tip)
+                                    .loading(d.busy_latency)
                                     .disabled(d.busy_latency)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.action(TrayAction::TestAll, window, cx)

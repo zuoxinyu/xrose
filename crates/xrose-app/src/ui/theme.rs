@@ -195,6 +195,19 @@ pub fn latency_color(p: &Palette, entry: Option<&LatencyEntry>) -> Hsla {
     }
 }
 
+pub fn health_grade_colors(
+    p: &Palette,
+    grade: xrose_core::runtime::health::HealthGrade,
+) -> (Hsla, Hsla) {
+    use xrose_core::runtime::health::HealthGrade::*;
+    match grade {
+        A => (p.ok_text, p.success.opacity(SEMANTIC_ALPHA)),
+        B => (p.fg, p.panel_alt),
+        C => (p.warn_text, p.warning.opacity(SEMANTIC_ALPHA)),
+        D | F => (p.danger_text, p.danger.opacity(SEMANTIC_ALPHA)),
+    }
+}
+
 pub fn latency_age_secs(entry: &LatencyEntry) -> i64 {
     xrose_core::util::now_unix()
         .saturating_sub(entry.checked_at)
@@ -239,7 +252,10 @@ pub const HEADER_PRIVACY_EDGE_GAP: f32 = if cfg!(target_os = "macos") { 12. } el
 pub const ICON_BUTTON_SIZE: f32 = 28.;
 pub const ICON_SIZE: f32 = 16.;
 pub const NODE_ROW_HEIGHT: f32 = 64.;
+pub const NODE_HEALTH_WIDTH: f32 = 56.;
 pub const NODE_HTTP_WIDTH: f32 = 80.;
+pub const HEALTH_DETAIL_LABEL_WIDTH: f32 = 84.;
+pub const HEALTH_HOURLY_BAR_HEIGHT: f32 = 36.;
 pub const SETTING_LABEL_WIDTH: f32 = 120.;
 pub const DIALOG_LABEL_WIDTH: f32 = 192.;
 pub const INLINE_LABEL_WIDTH: f32 = 88.;

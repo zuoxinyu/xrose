@@ -32,6 +32,7 @@ fn main() {
         Some("add-node") => add_node(&args[1..]),
         Some("doctor") => doctor(&args[1..]),
         Some("seed-demo") => seed_demo(&args[1..]),
+        Some("health") => health_command(&args[1..]),
         Some("core") => core_command(&args[1..]),
         Some("fetch-core") => fetch_core(&args[1..]),
         Some("run") => run_core(&args[1..]),
@@ -84,6 +85,7 @@ fn usage() {
   xrose-cli helper run              前台运行助手（需要 root/管理员）
   xrose-cli doctor                  输出网卡、路由、系统 DNS/代理、监听归属与提权助手诊断
   xrose-cli seed-demo               写入演示节点/订阅/规则（用于截图或试用）
+  xrose-cli health [--profile general|ai|streaming|low-latency|bulk] [--home DIR]   查看节点健康评分摘要
   xrose-cli core install --core xray --path <bin> --version 1.8.24
   xrose-cli core use --core xray --version 1.8.24
   xrose-cli fetch-core [--core sing-box]  从 GitHub 下载并校验核心
@@ -1116,10 +1118,111 @@ tuic://11111111-2222-3333-4444-555555555555:tuicpass@kr.example.com:443?congesti
     route.name = "ChatGPT 走美国".into();
     service.upsert_rule(route);
     service.rename_profile("演示配置");
+    service.seed_demo_health();
     println!(
         "已写入演示数据：{added} 个节点、1 个订阅、1 条自定义规则（{}）",
         settings.core.display_name()
     );
+    Ok(())
+}
+
+fn health_command(args: &[String]) -> Result<(), String> {
+    use xrose_core::model::HealthProfile;
+    use xrose_core::util::format_bytes;
+
+    let (_, _, home, _) = parse_args(args);
+    let profile = match value_arg(args, "--profile").as_deref() {
+        None | Some("general") => HealthProfile::General,
+        Some("ai") => HealthProfile::Ai,
+        Some("streaming") | Some("media") => HealthProfile::Streaming,
+        Some("low-latency") | Some("low_latency") => HealthProfile::LowLatency,
+        Some("bulk") => HealthProfile::Bulk,
+        Some(other) => {
+            return Err(format!(
+                "未知场景：{other}（可选 general|ai|streaming|low-latency|bulk）"
+            ));
+        }
+    };
+    let service = service(home)?;
+    let snapshot = service.snapshot();
+    let used = format_bytes(snapshot.probe_budget_used_bytes);
+    let budget = if snapshot.settings.daily_probe_budget_mb == 0 {
+        "不限".to_string()
+    } else {
+        format!("{} MiB", snapshot.settings.daily_probe_budget_mb)
+    };
+    println!("今日自动探测流量：已用 {used} / {budget}（场景：{profile:?}）");
+
+    let mut rows: Vec<_> = snapshot
+        .model
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(idx, node)| {
+            let view = snapshot.node_health.get(&node.id);
+            let eval = service.evaluate_node_health(&node.id, profile);
+            (idx, node, view, eval)
+        })
+        .collect();
+    rows.sort_by(|a, b| match (&a.3, &b.3) {
+        (Some(ea), Some(eb)) => eb
+            .score
+            .partial_cmp(&ea.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.0.cmp(&b.0),
+    });
+
+    if rows.is_empty() {
+        println!("当前配置无节点。");
+        return Ok(());
+    }
+    for (_, node, view, eval) in rows {
+        let name = if snapshot.settings.privacy_mode {
+            xrose_core::privacy::mask_server_in_label(
+                &node.name,
+                &node.server,
+                "•••",
+                &snapshot.mesh.magic_dns_suffixes(),
+            )
+        } else {
+            node.name.clone()
+        };
+        match eval {
+            Some(ev) => {
+                let ai = view
+                    .and_then(|v| v.ai_score)
+                    .map(|s| format!("AI {:>3.0}", s))
+                    .unwrap_or_else(|| "AI  — ".into());
+                let media = view
+                    .and_then(|v| v.media_score)
+                    .map(|s| format!("流媒体 {:>3.0}", s))
+                    .unwrap_or_else(|| "流媒体  — ".into());
+                let note = ev
+                    .gate
+                    .map(|g| format!("门槛：{}", g.label_zh()))
+                    .or_else(|| ev.deductions.first().map(|d| d.zh.clone()))
+                    .unwrap_or_else(|| "正常".into());
+                println!(
+                    "[{} {:>3.0}] 15m={:>3.0} 24h={:>3.0} 置信={:>3.0}% | {ai} {media} | {:<18} | {note}",
+                    ev.grade.as_str(),
+                    ev.score,
+                    ev.short_score,
+                    ev.long_score,
+                    ev.confidence * 100.0,
+                    truncate(&name, 18),
+                );
+            }
+            None => {
+                println!(
+                    "[—    ]                                   |                | {:<18} | 未探测",
+                    truncate(&name, 18),
+                );
+            }
+        }
+    }
     Ok(())
 }
 

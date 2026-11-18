@@ -5,10 +5,10 @@ pub(crate) struct TrayWindowState {
     page: Page,
     settings_tab: SettingsTab,
     network_advanced_open: bool,
-    page_inputs: [SharedString; 10],
+    page_inputs: [SharedString; 12],
     hide_ips: bool,
     hide_traffic_chart: bool,
-    sort_by_latency: bool,
+    node_sort: super::NodeSort,
     group_by_subscription: bool,
     exact_process_filter: Option<String>,
     connection_sort: xrose_core::flow::ConnectionSort,
@@ -30,7 +30,7 @@ pub(crate) struct TrayWindowState {
 impl AppView {
     // The two windows have different focus and input subscriptions. Carry the text
     // across in memory and let GPUI bind the new controls to their own window.
-    fn page_inputs(&self) -> [&Entity<InputState>; 10] {
+    fn page_inputs(&self) -> [&Entity<InputState>; 12] {
         [
             &self.node_search,
             &self.connection_search,
@@ -40,6 +40,8 @@ impl AppView {
             &self.lan_port_input,
             &self.lan_user_input,
             &self.lan_password_input,
+            &self.domestic_urltest_input,
+            &self.overseas_urltest_input,
             &self.update_agent_input,
             &self.trace_input,
         ]
@@ -59,7 +61,7 @@ impl AppView {
             exact_process_filter: self.exact_process_filter.clone(),
             hide_ips: self.hide_ips,
             hide_traffic_chart: self.hide_traffic_chart,
-            sort_by_latency: self.sort_by_latency,
+            node_sort: self.node_sort,
             group_by_subscription: self.group_by_subscription,
             connection_sort: self.connection_sort,
             connections_tab: self.connections_tab,
@@ -98,7 +100,7 @@ impl AppView {
         self.exact_process_filter = state.exact_process_filter;
         self.hide_ips = state.hide_ips;
         self.hide_traffic_chart = state.hide_traffic_chart;
-        self.sort_by_latency = state.sort_by_latency;
+        self.node_sort = state.node_sort;
         self.group_by_subscription = state.group_by_subscription;
         self.connection_sort = state.connection_sort;
         self.connections_tab = state.connections_tab;

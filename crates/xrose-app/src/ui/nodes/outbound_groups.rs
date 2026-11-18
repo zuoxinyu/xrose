@@ -153,6 +153,19 @@ impl AppView {
                 self.tr("延迟优先", "Lowest latency")
             }
             (SwitchMode::Throughput, _) => self.tr("吞吐优先", "Highest throughput"),
+            (SwitchMode::Health, _) => {
+                let suffix = match group.switch_policy.health_profile {
+                    xrose_core::model::HealthProfile::General => self.tr("综合", "General"),
+                    xrose_core::model::HealthProfile::Ai => self.tr("AI", "AI"),
+                    xrose_core::model::HealthProfile::Streaming => self.tr("流媒体", "Streaming"),
+                    xrose_core::model::HealthProfile::LowLatency => {
+                        self.tr("低延迟", "Low latency")
+                    }
+                    xrose_core::model::HealthProfile::Bulk => self.tr("大流量", "Bulk"),
+                    xrose_core::model::HealthProfile::MeshExit => self.tr("组网", "Mesh"),
+                };
+                format!("{}（{}）", self.tr("健康评分", "Health"), suffix).into()
+            }
             _ => self.tr("负载均衡", "Load balancing"),
         }
     }

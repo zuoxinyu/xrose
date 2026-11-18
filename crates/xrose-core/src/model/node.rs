@@ -1072,8 +1072,37 @@ pub enum SwitchMode {
     GroupDefault,
     Off,
     Failover,
+    Health,
     Latency,
     Throughput,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthProfile {
+    #[default]
+    General,
+    Ai,
+    Streaming,
+    LowLatency,
+    Bulk,
+    MeshExit,
+}
+
+impl HealthProfile {
+    pub const fn group_choices() -> [Self; 5] {
+        [
+            Self::General,
+            Self::Ai,
+            Self::Streaming,
+            Self::LowLatency,
+            Self::Bulk,
+        ]
+    }
+
+    pub const fn default_sticky_session(self) -> bool {
+        matches!(self, Self::Ai)
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1091,6 +1120,8 @@ pub struct NodeSwitchPolicy {
     pub mode: SwitchMode,
     pub fallback: FallbackScope,
     pub consecutive_failures: u8,
+    pub health_profile: HealthProfile,
+    pub sticky_session: bool,
 }
 
 impl Default for NodeSwitchPolicy {
@@ -1099,6 +1130,8 @@ impl Default for NodeSwitchPolicy {
             mode: SwitchMode::GroupDefault,
             fallback: FallbackScope::Group,
             consecutive_failures: 2,
+            health_profile: HealthProfile::General,
+            sticky_session: false,
         }
     }
 }
@@ -1154,7 +1187,10 @@ impl OutboundGroup {
     pub fn managed(&self) -> bool {
         matches!(
             self.switch_mode(),
-            SwitchMode::Failover | SwitchMode::Latency | SwitchMode::Throughput
+            SwitchMode::Failover
+                | SwitchMode::Health
+                | SwitchMode::Latency
+                | SwitchMode::Throughput
         )
     }
 

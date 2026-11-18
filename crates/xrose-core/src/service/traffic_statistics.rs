@@ -213,6 +213,17 @@ impl AppService {
     }
 
     async fn flush_statistics_locked(&self) {
+        let hourly = self.inner.health.lock().take_dirty_hourly_buckets();
+        if !hourly.is_empty() {
+            let min_bucket = (crate::util::now_unix().div_euclid(3600) - 168) * 3600;
+            if let Err(err) = self.inner.store.save_hourly_buckets(&hourly, min_bucket) {
+                tracing::warn!(
+                    target: "xrose::health",
+                    error = %err,
+                    "save health hourly buckets failed"
+                );
+            }
+        }
         let (session, started, records) = {
             let data = self.inner.statistics.data.lock();
             (
@@ -293,10 +304,24 @@ impl AppService {
                 .await
             {
                 Ok(traffic) if valid() => {
-                    self.inner
+                    let sampled = self
+                        .inner
                         .traffic
                         .lock()
                         .sample(traffic.uplink, traffic.downlink);
+                    if model.work_mode == crate::model::WorkMode::Proxy {
+                        if let Some(node_id) = model
+                            .default_group_id()
+                            .and_then(|gid| model.group(&gid))
+                            .and_then(|g| g.active_node())
+                        {
+                            self.inner.health.lock().observe_xray_active(
+                                node_id,
+                                sampled.down_speed,
+                                crate::util::now_unix(),
+                            );
+                        }
+                    }
                     self.inner.statistics.data.lock().observe_xray(
                         epoch.clone(),
                         &model,

@@ -1,6 +1,7 @@
 //! SQLite persistence with migrations, encrypted payloads and JSON backups.
 
 pub mod crypto;
+mod health;
 mod mesh_sync;
 mod traffic_statistics;
 
@@ -19,7 +20,7 @@ use crate::util::{atomic_write_json, now_rfc3339, now_unix};
 
 use crypto::SecretBox;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 // Distinguish the release schema from overlapping pre-release version numbers.
 const APPLICATION_ID: i64 = i32::from_be_bytes(*b"XROS") as i64;
 
@@ -130,8 +131,8 @@ impl Store {
             // Old profile JSON may contain a chained node ID. Serde drops it when saving;
             // the application-level SOCKS5 endpoint starts empty in the separate settings file.
             (APPLICATION_ID, 1) => {}
-            // Earlier releases share these tables; migrate legacy routing JSON below.
-            (APPLICATION_ID, 2 | 3) => {}
+            // Earlier releases share these tables; migrate legacy routing JSON and add health tables below.
+            (APPLICATION_ID, 2..=4) => {}
             (0, 0) => tx.execute_batch(include_str!("schema_v1.sql"))?,
             (0, 14 | 15) => {
                 // These builds already use the complete v1 table layout. The two routing
@@ -175,6 +176,7 @@ impl Store {
                 )?;
             }
         }
+        tx.execute_batch(health::HEALTH_SCHEMA_SQL)?;
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;

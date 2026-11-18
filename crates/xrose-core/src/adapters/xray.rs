@@ -827,20 +827,46 @@ fn tun_inbound(
 
 /// Minimal configuration used only by private per-node probes.
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
-    let outbounds = [node_outbound(node, &mut Vec::new())?];
-    Ok(json!({
-        "log": {"loglevel": "none"},
-        "inbounds": [{"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}],
-        "outbounds": outbounds
-    }))
+    compile_probe_with_inbounds(
+        Some(node),
+        vec![
+            json!({"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}),
+        ],
+    )
 }
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
-    json!({
+    compile_probe_with_inbounds(
+        None,
+        vec![json!({"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}})],
+    )
+    .expect("direct probe compiles")
+}
+
+pub(super) fn compile_reachability_probe(
+    node: Option<&Node>,
+    http_port: u16,
+    socks_port: u16,
+) -> Result<Value> {
+    compile_probe_with_inbounds(
+        node,
+        vec![
+            json!({"protocol": "http", "tag": "probe-http", "listen": "127.0.0.1", "port": http_port, "settings": {}}),
+            json!({"protocol": "socks", "tag": "probe-socks", "listen": "127.0.0.1", "port": socks_port, "settings": {"auth": "noauth", "udp": true, "userLevel": 0}}),
+        ],
+    )
+}
+
+fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {
+    let outbounds = match node {
+        Some(node) => vec![node_outbound(node, &mut Vec::new())?],
+        None => vec![json!({"protocol": "freedom", "tag": "direct", "settings": {}})],
+    };
+    Ok(json!({
         "log": {"loglevel": "none"},
-        "inbounds": [{"protocol":"http", "tag":"probe", "listen":"127.0.0.1", "port":port, "settings":{}}],
-        "outbounds": [{"protocol":"freedom", "tag":"direct", "settings":{}}]
-    })
+        "inbounds": inbounds,
+        "outbounds": outbounds
+    }))
 }
 
 /// Bind probe sockets before they can be captured by a running TUN.

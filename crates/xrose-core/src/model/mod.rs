@@ -12,9 +12,9 @@ pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
 pub use mesh_mode::{MeshDnsMode, MeshExitTarget, MeshModeConfig};
 pub use node::{
-    AnytlsOptions, Credentials, FallbackScope, GroupKind, Network, Node, NodeDraft, NodeSource,
-    NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode, TlsOptions, Transport,
-    TransportKind, WireguardOptions,
+    AnytlsOptions, Credentials, FallbackScope, GroupKind, HealthProfile, Network, Node, NodeDraft,
+    NodeSource, NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode, TlsOptions,
+    Transport, TransportKind, WireguardOptions,
 };
 pub use route::{
     DomainStrategy, Matchers, Placement, RouteAction, RouteActionKind, RoutePreset, RouteRule,

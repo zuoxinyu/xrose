@@ -1,4 +1,5 @@
 mod direct_entry;
+mod health_detail;
 mod mesh_exits;
 mod outbound_groups;
 mod switching;
@@ -182,7 +183,12 @@ impl AppView {
             .collect();
         let auto_mode = group.as_ref().is_some_and(|g| !g.manually_selectable());
 
-        let sort_active = has_nodes && self.sort_by_latency;
+        let node_sort = if has_nodes {
+            self.node_sort
+        } else {
+            super::NodeSort::Order
+        };
+        let sort_active = node_sort != super::NodeSort::Order;
         let grouped = has_nodes && self.group_by_subscription;
 
         let search_query = if has_nodes {
@@ -211,20 +217,52 @@ impl AppView {
             .collect();
 
         // Sorting only changes the view; the stored order is left alone.
-        if sort_active {
-            display_nodes.sort_by_key(|&index| {
-                let n = &model.nodes[index];
-                let ms = self
-                    .snapshot
-                    .latency
-                    .get(&n.id)
-                    .filter(|entry| entry.is_http())
-                    .and_then(|l| l.delay_ms);
-                match ms {
-                    Some(v) => (0, v),
-                    None => (1, u32::MAX),
-                }
-            });
+        match node_sort {
+            super::NodeSort::Order => {}
+            super::NodeSort::Latency => {
+                display_nodes.sort_by(|&a, &b| {
+                    let rtt = |idx: usize| {
+                        let n = &model.nodes[idx];
+                        self.snapshot
+                            .latency
+                            .get(&n.id)
+                            .filter(|entry| entry.is_http())
+                            .and_then(|l| l.delay_ms)
+                    };
+                    match (rtt(a), rtt(b)) {
+                        (Some(va), Some(vb)) => va.cmp(&vb).then_with(|| a.cmp(&b)),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.cmp(&b),
+                    }
+                });
+            }
+            super::NodeSort::Health => {
+                display_nodes.sort_by(|&a, &b| {
+                    let score_pair = |idx: usize| -> Option<(f32, f32)> {
+                        let n = &model.nodes[idx];
+                        self.snapshot
+                            .node_health
+                            .get(&n.id)?
+                            .general
+                            .as_ref()
+                            .map(|g| (g.score, g.short_score))
+                    };
+                    match (score_pair(a), score_pair(b)) {
+                        (Some(sa), Some(sb)) => {
+                            sb.0.partial_cmp(&sa.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| {
+                                    sb.1.partial_cmp(&sa.1).unwrap_or(std::cmp::Ordering::Equal)
+                                })
+                                .then_with(|| a.cmp(&b))
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => a.cmp(&b),
+                    }
+                });
+            }
         }
 
         // Fastest node among all enabled nodes, only if it clearly wins.
@@ -248,8 +286,11 @@ impl AppView {
         let batch_mode = self.batch_mode;
         let batch_selected = &self.batch_selected;
         let latency_busy = this_busy(&self.snapshot.busy, "latency");
+        let download_busy = this_busy(&self.snapshot.busy, "download");
+        let reachability_busy = this_busy(&self.snapshot.busy, "reachability");
         let tests_busy = latency_busy
-            || this_busy(&self.snapshot.busy, "download")
+            || download_busy
+            || reachability_busy
             || this_busy(&self.snapshot.busy, "auto-probe");
         let exit_busy = this_busy(&self.snapshot.busy, "mesh-exit");
         let core_busy = is_core_busy || exit_busy;
@@ -322,6 +363,11 @@ impl AppView {
                                     downloading: this_busy(
                                         &this.snapshot.busy,
                                         &format!("download:{}", node.id),
+                                    ),
+                                    health: this.snapshot.node_health.get(&node.id),
+                                    checking_reachability: this_busy(
+                                        &this.snapshot.busy,
+                                        &format!("reachability:{}", node.id),
                                     ),
                                     hide_ips,
                                     magic_dns_suffixes: &suffixes,
@@ -474,24 +520,56 @@ impl AppView {
                                     },
                                 )),
                             )
-                            .child(
+                            .child({
+                                let sort_choices = [
+                                    super::NodeSort::Order,
+                                    super::NodeSort::Health,
+                                    super::NodeSort::Latency,
+                                ];
                                 ChoiceGroup::new(
                                     "node-sort",
-                                    vec![self.tr("顺序", "Order"), self.tr("延迟 ↑", "Latency ↑")],
-                                    usize::from(sort_active),
+                                    vec![
+                                        self.tr("顺序", "Order"),
+                                        self.tr("健康 ↓", "Health ↓"),
+                                        self.tr("延迟 ↑", "Latency ↑"),
+                                    ],
+                                    sort_choices
+                                        .iter()
+                                        .position(|&s| s == node_sort)
+                                        .unwrap_or(0),
                                 )
                                 .on_change(cx.listener(
-                                    |this, index, _, cx| {
-                                        this.sort_by_latency = *index == 1;
+                                    move |this, index, _, cx| {
+                                        this.node_sort = sort_choices
+                                            .get(*index)
+                                            .copied()
+                                            .unwrap_or_default();
                                         cx.notify();
                                     },
-                                )),
-                            )
+                                ))
+                            })
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w(px(super::theme::FORM_FIELD_WIDTH))
                                     .child(Input::new(&self.node_search)),
+                            )
+                            .child(
+                                toolbar_icon_button(
+                                    "health-check-all",
+                                    IconName::HeartPulse,
+                                    self.tr(
+                                        "对本机直连、已启用代理和已连接组网出口进行批量健康检查",
+                                        "Batch health check Direct, enabled proxies and connected mesh exits",
+                                    ),
+                                    cx,
+                                )
+                                .disabled(tests_busy)
+                                .loading(reachability_busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.service.test_all_health(false);
+                                    this.sync(cx);
+                                })),
                             )
                             .child(
                                 toolbar_icon_button(
@@ -652,6 +730,8 @@ impl AppView {
                                         let button = Button::new("batch-test")
                                             .compact()
                                             .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                            .icon(IconName::Gauge)
+                                            .loading(latency_busy || download_busy || reachability_busy)
                                             .label(self.tr("批量测速", "Batch test"));
                                         if selected_count == 0 || tests_busy {
                                             button.disabled(true).into_any_element()
@@ -703,6 +783,8 @@ impl AppView {
                                     .child({
                                         let sel = selected_ids.clone();
                                         Button::new("batch-delete")
+                                            .compact()
+                                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
                                             .ghost()
                                             .icon(IconName::Trash)
                                             .label(self.tr("批量删除", "Delete selected"))
@@ -881,6 +963,10 @@ impl AppView {
                                             )),
                                     )
                                     .when(!group_nodes.is_empty(), |header| {
+                                        let group_testing = node_ids_for_ping.iter().any(|id| {
+                                            this_busy(&self.snapshot.busy, &format!("latency:{id}"))
+                                                || this_busy(&self.snapshot.busy, &format!("download:{id}"))
+                                        });
                                         header.child(
                                             Button::new(SharedString::from(format!(
                                                 "ping-sub-{}",
@@ -888,6 +974,8 @@ impl AppView {
                                             )))
                                             .compact()
                                             .ghost()
+                                            .icon(IconName::Gauge)
+                                            .loading(group_testing)
                                             .label(self.tr("测速本组", "Test group"))
                                             .disabled(tests_busy)
                                             .tooltip(self.tr(
@@ -1017,6 +1105,8 @@ struct RowProps<'a> {
     location: Option<&'a xrose_core::runtime::location::NodeLocation>,
     download: Option<&'a xrose_core::runtime::probe::DownloadResult>,
     downloading: bool,
+    health: Option<&'a xrose_core::runtime::health::NodeHealthView>,
+    checking_reachability: bool,
     hide_ips: bool,
     magic_dns_suffixes: &'a [&'a str],
     usable: bool,
@@ -1121,8 +1211,10 @@ fn render_virtual_node_row(
                 .get(&key)
                 .filter(|entry| entry.is_http()),
             location: None,
-            download: None,
-            downloading: false,
+            download: view.snapshot.downloads.get(&key),
+            downloading: this_busy(&view.snapshot.busy, &format!("download:{key}")),
+            health: view.snapshot.node_health.get(&key),
+            checking_reachability: this_busy(&view.snapshot.busy, &format!("reachability:{key}")),
             hide_ips: view.hide_ips,
             magic_dns_suffixes: &magic_dns_suffixes,
             usable: true,
@@ -1131,9 +1223,16 @@ fn render_virtual_node_row(
             mesh_provider,
             group_id: None,
             core_busy: busy,
-            latency_busy: ["latency", "download", "auto-probe", "core", "mesh"]
-                .iter()
-                .any(|key| this_busy(&view.snapshot.busy, key)),
+            latency_busy: [
+                "latency",
+                "download",
+                "reachability",
+                "auto-probe",
+                "core",
+                "mesh",
+            ]
+            .iter()
+            .any(|key| this_busy(&view.snapshot.busy, key)),
             testing: this_busy(&view.snapshot.busy, &format!("latency:{key}")),
             batch_mode: false,
             batch_checked: false,
@@ -1364,6 +1463,7 @@ fn http_row_controls(
                                     super::tr(lang, "HTTP 测速", "HTTP test")
                                 })
                                 .accessibility_label(super::tr(lang, "HTTP 测速", "HTTP test"))
+                                .loading(testing)
                                 .disabled(disabled)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.service.test_http_target(target.clone());
@@ -1430,6 +1530,195 @@ fn age_text(lang: Language, secs: i64) -> String {
     }
 }
 
+impl AppView {
+    pub(in crate::ui) fn open_health_detail(
+        &self,
+        target: HttpTestTarget,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        health_detail::open_node_health_dialog(target, title, window, cx);
+    }
+}
+
+fn health_subtitle_tag(
+    health: Option<&xrose_core::runtime::health::NodeHealthView>,
+    lang: Language,
+) -> Option<String> {
+    use xrose_core::runtime::health::ReachabilityCheckStatus as S;
+    let h = health?;
+    let mut parts = Vec::new();
+    if let Some(r) = &h.reachability {
+        if let Some((pass, total)) = r.ai_counts() {
+            parts.push(format!("AI {pass}/{total}"));
+        }
+        let media_sym = |code: &str, status: S| match status {
+            S::Pass => Some(format!("{code}✓")),
+            S::Limited => Some(format!("{code}△")),
+            S::Blocked => Some(format!("{code}✕")),
+            S::Untested => None,
+        };
+        let mut media = Vec::new();
+        if let Some(s) = media_sym("NF", r.netflix.status) {
+            media.push(s);
+        }
+        if let Some(s) = media_sym("YT", r.youtube.status) {
+            media.push(s);
+        }
+        if !media.is_empty() {
+            parts.push(media.join(" "));
+        }
+    }
+    if let Some(peak) = &h.peak_degradation {
+        parts.push(match lang {
+            Language::Zh => format!("晚高峰 +{}%", peak.increase_pct),
+            Language::En => format!("Peak +{}%", peak.increase_pct),
+        });
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn health_tooltip_text(
+    health: Option<&xrose_core::runtime::health::NodeHealthView>,
+    lang: Language,
+) -> SharedString {
+    use xrose_core::runtime::health::HealthDim;
+    let Some(h) = health else {
+        return super::tr(
+            lang,
+            "暂无健康样本 · 点击查看详情或检测",
+            "No health samples · Click for details or probe",
+        );
+    };
+    let mut parts = Vec::new();
+    if let Some(eval) = &h.general {
+        parts.push(format!(
+            "{} {} {} (15m {} / 24h {})",
+            super::tr(lang, "综合", "Health"),
+            eval.grade.as_str(),
+            eval.score.round() as u32,
+            eval.short_score.round() as u32,
+            eval.long_score.round() as u32,
+        ));
+        if let Some(gate) = eval.gate {
+            let g_label = match lang {
+                Language::Zh => gate.label_zh(),
+                Language::En => gate.label_en(),
+            };
+            parts.push(format!("{}: {g_label}", super::tr(lang, "门槛", "Gate")));
+        }
+        let mut dim_bits = Vec::new();
+        for d in &eval.dims {
+            let code = match d.dim {
+                HealthDim::Availability => "A",
+                HealthDim::Latency => "L",
+                HealthDim::Stability => "S",
+                HealthDim::Throughput => "T",
+                HealthDim::Reachability => "R",
+            };
+            if let Some(s) = d.score {
+                dim_bits.push(format!("{code} {}", s.round() as u32));
+            }
+        }
+        if !dim_bits.is_empty() {
+            parts.push(dim_bits.join(" "));
+        }
+        if eval.confidence < 0.40 {
+            parts.push(format!(
+                "{} {}%",
+                super::tr(lang, "样本少", "Low conf"),
+                (eval.confidence * 100.0).round() as u32
+            ));
+        }
+    }
+    if let Some(ai) = h.ai_score {
+        parts.push(format!("AI {}", ai.round() as u32));
+    }
+    if let Some(media) = h.media_score {
+        parts.push(format!(
+            "{} {}",
+            super::tr(lang, "流媒体", "Media"),
+            media.round() as u32
+        ));
+    }
+    parts.push(super::tr(lang, "点击查看详情", "Click for details").to_string());
+    parts.join(" · ").into()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_health_capsule(
+    health: Option<&xrose_core::runtime::health::NodeHealthView>,
+    checking: bool,
+    target: HttpTestTarget,
+    title: String,
+    node_id: &str,
+    lang: Language,
+    p: &Palette,
+    cx: &mut Context<AppView>,
+) -> Div {
+    let tip = health_tooltip_text(health, lang);
+    let inner = if checking {
+        div()
+            .px_2()
+            .py(px(2.))
+            .rounded_sm()
+            .bg(p.panel_alt)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(Spinner::new().small().color(p.muted_fg))
+            .into_any_element()
+    } else if let Some(eval) = health.and_then(|h| h.general.as_ref()) {
+        let (fg, bg) = super::theme::health_grade_colors(p, eval.grade);
+        div()
+            .px(px(6.))
+            .py(px(2.))
+            .rounded_sm()
+            .bg(bg)
+            .text_xs()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_color(fg)
+            .when(eval.confidence < 0.40, |d| d.opacity(0.75))
+            .child(format!(
+                "{} {}",
+                eval.grade.as_str(),
+                eval.score.round() as u32
+            ))
+            .into_any_element()
+    } else {
+        div()
+            .px(px(6.))
+            .py(px(2.))
+            .rounded_sm()
+            .bg(p.panel_alt)
+            .text_xs()
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_color(p.muted_fg)
+            .child("—")
+            .into_any_element()
+    };
+
+    div()
+        .w(px(super::theme::NODE_HEALTH_WIDTH))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_end()
+        .child(
+            div()
+                .id(SharedString::from(format!("node-health-{node_id}")))
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.85))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_health_detail(target.clone(), title.clone(), window, cx);
+                }))
+                .child(inner),
+        )
+}
+
 /// Render a single node row: flush selection bar, radio, metadata, latency and
 /// hover-revealed actions.
 fn render_node_row(
@@ -1448,6 +1737,8 @@ fn render_node_row(
         location,
         download,
         downloading,
+        health,
+        checking_reachability,
         hide_ips,
         magic_dns_suffixes,
         usable,
@@ -1475,6 +1766,17 @@ fn render_node_row(
         MenuTarget::Node(node.id.clone())
     };
     let name = display_node_name(node, hide_ips, magic_dns_suffixes);
+    let health_subtitle = health_subtitle_tag(health, lang);
+    let health_capsule = render_health_capsule(
+        health,
+        checking_reachability,
+        http_target.clone(),
+        name.clone(),
+        &node.id,
+        lang,
+        p,
+        cx,
+    );
     let virtual_select = virtual_exit.clone();
     let radio_target = virtual_exit.clone();
     let radio_group = group_id.clone();
@@ -1557,6 +1859,7 @@ fn render_node_row(
         })
         .on_drop(cx.listener(move |this, dragged: &DraggedNode, _, cx| {
             if dragged.id != drop_target {
+                this.node_sort = super::NodeSort::Order;
                 this.service.move_node_to(&dragged.id, &drop_target);
                 this.sync(cx);
             }
@@ -1754,56 +2057,78 @@ fn render_node_row(
                                     ))
                                 }),
                         )
-                        .child(if let Some(exit) = &virtual_exit {
-                            div()
-                                .min_w(px(0.))
-                                .truncate()
-                                .text_xs()
-                                .text_color(p.muted_fg)
-                                .child(exit.detail().to_owned())
-                                .into_any_element()
-                        } else {
+                        .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap_2()
-                                .text_xs()
                                 .min_w(px(0.))
-                                .child(
+                                .child(if let Some(exit) = &virtual_exit {
                                     div()
                                         .min_w(px(0.))
                                         .truncate()
+                                        .text_xs()
                                         .text_color(p.muted_fg)
-                                        .child(endpoint_display),
-                                )
-                                .child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
-                                .child(
+                                        .child(exit.detail().to_owned())
+                                        .into_any_element()
+                                } else {
                                     div()
-                                        .text_color(p.muted_fg)
-                                        .child(node.transport.kind_name().to_uppercase()),
-                                )
-                                .when_some(location_label, |d, label| {
-                                    let tip = label.clone();
-                                    d.child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .min_w(px(0.))
                                         .child(
                                             div()
-                                                .id(SharedString::from(format!(
-                                                    "node-location-{}",
-                                                    node.id
-                                                )))
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .text_color(p.muted_fg)
-                                                .tooltip(move |window, cx| {
-                                                    Tooltip::new(tip.clone()).build(window, cx)
-                                                })
-                                                .child(label),
+                                                .child(endpoint_display),
                                         )
+                                        .child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
+                                        .child(
+                                            div()
+                                                .text_color(p.muted_fg)
+                                                .child(node.transport.kind_name().to_uppercase()),
+                                        )
+                                        .when_some(location_label, |d, label| {
+                                            let tip = label.clone();
+                                            d.child(
+                                                div()
+                                                    .text_color(p.muted_fg.opacity(0.6))
+                                                    .child("·"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "node-location-{}",
+                                                        node.id
+                                                    )))
+                                                    .min_w(px(0.))
+                                                    .truncate()
+                                                    .text_color(p.muted_fg)
+                                                    .tooltip(move |window, cx| {
+                                                        Tooltip::new(tip.clone()).build(window, cx)
+                                                    })
+                                                    .child(label),
+                                            )
+                                        })
+                                        .into_any_element()
                                 })
-                                .into_any_element()
-                        }),
+                                .when_some(health_subtitle, |d, tag| {
+                                    d.child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
+                                        .child(
+                                            div()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .child(tag),
+                                        )
+                                }),
+                        ),
                 )
-                // Download speed column: fixed width, right-aligned, mono. Placed to the left of latency.
+                // Download speed column: fixed width, right-aligned, mono. Placed to the left of health/latency.
                 .child(
                     div()
                         .w(px(96.))
@@ -1835,6 +2160,7 @@ fn render_node_row(
                             div().into_any_element()
                         }),
                 )
+                .child(health_capsule)
                 .child(http_row_controls(
                     http_target,
                     row_menu.clone(),

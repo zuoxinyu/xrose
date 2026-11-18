@@ -3,13 +3,16 @@ use super::*;
 use crate::ui::dialogs::{dialog_footer, settings_dialog};
 use gpui_kit::component::WindowExt;
 use std::collections::BTreeMap;
-use xrose_core::model::{FallbackScope, GroupKind, NodeSwitchPolicy, OutboundGroup, SwitchMode};
+use xrose_core::model::{
+    FallbackScope, GroupKind, HealthProfile, NodeSwitchPolicy, OutboundGroup, SwitchMode,
+};
 
-const MODES: [SwitchMode; 4] = [
+const MODES: [SwitchMode; 5] = [
     SwitchMode::Off,
     SwitchMode::Failover,
     SwitchMode::Latency,
     SwitchMode::Throughput,
+    SwitchMode::Health,
 ];
 
 struct SwitchDialogState {
@@ -235,6 +238,7 @@ impl AppView {
                 self.tr("仅故障切换", "Failover only"),
                 self.tr("延迟优先", "Lowest latency"),
                 self.tr("吞吐优先", "Highest throughput"),
+                self.tr("健康评分", "Health score"),
             ],
             MODES.iter().position(|m| *m == mode),
         )
@@ -252,6 +256,76 @@ impl AppView {
             );
         }));
         let policy = NodeSwitchPolicy { mode, ..policy };
+        let profiles = HealthProfile::group_choices();
+        let profile_handler = on_change.clone();
+        let health_profile = ChoiceGroup::new(
+            "node-health-profile",
+            vec![
+                self.tr("综合", "General"),
+                self.tr("AI 优先", "AI"),
+                self.tr("流媒体", "Streaming"),
+                self.tr("低延迟", "Low latency"),
+                self.tr("大流量", "Bulk"),
+            ],
+            profiles.iter().position(|p| *p == policy.health_profile),
+        )
+        .small()
+        .disabled(disabled)
+        .on_change(cx.listener(move |this, i: &usize, _, cx| {
+            let next_profile = profiles[*i];
+            profile_handler(
+                this,
+                NodeSwitchPolicy {
+                    health_profile: next_profile,
+                    sticky_session: next_profile.default_sticky_session(),
+                    ..policy
+                },
+                interval,
+                cx,
+            );
+        }));
+        let sticky_handler = on_change.clone();
+        let sticky = toggle(
+            "node-sticky-session",
+            self.tr(
+                "粘性会话（仅连通失败时切换）",
+                "Sticky session (switch only on connectivity failure)",
+            ),
+            policy.sticky_session,
+        )
+        .small()
+        .disabled(disabled)
+        .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+            sticky_handler(
+                this,
+                NodeSwitchPolicy {
+                    sticky_session: *checked,
+                    ..policy
+                },
+                interval,
+                cx,
+            );
+        }));
+        let budgets = [50u32, 100, 250, 0];
+        let current_budget = self.snapshot.settings.daily_probe_budget_mb;
+        let budget_choices = ChoiceGroup::new(
+            "node-probe-budget",
+            vec![
+                "50 MiB".into(),
+                "100 MiB".into(),
+                "250 MiB".into(),
+                self.tr("不限", "Unlimited"),
+            ],
+            budgets.iter().position(|b| *b == current_budget),
+        )
+        .small()
+        .disabled(disabled)
+        .on_change(cx.listener(move |this, i: &usize, _, cx| {
+            if let Err(err) = this.service.set_daily_probe_budget_mb(budgets[*i]) {
+                let _ = err;
+            }
+            this.sync(cx);
+        }));
         let scopes = [
             FallbackScope::Group,
             FallbackScope::SameSubscription,
@@ -330,6 +404,11 @@ impl AppView {
                 "每轮每个节点最多下载 1 MiB，下载速度至少提高 10% 时切换。",
                 "Each round downloads up to 1 MiB per node. Switching requires a speed gain of at least 10%.",
             )
+        } else if mode == SwitchMode::Health {
+            self.tr(
+                "候选短期分领先 ≥12 分并连续 3 轮保持时切换；仅连续连通失败时回退；冷却 5 分钟。",
+                "Switches after 3 rounds leading by >= 12 short points; recovers only on consecutive connectivity failures; 5 min cooldown.",
+            )
         } else if mode == SwitchMode::Off {
             self.tr(
                 "启用自动切换后使用这些条件。",
@@ -369,6 +448,35 @@ impl AppView {
                 mode_note,
                 modes,
             ))
+            .when(mode == SwitchMode::Health, |d| {
+                d.child(dialog_control_row(
+                    &p,
+                    self.tr("评估场景", "Health profile"),
+                    self.tr(
+                        "切换场景时会同步推荐的粘性会话默认值。",
+                        "Applies the recommended sticky-session default when switched.",
+                    ),
+                    health_profile,
+                ))
+                .child(dialog_control_row(
+                    &p,
+                    self.tr("粘性会话", "Sticky session"),
+                    self.tr(
+                        "开启后仅在连续连通性失败时切换，绝不因分差或门限中断使用中的节点。",
+                        "Switch only on consecutive connectivity failures, never interrupting a working node due to score.",
+                    ),
+                    sticky,
+                ))
+                .child(dialog_control_row(
+                    &p,
+                    self.tr("每日探测上限", "Daily probe cap"),
+                    self.tr(
+                        "超限后暂停自动探测与切换，不影响手动测速。",
+                        "Pauses background auto-probing once reached; manual tests still run.",
+                    ),
+                    budget_choices,
+                ))
+            })
             .child(dialog_control_row(
                 &p,
                 self.tr("故障回退范围", "Fallback scope"),
@@ -406,6 +514,7 @@ mod tests {
             mode: SwitchMode::Off,
             fallback: FallbackScope::Group,
             consecutive_failures: 2,
+            ..Default::default()
         };
         a.interval_secs = 300;
 
@@ -415,6 +524,7 @@ mod tests {
             mode: SwitchMode::Failover,
             fallback: FallbackScope::SameSubscription,
             consecutive_failures: 1,
+            ..Default::default()
         };
         b.interval_secs = 15; // Below minimum 30s normalized in dialog drafts.
 
