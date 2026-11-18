@@ -24,12 +24,13 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateIconIndirect, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, GetClientRect,
-    GetCursorPos, GetSystemMetrics, GetWindowRect, HICON, ICONINFO, IDC_ARROW, IsIconic, IsWindow,
-    LoadCursorW, MSG, PM_NOREMOVE, PeekMessageW, PostMessageW, RegisterClassW,
-    RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
-    ShowWindow, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETTINGCHANGE,
-    WM_THEMECHANGED, WNDCLASSW, WS_OVERLAPPED,
+    AllowSetForegroundWindow, ChangeWindowMessageFilterEx, CreateIconIndirect, CreateWindowExW,
+    DefWindowProcW, DestroyIcon, DestroyWindow, FindWindowW, GetClientRect, GetCursorPos,
+    GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, HICON, ICONINFO, IDC_ARROW,
+    IsIconic, IsWindow, LoadCursorW, MSG, MSGFLT_ALLOW, PM_NOREMOVE, PeekMessageW, PostMessageW,
+    RegisterClassW, RegisterWindowMessageW, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, WM_APP, WM_CONTEXTMENU, WM_LBUTTONUP, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_THEMECHANGED, WNDCLASSW, WS_OVERLAPPED,
 };
 
 use super::TrayCommand as Command;
@@ -40,6 +41,7 @@ use xrose_core::service::TrayStatus;
 
 const WM_TRAY: u32 = WM_APP + 1;
 const WM_POPUP: u32 = WM_APP + 2;
+const WM_WAKEUP: u32 = WM_APP + 3;
 const FLYOUT_TIMER: usize = 0x5852;
 static FLYOUT: Mutex<Option<Flyout>> = Mutex::new(None);
 struct Flyout {
@@ -129,7 +131,7 @@ impl Backend {
             };
             // A duplicate registration (second app instance) is harmless.
             RegisterClassW(&window_class);
-            let title = wide("XroseTray");
+            let title = wide(&window_title(service.paths()));
             let hwnd = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -148,7 +150,16 @@ impl Backend {
                 debug_log("CreateWindowExW failed");
                 return None;
             }
-            let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
+            let taskbar_created = *TASKBAR_CREATED
+                .get_or_init(|| RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
+            // Allow standard-integrity Explorer and secondary launches to deliver
+            // tray callbacks, taskbar recreation notices, and single-instance
+            // wakeups even when the GUI process runs elevated.
+            for msg in [WM_TRAY, WM_WAKEUP, taskbar_created] {
+                if msg != 0 {
+                    ChangeWindowMessageFilterEx(hwnd, msg, MSGFLT_ALLOW, std::ptr::null_mut());
+                }
+            }
             let status = service.tray_status();
             let white_ink = taskbar_is_dark();
             DARK_TASKBAR.store(white_ink, Ordering::Relaxed);
@@ -348,6 +359,28 @@ pub fn show_main_window() {
 
 pub fn setup_window() {}
 
+pub fn wake_existing(paths: &xrose_core::paths::AppPaths) -> bool {
+    let class = wide(CLASS_NAME);
+    let title = wide(&window_title(paths));
+    // SAFETY: class and title are NUL-terminated UTF-16 buffers.
+    unsafe {
+        let hwnd = FindWindowW(class.as_ptr(), title.as_ptr());
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 {
+            AllowSetForegroundWindow(pid);
+        }
+        PostMessageW(hwnd, WM_WAKEUP, 0, 0) != 0
+    }
+}
+
+fn window_title(paths: &xrose_core::paths::AppPaths) -> String {
+    format!("XroseTray:{}", paths.instance_id())
+}
+
 fn icon_state() -> Option<MutexGuard<'static, IconState>> {
     ICON.get()
         .map(|mutex| mutex.lock().unwrap_or_else(|e| e.into_inner()))
@@ -437,6 +470,10 @@ unsafe extern "system" fn wnd_proc(
                     _ => {}
                 }
             }
+            return 0;
+        }
+        if message == WM_WAKEUP {
+            super::queue_command(Command::ShowWindow);
             return 0;
         }
         if message == WM_TRAY {
@@ -900,5 +937,20 @@ unsafe fn finish_flyout(owner: HWND, showing: bool) {
             let _ = shown.send(());
         }
         debug_log(&format!("flyout settled ({hwnd}, visible={showing})"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use xrose_core::paths::AppPaths;
+
+    #[test]
+    fn tray_window_title_is_scoped_to_profile_and_missing_instance_returns_false() {
+        let first = AppPaths::from_root(Path::new(r"C:\fixture-a"));
+        let second = AppPaths::from_root(Path::new(r"C:\fixture-b"));
+        assert_ne!(window_title(&first), window_title(&second));
+        assert!(!wake_existing(&first));
     }
 }

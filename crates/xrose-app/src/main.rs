@@ -39,28 +39,48 @@ fn main() {
         .find(|args| args[0] == "--home")
         .map(|args| xrose_core::paths::AppPaths::from_root(std::path::Path::new(&args[1])))
         .unwrap_or_else(xrose_core::paths::AppPaths::discover);
-    if let Err(error) = xrose_core::bundled::prepare(&paths) {
-        eprintln!("初始化随附资源失败：{error}");
-        std::process::exit(1);
-    }
-    if args.iter().any(|arg| arg == "--prepare-resources") {
+    let prepare_only = args.iter().any(|arg| arg == "--prepare-resources");
+    let single_instance_hint = xrose_core::Settings::load(&paths.settings_file())
+        .map(|settings| settings.single_instance)
+        .unwrap_or(true);
+    // Wake a running GUI instance before touching on-disk state so a standard
+    // launch can still surface an elevated instance running in a protected folder.
+    if !prepare_only && single_instance_hint && wake_running_instance(&paths, false) {
         return;
     }
+    if let Err(error) = xrose_core::bundled::prepare(&paths) {
+        report_startup_error(
+            &paths,
+            StartupStage::PrepareResources,
+            &error,
+            !prepare_only,
+        );
+        std::process::exit(1);
+    }
+    if prepare_only {
+        return;
+    }
+    let startup_paths = paths.clone();
     let service = match AppService::with_paths(paths) {
         Ok(service) => service,
         Err(err) => {
-            eprintln!("Xrose 启动失败：{err}");
+            if single_instance_hint && wake_running_instance(&startup_paths, false) {
+                return;
+            }
+            report_startup_error(&startup_paths, StartupStage::StartApp, &err, true);
             std::process::exit(1);
         }
     };
 
     // Single instance: the lock is held for the lifetime of the process.
-    let _instance = if service.settings().single_instance {
+    let mut _instance = if service.settings().single_instance {
         let path = service.paths().lock_file();
         match SingleInstance::acquire(&path) {
             Ok(Some(guard)) => Some(guard),
             Ok(None) => {
-                eprintln!("Xrose 已在运行（锁文件：{}）", path.display());
+                if !wake_running_instance(service.paths(), true) {
+                    eprintln!("Xrose 已在运行（锁文件：{}）", path.display());
+                }
                 return;
             }
             Err(err) => {
@@ -71,6 +91,9 @@ fn main() {
     } else {
         None
     };
+    if let Some(guard) = _instance.as_mut() {
+        guard.on_wakeup(|| tray::queue_command(tray::TrayCommand::ShowWindow));
+    }
 
     #[cfg(target_os = "macos")]
     let _proxy_observer = service.observe_system_proxy();
@@ -199,5 +222,125 @@ fn show_target(command: tray::TrayCommand) -> Option<main_window::ShowTarget> {
         #[cfg(target_os = "macos")]
         tray::TrayCommand::ShowUpdates => Some(main_window::ShowTarget::Updates),
         _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StartupStage {
+    PrepareResources,
+    StartApp,
+}
+
+fn wake_running_instance(paths: &xrose_core::paths::AppPaths, retry: bool) -> bool {
+    let attempts = if retry { 6 } else { 1 };
+    for attempt in 0..attempts {
+        if tray::wake_existing(paths) {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+    false
+}
+
+fn format_startup_error(
+    paths: &xrose_core::paths::AppPaths,
+    stage: StartupStage,
+    error: &xrose_core::Error,
+    lang: xrose_core::settings::Language,
+) -> String {
+    let prefix = match stage {
+        StartupStage::PrepareResources => crate::i18n::tr(
+            lang,
+            "初始化随附资源失败：",
+            "Failed to initialize bundled resources: ",
+        ),
+        StartupStage::StartApp => {
+            crate::i18n::tr(lang, "Xrose 启动失败：", "Failed to start Xrose: ")
+        }
+    };
+    let portable_hint = if paths.is_portable_data() && error.is_permission_or_readonly() {
+        crate::i18n::tr(
+            lang,
+            "\n\n当前程序目录无写入权限。便携版会在程序目录下读写 XroseData，请将整个目录移至普通用户可写的位置运行，不要放在 Program Files 等受保护目录中。",
+            "\n\nThe application directory is not writable. Portable mode stores data in XroseData next to the executable; move Xrose to a user-writable folder instead of Program Files or another protected directory.",
+        )
+    } else {
+        SharedString::default()
+    };
+    format!("{prefix}{error}{portable_hint}")
+}
+
+fn report_startup_error(
+    paths: &xrose_core::paths::AppPaths,
+    stage: StartupStage,
+    error: &xrose_core::Error,
+    interactive: bool,
+) {
+    let lang = xrose_core::Settings::load(&paths.settings_file())
+        .map(|settings| settings.language)
+        .unwrap_or_default();
+    let message = format_startup_error(paths, stage, error, lang);
+    eprintln!("{message}");
+    #[cfg(windows)]
+    if interactive {
+        show_windows_error_dialog(&message);
+    }
+    #[cfg(not(windows))]
+    let _ = interactive;
+}
+
+#[cfg(windows)]
+fn show_windows_error_dialog(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "Xrose\0".encode_utf16().collect();
+    // SAFETY: text and caption are NUL-terminated UTF-16 buffers valid for the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_ICONERROR | MB_OK,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StartupStage, format_startup_error};
+    use xrose_core::settings::Language;
+
+    #[test]
+    fn startup_error_adds_portable_directory_guidance_on_permission_failure() {
+        let dir = std::env::temp_dir().join(format!("xrose-startup-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("xrose.portable"), "full").unwrap();
+        let portable = xrose_core::paths::AppPaths::from_root(&dir.join("XroseData"));
+        let denied = xrose_core::error::io_context(
+            &portable.data_dir,
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+        );
+
+        let zh = format_startup_error(&portable, StartupStage::StartApp, &denied, Language::Zh);
+        assert!(zh.starts_with("Xrose 启动失败："));
+        assert!(zh.contains("Program Files"));
+
+        let en = format_startup_error(
+            &portable,
+            StartupStage::PrepareResources,
+            &denied,
+            Language::En,
+        );
+        assert!(en.starts_with("Failed to initialize bundled resources: "));
+        assert!(en.contains("XroseData"));
+
+        let normal = xrose_core::paths::AppPaths::from_root(&dir.join("Standard"));
+        let plain = format_startup_error(&normal, StartupStage::StartApp, &denied, Language::Zh);
+        assert!(!plain.contains("Program Files"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

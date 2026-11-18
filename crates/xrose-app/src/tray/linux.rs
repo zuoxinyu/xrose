@@ -193,6 +193,9 @@ pub fn register_main_window(_window: &Window) {}
 pub fn hide_main_window() {}
 pub fn show_main_window() {}
 pub fn setup_window() {}
+pub fn wake_existing(paths: &xrose_core::paths::AppPaths) -> bool {
+    xrose_core::system::SingleInstance::notify_existing(&paths.lock_file())
+}
 pub fn pointer_on_icon() -> bool {
     false
 }

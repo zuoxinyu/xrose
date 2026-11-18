@@ -27,6 +27,10 @@ pub fn show_main_window() {}
 
 pub fn setup_window() {}
 
+pub fn wake_existing(_paths: &xrose_core::paths::AppPaths) -> bool {
+    false
+}
+
 pub fn register_main_window(_window: &gpui_kit::Window) {}
 pub fn popup_anchor() -> Option<super::PopupAnchor> {
     None

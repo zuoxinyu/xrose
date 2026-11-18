@@ -137,3 +137,9 @@ pub fn quitting() -> bool {
 pub fn setup_platform_window() {
     backend::setup_window();
 }
+
+/// Signals an already-running instance for `paths` to restore and focus its
+/// main window. Returns `true` when the wakeup was delivered.
+pub fn wake_existing(paths: &xrose_core::paths::AppPaths) -> bool {
+    backend::wake_existing(paths)
+}

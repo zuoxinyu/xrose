@@ -72,13 +72,15 @@ fn install(paths: &AppPaths, root: &Path) -> Result<()> {
         return Ok(());
     }
     paths.ensure()?;
+    let lock_path = paths.data_dir.join("full-seed.lock");
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(paths.data_dir.join("full-seed.lock"))?;
-    FileExt::lock_exclusive(&lock)?;
+        .open(&lock_path)
+        .map_err(|e| crate::error::io_context(&lock_path, e))?;
+    FileExt::lock_exclusive(&lock).map_err(|e| crate::error::io_context(&lock_path, e))?;
     if done.is_file() {
         return Ok(());
     }

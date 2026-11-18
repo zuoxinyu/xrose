@@ -65,6 +65,25 @@ impl Error {
     pub fn unsupported(msg: impl Into<String>) -> Self {
         Self::Unsupported(msg.into())
     }
+
+    /// True when the failure was caused by a lack of filesystem write/access
+    /// permissions or a read-only database directory.
+    pub fn is_permission_or_readonly(&self) -> bool {
+        match self {
+            Self::Io(err) => {
+                err.kind() == std::io::ErrorKind::PermissionDenied
+                    || matches!(err.raw_os_error(), Some(5))
+            }
+            Self::Database(rusqlite::Error::SqliteFailure(err, _)) => matches!(
+                err.code,
+                rusqlite::ErrorCode::PermissionDenied
+                    | rusqlite::ErrorCode::ReadOnly
+                    | rusqlite::ErrorCode::CannotOpen
+            ),
+            Self::MeshCore { source, .. } => source.is_permission_or_readonly(),
+            _ => false,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -85,4 +104,24 @@ pub fn io_context(path: &std::path::Path, err: std::io::Error) -> Error {
 /// Convenience for callers that need to report a path in an otherwise opaque error.
 pub fn path_display(path: &Path) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_permission_and_readonly_errors() {
+        let denied = io_context(
+            Path::new("fixture"),
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+        );
+        assert!(denied.is_permission_or_readonly());
+
+        let not_found = io_context(
+            Path::new("fixture"),
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        );
+        assert!(!not_found.is_permission_or_readonly());
+    }
 }

@@ -111,6 +111,49 @@ impl AppPaths {
     pub fn backup_dir(&self) -> PathBuf {
         self.data_dir.join("backups")
     }
+
+    /// True when this profile lives inside a `XroseData` directory activated by
+    /// a sibling `xrose.portable` marker file.
+    pub fn is_portable_data(&self) -> bool {
+        let Some(root) = self.config_dir.parent() else {
+            return false;
+        };
+        root.file_name() == Some(std::ffi::OsStr::new("XroseData"))
+            && root
+                .parent()
+                .is_some_and(|dir| dir.join("xrose.portable").is_file())
+    }
+
+    /// Deterministic identifier for single-instance coordination scoped to this
+    /// profile directory, stable before and after [`Self::ensure`] creates it.
+    pub fn instance_id(&self) -> String {
+        let normalized = normalize_instance_path(&self.config_dir);
+        let digest = crate::util::sha256_bytes(normalized.as_bytes());
+        digest[..16].to_string()
+    }
+}
+
+fn normalize_instance_path(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    #[cfg(windows)]
+    {
+        let raw = resolved.to_string_lossy().replace('/', "\\");
+        let stripped = if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else if let Some(local) = raw.strip_prefix(r"\\?\") {
+            local.to_string()
+        } else {
+            raw
+        };
+        stripped.trim_end_matches('\\').to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        let raw = resolved.to_string_lossy();
+        raw.trim_end_matches('/').to_string()
+    }
 }
 
 fn runtime_dir(data_dir: &Path) -> PathBuf {
@@ -127,5 +170,41 @@ fn runtime_dir(data_dir: &Path) -> PathBuf {
     {
         let _ = data_dir;
         std::env::temp_dir().join("xrose")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_id_stays_stable_before_and_after_directory_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("profile-a");
+        let paths = AppPaths::from_root(&root);
+        let before = paths.instance_id();
+        paths.ensure().unwrap();
+        let after = paths.instance_id();
+        assert_eq!(before, after);
+        assert_eq!(before.len(), 16);
+
+        let dot_paths = AppPaths::from_root(&root.join("."));
+        assert_eq!(before, dot_paths.instance_id());
+
+        let other = AppPaths::from_root(&dir.path().join("profile-b"));
+        assert_ne!(before, other.instance_id());
+    }
+
+    #[test]
+    fn portable_data_marker_detection_matches_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let normal = AppPaths::from_root(&dir.path().join("XroseData"));
+        assert!(!normal.is_portable_data());
+
+        std::fs::write(dir.path().join("xrose.portable"), "full").unwrap();
+        assert!(normal.is_portable_data());
+
+        let custom = AppPaths::from_root(&dir.path().join("custom"));
+        assert!(!custom.is_portable_data());
     }
 }

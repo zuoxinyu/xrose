@@ -562,6 +562,10 @@ pub fn show_popup(
     }
 }
 
+pub fn wake_existing(paths: &xrose_core::paths::AppPaths) -> bool {
+    xrose_core::system::SingleInstance::notify_existing(&paths.lock_file())
+}
+
 #[cfg(test)]
 mod tests {
     use super::format_fixed_speed;

@@ -11,6 +11,8 @@ use crate::error::{Result, io_context};
 pub struct SingleInstance {
     file: File,
     path: PathBuf,
+    #[cfg(unix)]
+    wakeup_socket: Option<PathBuf>,
 }
 
 impl SingleInstance {
@@ -35,9 +37,60 @@ impl SingleInstance {
                 Ok(Some(Self {
                     file,
                     path: path.to_path_buf(),
+                    #[cfg(unix)]
+                    wakeup_socket: None,
                 }))
             }
             Err(_) => Ok(None),
+        }
+    }
+
+    /// Registers a wakeup callback for secondary launches on Unix platforms.
+    /// Windows uses a message-window wakeup channel so foreground activation
+    /// rights can be transferred across integrity levels.
+    pub fn on_wakeup<F>(&mut self, callback: F)
+    where
+        F: Fn() + Send + 'static,
+    {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::net::UnixListener;
+
+            let sock = self.path.with_extension("sock");
+            let _ = std::fs::remove_file(&sock);
+            let Ok(listener) = UnixListener::bind(&sock) else {
+                return;
+            };
+            let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
+            self.wakeup_socket = Some(sock);
+            let _ = std::thread::Builder::new()
+                .name("xrose-single-instance".into())
+                .spawn(move || {
+                    for stream in listener.incoming() {
+                        if stream.is_ok() {
+                            callback();
+                        }
+                    }
+                });
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = callback;
+        }
+    }
+
+    /// Signals a running Unix instance holding `lock_path` to show its window.
+    pub fn notify_existing(lock_path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixStream;
+            UnixStream::connect(lock_path.with_extension("sock")).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = lock_path;
+            false
         }
     }
 
@@ -55,6 +108,10 @@ impl SingleInstance {
 
 impl Drop for SingleInstance {
     fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(sock) = self.wakeup_socket.take() {
+            let _ = std::fs::remove_file(sock);
+        }
         let _ = self.file.unlock();
     }
 }
