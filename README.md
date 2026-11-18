@@ -28,6 +28,8 @@ Xrose 正式读作 **k'rose**，口语也可读作 **ex-rose**。
 
 ![节点](docs/screenshots/nodes.png)
 
+![节点健康详情](docs/screenshots/node-health.png)
+
 **2. 组网**
 
 ![组网](docs/screenshots/mesh.png)
@@ -60,6 +62,14 @@ Xrose 正式读作 **k'rose**，口语也可读作 **ex-rose**。
 
 ![设置](docs/screenshots/settings.png)
 
+**10. 托盘浮窗**
+
+![托盘浮窗](docs/screenshots/tray.png)
+
+**11. 关于**
+
+![关于](docs/screenshots/about.png)
+
 </details>
 
 ### 三种工作模式
@@ -73,6 +83,8 @@ Xrose 提供三种独立工作模式，切换时完整保留原有节点、出�
 | 组网 | 异地虚拟局域网互联与全流量远端出口接管 | 指定组网出口通过 TUN 接管系统流量，默认 DNS 随出口（可选自定义 DNS），暂停本地代理分流 |
 
 ### 直连模式
+
+![本机直连](docs/screenshots/direct.png)
 
 - **开箱即用**：默认使用内置 sing-box 与「本机直连」模式，无需配置节点订阅或代理节点即可开启实时流量监控、连接捕获与网络诊断。
 - **广告拦截与 DNS 管理**：直连模式继续应用阻止规则与去广告规则集、直连加密 DNS、Hosts 与异地组网路由，自动跳过依赖代理出站的规则与上游解析器。
