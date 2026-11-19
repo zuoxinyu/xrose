@@ -81,6 +81,34 @@ pub(crate) fn process_basename<'a>(process: &'a str, path: &'a str) -> &'a str {
     }
 }
 
+/// Returns true for Xrose's own desktop, CLI, and privilege-helper executables so
+/// users cannot accidentally block Xrose or its helper from networking.
+pub fn is_protected_process(process: &str) -> bool {
+    let name = process_basename(process, "");
+    if name.is_empty() {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
+    matches!(stem, "xrose-helper" | "xrose-app" | "xrose-cli" | "xrose")
+}
+
+/// Returns true when a routing rule would block any protected Xrose or helper process.
+pub fn blocks_protected_process(
+    matchers: &crate::model::Matchers,
+    action: &crate::model::RouteAction,
+) -> bool {
+    action.kind == crate::model::RouteActionKind::Block
+        && (matchers
+            .process_names
+            .iter()
+            .any(|name| is_protected_process(name))
+            || matchers
+                .process_paths
+                .iter()
+                .any(|path| is_protected_process(path)))
+}
+
 struct Counters {
     upload: u64,
     download: u64,
@@ -287,5 +315,70 @@ mod tests {
             tracker.observe([a], at + 4 * dt, wall + 4 * dt).metrics[0].down_speed,
             0
         );
+    }
+
+    #[test]
+    fn protected_process_matches_xrose_and_helper_executables() {
+        for protected in [
+            "xrose-helper",
+            "xrose-helper.exe",
+            "XROSE-HELPER.EXE",
+            "xrose-app",
+            "xrose-app.exe",
+            "Xrose.exe",
+            "xrose-cli",
+            "xrose-cli.exe",
+            "/Applications/Xrose.app/Contents/MacOS/xrose-app",
+            r"C:\ProgramData\Xrose\helper\xrose-helper.exe",
+            "xrose-app (root)",
+        ] {
+            assert!(
+                is_protected_process(protected),
+                "expected {protected} to be protected"
+            );
+        }
+
+        for allowed in [
+            "",
+            "12345",
+            "Chrome",
+            "Google Chrome Helper",
+            "Antigravity Helper",
+            "xrose-demo",
+            "my-xrose-helper",
+        ] {
+            assert!(
+                !is_protected_process(allowed),
+                "expected {allowed} not to be protected"
+            );
+        }
+
+        let by_name = crate::model::Matchers {
+            process_names: vec!["xrose-helper.exe".into()],
+            ..Default::default()
+        };
+        let by_path = crate::model::Matchers {
+            process_paths: vec!["/Applications/Xrose.app/Contents/MacOS/xrose-app".into()],
+            ..Default::default()
+        };
+        assert!(blocks_protected_process(
+            &by_name,
+            &crate::model::RouteAction::block()
+        ));
+        assert!(blocks_protected_process(
+            &by_path,
+            &crate::model::RouteAction::block()
+        ));
+        assert!(!blocks_protected_process(
+            &by_name,
+            &crate::model::RouteAction::direct()
+        ));
+        assert!(!blocks_protected_process(
+            &crate::model::Matchers {
+                process_names: vec!["example-app".into()],
+                ..Default::default()
+            },
+            &crate::model::RouteAction::block()
+        ));
     }
 }

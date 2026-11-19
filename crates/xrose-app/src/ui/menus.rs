@@ -925,11 +925,14 @@ impl AppView {
                     (DiagnosticRuleKind::Process, "阻止此进程", "Block process"),
                     (DiagnosticRuleKind::Ip, "阻止此 IP", "Block IP"),
                 ] {
+                    let blocked_protected = kind == DiagnosticRuleKind::Process
+                        && xrose_core::flow::is_protected_process(target.value(kind));
                     menu = menu.item(add(
                         zh,
                         en,
                         !self.snapshot.busy.iter().any(|k| k == "firewall-rule")
-                            && !target.value(kind).is_empty(),
+                            && !target.value(kind).is_empty()
+                            && !blocked_protected,
                         Command::BlockConnection(target.clone(), kind),
                     ));
                 }

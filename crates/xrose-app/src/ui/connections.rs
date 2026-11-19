@@ -2,16 +2,18 @@
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme, Icon};
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::diagnostics::{
     DiagnosticRuleKind, DiagnosticTarget, connection_matches_query, connection_test_target,
 };
-use xrose_core::flow::{ConnectionMetrics, ConnectionSort, ProcessLiveTraffic};
+use xrose_core::flow::{
+    ConnectionMetrics, ConnectionSort, ProcessLiveTraffic, is_protected_process,
+};
 use xrose_core::model::{CoreKind, RouteAction, RouteActionKind, WorkMode};
 use xrose_core::runtime::ClashConnection;
 use xrose_core::service::ToastLevel;
@@ -161,7 +163,16 @@ impl AppView {
         let tab = self.connections_tab;
         let focus_bg = p.accent;
         let active_conn_len = self.snapshot.runtime.connections.len();
-        let active_process_len = self.snapshot.runtime.live_traffic.processes.len();
+        let active_process_len = self
+            .snapshot
+            .runtime
+            .live_traffic
+            .processes
+            .iter()
+            .filter(|process| {
+                !is_protected_live_process(process, &self.snapshot.runtime.connections)
+            })
+            .count();
         let recorded_conn_len = self.snapshot.recording.connections.len();
         let recording_active = self.snapshot.recording.active;
         let top_tabs = TabBar::new("connections-tabs")
@@ -291,19 +302,15 @@ impl AppView {
                 }
                 ConnectionsTab::Processes => {
                     let text = query.to_lowercase();
+                    let connections = &self.snapshot.runtime.connections;
                     let mut rows = (0..live.processes.len()).filter(|&i| {
-                        text.is_empty()
-                            || live.processes[i]
-                                .process_name
-                                .to_lowercase()
-                                .contains(&text)
+                        let process = &live.processes[i];
+                        !is_protected_live_process(process, connections)
+                            && (text.is_empty()
+                                || process.process_name.to_lowercase().contains(&text))
                     });
                     let visible: Vec<_> = rows.by_ref().take(limit).collect();
-                    let count = if query.is_empty() {
-                        live.processes.len()
-                    } else {
-                        visible.len() + rows.count()
-                    };
+                    let count = visible.len() + rows.count();
                     (visible, count)
                 }
                 ConnectionsTab::Live => {
@@ -1215,11 +1222,23 @@ impl AppView {
         } else {
             name.clone().into()
         };
+        let active_label = format!(
+            "{} {}",
+            process.active_connections,
+            if process.active_connections == 1 {
+                self.tr("个活动连接", "active connection")
+            } else {
+                self.tr("个活动连接", "active connections")
+            }
+        );
+        let count_button_style = ButtonCustomVariant::new(cx)
+            .foreground(p.muted_fg)
+            .hover(p.neutral_hover())
+            .active(p.neutral_active());
         div()
             .flex()
             .items_center()
             .gap_3()
-            .flex_wrap()
             .p_3()
             .rounded_lg()
             .bg(p.bg)
@@ -1229,15 +1248,35 @@ impl AppView {
                 div()
                     .flex()
                     .items_center()
-                    .gap_1()
+                    .gap_2()
                     .flex_1()
                     .min_w(px(0.))
                     .children(icon)
                     .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if name.is_empty() { p.muted_fg } else { p.fg })
+                            .truncate()
+                            .child(label),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(super::theme::PROCESS_CONNECTIONS_WIDTH))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_end()
+                    .child(
                         Button::new(SharedString::from(format!("process-details-{name}")))
+                            .xsmall()
                             .compact()
-                            .ghost()
-                            .label(label)
+                            .h(px(24.))
+                            .px_2()
+                            .custom(count_button_style)
+                            .label(active_label)
                             .disabled(name.is_empty())
                             .tooltip(self.tr("查看此进程的连接", "View process connections"))
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1256,17 +1295,10 @@ impl AppView {
                             })),
                     ),
             )
-            .child(div().text_xs().text_color(p.muted_fg).child(format!(
-                "{} {}",
-                process.active_connections,
-                if process.active_connections == 1 {
-                    self.tr("个活动连接", "active connection")
-                } else {
-                    self.tr("个活动连接", "active connections")
-                }
-            )))
             .child(
                 div()
+                    .w(px(super::theme::PROCESS_TRAFFIC_WIDTH))
+                    .flex_shrink_0()
                     .flex()
                     .flex_col()
                     .items_end()
@@ -1282,11 +1314,13 @@ impl AppView {
             )
             .child(
                 Button::new(SharedString::from(format!("process-block-{name}")))
+                    .flex_shrink_0()
                     .compact()
                     .ghost()
                     .label(self.tr("阻止联网", "Block process"))
                     .disabled(
                         name.is_empty()
+                            || is_protected_process(name)
                             || self
                                 .snapshot
                                 .busy
@@ -1501,6 +1535,8 @@ impl AppView {
         let p = palette(cx);
         let kind = self.diagnostic_rule_kind;
         let value = target.value(kind).to_string();
+        let blocked_protected =
+            is_protected_process_block(kind, self.diagnostic_rule_action, &value);
         let outbound_label = self
             .diagnostic_rule_group
             .as_deref()
@@ -1615,7 +1651,7 @@ impl AppView {
                             .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
                             .primary()
                             .label(self.tr("置顶添加", "Add at top"))
-                            .disabled(value.is_empty())
+                            .disabled(value.is_empty() || blocked_protected)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let action = RouteAction {
                                     kind: this.diagnostic_rule_action,
@@ -1633,7 +1669,9 @@ impl AppView {
                                 this.sync(cx);
                             })),
                     )
-                    .child(div().text_xs().text_color(p.muted_fg).child(if self.snapshot.model.work_mode == WorkMode::Mesh {
+                    .child(div().text_xs().text_color(if blocked_protected { p.danger_text } else { p.muted_fg }).child(if blocked_protected {
+                        self.tr("不能阻止 Xrose 或提权助手联网", "Cannot block Xrose or the privilege helper")
+                    } else if self.snapshot.model.work_mode == WorkMode::Mesh {
                         self.tr("保存至本机规则；组网模式暂停本地代理分流，不会修改远端出口规则", "Saved locally; Mesh mode pauses local proxy routing and does not change the remote exit's rules")
                     } else {
                         self.tr("置顶保存至自定义规则，应用配置后生效", "Saved at the top of custom rules; apply config to take effect")
@@ -2066,6 +2104,27 @@ impl AppView {
     }
 }
 
+fn is_protected_live_process(
+    process: &ProcessLiveTraffic,
+    connections: &[ClashConnection],
+) -> bool {
+    is_protected_process(&process.process_name)
+        || process
+            .connection_with_path
+            .and_then(|i| connections.get(i))
+            .is_some_and(|c| is_protected_process(c.process_path()))
+}
+
+fn is_protected_process_block(
+    kind: DiagnosticRuleKind,
+    action: RouteActionKind,
+    value: &str,
+) -> bool {
+    kind == DiagnosticRuleKind::Process
+        && action == RouteActionKind::Block
+        && is_protected_process(value)
+}
+
 fn rate_pair(up: u64, down: u64, p: &Palette) -> Div {
     div()
         .flex()
@@ -2167,5 +2226,57 @@ mod tests {
             ConnectionsTab::Recorded.post_start_recording_tab(),
             ConnectionsTab::Recorded
         );
+    }
+
+    #[test]
+    fn active_process_list_hides_and_protects_xrose_executables() {
+        use super::{is_protected_live_process, is_protected_process_block};
+        use xrose_core::diagnostics::DiagnosticRuleKind;
+        use xrose_core::flow::ProcessLiveTraffic;
+        use xrose_core::model::RouteActionKind;
+        use xrose_core::runtime::ClashConnection;
+
+        let helper_by_name = ProcessLiveTraffic {
+            process_name: "xrose-helper.exe".into(),
+            ..Default::default()
+        };
+        assert!(is_protected_live_process(&helper_by_name, &[]));
+
+        let app_by_path = ProcessLiveTraffic {
+            process_name: String::new(),
+            connection_with_path: Some(0),
+            ..Default::default()
+        };
+        let mut app_conn = ClashConnection::default();
+        app_conn.metadata.process_path = "/Applications/Xrose.app/Contents/MacOS/xrose-app".into();
+        let connections = vec![app_conn];
+        assert!(is_protected_live_process(&app_by_path, &connections));
+
+        let regular = ProcessLiveTraffic {
+            process_name: "ExampleBrowser".into(),
+            ..Default::default()
+        };
+        assert!(!is_protected_live_process(&regular, &connections));
+
+        assert!(is_protected_process_block(
+            DiagnosticRuleKind::Process,
+            RouteActionKind::Block,
+            "xrose-helper"
+        ));
+        assert!(is_protected_process_block(
+            DiagnosticRuleKind::Process,
+            RouteActionKind::Block,
+            "xrose-app"
+        ));
+        assert!(!is_protected_process_block(
+            DiagnosticRuleKind::Process,
+            RouteActionKind::Direct,
+            "xrose-helper"
+        ));
+        assert!(!is_protected_process_block(
+            DiagnosticRuleKind::Domain,
+            RouteActionKind::Block,
+            "xrose-helper"
+        ));
     }
 }

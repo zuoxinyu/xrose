@@ -3453,6 +3453,11 @@ impl AppService {
     }
 
     pub fn upsert_rule_in_group(&self, mut rule: RouteRule, group_id: Option<&str>) -> Result<()> {
+        if crate::flow::blocks_protected_process(&rule.matchers, &rule.action) {
+            return Err(Error::config(
+                "不能阻止 Xrose 或提权助手联网，否则会导致代理与组网异常",
+            ));
+        }
         self.commit_model_change(|model| {
             if rule.action.kind == crate::model::RouteActionKind::Proxy {
                 if let Some(id) = &rule.action.group {
@@ -4675,6 +4680,11 @@ impl AppService {
         action: crate::model::RouteAction,
     ) -> Result<()> {
         let matchers = target.matchers(kind)?;
+        if crate::flow::blocks_protected_process(&matchers, &action) {
+            return Err(Error::config(
+                "不能阻止 Xrose 或提权助手联网，否则会导致代理与组网异常",
+            ));
+        }
         let mut model = self.inner.model.write();
         if let Some(group) = &action.group {
             if !model.group(group).is_some_and(|group| group.enabled) {
@@ -7359,6 +7369,64 @@ esac
             service
                 .add_diagnostic_rule(&target, DiagnosticRuleKind::Process, RouteAction::direct())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn blocking_protected_xrose_processes_is_rejected() {
+        use crate::model::RouteAction;
+
+        let (service, _dir) = service();
+        for process in ["xrose-helper", "xrose-helper.exe", "xrose-app", "Xrose.exe"] {
+            let target = DiagnosticTarget {
+                process: process.into(),
+                ..Default::default()
+            };
+            assert!(
+                service
+                    .add_diagnostic_rule(&target, DiagnosticRuleKind::Process, RouteAction::block())
+                    .is_err(),
+                "diagnostic block should reject {process}"
+            );
+            let manual = RouteRule::new(
+                "block helper",
+                crate::model::Matchers {
+                    process_names: vec![process.into()],
+                    ..Default::default()
+                },
+                RouteAction::block(),
+            );
+            assert!(
+                service.upsert_rule_in_group(manual, None).is_err(),
+                "manual block should reject {process}"
+            );
+        }
+
+        let helper_target = DiagnosticTarget {
+            process: "xrose-helper".into(),
+            ..Default::default()
+        };
+        assert!(
+            service
+                .add_diagnostic_rule(
+                    &helper_target,
+                    DiagnosticRuleKind::Process,
+                    RouteAction::direct()
+                )
+                .is_ok()
+        );
+        let normal_target = DiagnosticTarget {
+            process: "example-app".into(),
+            ..Default::default()
+        };
+        assert!(
+            service
+                .add_diagnostic_rule(
+                    &normal_target,
+                    DiagnosticRuleKind::Process,
+                    RouteAction::block()
+                )
+                .is_ok()
         );
     }
 
