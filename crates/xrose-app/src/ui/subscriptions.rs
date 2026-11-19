@@ -116,18 +116,23 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .justify_between()
                         .flex_wrap()
-                        .gap_2()
-                        .child(section_title(
-                            &p,
-                            self.tr("订阅列表", "Subscription list"),
-                            self.tr(
-                                "管理节点订阅、自动更新与流量用量",
-                                "Manage node subscriptions, automatic refresh, and data usage",
-                            ),
-                        ))
+                        .gap_3()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(section_title(
+                                    &p,
+                                    self.tr("订阅列表", "Subscription list"),
+                                    self.tr(
+                                        "管理节点订阅、自动更新与流量用量",
+                                        "Manage node subscriptions, automatic refresh, and data usage",
+                                    ),
+                                )),
+                        )
                         .child(
                             div()
                                 .flex()

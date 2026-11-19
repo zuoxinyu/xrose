@@ -3,6 +3,7 @@
 use super::*;
 use crate::ui::dialogs::{dialog_footer, settings_dialog};
 use crate::ui::theme::{CONTROL_HEIGHT, FORM_FIELD_WIDTH, MEMBER_LIST_HEIGHT};
+use gpui_base::{ScrollBounce, Scrollbar, ScrollbarMode};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::InputState;
@@ -16,6 +17,7 @@ struct GroupEditor {
     draft: OutboundGroup,
     name: Entity<InputState>,
     search: Entity<InputState>,
+    members_scroll: UniformListScrollHandle,
     error: Option<String>,
 }
 
@@ -204,6 +206,7 @@ impl AppView {
             draft,
             name,
             search,
+            members_scroll: UniformListScrollHandle::new(),
             error: None,
         });
         let profile = self.snapshot.active_profile.clone();
@@ -341,10 +344,12 @@ impl AppView {
             })
             .collect();
         let list_editor = editor.clone();
+        let members_scroll = state.members_scroll.clone();
         let view = cx.entity().downgrade();
         let preferred = draft.selected.clone();
         let preferred_label = self.tr("首选", "Preferred");
         let list_height = (nodes.len() as f32 * CONTROL_HEIGHT).min(MEMBER_LIST_HEIGHT);
+        let scrollable_members = (nodes.len() as f32 * CONTROL_HEIGHT) > MEMBER_LIST_HEIGHT;
         body = body.child(
             div()
                 .p_2()
@@ -356,79 +361,102 @@ impl AppView {
                     empty_hint(&p, self.tr("没有匹配的节点", "No matching nodes"))
                         .into_any_element()
                 } else {
-                    uniform_list("outbound-group-members", nodes.len(), move |range, _, _| {
-                        range
-                            .map(|index| {
-                                let (id, name, status, usable) = &nodes[index];
-                                let selected = members.contains(id);
-                                let id = id.clone();
-                                let editor = list_editor.clone();
-                                let view = view.clone();
-                                let preferred_id = id.clone();
-                                let preferred_editor = editor.clone();
-                                let preferred_view = view.clone();
-                                div()
-                                    .w_full()
-                                    .h(px(CONTROL_HEIGHT))
-                                    .px_2()
-                                    .rounded_sm()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        Checkbox::new(("group-member", index))
-                                            .label(name.clone())
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .checked(selected)
-                                            .disabled(busy)
-                                            .on_change(move |checked, _, cx| {
-                                                editor.update(cx, |state, _| {
-                                                    if *checked {
-                                                        state.draft.members.push(id.clone());
-                                                    } else {
-                                                        state
-                                                            .draft
-                                                            .members
-                                                            .retain(|member| member != &id);
-                                                    }
-                                                    state.draft.repair();
-                                                    state.error = None;
-                                                });
-                                                let _ = view.update(cx, |_, cx| cx.notify());
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(p.muted_fg)
-                                            .child(status.clone()),
-                                    )
-                                    .child(
-                                        Radio::new(("group-preferred", index))
-                                            .label(preferred_label.clone())
-                                            .accessibility_label(format!(
-                                                "{} {}",
-                                                preferred_label, name
-                                            ))
-                                            .checked(preferred.as_ref() == Some(&preferred_id))
-                                            .disabled(busy || !selected || !usable)
-                                            .on_change(move |_, _, cx| {
-                                                preferred_editor.update(cx, |state, _| {
-                                                    state.draft.selected =
-                                                        Some(preferred_id.clone())
-                                                });
-                                                let _ =
-                                                    preferred_view.update(cx, |_, cx| cx.notify());
-                                            }),
-                                    )
-                                    .into_any_element()
-                            })
-                            .collect()
-                    })
-                    .h(px(list_height))
-                    .w_full()
-                    .into_any_element()
+                    let list =
+                        uniform_list("outbound-group-members", nodes.len(), move |range, _, _| {
+                            range
+                                .map(|index| {
+                                    let (id, name, status, usable) = &nodes[index];
+                                    let selected = members.contains(id);
+                                    let id = id.clone();
+                                    let editor = list_editor.clone();
+                                    let view = view.clone();
+                                    let preferred_id = id.clone();
+                                    let preferred_editor = editor.clone();
+                                    let preferred_view = view.clone();
+                                    div()
+                                        .w_full()
+                                        .h(px(CONTROL_HEIGHT))
+                                        .pl_2()
+                                        .when(scrollable_members, |d| d.pr_4())
+                                        .when(!scrollable_members, |d| d.pr_2())
+                                        .rounded_sm()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            Checkbox::new(("group-member", index))
+                                                .label(name.clone())
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .checked(selected)
+                                                .disabled(busy)
+                                                .on_change(move |checked, _, cx| {
+                                                    editor.update(cx, |state, _| {
+                                                        if *checked {
+                                                            state.draft.members.push(id.clone());
+                                                        } else {
+                                                            state
+                                                                .draft
+                                                                .members
+                                                                .retain(|member| member != &id);
+                                                        }
+                                                        state.draft.repair();
+                                                        state.error = None;
+                                                    });
+                                                    let _ = view.update(cx, |_, cx| cx.notify());
+                                                }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(p.muted_fg)
+                                                .child(status.clone()),
+                                        )
+                                        .child(
+                                            Radio::new(("group-preferred", index))
+                                                .label(preferred_label.clone())
+                                                .accessibility_label(format!(
+                                                    "{} {}",
+                                                    preferred_label, name
+                                                ))
+                                                .checked(preferred.as_ref() == Some(&preferred_id))
+                                                .disabled(busy || !selected || !usable)
+                                                .on_change(move |_, _, cx| {
+                                                    preferred_editor.update(cx, |state, _| {
+                                                        state.draft.selected =
+                                                            Some(preferred_id.clone())
+                                                    });
+                                                    let _ = preferred_view
+                                                        .update(cx, |_, cx| cx.notify());
+                                                }),
+                                        )
+                                        .into_any_element()
+                                })
+                                .collect()
+                        })
+                        .track_scroll(&members_scroll)
+                        .h(px(list_height))
+                        .w_full();
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .h(px(list_height))
+                        .child(ScrollBounce::new(
+                            "outbound-group-members-bounce",
+                            &members_scroll,
+                            list,
+                        ))
+                        .child(
+                            div().absolute().inset_0().child(
+                                Scrollbar::vertical(&members_scroll)
+                                    .id("outbound-group-members-scrollbar")
+                                    .mode(ScrollbarMode::Always)
+                                    .viewport_from_layout(),
+                            ),
+                        )
+                        .into_any_element()
                 }),
         );
         let policy_editor = editor.clone();

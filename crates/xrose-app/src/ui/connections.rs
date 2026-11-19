@@ -996,6 +996,7 @@ impl AppView {
         let test_target = connection_test_target(&connection);
         let process = connection.process_name();
         let row_hover_bg = p.panel_alt.opacity(0.45);
+        let hover_group = SharedString::from(format!("conn-row-{id}-{}", connection.start));
         let inspect_tip = self.tr("连接透视", "Inspect connection");
         let test_tip = self.tr("测试目标", "Test target");
         let suffixes = self.snapshot.mesh.magic_dns_suffixes();
@@ -1013,6 +1014,7 @@ impl AppView {
 
         div()
             .id(SharedString::from(format!("conn-{id}")))
+            .group(hover_group.clone())
             .flex()
             .flex_col()
             .gap_2()
@@ -1092,55 +1094,66 @@ impl AppView {
                             .gap_1()
                             .flex_shrink_0()
                             .child(
-                                Button::new(SharedString::from(format!("inspect-{id}")))
-                                    .compact()
-                                    .custom(icon_button_style(p, false, cx))
-                                    .icon(IconName::Route)
-                                    .tooltip(inspect_tip.clone())
-                                    .accessibility_label(inspect_tip)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.inspect_connection(inspect.clone(), window, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("test-{id}")))
-                                    .compact()
-                                    .custom(icon_button_style(p, false, cx))
-                                    .icon(IconName::Radar)
-                                    .tooltip(test_tip.clone())
-                                    .accessibility_label(test_tip)
-                                    .disabled(test_target.is_none())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if let Some(target) = &test_target {
-                                            this.selected_connection = Some(test.clone());
-                                            this.page = Page::Diagnostics;
-                                            this.replay_connection(target, window, cx);
-                                        }
-                                    })),
-                            )
-                            .when(
-                                !closed && self.connections_tab != ConnectionsTab::Recorded,
-                                |d| {
-                                    d.child(
-                                        danger_icon_button(
-                                            SharedString::from(format!("close-{id}")),
-                                            IconName::Unplug,
-                                            self.tr("断开此连接", "Close connection"),
-                                            cx,
-                                        )
-                                        .disabled(
-                                            self.snapshot
-                                                .busy
-                                                .iter()
-                                                .any(|b| b == "connection-close"),
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, _| {
-                                                this.service.close_connection(&id)
-                                            }),
-                                        ),
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .opacity(0.)
+                                    .group_hover(hover_group, |s| s.opacity(1.))
+                                    .child(
+                                        Button::new(SharedString::from(format!("inspect-{id}")))
+                                            .compact()
+                                            .custom(icon_button_style(p, false, cx))
+                                            .icon(IconName::Route)
+                                            .tooltip(inspect_tip.clone())
+                                            .accessibility_label(inspect_tip)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.inspect_connection(
+                                                    inspect.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
                                     )
-                                },
+                                    .child(
+                                        Button::new(SharedString::from(format!("test-{id}")))
+                                            .compact()
+                                            .custom(icon_button_style(p, false, cx))
+                                            .icon(IconName::Radar)
+                                            .tooltip(test_tip.clone())
+                                            .accessibility_label(test_tip)
+                                            .disabled(test_target.is_none())
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(target) = &test_target {
+                                                    this.selected_connection = Some(test.clone());
+                                                    this.page = Page::Diagnostics;
+                                                    this.replay_connection(target, window, cx);
+                                                }
+                                            })),
+                                    )
+                                    .when(
+                                        !closed && self.connections_tab != ConnectionsTab::Recorded,
+                                        |d| {
+                                            d.child(
+                                                danger_icon_button(
+                                                    SharedString::from(format!("close-{id}")),
+                                                    IconName::Unplug,
+                                                    self.tr("断开此连接", "Close connection"),
+                                                    cx,
+                                                )
+                                                .custom(danger_button_style(p, cx))
+                                                .disabled(
+                                                    self.snapshot
+                                                        .busy
+                                                        .iter()
+                                                        .any(|b| b == "connection-close"),
+                                                )
+                                                .on_click(cx.listener(move |this, _, _, _| {
+                                                    this.service.close_connection(&id)
+                                                })),
+                                            )
+                                        },
+                                    ),
                             )
                             .child(
                                 more_button(
@@ -1231,11 +1244,15 @@ impl AppView {
                 self.tr("个活动连接", "active connections")
             }
         );
+        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let hover_group = SharedString::from(format!("process-row-{name}"));
         let count_button_style = ButtonCustomVariant::new(cx)
             .foreground(p.muted_fg)
             .hover(p.neutral_hover())
             .active(p.neutral_active());
         div()
+            .id(SharedString::from(format!("process-row-item-{name}")))
+            .group(hover_group.clone())
             .flex()
             .items_center()
             .gap_3()
@@ -1244,6 +1261,7 @@ impl AppView {
             .bg(p.bg)
             .border_1()
             .border_color(p.border)
+            .hover(move |s| s.bg(row_hover_bg))
             .child(
                 div()
                     .flex()
@@ -1313,31 +1331,36 @@ impl AppView {
                     ))),
             )
             .child(
-                Button::new(SharedString::from(format!("process-block-{name}")))
+                div()
                     .flex_shrink_0()
-                    .compact()
-                    .ghost()
-                    .label(self.tr("阻止联网", "Block process"))
-                    .disabled(
-                        name.is_empty()
-                            || is_protected_process(name)
-                            || self
-                                .snapshot
-                                .busy
-                                .iter()
-                                .any(|k| k == "firewall-rule" || k == "core"),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.run_command(
-                            menus::Command::BlockConnection(
-                                target.clone(),
-                                DiagnosticRuleKind::Process,
-                            ),
-                            false,
-                            window,
-                            cx,
-                        )
-                    })),
+                    .opacity(0.)
+                    .group_hover(hover_group, |s| s.opacity(1.))
+                    .child(
+                        Button::new(SharedString::from(format!("process-block-{name}")))
+                            .compact()
+                            .ghost()
+                            .label(self.tr("阻止联网", "Block process"))
+                            .disabled(
+                                name.is_empty()
+                                    || is_protected_process(name)
+                                    || self
+                                        .snapshot
+                                        .busy
+                                        .iter()
+                                        .any(|k| k == "firewall-rule" || k == "core"),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.run_command(
+                                    menus::Command::BlockConnection(
+                                        target.clone(),
+                                        DiagnosticRuleKind::Process,
+                                    ),
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    ),
             )
     }
 

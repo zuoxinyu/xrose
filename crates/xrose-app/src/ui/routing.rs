@@ -375,7 +375,7 @@ impl AppView {
                 div()
                     .flex()
                     .flex_wrap()
-                    .items_center()
+                    .items_start()
                     .justify_between()
                     .gap_2()
                     .child(section_title(
@@ -580,7 +580,7 @@ impl AppView {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .flex_wrap()
                     .gap_3()
                     .child(
@@ -1472,7 +1472,7 @@ impl AppView {
             .child(
                 div()
                     .flex()
-                    .items_center()
+                    .items_start()
                     .justify_between()
                     .gap_3()
                     .flex_wrap()

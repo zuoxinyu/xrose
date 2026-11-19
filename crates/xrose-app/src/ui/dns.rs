@@ -166,7 +166,7 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .justify_between()
                         .child(section_title(
                             &p,
@@ -396,7 +396,7 @@ impl AppView {
                                     d.child(pill(server.server_type.as_str(), p.muted_fg, p.panel_alt))
                                 })
                                 .when(is_final, |d| {
-                                    d.child(pill(self.tr("默认", "Default"), p.primary, p.accent))
+                                    d.child(pill("final", p.primary, p.accent))
                                 }),
                         )
                         .child(
@@ -477,7 +477,7 @@ impl AppView {
                 .child(
                     div()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .justify_between()
                         .child(section_title(
                             &p,

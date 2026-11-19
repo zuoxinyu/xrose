@@ -1016,12 +1016,17 @@ impl AppView {
                     .profiles
                     .iter()
                     .filter(|_| self.snapshot.mesh.supported)
-                    .map(|profile| {
+                    .enumerate()
+                    .map(|(index, profile)| {
                         let id = profile.id.clone();
                         let provider = profile.provider;
                         setting_row(
                             &p,
-                            self.tr("启动组网", "Mesh startup"),
+                            if index == 0 {
+                                self.tr("启动组网", "Mesh startup")
+                            } else {
+                                SharedString::default()
+                            },
                             "",
                             toggle(
                                 SharedString::from(format!("login-mesh-{id}")),
