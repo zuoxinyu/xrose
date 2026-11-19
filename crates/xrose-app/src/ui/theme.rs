@@ -45,6 +45,16 @@ pub fn finder_brand_color(phase: f32, opacity: f32) -> Hsla {
     Hsla::from(rgb(from).blend(rgb(to).alpha(t))).opacity(opacity)
 }
 
+/// High-contrast outer backing for the locked QR viewfinder frame on light surfaces.
+pub fn finder_outer_outline(opacity: f32) -> Hsla {
+    gpui_kit::hsla(220. / 360., 0.35, 0.06, opacity)
+}
+
+/// Crisp inner highlight for the locked QR viewfinder frame on dark surfaces.
+pub fn finder_inner_highlight(opacity: f32) -> Hsla {
+    gpui_kit::hsla(0., 0., 1., opacity)
+}
+
 /// Interaction color shared by the theme override and the palette.
 pub fn interaction(dark: bool) -> (Hsla, Hsla) {
     if dark {
@@ -281,6 +291,10 @@ pub const INSERTION_LINE: f32 = 2.;
 pub const DIALOG_WIDTH: f32 = 440.;
 pub const DIALOG_WIDE: f32 = 720.;
 pub const MEMBER_LIST_HEIGHT: f32 = 192.;
+pub const FINDER_OPEN_ARM: f32 = 26.;
+pub const FINDER_STROKE_OPEN: f32 = 3.;
+pub const FINDER_STROKE_LOCKED: f32 = 4.5;
+pub const FINDER_BADGE_SIZE: f32 = 32.;
 
 pub fn switch_off() -> Hsla {
     hsl(0., 0., 0.5)

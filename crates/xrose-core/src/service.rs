@@ -93,6 +93,15 @@ pub enum SharePreview {
     Unsupported,
 }
 
+/// Classification of shared text without persisting or issuing network requests.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SharedContentSummary {
+    /// Subscription `(url, default_name)` pairs extracted from the text.
+    pub subscription_urls: Vec<(String, String)>,
+    /// Whether any non-subscription lines or structured payload remain.
+    pub has_other_content: bool,
+}
+
 #[derive(Clone)]
 pub enum ShareTarget {
     Node(String),
@@ -1448,7 +1457,11 @@ impl AppService {
                         .as_ref()
                         .map(SubscriptionUsage::from_userinfo);
                     updated.last_updated = Some(now_unix());
-                    updated.last_error = None;
+                    updated.last_error = if parsed.is_empty() {
+                        Some(format!("未解析出节点：{}", parsed.warnings.join("；")))
+                    } else {
+                        None
+                    };
                     updated.node_count = added;
                     if let Some(hours) = response.update_interval_hours {
                         if hours > 0 {
@@ -1593,6 +1606,19 @@ impl AppService {
                 host: pretty_host(url),
             },
             None => SharePreview::Unsupported,
+        }
+    }
+
+    /// Splits shared text into candidate subscription URLs (with domain-based default names)
+    /// and indicates whether any other content remains, without persisting or fetching anything.
+    pub fn inspect_shared_content(content: &str) -> SharedContentSummary {
+        let (urls, nodes) = split_shared_content(content);
+        SharedContentSummary {
+            subscription_urls: urls
+                .into_iter()
+                .map(|url| (url.to_string(), pretty_host(url)))
+                .collect(),
+            has_other_content: !nodes.trim().is_empty(),
         }
     }
 
@@ -5751,6 +5777,87 @@ mod tests {
         let yaml = "proxies:\n  # https://feed.example/test";
         assert_eq!(super::split_shared_content(yaml).1, yaml);
         assert!(super::split_shared_content("https:// bad").0.is_empty());
+    }
+
+    #[test]
+    fn inspect_shared_content_extracts_subscription_urls_and_default_host_names() {
+        let single =
+            super::AppService::inspect_shared_content("  https://sub.example.test/api?token=abc\n");
+        assert_eq!(
+            single.subscription_urls,
+            vec![(
+                "https://sub.example.test/api?token=abc".to_string(),
+                "sub.example.test".to_string(),
+            )]
+        );
+        assert!(!single.has_other_content);
+
+        let proxy =
+            super::AppService::inspect_shared_content("http://proxy.example:8080?xrose=proxy#HTTP");
+        assert!(proxy.subscription_urls.is_empty());
+        assert!(proxy.has_other_content);
+
+        let mixed = super::AppService::inspect_shared_content(
+            "https://feed.example/list\nsocks://node.example:1080#Demo",
+        );
+        assert_eq!(mixed.subscription_urls.len(), 1);
+        assert!(mixed.has_other_content);
+
+        let plain = super::AppService::inspect_shared_content("not a link");
+        assert!(plain.subscription_urls.is_empty());
+        assert!(plain.has_other_content);
+    }
+
+    #[test]
+    fn subscription_refresh_records_error_when_response_has_no_valid_nodes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (service, _dir) = service();
+        let addr = service.inner.rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let body = "<html><body>Not a subscription</body></html>";
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                }
+            });
+            addr
+        });
+        let id = service
+            .add_subscription("", format!("http://{addr}/page"))
+            .unwrap();
+        let busy_key = format!("sub:{id}");
+        service.inner.rt.block_on(async {
+            for _ in 0..80 {
+                if !service.is_busy(&busy_key) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        });
+        let sub = service
+            .snapshot()
+            .subscriptions
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        assert_eq!(sub.node_count, 0);
+        assert!(sub.last_updated.is_some());
+        assert!(
+            sub.last_error
+                .as_deref()
+                .is_some_and(|err| err.contains("未解析出节点")),
+            "expected empty parse error on subscription card, got {:?}",
+            sub.last_error
+        );
     }
 
     #[test]

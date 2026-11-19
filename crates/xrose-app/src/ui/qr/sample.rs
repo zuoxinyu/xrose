@@ -11,7 +11,15 @@ pub(super) const SNAP_DISTANCE: f32 = 82.;
 const PADDING: f32 = 5.;
 pub(super) type Rect = [f32; 4];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ScanKind {
+    Node,
+    Subscription,
+    Unsupported,
+}
+
 pub(super) struct ScanSummary {
+    pub(super) kind: ScanKind,
     pub(super) name: Option<SharedString>,
     pub(super) detail: SharedString,
 }
@@ -134,7 +142,7 @@ pub(super) async fn scan_desktop(
 }
 
 pub(super) fn scan_summary(preview: SharePreview, privacy: bool, lang: Language) -> ScanSummary {
-    let (name, detail) = match preview {
+    let (kind, name, detail) = match preview {
         SharePreview::Node {
             mut name,
             protocol,
@@ -167,11 +175,13 @@ pub(super) fn scan_summary(preview: SharePreview, privacy: bool, lang: Language)
             }
             let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
             (
+                ScanKind::Node,
                 (!name.is_empty()).then(|| name.into()),
                 SharedString::from(label),
             )
         }
         SharePreview::Subscription { host } => (
+            ScanKind::Subscription,
             None,
             format!(
                 "{} · {}",
@@ -188,11 +198,12 @@ pub(super) fn scan_summary(preview: SharePreview, privacy: bool, lang: Language)
             .into(),
         ),
         SharePreview::Unsupported => (
+            ScanKind::Unsupported,
             None,
             tr(lang, "无法识别为节点或订阅", "Not a node or subscription"),
         ),
     };
-    ScanSummary { name, detail }
+    ScanSummary { kind, name, detail }
 }
 
 #[cfg(test)]
@@ -311,7 +322,21 @@ mod tests {
             true,
             Language::En,
         );
+        assert_eq!(v6_label.kind, super::ScanKind::Node);
         assert_eq!(v6_label.name.as_deref(), Some("VLESS 2001:*:*:*"));
         assert_eq!(v6_label.detail.as_ref(), "VLESS · [2001:*:*:*]:443");
+
+        let sub = scan_summary(
+            SharePreview::Subscription {
+                host: "sub.example".into(),
+            },
+            false,
+            Language::En,
+        );
+        assert_eq!(sub.kind, super::ScanKind::Subscription);
+        assert_eq!(
+            scan_summary(SharePreview::Unsupported, false, Language::En).kind,
+            super::ScanKind::Unsupported
+        );
     }
 }

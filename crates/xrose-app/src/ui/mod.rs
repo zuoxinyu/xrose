@@ -323,6 +323,10 @@ pub struct AppView {
     pub(crate) batch_selected: std::collections::HashSet<String>,
     pub(crate) sub_name: Entity<InputState>,
     pub(crate) sub_url: Entity<InputState>,
+    /// Tracks the last domain auto-filled into `sub_name` so repeated scans update it cleanly.
+    pub(crate) sub_name_auto: Option<String>,
+    /// URL associated with an inline subscription error so programmatic prefill does not clear it.
+    pub(crate) sub_error_url: Option<String>,
     pub(crate) import_input: Entity<TextareaState>,
     pub(crate) log_search: Entity<InputState>,
     log_list: logs::LogListState,
@@ -409,6 +413,48 @@ impl AppView {
             cx,
             "https://example.com/api/v1/client/subscribe?token=...",
         );
+        cx.subscribe_in(&sub_name, window, |this, _, event, window, cx| {
+            if !this.show_subscription_form {
+                return;
+            }
+            match event {
+                InputEvent::Change => {
+                    let current_url = this.sub_url.read(cx).value();
+                    if this.sub_error_url.as_deref() != Some(current_url.as_ref()) {
+                        this.manual_error = None;
+                        this.sub_error_url = None;
+                    }
+                    window.refresh();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.submit_subscription_form(window, cx);
+                }
+                _ => {}
+            }
+        })
+        .detach();
+        cx.subscribe_in(&sub_url, window, |this, _, event, window, cx| {
+            if !this.show_subscription_form {
+                return;
+            }
+            match event {
+                InputEvent::Change => {
+                    let current = this.sub_url.read(cx).value();
+                    if this.sub_error_url.as_deref() != Some(current.as_ref()) {
+                        this.manual_error = None;
+                        this.sub_error_url = None;
+                    }
+                    window.refresh();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    this.submit_subscription_form(window, cx);
+                }
+                _ => {}
+            }
+        })
+        .detach();
         let import_input = cx.new(|cx| TextareaState::new(window, cx).rows(4));
         cx.subscribe(&import_input, |this, _, event, cx| {
             if this.show_import_box && matches!(event, InputEvent::Change) {
@@ -571,6 +617,8 @@ impl AppView {
             batch_selected: std::collections::HashSet::new(),
             sub_name,
             sub_url,
+            sub_name_auto: None,
+            sub_error_url: None,
             import_input,
             log_search,
             log_list: logs::LogListState::new(),
