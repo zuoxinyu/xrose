@@ -385,32 +385,7 @@ impl AppView {
                             "选择预设分流模式，或配置自定义分流规则",
                             "Select a routing preset or configure custom rules",
                         ),
-                    ))
-                    .when(model.groups.len() > 1, |d| {
-                        let name = model
-                            .default_group_id()
-                            .and_then(|id| model.group(&id))
-                            .map(|g| self.outbound_group_label(g))
-                            .unwrap_or_else(|| self.tr("选择出站组", "Choose group"));
-                        d.child(
-                            Button::new("route-default-outbound")
-                                .compact()
-                                .h(px(super::theme::CONTROL_HEIGHT))
-                                .tooltip(self.tr(
-                                    "用于未指定出站组的代理规则",
-                                    "Used by proxy rules without an explicit outbound group",
-                                ))
-                                .child(prefixed_dropdown_content(
-                                    self.tr("默认代理出站", "Default proxy outbound"),
-                                    name,
-                                    p,
-                                ))
-                                .dropdown_menu(menus::builder(
-                                    cx.entity().downgrade(),
-                                    MenuTarget::DefaultOutbound,
-                                )),
-                        )
-                    }),
+                    )),
             )
             .when(model.work_mode == xrose_core::model::WorkMode::Mesh, |card| {
                 card.child(div().text_sm().text_color(p.muted_fg).child(self.tr(

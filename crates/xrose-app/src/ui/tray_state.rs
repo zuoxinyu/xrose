@@ -9,7 +9,7 @@ pub(crate) struct TrayWindowState {
     hide_ips: bool,
     hide_traffic_chart: bool,
     node_sort: super::NodeSort,
-    group_by_subscription: bool,
+    node_view: super::NodeView,
     exact_process_filter: Option<String>,
     connection_sort: xrose_core::flow::ConnectionSort,
     connections_tab: connections::ConnectionsTab,
@@ -62,7 +62,7 @@ impl AppView {
             hide_ips: self.hide_ips,
             hide_traffic_chart: self.hide_traffic_chart,
             node_sort: self.node_sort,
-            group_by_subscription: self.group_by_subscription,
+            node_view: self.node_view,
             connection_sort: self.connection_sort,
             connections_tab: self.connections_tab,
             log_filter: self.log_filter.clone(),
@@ -101,7 +101,7 @@ impl AppView {
         self.hide_ips = state.hide_ips;
         self.hide_traffic_chart = state.hide_traffic_chart;
         self.node_sort = state.node_sort;
-        self.group_by_subscription = state.group_by_subscription;
+        self.node_view = state.node_view;
         self.connection_sort = state.connection_sort;
         self.connections_tab = state.connections_tab;
         for (field, value) in self.page_inputs().into_iter().zip(state.page_inputs) {

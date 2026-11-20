@@ -41,12 +41,39 @@ impl AppView {
         crate::i18n::outbound_group_label(self.lang(), group)
     }
 
+    pub(in crate::ui) fn set_group_switch_mode(
+        &mut self,
+        group_id: &str,
+        mode: SwitchMode,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(group) = self.snapshot.model.group(group_id) else {
+            return;
+        };
+        let mut policy = group.switch_policy;
+        policy.mode = mode;
+        policy.consecutive_failures = policy.consecutive_failures.clamp(1, 10);
+        let interval = group.interval_secs.max(30);
+        if let Err(err) = self
+            .service
+            .set_node_switch_policy(group_id, policy, interval)
+        {
+            self.service
+                .toast(xrose_core::service::ToastLevel::Error, err.to_string());
+        }
+        self.sync(cx);
+    }
+
     pub(in crate::ui) fn open_node_switch_dialog(
         &self,
+        initial_group: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(initial) = self.snapshot.model.default_group_id() else {
+        let Some(initial) = initial_group
+            .filter(|id| self.snapshot.model.group(id).is_some())
+            .or_else(|| self.snapshot.model.default_group_id())
+        else {
             return;
         };
         let drafts = self

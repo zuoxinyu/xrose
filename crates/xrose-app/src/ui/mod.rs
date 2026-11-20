@@ -286,6 +286,14 @@ pub(crate) enum NodeSort {
     Latency,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NodeView {
+    #[default]
+    Flat,
+    Source,
+    OutboundGroups,
+}
+
 pub struct AppView {
     scan_pending: bool,
     import_editor_epoch: u64,
@@ -319,7 +327,7 @@ pub struct AppView {
     /// instead of a stale value while the run is busy.
     pub(crate) latency_pending: std::collections::HashSet<String>,
     pub(crate) node_sort: NodeSort,
-    pub(crate) group_by_subscription: bool,
+    pub(crate) node_view: NodeView,
     pub(crate) collapsed_subs: std::collections::HashSet<String>,
     pub(crate) batch_mode: bool,
     pub(crate) batch_selected: std::collections::HashSet<String>,
@@ -346,6 +354,7 @@ pub struct AppView {
     route_scroll_running: bool,
     node_selector: Option<Entity<node_selector::NodeSelector>>,
     pub(crate) traffic_popover_open: bool,
+    pub(crate) nodes_policy_popover_open: bool,
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
     sidebar_view: Entity<WindowRegion>,
@@ -615,7 +624,7 @@ impl AppView {
             hide_traffic_chart: false,
             latency_pending: std::collections::HashSet::new(),
             node_sort: NodeSort::Order,
-            group_by_subscription: false,
+            node_view: NodeView::Flat,
             collapsed_subs: std::collections::HashSet::new(),
             batch_mode: false,
             batch_selected: std::collections::HashSet::new(),
@@ -642,6 +651,7 @@ impl AppView {
             action_menu: None,
             node_selector: None,
             traffic_popover_open: false,
+            nodes_policy_popover_open: false,
             about_note_hovered: false,
             active_route_drag: None,
             trace_anchor: ScrollAnchor::for_handle(content_scroll.clone()),

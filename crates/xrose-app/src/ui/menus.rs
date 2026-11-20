@@ -8,7 +8,7 @@ use gpui_kit::*;
 use xrose_core::core::logs::LogPrivacy;
 use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
-use xrose_core::model::WorkMode;
+use xrose_core::model::{SwitchMode, WorkMode};
 use xrose_core::route::transfer::ExportScope;
 use xrose_core::service::{HttpTestTarget, ShareTarget, ToastLevel};
 
@@ -22,10 +22,10 @@ pub(super) enum MenuTarget {
     ServiceForward(String, ServiceForward),
     RoutingRules,
     RuleSetSources,
-    DefaultOutbound,
     RuleOutbound,
     DiagnosticOutbound,
     OutboundGroup(String),
+    GroupSwitchPolicy(String),
     Node(String),
     Exit(HttpTestTarget),
     Nodes,
@@ -58,9 +58,10 @@ pub(super) enum Command {
     SetDefaultOutbound(String),
     SelectRuleOutbound(Option<String>),
     SelectDiagnosticOutbound(Option<String>),
-    ManageOutboundGroups,
     EditOutboundGroup(String),
     DeleteOutboundGroup(String),
+    SetGroupSwitchMode(String, SwitchMode),
+    OpenGroupSwitchSettings(String),
     NodeOutboundGroups(String),
     EditNode(String),
     TestNode(String),
@@ -77,7 +78,6 @@ pub(super) enum Command {
     ShowQr(ShareTarget),
     DeleteNode(String),
     DeleteNodes(Vec<String>),
-    NodeSwitchSettings,
     BatchNodes,
     CleanNodes,
     MoveRule(String, Option<String>, isize),
@@ -173,6 +173,9 @@ impl AppView {
             cx.notify();
         }
         if std::mem::take(&mut self.traffic_popover_open) {
+            cx.notify();
+        }
+        if std::mem::take(&mut self.nodes_policy_popover_open) {
             cx.notify();
         }
         if let Some(menu) = self.action_menu.take() {
@@ -406,30 +409,39 @@ impl AppView {
                     );
                 }
             }
-            MenuTarget::DefaultOutbound => {
-                let model = &self.snapshot.model;
-                let current = model.default_group_id();
-                for group in &model.groups {
-                    let usable = group.members.iter().any(|id| {
-                        model
-                            .node(id)
-                            .is_some_and(|node| node.usable_with(self.snapshot.settings.core))
-                    });
+            MenuTarget::GroupSwitchPolicy(id) => {
+                let Some(group) = self.snapshot.model.group(&id) else {
+                    return menu;
+                };
+                let current = match (group.switch_mode(), group.kind) {
+                    (SwitchMode::GroupDefault, xrose_core::model::GroupKind::UrlTest) => {
+                        SwitchMode::Latency
+                    }
+                    (mode, _) => mode,
+                };
+                let modes = [
+                    (SwitchMode::Off, "手动选择", "Manual"),
+                    (SwitchMode::Health, "健康评分", "Health score"),
+                    (SwitchMode::Latency, "延迟优先", "Lowest latency"),
+                    (SwitchMode::Failover, "仅故障切换", "Failover only"),
+                    (SwitchMode::Throughput, "吞吐优先", "Highest throughput"),
+                ];
+                for (mode, zh, en) in modes {
                     menu = menu.item(
-                        item(
-                            &view,
-                            self.outbound_group_label(group),
-                            group.enabled && usable && !busy("core"),
-                            Command::SetDefaultOutbound(group.id.clone()),
+                        add(
+                            zh,
+                            en,
+                            !busy("core"),
+                            Command::SetGroupSwitchMode(id.clone(), mode),
                         )
-                        .checked(current.as_ref() == Some(&group.id)),
+                        .checked(current == mode),
                     );
                 }
                 menu = menu.separator().item(add(
-                    "管理出站组…",
-                    "Manage outbound groups…",
+                    "策略详细设置…",
+                    "Policy details…",
                     true,
-                    Command::ManageOutboundGroups,
+                    Command::OpenGroupSwitchSettings(id),
                 ));
             }
             MenuTarget::OutboundGroup(id) => {
@@ -439,6 +451,18 @@ impl AppView {
                 };
                 let reason = model.outbound_group_deletion_reason(&id);
                 menu = menu
+                    .item(add(
+                        "编辑出站组…",
+                        "Edit outbound group…",
+                        true,
+                        Command::EditOutboundGroup(id.clone()),
+                    ))
+                    .item(add(
+                        "策略详细设置…",
+                        "Policy details…",
+                        true,
+                        Command::OpenGroupSwitchSettings(id.clone()),
+                    ))
                     .item(add(
                         "设为默认代理出站",
                         "Use as default proxy group",
@@ -632,18 +656,6 @@ impl AppView {
                         "Import configuration…",
                         !busy("config-import"),
                         Command::ImportConfig,
-                    ))
-                    .item(add(
-                        "管理出站组…",
-                        "Manage outbound groups…",
-                        true,
-                        Command::ManageOutboundGroups,
-                    ))
-                    .item(add(
-                        "自动切换设置…",
-                        "Auto-switch settings…",
-                        self.snapshot.model.default_group_id().is_some(),
-                        Command::NodeSwitchSettings,
                     ))
                     .item(add(
                         "检测当前出站组可达性",
@@ -1115,6 +1127,10 @@ impl AppView {
             | Command::SetNodeEnabled(id, _)
             | Command::DownloadNode(id)
             | Command::DeleteNode(id) => self.snapshot.model.node(id).is_some(),
+            Command::SetGroupSwitchMode(id, _) => {
+                !busy("core") && self.snapshot.model.group(id).is_some()
+            }
+            Command::OpenGroupSwitchSettings(id) => self.snapshot.model.group(id).is_some(),
             Command::DeleteRule(id) | Command::AssignRule(id, _) | Command::MoveRule(id, _, _) => {
                 self.snapshot
                     .model
@@ -1300,7 +1316,6 @@ impl AppView {
             }
         }
         match command {
-            Command::ManageOutboundGroups => self.open_outbound_groups(window, cx),
             Command::EditOutboundGroup(id) => self.open_outbound_group_editor(Some(id), window, cx),
             Command::NodeOutboundGroups(id) => self.open_node_outbound_groups(id, window, cx),
             Command::DeleteOutboundGroup(id) => {
@@ -1308,7 +1323,10 @@ impl AppView {
                     self.service.toast(ToastLevel::Error, error.to_string());
                 }
             }
-            Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
+            Command::SetGroupSwitchMode(id, mode) => self.set_group_switch_mode(&id, mode, cx),
+            Command::OpenGroupSwitchSettings(id) => {
+                self.open_node_switch_dialog(Some(id), window, cx)
+            }
             Command::ImportConfig => self.open_config_import_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
             Command::ValidateConfig => self.service.validate_config(),

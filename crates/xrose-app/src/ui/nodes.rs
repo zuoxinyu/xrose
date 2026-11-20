@@ -2,28 +2,31 @@ mod direct_entry;
 mod health_detail;
 mod mesh_exits;
 mod outbound_groups;
+mod policy_popover;
 mod switching;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use xrose_core::model::{CoreKind, Node};
-use xrose_core::service::{HttpTestTarget, ToastLevel};
+use xrose_core::model::{AppModel, CoreKind, Node, OutboundGroup, WorkMode};
+use xrose_core::service::{HttpTestTarget, ToastLevel, UiSnapshot};
 use xrose_core::settings::Language;
 use xrose_core::storage::LatencyEntry;
 
 use super::menus::{self, Command, MenuTarget};
-use super::theme::{LATENCY_STALE_SECS, Palette, latency_age_secs, latency_color, palette};
+use super::theme::{
+    LATENCY_STALE_SECS, Palette, SEMANTIC_ALPHA, latency_age_secs, latency_color, palette,
+};
 use super::widgets::*;
-use super::{AppView, Page};
+use super::{AppView, NodeSort, NodeView, Page};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
@@ -186,12 +189,17 @@ impl AppView {
         let node_sort = if has_nodes {
             self.node_sort
         } else {
-            super::NodeSort::Order
+            NodeSort::Order
         };
-        let sort_active = node_sort != super::NodeSort::Order;
-        let grouped = has_nodes && self.group_by_subscription;
+        let sort_active = node_sort != NodeSort::Order;
+        let show_toolbar = has_nodes || model.groups.len() > 1;
+        let node_view = if show_toolbar {
+            self.node_view
+        } else {
+            NodeView::Flat
+        };
 
-        let search_query = if has_nodes {
+        let search_query = if show_toolbar {
             self.node_search.read(cx).value().trim().to_lowercase()
         } else {
             String::new()
@@ -201,69 +209,12 @@ impl AppView {
             .iter()
             .enumerate()
             .filter(|(_, node)| !node.is_mesh_gateway() || !discovered_gateways.contains(&node.id))
-            .filter(|(_, n)| {
-                if search_query.is_empty() {
-                    true
-                } else {
-                    n.name.to_lowercase().contains(&search_query)
-                        || n.endpoint().to_lowercase().contains(&search_query)
-                        || n.protocol
-                            .display_name()
-                            .to_lowercase()
-                            .contains(&search_query)
-                }
-            })
+            .filter(|(_, n)| node_matches_query(n, &search_query))
             .map(|(index, _)| index)
             .collect();
 
         // Sorting only changes the view; the stored order is left alone.
-        match node_sort {
-            super::NodeSort::Order => {}
-            super::NodeSort::Latency => {
-                display_nodes.sort_by(|&a, &b| {
-                    let rtt = |idx: usize| {
-                        let n = &model.nodes[idx];
-                        self.snapshot
-                            .latency
-                            .get(&n.id)
-                            .filter(|entry| entry.is_http())
-                            .and_then(|l| l.delay_ms)
-                    };
-                    match (rtt(a), rtt(b)) {
-                        (Some(va), Some(vb)) => va.cmp(&vb).then_with(|| a.cmp(&b)),
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => a.cmp(&b),
-                    }
-                });
-            }
-            super::NodeSort::Health => {
-                display_nodes.sort_by(|&a, &b| {
-                    let score_pair = |idx: usize| -> Option<(f32, f32)> {
-                        let n = &model.nodes[idx];
-                        self.snapshot
-                            .node_health
-                            .get(&n.id)?
-                            .general
-                            .as_ref()
-                            .map(|g| (g.score, g.short_score))
-                    };
-                    match (score_pair(a), score_pair(b)) {
-                        (Some(sa), Some(sb)) => {
-                            sb.0.partial_cmp(&sa.0)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                                .then_with(|| {
-                                    sb.1.partial_cmp(&sa.1).unwrap_or(std::cmp::Ordering::Equal)
-                                })
-                                .then_with(|| a.cmp(&b))
-                        }
-                        (Some(_), None) => std::cmp::Ordering::Less,
-                        (None, Some(_)) => std::cmp::Ordering::Greater,
-                        (None, None) => a.cmp(&b),
-                    }
-                });
-            }
-        }
+        sort_node_indices(&mut display_nodes, node_sort, model, &self.snapshot);
 
         // Fastest node among all enabled nodes, only if it clearly wins.
         let fastest_node_id = clear_winner(
@@ -300,7 +251,12 @@ impl AppView {
             .filter(|node| !node.is_mesh_gateway() || !discovered_gateways.contains(&node.id))
             .count()
             + exits.len();
-        let row_gap = rems(if grouped { 0.5 } else { 0.75 }).to_pixels(window.rem_size());
+        let row_gap = rems(if node_view == NodeView::Flat {
+            0.75
+        } else {
+            0.5
+        })
+        .to_pixels(window.rem_size());
         let exits: Vec<_> = exits
             .into_iter()
             .filter(|exit| exit.matches(&search_query, hide_ips))
@@ -332,6 +288,8 @@ impl AppView {
             .filter(|(_, peer, _)| peer.exit_selected && !peer.online)
             .map(|(profile, _, _)| format!("mesh-exit-{}", profile.id))
             .collect();
+        let offline_exits_for_groups = offline_exits.clone();
+        let fastest_for_groups = fastest_node_id.clone();
         let row_group = active_group.clone();
         let view = cx.entity();
         let render_rows = std::rc::Rc::new(
@@ -346,11 +304,11 @@ impl AppView {
                             render_node_row(
                                 RowProps {
                                     node,
+                                    row_key: node.id.clone(),
                                     lang,
                                     selected: active_node.as_deref() == Some(node.id.as_str())
                                         && (!node.is_mesh_gateway()
-                                            || this.snapshot.model.work_mode
-                                                == xrose_core::model::WorkMode::Mesh),
+                                            || this.snapshot.model.work_mode == WorkMode::Mesh),
                                     virtual_exit: None,
                                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
                                     latency: this
@@ -373,6 +331,7 @@ impl AppView {
                                     magic_dns_suffixes: &suffixes,
                                     usable,
                                     auto_mode,
+                                    group_context: false,
                                     offline_exit: offline_exits.contains(&node.id),
                                     mesh_provider: node
                                         .id
@@ -397,7 +356,9 @@ impl AppView {
                                     ),
                                     batch_mode,
                                     batch_checked: this.batch_selected.contains(&node.id),
-                                    drag_enabled: !sort_active,
+                                    drag_enabled: !sort_active
+                                        && node_view == NodeView::Flat
+                                        && !node.is_mesh_gateway(),
                                 },
                                 &p,
                                 window,
@@ -477,6 +438,9 @@ impl AppView {
                                 .items_center()
                                 .justify_end()
                                 .gap_2()
+                                .when(show_toolbar, |d| {
+                                    d.children(self.nodes_policy_popover(core_busy, cx))
+                                })
                                 .child(
                                     more_button(
                                         "toolbar-more",
@@ -500,26 +464,41 @@ impl AppView {
                                 ),
                         ),
                 )
-                .when(has_nodes, |d| {
+                .when(show_toolbar, |d| {
                     d.child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
                             .flex_wrap()
-                            .child(
+                            .child({
+                                let view_choices = [
+                                    NodeView::Flat,
+                                    NodeView::Source,
+                                    NodeView::OutboundGroups,
+                                ];
                                 ChoiceGroup::new(
                                     "node-view",
-                                    vec![self.tr("平铺", "Flat"), self.tr("订阅", "Subscription")],
-                                    usize::from(grouped),
+                                    vec![
+                                        self.tr("平铺", "Flat"),
+                                        self.tr("来源", "Source"),
+                                        self.tr("出站组", "Groups"),
+                                    ],
+                                    view_choices
+                                        .iter()
+                                        .position(|&v| v == node_view)
+                                        .unwrap_or(0),
                                 )
                                 .on_change(cx.listener(
-                                    |this, index, _, cx| {
-                                        this.group_by_subscription = *index == 1;
+                                    move |this, index, _, cx| {
+                                        this.node_view = view_choices
+                                            .get(*index)
+                                            .copied()
+                                            .unwrap_or_default();
                                         cx.notify();
                                     },
-                                )),
-                            )
+                                ))
+                            })
                             .child({
                                 let sort_choices = [
                                     super::NodeSort::Order,
@@ -836,21 +815,31 @@ impl AppView {
                             )),
                     )
                 })
-                .when(shown == 0 && !search_query.is_empty(), |d| {
-                    d.child(empty_hint(
-                        &p,
-                        self.tr("未找到匹配的节点", "No matching nodes found"),
-                    ))
-                })
-                // Node list: either Grouped by Subscription or Flat List.
-                .when(!grouped, |container| {
+                .when(
+                    node_view != NodeView::OutboundGroups
+                        && shown == 0
+                        && !search_query.is_empty(),
+                    |d| {
+                        d.child(empty_hint(
+                            &p,
+                            self.tr("未找到匹配的节点", "No matching nodes found"),
+                        ))
+                    },
+                )
+                // Node list: Flat, Grouped by Source, or Grouped by Outbound Group.
+                .when(node_view == NodeView::Flat, |container| {
+                    let (mesh_nodes, proxy_nodes) =
+                        split_flat_nodes(std::mem::take(&mut display_nodes), model);
                     container
-                        .when(!display_nodes.is_empty(), |d| {
-                            d.child(configured_rows(std::mem::take(&mut display_nodes)))
-                        })
                         .children(exit_rows.take())
+                        .when(!mesh_nodes.is_empty(), |d| {
+                            d.child(configured_rows(mesh_nodes))
+                        })
+                        .when(!proxy_nodes.is_empty(), |d| {
+                            d.child(configured_rows(proxy_nodes))
+                        })
                 })
-                .when(grouped, |container| {
+                .when(node_view == NodeView::Source, |container| {
                     let sub_names: HashMap<_, _> = self
                         .snapshot
                         .subscriptions
@@ -999,6 +988,464 @@ impl AppView {
                                 .when(mesh, |d| d.children(exit_rows.take()))
                             })
                     }))
+                })
+                .when(node_view == NodeView::OutboundGroups, |container| {
+                    let node_index_by_id: HashMap<&str, usize> = model
+                        .nodes
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, node)| (node.id.as_str(), idx))
+                        .collect();
+                    let ordered = ordered_outbound_groups(&model.groups, active_group.as_deref());
+                    let collapsed_set = &self.collapsed_subs;
+                    let groups_view = cx.entity();
+                    let mut group_sections = Vec::new();
+                    for group in ordered {
+                        let is_default = active_group.as_deref() == Some(group.id.as_str());
+                        let group_label = self.outbound_group_label(group);
+                        let name_matches = !search_query.is_empty()
+                            && group_label.to_lowercase().contains(&search_query);
+                        let mut member_indices: Vec<usize> = group
+                            .members
+                            .iter()
+                            .filter_map(|id| node_index_by_id.get(id.as_str()).copied())
+                            .filter(|&idx| {
+                                name_matches || node_matches_query(&model.nodes[idx], &search_query)
+                            })
+                            .collect();
+                        sort_node_indices(&mut member_indices, node_sort, model, &self.snapshot);
+                        let member_count = member_indices.len();
+                        if !search_query.is_empty() && member_indices.is_empty() && !name_matches {
+                            continue;
+                        }
+                        let group_key = format!("outbound-group-{}", group.id);
+                        let is_collapsed = collapsed_set.contains(&group_key);
+                        let group_id_str = group.id.clone();
+                        let group_auto = !group.manually_selectable();
+                        let group_enabled = group.enabled;
+                        let group_active_node = (model.work_mode == WorkMode::Proxy)
+                            .then(|| {
+                                self.snapshot
+                                    .selected_node(Some(&group.id))
+                                    .map(|n| n.id.clone())
+                            })
+                            .flatten();
+                        let can_be_default = !is_default
+                            && group.enabled
+                            && group.members.iter().any(|id| {
+                                model
+                                    .node(id)
+                                    .is_some_and(|n| n.usable_with(self.snapshot.settings.core))
+                            });
+                        let member_ids_for_ping: Vec<String> = member_indices
+                            .iter()
+                            .map(|&i| model.nodes[i].id.clone())
+                            .collect();
+                        let group_testing = member_ids_for_ping.iter().any(|id| {
+                            this_busy(&self.snapshot.busy, &format!("latency:{id}"))
+                                || this_busy(&self.snapshot.busy, &format!("download:{id}"))
+                        });
+                        let policy_label = self.outbound_policy_label(group);
+                        let key_for_click = group_key.clone();
+                        let edit_group_id = group.id.clone();
+                        let default_group_id = group.id.clone();
+                        let policy_group_id = group.id.clone();
+                        let menu_group_id = group.id.clone();
+
+                        let rows_elem = (!is_collapsed).then(|| {
+                            if member_indices.is_empty() {
+                                empty_hint(
+                                    &p,
+                                    self.tr(
+                                        "此出站组暂无成员节点，点击「编辑」添加成员",
+                                        "No member nodes in this group; click Edit to add members",
+                                    ),
+                                )
+                                .into_any_element()
+                            } else {
+                                let groups_view = groups_view.clone();
+                                let offline_exits = offline_exits_for_groups.clone();
+                                let fastest_id = fastest_for_groups.clone();
+                                let group_id_for_rows = group_id_str.clone();
+                                node_rows(
+                                    member_count,
+                                    px(super::theme::NODE_ROW_HEIGHT + 2.),
+                                    row_gap,
+                                    move |range, window, cx| {
+                                        groups_view.update(cx, |this, cx| {
+                                            let suffixes = this.snapshot.mesh.magic_dns_suffixes();
+                                            member_indices[range]
+                                                .iter()
+                                                .map(|&index| {
+                                                    let node = &this.snapshot.model.nodes[index];
+                                                    let usable = node
+                                                        .usable_with(this.snapshot.settings.core);
+                                                    render_node_row(
+                                                        RowProps {
+                                                            node,
+                                                            row_key: format!(
+                                                                "grp-{}-{}",
+                                                                group_id_for_rows, node.id
+                                                            ),
+                                                            lang,
+                                                            selected: group_active_node.as_deref()
+                                                                == Some(node.id.as_str()),
+                                                            virtual_exit: None,
+                                                            fastest: fastest_id.as_deref()
+                                                                == Some(node.id.as_str()),
+                                                            latency: this
+                                                                .snapshot
+                                                                .latency
+                                                                .get(&node.id)
+                                                                .filter(|entry| entry.is_http()),
+                                                            location: this
+                                                                .snapshot
+                                                                .node_location(node),
+                                                            download: this
+                                                                .snapshot
+                                                                .downloads
+                                                                .get(&node.id),
+                                                            downloading: this_busy(
+                                                                &this.snapshot.busy,
+                                                                &format!("download:{}", node.id),
+                                                            ),
+                                                            health: this
+                                                                .snapshot
+                                                                .node_health
+                                                                .get(&node.id),
+                                                            checking_reachability: this_busy(
+                                                                &this.snapshot.busy,
+                                                                &format!(
+                                                                    "reachability:{}",
+                                                                    node.id
+                                                                ),
+                                                            ),
+                                                            hide_ips,
+                                                            magic_dns_suffixes: &suffixes,
+                                                            usable,
+                                                            auto_mode: group_auto,
+                                                            group_context: true,
+                                                            offline_exit: offline_exits
+                                                                .contains(&node.id),
+                                                            mesh_provider: node
+                                                                .id
+                                                                .strip_prefix("mesh-exit-")
+                                                                .and_then(|id| {
+                                                                    this.snapshot
+                                                                        .mesh
+                                                                        .profiles
+                                                                        .iter()
+                                                                        .find(|profile| {
+                                                                            profile.id == id
+                                                                        })
+                                                                })
+                                                                .map(|profile| profile.provider),
+                                                            group_id: (group_enabled
+                                                                && !group_auto
+                                                                && usable)
+                                                                .then(|| group_id_for_rows.clone()),
+                                                            core_busy,
+                                                            latency_busy: tests_busy,
+                                                            testing: this_busy(
+                                                                &this.snapshot.busy,
+                                                                &format!("latency:{}", node.id),
+                                                            ),
+                                                            batch_mode,
+                                                            batch_checked: this
+                                                                .batch_selected
+                                                                .contains(&node.id),
+                                                            drag_enabled: false,
+                                                        },
+                                                        &p,
+                                                        window,
+                                                        cx,
+                                                    )
+                                                    .into_any_element()
+                                                })
+                                                .collect::<Vec<_>>()
+                                        })
+                                    },
+                                )
+                                .into_any_element()
+                            }
+                        });
+
+                        let policy_btn = {
+                            let mut btn = Button::new(SharedString::from(format!(
+                                "group-policy-{}",
+                                group.id
+                            )))
+                            .compact()
+                            .h(px(26.))
+                            .px_2()
+                            .disabled(core_busy)
+                            .tooltip(self.tr(
+                                "切换此出站组的选点策略",
+                                "Change selection policy for this outbound group",
+                            ));
+                            if group_auto {
+                                btn = btn.custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(p.accent)
+                                        .foreground(p.primary)
+                                        .hover(p.primary.opacity(SEMANTIC_ALPHA + 0.06))
+                                        .active(p.primary.opacity(SEMANTIC_ALPHA + 0.12)),
+                                );
+                            } else {
+                                btn = btn.ghost();
+                            }
+                            btn.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if group_auto {
+                                                p.primary
+                                            } else {
+                                                p.muted_fg
+                                            })
+                                            .child(policy_label),
+                                    )
+                                    .child(
+                                        Icon::new(IconName::ChevronDown)
+                                            .size(px(12.))
+                                            .text_color(if group_auto {
+                                                p.primary
+                                            } else {
+                                                p.muted_fg
+                                            })
+                                            .opacity(0.8),
+                                    ),
+                            )
+                            .dropdown_menu(menus::builder(
+                                cx.entity().downgrade(),
+                                MenuTarget::GroupSwitchPolicy(policy_group_id),
+                            ))
+                        };
+
+                        group_sections.push(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!(
+                                            "group-header-{}",
+                                            group.id
+                                        )))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .bg(p.panel)
+                                        .border_1()
+                                        .border_color(p.border)
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if this.collapsed_subs.contains(&key_for_click) {
+                                                this.collapsed_subs.remove(&key_for_click);
+                                            } else {
+                                                this.collapsed_subs.insert(key_for_click.clone());
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .child(
+                                                    div().text_xs().text_color(p.muted_fg).child(
+                                                        Icon::new(if is_collapsed {
+                                                            IconName::ChevronRight
+                                                        } else {
+                                                            IconName::ChevronDown
+                                                        })
+                                                        .size(px(14.)),
+                                                    ),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(p.fg)
+                                                        .child(group_label),
+                                                )
+                                                .when(is_default, |d| {
+                                                    d.child(pill(
+                                                        self.tr("默认", "Default"),
+                                                        p.primary,
+                                                        p.accent,
+                                                    ))
+                                                })
+                                                .when(!group.enabled, |d| {
+                                                    d.child(pill(
+                                                        self.tr("已禁用", "Disabled"),
+                                                        p.muted_fg,
+                                                        p.panel_alt,
+                                                    ))
+                                                })
+                                                .child(pill(
+                                                    format!(
+                                                        "{}{}",
+                                                        member_count,
+                                                        self.tr(" 个", "")
+                                                    ),
+                                                    p.muted_fg,
+                                                    p.panel_alt,
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "group-actions-{}",
+                                                    group.id
+                                                )))
+                                                .flex()
+                                                .items_center()
+                                                .flex_wrap()
+                                                .gap_1()
+                                                .on_click(|_, _, cx| cx.stop_propagation())
+                                                .when(can_be_default, |d| {
+                                                    d.child(
+                                                        Button::new(SharedString::from(format!(
+                                                            "group-set-default-{}",
+                                                            group.id
+                                                        )))
+                                                        .compact()
+                                                        .ghost()
+                                                        .label(self.tr("设为默认", "Set default"))
+                                                        .disabled(core_busy)
+                                                        .on_click(cx.listener(
+                                                            move |this, _, window, cx| {
+                                                                this.run_command(
+                                                                    Command::SetDefaultOutbound(
+                                                                        default_group_id.clone(),
+                                                                    ),
+                                                                    false,
+                                                                    window,
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        )),
+                                                    )
+                                                })
+                                                .child(policy_btn)
+                                                .when(!member_ids_for_ping.is_empty(), |d| {
+                                                    d.child(
+                                                        Button::new(SharedString::from(format!(
+                                                            "ping-group-{}",
+                                                            group.id
+                                                        )))
+                                                        .compact()
+                                                        .ghost()
+                                                        .icon(IconName::Gauge)
+                                                        .loading(group_testing)
+                                                        .label(self.tr("测速本组", "Test group"))
+                                                        .disabled(tests_busy)
+                                                        .tooltip(self.tr(
+                                                            "测试本组已配置节点的延迟",
+                                                            "Test latency of configured nodes in this group",
+                                                        ))
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.latency_pending.extend(
+                                                                    member_ids_for_ping
+                                                                        .iter()
+                                                                        .cloned(),
+                                                                );
+                                                                this.service.test_http_latency(
+                                                                    member_ids_for_ping.clone(),
+                                                                );
+                                                                this.sync(cx);
+                                                            },
+                                                        )),
+                                                    )
+                                                })
+                                                .child(
+                                                    Button::new(SharedString::from(format!(
+                                                        "group-edit-{}",
+                                                        group.id
+                                                    )))
+                                                    .compact()
+                                                    .ghost()
+                                                    .label(self.tr("编辑", "Edit"))
+                                                    .disabled(core_busy)
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.open_outbound_group_editor(
+                                                                Some(edit_group_id.clone()),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                                )
+                                                .child(
+                                                    more_button(
+                                                        SharedString::from(format!(
+                                                            "group-more-{}",
+                                                            group.id
+                                                        )),
+                                                        self.tr("出站组操作", "Group actions"),
+                                                        cx,
+                                                    )
+                                                    .dropdown_menu(menus::builder(
+                                                        cx.entity().downgrade(),
+                                                        MenuTarget::OutboundGroup(menu_group_id),
+                                                    )),
+                                                ),
+                                        ),
+                                )
+                                .children(rows_elem),
+                        );
+                    }
+
+                    container
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .flex_wrap()
+                                .gap_2()
+                                .px_1()
+                                .child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                                    "按出站组查看、选点并独立配置自动切换策略",
+                                    "View groups, choose exits, and configure per-group auto-switch policies",
+                                )))
+                                .child(
+                                    Button::new("nodes-create-outbound-group")
+                                        .compact()
+                                        .ghost()
+                                        .h(px(28.))
+                                        .icon(IconName::Plus)
+                                        .label(self.tr("新建出站组", "New group"))
+                                        .disabled(core_busy)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_outbound_group_editor(None, window, cx);
+                                        })),
+                                ),
+                        )
+                        .when(group_sections.is_empty() && !search_query.is_empty(), |d| {
+                            d.child(empty_hint(
+                                &p,
+                                self.tr(
+                                    "未找到匹配的节点或出站组",
+                                    "No matching nodes or outbound groups found",
+                                ),
+                            ))
+                        })
+                        .children(group_sections)
                 }),
         );
 
@@ -1081,6 +1528,97 @@ fn this_busy(busy: &[String], key: &str) -> bool {
     busy.iter().any(|b| b == key)
 }
 
+fn node_matches_query(node: &Node, query: &str) -> bool {
+    query.is_empty()
+        || node.name.to_lowercase().contains(query)
+        || node.endpoint().to_lowercase().contains(query)
+        || node.protocol.display_name().to_lowercase().contains(query)
+}
+
+fn sort_node_indices(
+    indices: &mut [usize],
+    sort: NodeSort,
+    model: &AppModel,
+    snapshot: &UiSnapshot,
+) {
+    match sort {
+        NodeSort::Order => {}
+        NodeSort::Latency => {
+            indices.sort_by(|&a, &b| {
+                let rtt = |idx: usize| {
+                    let n = &model.nodes[idx];
+                    snapshot
+                        .latency
+                        .get(&n.id)
+                        .filter(|entry| entry.is_http())
+                        .and_then(|l| l.delay_ms)
+                };
+                match (rtt(a), rtt(b)) {
+                    (Some(va), Some(vb)) => va.cmp(&vb).then_with(|| a.cmp(&b)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.cmp(&b),
+                }
+            });
+        }
+        NodeSort::Health => {
+            indices.sort_by(|&a, &b| {
+                let score_pair = |idx: usize| -> Option<(f32, f32)> {
+                    let n = &model.nodes[idx];
+                    snapshot
+                        .node_health
+                        .get(&n.id)?
+                        .general
+                        .as_ref()
+                        .map(|g| (g.score, g.short_score))
+                };
+                match (score_pair(a), score_pair(b)) {
+                    (Some(sa), Some(sb)) => sb
+                        .0
+                        .partial_cmp(&sa.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| sb.1.partial_cmp(&sa.1).unwrap_or(std::cmp::Ordering::Equal))
+                        .then_with(|| a.cmp(&b)),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a.cmp(&b),
+                }
+            });
+        }
+    }
+}
+
+fn split_flat_nodes(indices: Vec<usize>, model: &AppModel) -> (Vec<usize>, Vec<usize>) {
+    let mut mesh_nodes = Vec::new();
+    let mut proxy_nodes = Vec::new();
+    for idx in indices {
+        if model.nodes[idx].is_mesh_gateway() {
+            mesh_nodes.push(idx);
+        } else {
+            proxy_nodes.push(idx);
+        }
+    }
+    (mesh_nodes, proxy_nodes)
+}
+
+fn ordered_outbound_groups<'a>(
+    groups: &'a [OutboundGroup],
+    default_id: Option<&str>,
+) -> Vec<&'a OutboundGroup> {
+    let mut ordered = Vec::with_capacity(groups.len());
+    if let Some(default_id) = default_id
+        && let Some(default_group) = groups.iter().find(|group| group.id == default_id)
+    {
+        ordered.push(default_group);
+    }
+    for group in groups {
+        if default_id != Some(group.id.as_str()) {
+            ordered.push(group);
+        }
+    }
+    ordered
+}
+
 /// Helper function to format and optionally mask host addresses for privacy.
 pub(super) fn format_endpoint(endpoint: &str, hide: bool) -> String {
     xrose_core::privacy::mask_proxy_endpoint(endpoint, hide)
@@ -1097,6 +1635,7 @@ pub(in crate::ui) fn display_node_name(node: &Node, hide_ips: bool, suffixes: &[
 /// Everything a node row needs; computed once per frame by the page.
 struct RowProps<'a> {
     node: &'a Node,
+    row_key: String,
     lang: Language,
     selected: bool,
     virtual_exit: Option<VirtualExit>,
@@ -1111,6 +1650,7 @@ struct RowProps<'a> {
     magic_dns_suffixes: &'a [&'a str],
     usable: bool,
     auto_mode: bool,
+    group_context: bool,
     offline_exit: bool,
     mesh_provider: Option<xrose_core::mesh::MeshProvider>,
     group_id: Option<String>,
@@ -1201,6 +1741,7 @@ fn render_virtual_node_row(
     render_node_row(
         RowProps {
             node,
+            row_key: key.clone(),
             lang: view.lang(),
             selected,
             virtual_exit: Some(exit),
@@ -1219,6 +1760,7 @@ fn render_virtual_node_row(
             magic_dns_suffixes: &magic_dns_suffixes,
             usable: true,
             auto_mode: false,
+            group_context: false,
             offline_exit: offline,
             mesh_provider,
             group_id: None,
@@ -1263,6 +1805,7 @@ fn row_tooltip(
     selected: bool,
     usable: bool,
     auto_mode: bool,
+    group_context: bool,
     in_selectable_group: bool,
     offline_exit: bool,
     batch_mode: bool,
@@ -1287,6 +1830,45 @@ fn row_tooltip(
                 lang,
                 "点击切换为本机直连；右键查看更多操作",
                 "Click to switch to Direct mode; right-click for more actions",
+            )
+        };
+    }
+    if virtual_exit.is_none() && node.is_mesh_gateway() && group_context {
+        return if !node.enabled {
+            super::tr(
+                lang,
+                "节点已禁用，可在右键或更多操作中启用",
+                "Node is disabled; enable it from the context menu or More actions",
+            )
+        } else if offline_exit {
+            super::tr(
+                lang,
+                "出口设备离线，请先连接所属组网",
+                "Exit device is offline; connect its mesh network first",
+            )
+        } else if auto_mode {
+            super::tr(
+                lang,
+                "此出站组为自动选择模式；右键管理节点",
+                "This outbound group selects nodes automatically; right-click to manage",
+            )
+        } else if !in_selectable_group {
+            super::tr(
+                lang,
+                "当前出站组已禁用或节点不可用",
+                "This outbound group is disabled or the node is unavailable",
+            )
+        } else if selected {
+            super::tr(
+                lang,
+                "当前出站组已选用此组网分流网关；右键查看更多操作",
+                "Selected mesh gateway in this outbound group; right-click for more actions",
+            )
+        } else {
+            super::tr(
+                lang,
+                "点击设为该出站组的分流出口（保持代理规则生效）",
+                "Click to use this mesh gateway for this outbound group (keeps proxy rules active)",
             )
         };
     }
@@ -1343,22 +1925,52 @@ fn row_tooltip(
             "Unsupported by current core; switch cores to use this node",
         )
     } else if auto_mode {
-        super::tr(
-            lang,
-            "默认出站组为自动选择模式；右键管理节点",
-            "Default outbound group selects nodes automatically; right-click to manage",
-        )
+        if group_context {
+            super::tr(
+                lang,
+                "此出站组为自动选择模式；右键管理节点",
+                "This outbound group selects nodes automatically; right-click to manage",
+            )
+        } else {
+            super::tr(
+                lang,
+                "默认出站组为自动选择模式；右键管理节点",
+                "Default outbound group selects nodes automatically; right-click to manage",
+            )
+        }
     } else if !in_selectable_group {
-        super::tr(
-            lang,
-            "未加入当前默认出站组，可在右键菜单配置所属出站组",
-            "Not in the default outbound group; configure membership from the context menu",
-        )
+        if group_context {
+            super::tr(
+                lang,
+                "当前出站组已禁用，无法手动选点",
+                "This outbound group is disabled and cannot be selected manually",
+            )
+        } else {
+            super::tr(
+                lang,
+                "未加入当前默认出站组，可在右键菜单配置所属出站组",
+                "Not in the default outbound group; configure membership from the context menu",
+            )
+        }
     } else if selected {
+        if group_context {
+            super::tr(
+                lang,
+                "当前出站组选中的代理节点；右键查看更多操作",
+                "Selected proxy node in this outbound group; right-click for more actions",
+            )
+        } else {
+            super::tr(
+                lang,
+                "当前选中的代理节点；右键查看更多操作",
+                "Currently selected proxy node; right-click for more actions",
+            )
+        }
+    } else if group_context {
         super::tr(
             lang,
-            "当前选中的代理节点；右键查看更多操作",
-            "Currently selected proxy node; right-click for more actions",
+            "点击设为该出站组的选用节点；右键查看更多操作",
+            "Click to select this node for this outbound group; right-click for more actions",
         )
     } else {
         super::tr(
@@ -1369,7 +1981,9 @@ fn row_tooltip(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn http_row_controls(
+    row_key: &str,
     target: HttpTestTarget,
     menu: MenuTarget,
     hover_group: SharedString,
@@ -1381,7 +1995,7 @@ fn http_row_controls(
     p: &Palette,
     cx: &mut Context<AppView>,
 ) -> impl IntoElement + use<> {
-    let key = target.key();
+    let key = row_key;
     let label = super::theme::latency_label(entry, false, lang);
     let detail: SharedString = entry
         .map(|entry| {
@@ -1739,6 +2353,7 @@ fn render_node_row(
 ) -> impl IntoElement + use<> {
     let RowProps {
         node,
+        row_key,
         lang,
         selected,
         virtual_exit,
@@ -1753,6 +2368,7 @@ fn render_node_row(
         magic_dns_suffixes,
         usable,
         auto_mode,
+        group_context,
         offline_exit,
         mesh_provider,
         group_id,
@@ -1782,7 +2398,7 @@ fn render_node_row(
         checking_reachability,
         http_target.clone(),
         name.clone(),
-        &node.id,
+        &row_key,
         lang,
         p,
         cx,
@@ -1793,7 +2409,9 @@ fn render_node_row(
     let radio_node = node.id.clone();
     let radio_name = name.clone();
     let drag_name = name.clone();
-    let can_select =
+    let can_select = if group_context {
+        group_id.is_some() && node.enabled && !is_core_busy && !offline_exit
+    } else {
         (virtual_exit.is_some() || group_id.is_some() || (mesh_gateway && node.enabled))
             && node.enabled
             && !is_core_busy
@@ -1804,14 +2422,20 @@ fn render_node_row(
                         resumable: true,
                         ..
                     })
-                ));
-    let auto_mode = auto_mode && !mesh_gateway && virtual_exit.is_none();
+                ))
+    };
+    let auto_mode = if group_context {
+        auto_mode
+    } else {
+        auto_mode && !mesh_gateway && virtual_exit.is_none()
+    };
     let row_tip = row_tooltip(
         node,
         virtual_exit.as_ref(),
         selected,
         usable,
         auto_mode,
+        group_context,
         group_id.is_some(),
         offline_exit,
         batch_mode,
@@ -1825,7 +2449,7 @@ fn render_node_row(
     let drag_primary = p.primary;
     let drag_accent = p.accent;
     let hover_bg = p.panel_alt.opacity(0.5);
-    let hover_group = SharedString::from(format!("node-group-{}", node.id));
+    let hover_group = SharedString::from(format!("node-group-{row_key}"));
 
     let location_label = location.filter(|_| !hide_ips).map(|entry| {
         if entry.pending {
@@ -1849,7 +2473,7 @@ fn render_node_row(
     let radio_dot = if auto_mode { p.muted_fg } else { p.primary };
 
     div()
-        .id(SharedString::from(format!("node-{}", node.id)))
+        .id(SharedString::from(format!("node-{row_key}")))
         .group(hover_group.clone())
         .relative()
         .flex()
@@ -1864,21 +2488,23 @@ fn render_node_row(
         .bg(if selected { p.accent } else { p.bg })
         .overflow_hidden()
         .when(!selected, |d| d.hover(move |s| s.bg(hover_bg)))
-        .drag_over::<DraggedNode>(move |style, _, _, _| {
-            style.border_color(drag_primary).bg(drag_accent)
+        .when(drag_enabled, |d| {
+            d.drag_over::<DraggedNode>(move |style, _, _, _| {
+                style.border_color(drag_primary).bg(drag_accent)
+            })
+            .on_drop(cx.listener(move |this, dragged: &DraggedNode, _, cx| {
+                if dragged.id != drop_target {
+                    this.node_sort = super::NodeSort::Order;
+                    this.service.move_node_to(&dragged.id, &drop_target);
+                    this.sync(cx);
+                }
+            }))
         })
-        .on_drop(cx.listener(move |this, dragged: &DraggedNode, _, cx| {
-            if dragged.id != drop_target {
-                this.node_sort = super::NodeSort::Order;
-                this.service.move_node_to(&dragged.id, &drop_target);
-                this.sync(cx);
-            }
-        }))
         .when(!node.enabled || offline_exit, |d| d.opacity(0.45))
         .when(selected, |row| row.child(selection_bar(p.primary)))
         .child(
             div()
-                .id(SharedString::from(format!("node-row-{}", node.id)))
+                .id(SharedString::from(format!("node-row-{row_key}")))
                 .flex()
                 .items_center()
                 .gap_3()
@@ -1913,7 +2539,7 @@ fn render_node_row(
                 // Drag handle: dimmed until hover, absent while a sort is applied.
                 .child(if drag_enabled {
                     div()
-                        .id(SharedString::from(format!("drag-node-{}", node.id)))
+                        .id(SharedString::from(format!("drag-node-{row_key}")))
                         .flex_shrink_0()
                         .cursor_pointer()
                         .opacity(0.35)
@@ -1976,7 +2602,7 @@ fn render_node_row(
                             cx,
                         );
                     });
-                    gpui_base::Radio::new(SharedString::from(format!("exit-choice-{}", node.id)))
+                    gpui_base::Radio::new(SharedString::from(format!("exit-choice-{row_key}")))
                         .checked(selected)
                         .disabled(!can_select || auto_mode)
                         .accessibility_label(radio_name)
@@ -2111,8 +2737,7 @@ fn render_node_row(
                                             .child(
                                                 div()
                                                     .id(SharedString::from(format!(
-                                                        "node-location-{}",
-                                                        node.id
+                                                        "node-location-{row_key}"
                                                     )))
                                                     .min_w(px(0.))
                                                     .truncate()
@@ -2172,6 +2797,7 @@ fn render_node_row(
                 )
                 .child(health_capsule)
                 .child(http_row_controls(
+                    &row_key,
                     http_target,
                     row_menu.clone(),
                     hover_group,
@@ -2284,6 +2910,26 @@ mod tests {
     }
 
     #[test]
+    fn ordered_outbound_groups_places_default_first_and_preserves_order() {
+        use super::ordered_outbound_groups;
+        use xrose_core::model::{GroupKind, OutboundGroup};
+
+        let mut a = OutboundGroup::new("A", GroupKind::Selector);
+        a.id = "a".into();
+        let mut b = OutboundGroup::new("B", GroupKind::Selector);
+        b.id = "b".into();
+        let mut c = OutboundGroup::new("C", GroupKind::Selector);
+        c.id = "c".into();
+        let groups = vec![a, b, c];
+
+        let ids: Vec<_> = ordered_outbound_groups(&groups, Some("b"))
+            .into_iter()
+            .map(|g| g.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["b", "a", "c"]);
+    }
+
+    #[test]
     fn row_tooltips_describe_action_and_unavailable_reasons() {
         use super::{VirtualExit, row_tooltip};
         use xrose_core::{
@@ -2300,6 +2946,7 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -2314,6 +2961,7 @@ mod tests {
                 true,
                 true,
                 false,
+                false,
                 true,
                 false,
                 false,
@@ -2325,6 +2973,7 @@ mod tests {
             row_tooltip(
                 &proxy,
                 None,
+                false,
                 false,
                 false,
                 false,
@@ -2345,6 +2994,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 Language::Zh
             ),
             "默认出站组为自动选择模式；右键管理节点"
@@ -2355,6 +3005,7 @@ mod tests {
                 None,
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -2370,12 +3021,47 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 true,
                 false,
                 true,
                 Language::Zh
             ),
             "点击勾选或取消勾选此节点"
+        );
+        assert_eq!(
+            row_tooltip(
+                &proxy,
+                None,
+                false,
+                true,
+                false,
+                true,
+                true,
+                false,
+                false,
+                Language::Zh
+            ),
+            "点击设为该出站组的选用节点；右键查看更多操作"
+        );
+
+        let mut gateway = Node::new("HomeNet · 出口", Protocol::Socks, "127.0.0.1", 19081);
+        gateway.id = "mesh-exit-fixture".into();
+        gateway.tags = vec!["mesh-exit".into()];
+        assert_eq!(
+            row_tooltip(
+                &gateway,
+                None,
+                false,
+                true,
+                false,
+                true,
+                true,
+                false,
+                false,
+                Language::Zh
+            ),
+            "点击设为该出站组的分流出口（保持代理规则生效）"
         );
 
         let mesh_online = VirtualExit::Mesh {
@@ -2396,6 +3082,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 Language::Zh,
             ),
             "进入组网模式，由此出口接管系统流量"
@@ -2406,6 +3093,7 @@ mod tests {
                 Some(&mesh_online),
                 false,
                 true,
+                false,
                 false,
                 false,
                 true,
@@ -2431,11 +3119,32 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 true,
                 false,
                 Language::Zh,
             ),
             "点击重连所属组网，由此出口接管系统流量"
         );
+    }
+
+    #[test]
+    fn split_flat_nodes_places_mesh_gateways_before_proxies() {
+        use xrose_core::model::{AppModel, Node, Protocol};
+
+        let mut model = AppModel::new("fixture");
+        let proxy_a = Node::new("Proxy A", Protocol::Vless, "203.0.113.10", 443);
+        let mut mesh_a = Node::new("HomeNet · A", Protocol::Socks, "127.0.0.1", 19081);
+        mesh_a.id = "mesh-exit-a".into();
+        mesh_a.tags = vec!["mesh-exit".into()];
+        let proxy_b = Node::new("Proxy B", Protocol::Vmess, "203.0.113.11", 443);
+        let mut mesh_b = Node::new("OfficeNet · B", Protocol::Socks, "127.0.0.1", 19082);
+        mesh_b.id = "mesh-exit-b".into();
+        mesh_b.tags = vec!["mesh-exit".into()];
+        model.nodes = vec![proxy_a, mesh_a, proxy_b, mesh_b];
+
+        let (mesh_nodes, proxy_nodes) = super::split_flat_nodes(vec![0, 1, 2, 3], &model);
+        assert_eq!(mesh_nodes, vec![1, 3]);
+        assert_eq!(proxy_nodes, vec![0, 2]);
     }
 }
