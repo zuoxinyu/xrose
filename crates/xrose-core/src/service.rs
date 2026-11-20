@@ -71,6 +71,13 @@ pub enum ToastLevel {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MergeOutcome {
+    added: usize,
+    removed: usize,
+    total: usize,
+}
+
 enum SubscriptionRefresh {
     Missing,
     Busy,
@@ -84,6 +91,8 @@ enum SubscriptionRefresh {
     Updated {
         name: String,
         added: usize,
+        removed: usize,
+        total: usize,
         format: &'static str,
         warnings: usize,
     },
@@ -1381,9 +1390,45 @@ impl AppService {
     }
 
     pub fn edit_subscription(&self, id: &str, name: &str, url: &str) -> Result<()> {
+        let existing_custom = self
+            .inner
+            .subs
+            .read()
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.custom_update_interval_secs)
+            .map(|secs| crate::subscription::Subscription::clamp_interval_hours(secs / 3600));
+        self.edit_subscription_with_interval(id, name, url, existing_custom)
+    }
+
+    pub fn edit_subscription_with_interval(
+        &self,
+        id: &str,
+        name: &str,
+        url: &str,
+        custom_interval_hours: Option<u64>,
+    ) -> Result<()> {
         let (name, url) = subscription_fields(name, url)?;
+        let custom_secs = match custom_interval_hours {
+            Some(hours) => {
+                if !(crate::subscription::MIN_UPDATE_INTERVAL_HOURS
+                    ..=crate::subscription::MAX_UPDATE_INTERVAL_HOURS)
+                    .contains(&hours)
+                {
+                    return Err(Error::config(format!(
+                        "更新间隔须为 {} 至 {} 之间的整数小时",
+                        crate::subscription::MIN_UPDATE_INTERVAL_HOURS,
+                        crate::subscription::MAX_UPDATE_INTERVAL_HOURS
+                    )));
+                }
+                Some(hours * 3600)
+            }
+            None => None,
+        };
+        let global_hours = self.settings().subscription_update_hours;
         self.change_subscription(id, |sub| {
             sub.name = name;
+            sub.custom_update_interval_secs = custom_secs;
             if sub.url != url {
                 // Validators, usage and credentials belong to the original feed.
                 if url::Url::parse(&sub.url).ok().map(|u| u.origin())
@@ -1397,13 +1442,82 @@ impl AppService {
                 sub.last_modified = None;
                 sub.etag = None;
                 sub.usage = None;
+                sub.server_update_interval_secs = None;
                 sub.last_error = None;
             }
+            sub.update_interval_secs = sub.effective_update_interval_secs(global_hours);
         })
+    }
+
+    pub fn set_subscription_update_hours(&self, hours: u64) -> Result<()> {
+        if !(crate::subscription::MIN_UPDATE_INTERVAL_HOURS
+            ..=crate::subscription::MAX_UPDATE_INTERVAL_HOURS)
+            .contains(&hours)
+        {
+            return Err(Error::config(format!(
+                "更新间隔须为 {} 至 {} 之间的整数小时",
+                crate::subscription::MIN_UPDATE_INTERVAL_HOURS,
+                crate::subscription::MAX_UPDATE_INTERVAL_HOURS
+            )));
+        }
+        let mut settings = self.settings();
+        settings.subscription_update_hours = hours;
+        self.update_settings(settings);
+        Ok(())
     }
 
     pub fn set_subscription_enabled(&self, id: &str, enabled: bool) -> Result<()> {
         self.change_subscription(id, |sub| sub.enabled = enabled)
+    }
+
+    /// Removes every subscription whose provider expiry time is in the past along
+    /// with its associated nodes. Returns `(removed_subscriptions, removed_nodes)`.
+    pub fn clean_expired_subscriptions(&self) -> Result<(usize, usize)> {
+        let expired_ids: Vec<String> = {
+            let subs = self.inner.subs.read();
+            subs.iter()
+                .filter(|s| s.is_expired())
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        if expired_ids.is_empty() {
+            return Ok((0, 0));
+        }
+        if expired_ids
+            .iter()
+            .any(|id| self.is_busy(&format!("sub:{id}")))
+        {
+            return Err(Error::other("部分过期订阅正在更新，请稍后再试"));
+        }
+        {
+            let mut subs = self.inner.subs.write();
+            for id in &expired_ids {
+                self.inner.store.delete_subscription(id)?;
+            }
+            subs.retain(|s| !expired_ids.iter().any(|expired| expired == &s.id));
+        }
+        let mut removed_node_ids = Vec::new();
+        self.commit_model_change(|model| {
+            let mut total_removed = 0usize;
+            for id in &expired_ids {
+                removed_node_ids.extend(
+                    model
+                        .nodes_of_subscription(id)
+                        .into_iter()
+                        .map(|n| n.id.clone()),
+                );
+                total_removed += model.remove_subscription_nodes(id);
+            }
+            for group in &mut model.groups {
+                group.repair();
+            }
+            Ok(total_removed > 0)
+        })?;
+        if !removed_node_ids.is_empty() {
+            self.remove_health_targets(&removed_node_ids);
+        }
+        self.refresh_doctor();
+        Ok((expired_ids.len(), removed_node_ids.len()))
     }
 
     pub fn delete_subscription(&self, id: &str) -> Result<()> {
@@ -1464,20 +1578,28 @@ impl AppService {
                 SubscriptionRefresh::Updated {
                     name,
                     added,
+                    removed,
+                    total,
                     format,
                     warnings,
                 } => {
+                    let summary = match (added, removed) {
+                        (0, 0) => format!("已是最新（共 {total} 个节点）"),
+                        (a, 0) => format!("新增 {a} 个节点（共 {total} 个）"),
+                        (0, r) => format!("清理 {r} 个下线节点（剩余 {total} 个）"),
+                        (a, r) => format!("新增 {a} 个、清理 {r} 个下线节点（共 {total} 个）"),
+                    };
                     if warnings > 0 {
                         service.toast(
                             ToastLevel::Warning,
-                            format!(
-                                "“{name}”更新完成：{added} 个新节点（{format}，{warnings} 条解析警告见日志）"
-                            ),
+                            format!("“{name}”更新完成：{summary}（{format}，{warnings} 条解析警告见日志）"),
                         );
+                    } else if added == 0 && removed == 0 {
+                        service.toast(ToastLevel::Info, format!("“{name}”{summary}"));
                     } else {
                         service.toast(
                             ToastLevel::Success,
-                            format!("“{name}”更新完成：{added} 个新节点（{format}）"),
+                            format!("“{name}”更新完成：{summary}（{format}）"),
                         );
                     }
                 }
@@ -1569,8 +1691,8 @@ impl AppService {
                         format!("订阅“{}”解析警告：{warning}", subscription.name),
                     );
                 }
-                let added = match self.merge_parsed(&subscription.id, &parsed) {
-                    Ok(count) => count,
+                let outcome = match self.merge_parsed(&subscription.id, &parsed, true) {
+                    Ok(outcome) => outcome,
                     Err(error) => {
                         self.set_busy(&key, false);
                         return SubscriptionRefresh::Failed {
@@ -1593,12 +1715,15 @@ impl AppService {
                 } else {
                     None
                 };
-                updated.node_count = added;
+                updated.node_count = outcome.total;
                 if let Some(hours) = response.update_interval_hours {
                     if hours > 0 {
-                        updated.update_interval_secs = hours * 3600;
+                        updated.server_update_interval_secs =
+                            Some(Subscription::clamp_interval_hours(hours) * 3600);
                     }
                 }
+                updated.update_interval_secs =
+                    updated.effective_update_interval_secs(settings.subscription_update_hours);
                 let _ = self.update_subscription_settings(updated);
                 if parsed.is_empty() {
                     SubscriptionRefresh::Empty {
@@ -1608,7 +1733,9 @@ impl AppService {
                 } else {
                     SubscriptionRefresh::Updated {
                         name: subscription.name,
-                        added,
+                        added: outcome.added,
+                        removed: outcome.removed,
+                        total: outcome.total,
                         format: parsed.format.label(),
                         warnings: parsed.warnings.len(),
                     }
@@ -1662,11 +1789,17 @@ impl AppService {
             let mut unchanged = 0usize;
             let mut failed = 0usize;
             let mut added_nodes = 0usize;
+            let mut removed_nodes = 0usize;
             for result in results {
                 match result {
-                    SubscriptionRefresh::Updated { added, .. } => {
-                        updated += 1;
-                        added_nodes += added;
+                    SubscriptionRefresh::Updated { added, removed, .. } => {
+                        if added > 0 || removed > 0 {
+                            updated += 1;
+                            added_nodes += added;
+                            removed_nodes += removed;
+                        } else {
+                            unchanged += 1;
+                        }
                     }
                     SubscriptionRefresh::NotModified { .. } => unchanged += 1,
                     SubscriptionRefresh::Empty { .. } | SubscriptionRefresh::Failed { .. } => {
@@ -1679,13 +1812,24 @@ impl AppService {
             if total == 0 {
                 return;
             }
+            let delta_text = match (added_nodes, removed_nodes) {
+                (0, 0) => String::new(),
+                (a, 0) => format!("+{a} 节点"),
+                (0, r) => format!("-{r} 下线节点"),
+                (a, r) => format!("+{a} / -{r} 节点"),
+            };
             if failed == total {
                 service.toast(ToastLevel::Error, format!("全部 {failed} 个订阅更新失败"));
             } else if failed > 0 {
+                let updated_part = if delta_text.is_empty() {
+                    format!("{updated} 个更新")
+                } else {
+                    format!("{updated} 个更新（{delta_text}）")
+                };
                 service.toast(
                     ToastLevel::Warning,
                     format!(
-                        "订阅更新完成：{updated} 个更新（+{added_nodes} 节点），{unchanged} 个已是最新，{failed} 个失败"
+                        "订阅更新完成：{updated_part}，{unchanged} 个已是最新，{failed} 个失败"
                     ),
                 );
             } else if updated == 0 {
@@ -1693,45 +1837,102 @@ impl AppService {
             } else {
                 service.toast(
                     ToastLevel::Success,
-                    format!(
-                        "订阅更新完成：新增 {added_nodes} 个节点（{updated}/{total} 个订阅有更新）"
-                    ),
+                    format!("订阅更新完成：{delta_text}（{updated}/{total} 个订阅有变更）"),
                 );
             }
         });
     }
 
-    /// Adds parsed nodes + groups to the model. Returns how many nodes were new.
+    /// Merges parsed nodes + groups for a source. When `prune_missing` is true
+    /// (live subscription refresh), nodes from this subscription that disappeared
+    /// from a non-empty feed are removed while retained nodes preserve their IDs,
+    /// settings, and health history. Empty feeds never delete existing nodes.
     fn merge_parsed(
         &self,
         subscription_id: &str,
         parsed: &crate::subscription::ParsedSubscription,
-    ) -> Result<usize> {
-        let mut added = 0;
+        prune_missing: bool,
+    ) -> Result<MergeOutcome> {
+        if parsed.nodes.is_empty() {
+            let total = self.model().nodes_of_subscription(subscription_id).len();
+            return Ok(MergeOutcome {
+                added: 0,
+                removed: 0,
+                total,
+            });
+        }
+        let mut added = 0usize;
+        let mut removed_ids = Vec::new();
+        let mut total = 0usize;
         self.commit_model_change(|model| {
-            let before: BTreeSet<String> = model.nodes.iter().map(|n| n.id.clone()).collect();
             let mut incoming: Vec<Node> = parsed.nodes.clone();
             for node in &mut incoming {
                 node.subscription_id = Some(subscription_id.to_string());
                 node.source = crate::model::NodeSource::Subscription;
             }
-            added = model.add_nodes(incoming);
-            if added == 0 {
-                return Ok(false);
+            let mut incoming_by_fp: std::collections::HashMap<String, Node> =
+                std::collections::HashMap::new();
+            for node in &incoming {
+                incoming_by_fp
+                    .entry(node.fingerprint())
+                    .or_insert_with(|| node.clone());
             }
-            let new_nodes: Vec<(String, String)> = model
+
+            if prune_missing {
+                let stale_ids: Vec<String> = model
+                    .nodes
+                    .iter()
+                    .filter(|n| {
+                        n.subscription_id.as_deref() == Some(subscription_id)
+                            && !incoming_by_fp.contains_key(&n.fingerprint())
+                    })
+                    .map(|n| n.id.clone())
+                    .collect();
+                for stale_id in &stale_ids {
+                    if model.remove_node(stale_id) {
+                        removed_ids.push(stale_id.clone());
+                    }
+                }
+            }
+
+            let mut updated_existing = false;
+            if prune_missing {
+                for existing in model
+                    .nodes
+                    .iter_mut()
+                    .filter(|n| n.subscription_id.as_deref() == Some(subscription_id))
+                {
+                    if let Some(fresh) = incoming_by_fp.get(&existing.fingerprint()) {
+                        if existing.name != fresh.name
+                            || existing.tls != fresh.tls
+                            || existing.transport != fresh.transport
+                            || existing.udp != fresh.udp
+                        {
+                            existing.name = fresh.name.clone();
+                            existing.tls = fresh.tls.clone();
+                            existing.transport = fresh.transport.clone();
+                            existing.udp = fresh.udp;
+                            updated_existing = true;
+                        }
+                    }
+                }
+            }
+
+            added = model.add_nodes(incoming);
+
+            let sub_nodes: Vec<(String, String)> = model
                 .nodes
                 .iter()
-                .filter(|n| !before.contains(&n.id))
                 .filter(|n| n.subscription_id.as_deref() == Some(subscription_id))
                 .map(|n| (n.name.clone(), n.id.clone()))
                 .collect();
+            let mut groups_changed = false;
             for group in &parsed.groups {
                 let members: Vec<String> = group
                     .members
                     .iter()
                     .filter_map(|name| {
-                        new_nodes
+                        sub_nodes
                             .iter()
                             .find(|(node_name, _)| node_name == name)
                             .map(|(_, id)| id.clone())
@@ -1741,11 +1942,15 @@ impl AppService {
                     continue;
                 }
                 if let Some(existing) = model.groups.iter_mut().find(|g| g.name == group.name) {
-                    existing.kind = group.kind;
-                    existing.enabled = true;
+                    if existing.kind != group.kind || !existing.enabled {
+                        existing.kind = group.kind;
+                        existing.enabled = true;
+                        groups_changed = true;
+                    }
                     for member in members {
                         if !existing.members.contains(&member) {
                             existing.members.push(member);
+                            groups_changed = true;
                         }
                     }
                     existing.repair();
@@ -1755,15 +1960,31 @@ impl AppService {
                     new_group.members = members;
                     new_group.selected = new_group.members.first().cloned();
                     model.groups.push(new_group);
+                    groups_changed = true;
                 }
             }
-            model.updated_at = now_unix();
-            Ok(true)
+            for group in &mut model.groups {
+                group.repair();
+            }
+            total = model.nodes_of_subscription(subscription_id).len();
+            let changed =
+                added > 0 || !removed_ids.is_empty() || updated_existing || groups_changed;
+            if changed {
+                model.updated_at = now_unix();
+            }
+            Ok(changed)
         })?;
-        if added > 0 {
+        if !removed_ids.is_empty() {
+            self.remove_health_targets(&removed_ids);
+        }
+        if added > 0 || !removed_ids.is_empty() {
             self.refresh_doctor();
         }
-        Ok(added)
+        Ok(MergeOutcome {
+            added,
+            removed: removed_ids.len(),
+            total,
+        })
     }
 
     /// Inspect the same formats as direct import without persisting anything or resolving a hostname.
@@ -1817,10 +2038,10 @@ impl AppService {
             let parsed = parse_subscription(&nodes);
             result.unreadable = parsed.is_empty() || !parsed.warnings.is_empty();
             if !parsed.is_empty() {
-                match self.merge_parsed(PASTED_SOURCE, &parsed) {
-                    Ok(count) => {
-                        result.nodes = count;
-                        result.duplicates += parsed.nodes.len() - count;
+                match self.merge_parsed(PASTED_SOURCE, &parsed, false) {
+                    Ok(outcome) => {
+                        result.nodes = outcome.added;
+                        result.duplicates += parsed.nodes.len() - outcome.added;
                     }
                     Err(err) => result.errors.push(err.to_string()),
                 }
@@ -1841,8 +2062,8 @@ impl AppService {
             );
             return 0;
         }
-        let added = match self.merge_parsed(PASTED_SOURCE, &parsed) {
-            Ok(count) => count,
+        let added = match self.merge_parsed(PASTED_SOURCE, &parsed, false) {
+            Ok(outcome) => outcome.added,
             Err(error) => {
                 self.toast(ToastLevel::Error, format!("保存节点失败：{error}"));
                 return 0;
@@ -5523,18 +5744,19 @@ impl AppService {
             loop {
                 let Some(inner) = weak.upgrade() else { break };
                 let service = AppService { inner };
+                let global_hours = service.settings().subscription_update_hours;
                 let due: Vec<String> = service
                     .inner
                     .subs
                     .read()
                     .iter()
-                    .filter(|s| s.due_for_update())
+                    .filter(|s| s.due_for_update_with(global_hours))
                     .map(|s| s.id.clone())
                     .collect();
                 for id in due {
                     let _ = service.refresh_subscription_once(&id).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             }
         });
     }
@@ -7239,6 +7461,178 @@ mod tests {
         );
     }
 
+    #[test]
+    fn subscription_interval_sync_stale_nodes_and_expired_cleanup() {
+        let (service, _dir) = service();
+        service.set_subscription_update_hours(6).unwrap();
+        assert_eq!(service.settings().subscription_update_hours, 6);
+        assert!(service.set_subscription_update_hours(0).is_err());
+        assert!(service.set_subscription_update_hours(999).is_err());
+
+        // Add manual node (must never be touched by subscription refresh/cleanup).
+        let manual_id = service
+            .add_manual_node(NodeDraft {
+                name: "Manual".into(),
+                protocol: Protocol::Http,
+                server: "manual.example.com".into(),
+                port: 8080,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let mut active_sub = Subscription::new("Active", "https://active.example/sub");
+        active_sub.server_update_interval_secs = Some(24 * 3600);
+        let active_id = active_sub.id.clone();
+        service.update_subscription_settings(active_sub).unwrap();
+
+        // Custom per-subscription interval overrides server hint & global default.
+        service
+            .edit_subscription_with_interval(
+                &active_id,
+                "Active",
+                "https://active.example/sub",
+                Some(3),
+            )
+            .unwrap();
+        let saved = service
+            .snapshot()
+            .subscriptions
+            .into_iter()
+            .find(|s| s.id == active_id)
+            .unwrap();
+        assert_eq!(saved.custom_update_interval_secs, Some(3 * 3600));
+        assert_eq!(saved.effective_update_interval_hours(6), 3);
+
+        // Initial refresh inserts two nodes for active_sub.
+        let initial = parse_subscription(concat!(
+            "vless://11111111-2222-3333-4444-555555555555@alpha.example.com:443?security=tls#Alpha\n",
+            "vless://11111111-2222-3333-4444-555555555555@beta.example.com:443?security=tls#Beta",
+        ));
+        let first = service.merge_parsed(&active_id, &initial, true).unwrap();
+        assert_eq!(
+            first,
+            MergeOutcome {
+                added: 2,
+                removed: 0,
+                total: 2,
+            }
+        );
+        let alpha_id = service
+            .model()
+            .nodes
+            .iter()
+            .find(|n| n.server == "alpha.example.com")
+            .unwrap()
+            .id
+            .clone();
+
+        // Subsequent refresh drops Beta, keeps Alpha (preserving its ID & renaming it), and adds Gamma.
+        let updated_feed = parse_subscription(concat!(
+            "vless://11111111-2222-3333-4444-555555555555@alpha.example.com:443?security=tls#Alpha-v2\n",
+            "vless://11111111-2222-3333-4444-555555555555@gamma.example.com:443?security=tls#Gamma",
+        ));
+        let second = service
+            .merge_parsed(&active_id, &updated_feed, true)
+            .unwrap();
+        assert_eq!(
+            second,
+            MergeOutcome {
+                added: 1,
+                removed: 1,
+                total: 2,
+            }
+        );
+        let model = service.model();
+        assert!(model.node(&manual_id).is_some());
+        let alpha = model.node(&alpha_id).unwrap();
+        assert_eq!(alpha.name, "Alpha-v2");
+        assert!(model.nodes.iter().all(|n| n.server != "beta.example.com"));
+        assert!(model.nodes.iter().any(|n| n.server == "gamma.example.com"));
+
+        // Pasting separate share links remains additive and never prunes earlier pasted links.
+        assert_eq!(
+            service.import_content(
+                "vless://11111111-2222-3333-4444-555555555555@pasted-a.example.com:443?security=tls#PastedA"
+            ),
+            1
+        );
+        assert_eq!(
+            service.import_content(
+                "vless://11111111-2222-3333-4444-555555555555@pasted-b.example.com:443?security=tls#PastedB"
+            ),
+            1
+        );
+        assert!(
+            service
+                .model()
+                .nodes
+                .iter()
+                .any(|n| n.server == "pasted-a.example.com")
+        );
+        assert!(
+            service
+                .model()
+                .nodes
+                .iter()
+                .any(|n| n.server == "pasted-b.example.com")
+        );
+
+        // Empty feed must never delete existing subscription nodes.
+        let empty = parse_subscription("");
+        let third = service.merge_parsed(&active_id, &empty, true).unwrap();
+        assert_eq!(
+            third,
+            MergeOutcome {
+                added: 0,
+                removed: 0,
+                total: 2,
+            }
+        );
+        assert_eq!(service.model().nodes_of_subscription(&active_id).len(), 2);
+
+        // Add an expired subscription with one node and verify cleanup removes only expired ones.
+        let mut expired_sub = Subscription::new("Expired", "https://expired.example/sub");
+        expired_sub.usage = Some(SubscriptionUsage {
+            expire: Some(now_unix() - 3600),
+            ..Default::default()
+        });
+        let expired_id = expired_sub.id.clone();
+        service.update_subscription_settings(expired_sub).unwrap();
+        let expired_feed = parse_subscription(
+            "vless://11111111-2222-3333-4444-555555555555@old.example.com:443?security=tls#Old",
+        );
+        service
+            .merge_parsed(&expired_id, &expired_feed, true)
+            .unwrap();
+        assert_eq!(service.model().nodes_of_subscription(&expired_id).len(), 1);
+
+        let (removed_subs, removed_nodes) = service.clean_expired_subscriptions().unwrap();
+        assert_eq!((removed_subs, removed_nodes), (1, 1));
+        assert!(
+            service
+                .snapshot()
+                .subscriptions
+                .iter()
+                .all(|s| s.id != expired_id)
+        );
+        assert!(
+            service
+                .snapshot()
+                .subscriptions
+                .iter()
+                .any(|s| s.id == active_id)
+        );
+        assert!(
+            service
+                .model()
+                .nodes
+                .iter()
+                .all(|n| n.server != "old.example.com")
+        );
+        assert_eq!(service.model().nodes_of_subscription(&active_id).len(), 2);
+        assert!(service.model().node(&manual_id).is_some());
+    }
+
     #[cfg(unix)]
     #[test]
     fn probes_local_versions_once_per_executable_revision() {
@@ -8266,8 +8660,12 @@ proxy-groups:
         service.inner.subs.write().push(subscription.clone());
         let content = "vless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A\nvless://11111111-2222-3333-4444-555555555555@a.example.com:443?security=tls#A";
         let parsed = parse_subscription(content);
-        let added = service.merge_parsed(&subscription.id, &parsed).unwrap();
-        assert_eq!(added, 1);
+        let outcome = service
+            .merge_parsed(&subscription.id, &parsed, true)
+            .unwrap();
+        assert_eq!(outcome.added, 1);
+        assert_eq!(outcome.removed, 0);
+        assert_eq!(outcome.total, 1);
         assert_eq!(
             service
                 .model()

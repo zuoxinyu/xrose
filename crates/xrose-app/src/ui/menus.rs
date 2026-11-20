@@ -31,6 +31,7 @@ pub(super) enum MenuTarget {
     Nodes,
     Rule(String, Option<String>),
     Group(String),
+    Subscriptions,
     Subscription(String),
     Dns(String),
     Host(String),
@@ -87,6 +88,8 @@ pub(super) enum Command {
     DeleteGroup(String),
     EditSubscription(String),
     DeleteSubscription(String),
+    SubscriptionIntervalSettings,
+    CleanExpiredSubscriptions,
     SetDefaultDns(String),
     DeleteDns(String),
     DeleteHost(String),
@@ -865,6 +868,29 @@ impl AppView {
                         Command::DeleteGroup(id),
                     ));
             }
+            MenuTarget::Subscriptions => {
+                let expired: Vec<_> = self
+                    .snapshot
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.is_expired())
+                    .collect();
+                let expired_busy = expired.iter().any(|s| busy(&format!("sub:{}", s.id)));
+                menu = menu
+                    .item(add(
+                        "默认更新间隔…",
+                        "Default update interval…",
+                        true,
+                        Command::SubscriptionIntervalSettings,
+                    ))
+                    .separator()
+                    .item(add(
+                        "清理过期订阅",
+                        "Remove expired subscriptions",
+                        !expired.is_empty() && !expired_busy,
+                        Command::CleanExpiredSubscriptions,
+                    ));
+            }
             MenuTarget::Subscription(id) => {
                 if !self.snapshot.subscriptions.iter().any(|s| s.id == id) {
                     return menu;
@@ -1118,6 +1144,15 @@ impl AppView {
                 self.snapshot.subscriptions.iter().any(|s| &s.id == id)
                     && !busy(&format!("sub:{id}"))
             }
+            Command::CleanExpiredSubscriptions => {
+                let expired: Vec<_> = self
+                    .snapshot
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.is_expired())
+                    .collect();
+                !expired.is_empty() && !expired.iter().any(|s| busy(&format!("sub:{}", s.id)))
+            }
             _ => true,
         };
         if !exists {
@@ -1191,6 +1226,31 @@ impl AppView {
             Command::DeleteSubscription(id) => {
                 let count = self.snapshot.subscriptions.iter().find(|s| &s.id == id).map(|s| s.node_count).unwrap_or(0);
                 Some((self.tr("删除订阅", "Delete subscription"), format!("{} {count} {}", self.tr("同时删除", "Also delete"), self.tr("个订阅节点。", "subscription nodes.")).into()))
+            }
+            Command::CleanExpiredSubscriptions => {
+                let expired: Vec<_> = self
+                    .snapshot
+                    .subscriptions
+                    .iter()
+                    .filter(|s| s.is_expired())
+                    .collect();
+                let subs = expired.len();
+                let nodes: usize = expired
+                    .iter()
+                    .map(|sub| self.snapshot.model.nodes_of_subscription(&sub.id).len())
+                    .sum();
+                Some((
+                    self.tr("清理过期订阅", "Remove expired subscriptions"),
+                    match self.lang() {
+                        xrose_core::settings::Language::Zh => {
+                            format!("将删除 {subs} 个已过期订阅及 {nodes} 个关联节点。").into()
+                        }
+                        xrose_core::settings::Language::En => format!(
+                            "Delete {subs} expired subscription(s) and {nodes} associated node(s)."
+                        )
+                        .into(),
+                    },
+                ))
             }
             Command::DeleteDns(_) => Some((self.tr("删除服务器", "Delete server"), self.tr("删除此 DNS 服务器，应用配置后生效。", "Remove this DNS server after applying the configuration."))),
             Command::DeleteHost(_) => Some((self.tr("删除静态解析", "Delete host mapping"), self.tr("删除此域名的静态解析记录，应用配置后生效。", "Remove this static host mapping after applying the configuration."))),
@@ -1513,6 +1573,30 @@ impl AppView {
             Command::DeleteSubscription(id) => {
                 if let Err(e) = self.service.delete_subscription(&id) {
                     self.service.toast(ToastLevel::Error, e.to_string());
+                }
+            }
+            Command::SubscriptionIntervalSettings => {
+                self.open_subscription_interval_dialog(window, cx);
+            }
+            Command::CleanExpiredSubscriptions => {
+                match self.service.clean_expired_subscriptions() {
+                    Ok((0, _)) => self.service.toast(
+                        ToastLevel::Info,
+                        self.tr("没有已过期的订阅", "No expired subscriptions")
+                            .to_string(),
+                    ),
+                    Ok((subs, nodes)) => self.service.toast(
+                        ToastLevel::Success,
+                        match self.lang() {
+                            xrose_core::settings::Language::Zh => {
+                                format!("已清理 {subs} 个过期订阅及 {nodes} 个关联节点")
+                            }
+                            xrose_core::settings::Language::En => format!(
+                                "Removed {subs} expired subscription(s) and {nodes} node(s)"
+                            ),
+                        },
+                    ),
+                    Err(e) => self.service.toast(ToastLevel::Error, e.to_string()),
                 }
             }
             Command::SetDefaultDns(id) => self.select_default_dns(&id, cx),

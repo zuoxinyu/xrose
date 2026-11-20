@@ -4,12 +4,13 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::Sizable;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use xrose_core::settings::Language;
 use xrose_core::subscription::Subscription;
 use xrose_core::util::format_bytes;
 
@@ -17,7 +18,162 @@ use super::AppView;
 use super::theme::palette;
 use super::widgets::*;
 
+pub(super) const SUBSCRIPTION_INTERVAL_PRESETS: [u64; 6] = [1, 6, 12, 24, 72, 168];
+
+pub(super) fn interval_preset_label(hours: u64, lang: Language) -> SharedString {
+    if hours >= 48 && hours.is_multiple_of(24) {
+        let days = hours / 24;
+        match lang {
+            Language::Zh => format!("{days} 天").into(),
+            Language::En => format!("{days}d").into(),
+        }
+    } else {
+        match lang {
+            Language::Zh => format!("{hours} 小时").into(),
+            Language::En => format!("{hours}h").into(),
+        }
+    }
+}
+
+pub(super) fn format_interval_every(hours: u64, lang: Language) -> String {
+    if hours >= 48 && hours.is_multiple_of(24) {
+        let days = hours / 24;
+        match lang {
+            Language::Zh => format!("每 {days} 天"),
+            Language::En => format!("Every {days}d"),
+        }
+    } else {
+        match lang {
+            Language::Zh => format!("每 {hours} 小时"),
+            Language::En => format!("Every {hours}h"),
+        }
+    }
+}
+
 impl AppView {
+    pub(super) fn open_subscription_interval_dialog(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current =
+            Subscription::clamp_interval_hours(self.snapshot.settings.subscription_update_hours);
+        let hours_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(current.to_string()));
+        let error = cx.new(|_| None::<String>);
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let Some(view) = view.upgrade() else {
+                return dialog;
+            };
+            view.update(cx, |this, cx| {
+                let p = palette(cx);
+                let lang = this.lang();
+                let parsed = Subscription::parse_interval_hours(&hours_input.read(cx).value()).ok();
+                let preset_selected =
+                    parsed.and_then(|h| SUBSCRIPTION_INTERVAL_PRESETS.iter().position(|&v| v == h));
+                let preset_input = hours_input.clone();
+                let preset_error = error.clone();
+                let presets = ChoiceGroup::new(
+                    "global-sub-interval-presets",
+                    SUBSCRIPTION_INTERVAL_PRESETS
+                        .iter()
+                        .map(|&h| interval_preset_label(h, lang))
+                        .collect(),
+                    preset_selected,
+                )
+                .small()
+                .on_change(move |index: &usize, window, cx| {
+                    let hours = SUBSCRIPTION_INTERVAL_PRESETS[*index];
+                    preset_input.update(cx, |input, cx| {
+                        input.set_value(hours.to_string(), window, cx)
+                    });
+                    preset_error.update(cx, |e, _| *e = None);
+                    window.refresh();
+                });
+                let form = div()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .pb_1()
+                    .child(dialog_control_row(
+                        &p,
+                        this.tr("常用间隔", "Presets"),
+                        "",
+                        presets,
+                    ))
+                    .child(dialog_control_row(
+                        &p,
+                        this.tr("自定义间隔", "Custom interval"),
+                        this.tr(
+                            "1–720 小时。对所有未单独指定间隔的订阅生效。",
+                            "1–720 hours. Applies to subscriptions using the default interval.",
+                        ),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(super::theme::SETTING_LABEL_WIDTH))
+                                    .child(Input::new(&hours_input)),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(p.muted_fg)
+                                    .child(this.tr("小时", "hours")),
+                            ),
+                    ));
+                let dialog_error = error.read(cx).clone();
+                let (hours_input, error) = (hours_input.clone(), error.clone());
+                super::dialogs::dialog_shell(
+                    dialog,
+                    this.tr("默认更新间隔", "Default update interval"),
+                    super::theme::DIALOG_WIDE,
+                    &p,
+                )
+                .child(form)
+                .overlay_closable(false)
+                .footer(super::dialogs::dialog_footer(
+                    &p,
+                    dialog_error,
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("cancel-sub-interval")
+                                .label(this.tr("取消", "Cancel"))
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("save-sub-interval")
+                                .primary()
+                                .label(this.tr("保存", "Save"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    match Subscription::parse_interval_hours(
+                                        &hours_input.read(cx).value(),
+                                    )
+                                    .and_then(|hours| {
+                                        this.service.set_subscription_update_hours(hours)
+                                    }) {
+                                        Ok(()) => {
+                                            window.close_dialog(cx);
+                                            this.sync(cx);
+                                        }
+                                        Err(err) => {
+                                            error.update(cx, |e, _| *e = Some(err.to_string()));
+                                            window.refresh();
+                                        }
+                                    }
+                                })),
+                        ),
+                ))
+            })
+        });
+    }
+
     pub(super) fn open_edit_subscription(
         &self,
         id: &str,
@@ -28,8 +184,23 @@ impl AppView {
             return;
         };
         let id = sub.id.clone();
+        let server_hours = sub
+            .server_update_interval_secs
+            .filter(|&secs| secs > 0)
+            .map(|secs| Subscription::clamp_interval_hours(secs / 3600));
+        let global_hours =
+            Subscription::clamp_interval_hours(self.snapshot.settings.subscription_update_hours);
+        let initial_custom = sub.custom_update_interval_secs.is_some();
+        let initial_hours = sub
+            .custom_update_interval_secs
+            .filter(|&secs| secs > 0)
+            .map(|secs| Subscription::clamp_interval_hours(secs / 3600))
+            .unwrap_or_else(|| server_hours.unwrap_or(global_hours));
         let name = cx.new(|cx| InputState::new(window, cx).default_value(sub.name.clone()));
         let url = cx.new(|cx| InputState::new(window, cx).default_value(sub.url.clone()));
+        let custom_mode = cx.new(|_| initial_custom);
+        let interval_input =
+            cx.new(|cx| InputState::new(window, cx).default_value(initial_hours.to_string()));
         let error = cx.new(|_| None::<String>);
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, window, cx| {
@@ -38,6 +209,72 @@ impl AppView {
             };
             view.update(cx, |this, cx| {
                 let p = palette(cx);
+                let lang = this.lang();
+                let is_custom = *custom_mode.read(cx);
+                let mode_state = custom_mode.clone();
+                let mode_error = error.clone();
+                let mode_choice = ChoiceGroup::new(
+                    "sub-interval-mode",
+                    vec![
+                        this.tr("跟随默认", "Use default"),
+                        this.tr("自定义", "Custom"),
+                    ],
+                    usize::from(is_custom),
+                )
+                .small()
+                .on_change(move |index: &usize, window, cx| {
+                    mode_state.update(cx, |custom, _| *custom = *index == 1);
+                    mode_error.update(cx, |e, _| *e = None);
+                    window.refresh();
+                });
+
+                let default_desc: SharedString = match (server_hours, lang) {
+                    (Some(hours), Language::Zh) => format!(
+                        "当前按服务端建议（{}）；选择自定义后不再被服务端响应头覆盖。",
+                        format_interval_every(hours, lang)
+                    )
+                    .into(),
+                    (Some(hours), Language::En) => format!(
+                        "Currently using server hint ({}); custom intervals ignore server headers.",
+                        format_interval_every(hours, lang)
+                    )
+                    .into(),
+                    (None, Language::Zh) => format!(
+                        "跟随全局默认（{}）；服务端返回更新间隔时会自动采用，自定义后不再覆盖。",
+                        format_interval_every(global_hours, lang)
+                    )
+                    .into(),
+                    (None, Language::En) => format!(
+                        "Follows global default ({}); adopts server hints unless overridden.",
+                        format_interval_every(global_hours, lang)
+                    )
+                    .into(),
+                };
+
+                let parsed_custom =
+                    Subscription::parse_interval_hours(&interval_input.read(cx).value()).ok();
+                let preset_selected = parsed_custom
+                    .and_then(|h| SUBSCRIPTION_INTERVAL_PRESETS.iter().position(|&v| v == h));
+                let preset_input = interval_input.clone();
+                let preset_error = error.clone();
+                let preset_choice = ChoiceGroup::new(
+                    "sub-interval-presets",
+                    SUBSCRIPTION_INTERVAL_PRESETS
+                        .iter()
+                        .map(|&h| interval_preset_label(h, lang))
+                        .collect(),
+                    preset_selected,
+                )
+                .small()
+                .on_change(move |index: &usize, window, cx| {
+                    let hours = SUBSCRIPTION_INTERVAL_PRESETS[*index];
+                    preset_input.update(cx, |input, cx| {
+                        input.set_value(hours.to_string(), window, cx)
+                    });
+                    preset_error.update(cx, |e, _| *e = None);
+                    window.refresh();
+                });
+
                 let form = div()
                     .flex()
                     .flex_col()
@@ -54,9 +291,59 @@ impl AppView {
                         this.tr("订阅地址", "Subscription URL"),
                         &url,
                         FieldWidth::Full,
-                    ));
+                    ))
+                    .child(dialog_control_row(
+                        &p,
+                        this.tr("自动更新间隔", "Auto-update interval"),
+                        if is_custom {
+                            this.tr(
+                                "自定义间隔优先于全局默认与服务端建议（1–720 小时）。",
+                                "Overrides both global default and server hints (1–720 hours).",
+                            )
+                        } else {
+                            default_desc
+                        },
+                        mode_choice,
+                    ))
+                    .when(is_custom, |d| {
+                        d.child(dialog_control_row(
+                            &p,
+                            this.tr("间隔时长", "Interval"),
+                            "",
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_start()
+                                .gap_2()
+                                .child(preset_choice)
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(super::theme::SETTING_LABEL_WIDTH))
+                                                .child(Input::new(&interval_input)),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(p.muted_fg)
+                                                .child(this.tr("小时", "hours")),
+                                        ),
+                                ),
+                        ))
+                    });
                 let dialog_error = error.read(cx).clone();
-                let (name, url, id, error) = (name.clone(), url.clone(), id.clone(), error.clone());
+                let (name, url, id, custom_mode, interval_input, error) = (
+                    name.clone(),
+                    url.clone(),
+                    id.clone(),
+                    custom_mode.clone(),
+                    interval_input.clone(),
+                    error.clone(),
+                );
                 super::dialogs::settings_dialog(
                     dialog,
                     this.tr("编辑订阅", "Edit subscription"),
@@ -82,10 +369,25 @@ impl AppView {
                                 .primary()
                                 .label(this.tr("保存", "Save"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    match this.service.edit_subscription(
+                                    let custom_hours = if *custom_mode.read(cx) {
+                                        match Subscription::parse_interval_hours(
+                                            &interval_input.read(cx).value(),
+                                        ) {
+                                            Ok(hours) => Some(hours),
+                                            Err(err) => {
+                                                error.update(cx, |e, _| *e = Some(err.to_string()));
+                                                window.refresh();
+                                                return;
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    match this.service.edit_subscription_with_interval(
                                         &id,
                                         &name.read(cx).value(),
                                         &url.read(cx).value(),
+                                        custom_hours,
                                     ) {
                                         Ok(()) => {
                                             window.close_dialog(cx);
@@ -140,6 +442,17 @@ impl AppView {
                                 .justify_end()
                                 .flex_wrap()
                                 .gap_2()
+                                .child(
+                                    more_button(
+                                        "subscriptions-more",
+                                        self.tr("更多操作", "More actions"),
+                                        cx,
+                                    )
+                                    .dropdown_menu(menus::builder(
+                                        cx.entity().downgrade(),
+                                        MenuTarget::Subscriptions,
+                                    )),
+                                )
                                 .child(
                                     Button::new("refresh-all-subs")
                                         .compact()
@@ -226,6 +539,28 @@ impl AppView {
                 .is_some_and(|ts| ts >= now && ts - now <= 7 * 86400);
             let toggle_id = sub.id.clone();
             let full_url = SharedString::from(sub.url.clone());
+            let effective_hours = sub
+                .effective_update_interval_hours(self.snapshot.settings.subscription_update_hours);
+            let interval_text = {
+                let every = format_interval_every(effective_hours, lang);
+                if sub.custom_update_interval_secs.is_some() {
+                    format!(
+                        "{}：{}（{}）",
+                        self.tr("自动更新", "Auto refresh"),
+                        every,
+                        self.tr("自定义", "custom")
+                    )
+                } else if sub.server_update_interval_secs.is_some() {
+                    format!(
+                        "{}：{}（{}）",
+                        self.tr("自动更新", "Auto refresh"),
+                        every,
+                        self.tr("服务端", "server")
+                    )
+                } else {
+                    format!("{}：{}", self.tr("自动更新", "Auto refresh"), every)
+                }
+            };
 
             body = body.child(
                 card(&p)
@@ -325,14 +660,12 @@ impl AppView {
                                         ),
                                     )
                                     .child(
-                                        Button::new(SharedString::from(format!(
-                                            "refresh-{}",
-                                            sub.id
-                                        )))
-                                        .compact()
-                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                        .icon(IconName::RefreshCw)
-                                        .label(self.tr("更新", "Refresh"))
+                                        icon_button(
+                                            SharedString::from(format!("refresh-{}", sub.id)),
+                                            IconName::RefreshCw,
+                                            self.tr("更新订阅", "Refresh subscription"),
+                                            cx,
+                                        )
                                         .loading(refreshing)
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
@@ -439,7 +772,8 @@ impl AppView {
                                 } else {
                                     format!("{}：{}", self.tr("最后更新", "Updated"), last_updated)
                                 },
-                            )),
+                            ))
+                            .when(sub.enabled, |d| d.child(div().child(interval_text))),
                     )
                     .when(!refreshing && sub.last_error.is_some(), |d| {
                         d.child(
@@ -478,11 +812,23 @@ fn usage_grade(percent: f32) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    use xrose_core::settings::Language;
+
     #[test]
     fn usage_thresholds_are_inclusive() {
         assert_eq!(super::usage_grade(79.9), 0);
         assert_eq!(super::usage_grade(80.), 1);
         assert_eq!(super::usage_grade(94.9), 1);
         assert_eq!(super::usage_grade(95.), 2);
+    }
+
+    #[test]
+    fn interval_labels_format_hours_and_multi_day_presets() {
+        assert_eq!(super::interval_preset_label(1, Language::Zh), "1 小时");
+        assert_eq!(super::interval_preset_label(24, Language::Zh), "24 小时");
+        assert_eq!(super::interval_preset_label(72, Language::Zh), "3 天");
+        assert_eq!(super::interval_preset_label(168, Language::En), "7d");
+        assert_eq!(super::format_interval_every(12, Language::Zh), "每 12 小时");
+        assert_eq!(super::format_interval_every(72, Language::En), "Every 3d");
     }
 }

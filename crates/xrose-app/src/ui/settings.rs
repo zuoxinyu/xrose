@@ -1204,6 +1204,37 @@ impl AppView {
                 .child(setting_row(&p, self.tr("节点订阅", "Subscriptions"), "",
                     toggle("proxy-sub-updates", self.tr("使用代理更新订阅", "Update subscriptions through the proxy"), settings.proxy_subscription_updates)
                         .on_change(cx.listener(|this, enabled, _, cx| this.modify_settings(cx, |s| s.proxy_subscription_updates = *enabled)))))
+                .child({
+                    let current = xrose_core::subscription::Subscription::clamp_interval_hours(
+                        settings.subscription_update_hours,
+                    );
+                    let mut values = super::subscriptions::SUBSCRIPTION_INTERVAL_PRESETS.to_vec();
+                    if !values.contains(&current) {
+                        values.push(current);
+                    }
+                    let selected = values.iter().position(|&h| h == current);
+                    let labels = values
+                        .iter()
+                        .map(|&h| super::subscriptions::interval_preset_label(h, self.lang()))
+                        .collect();
+                    setting_row(
+                        &p,
+                        self.tr("更新间隔", "Refresh interval"),
+                        self.tr(
+                            "开启自动更新的订阅默认按此间隔刷新；单条订阅可单独自定义覆盖。",
+                            "Default interval for auto-updating subscriptions. Per-subscription overrides take precedence.",
+                        ),
+                        ChoiceGroup::new("settings-sub-interval", labels, selected)
+                            .small()
+                            .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                                if let Some(&hours) = values.get(*index) {
+                                    this.modify_settings(cx, |s| {
+                                        s.subscription_update_hours = hours;
+                                    });
+                                }
+                            })),
+                    )
+                })
                 .child(setting_row(&p, self.tr("资源下载", "Resources"),
                     self.tr("适用于版本检查、内核、规则集及组网组件", "Applies to release checks, cores, rule sets and mesh components."),
                     toggle("proxy-resource-updates", self.tr("使用代理更新资源", "Update resources through the proxy"), settings.proxy_resource_updates)

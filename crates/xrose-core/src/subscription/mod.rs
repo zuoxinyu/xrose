@@ -75,6 +75,13 @@ pub struct Subscription {
     pub enabled: bool,
     #[serde(default = "default_interval")]
     pub update_interval_secs: u64,
+    /// User-configured per-subscription interval in seconds. When set, takes
+    /// precedence over both the global default and server `profile-update-interval`.
+    #[serde(default)]
+    pub custom_update_interval_secs: Option<u64>,
+    /// Server-suggested interval parsed from `profile-update-interval`, if any.
+    #[serde(default)]
+    pub server_update_interval_secs: Option<u64>,
     #[serde(default)]
     pub last_updated: Option<i64>,
     #[serde(default)]
@@ -91,8 +98,13 @@ pub struct Subscription {
     pub sort: i64,
 }
 
+pub const DEFAULT_UPDATE_INTERVAL_HOURS: u64 = 12;
+pub const MIN_UPDATE_INTERVAL_HOURS: u64 = 1;
+pub const MAX_UPDATE_INTERVAL_HOURS: u64 = 24 * 30;
+pub const DEFAULT_UPDATE_INTERVAL_SECS: u64 = DEFAULT_UPDATE_INTERVAL_HOURS * 3600;
+
 fn default_interval() -> u64 {
-    12 * 3600
+    DEFAULT_UPDATE_INTERVAL_SECS
 }
 
 impl Subscription {
@@ -106,6 +118,8 @@ impl Subscription {
             headers: BTreeMap::new(),
             enabled: true,
             update_interval_secs: default_interval(),
+            custom_update_interval_secs: None,
+            server_update_interval_secs: None,
             last_updated: None,
             etag: None,
             last_modified: None,
@@ -116,14 +130,64 @@ impl Subscription {
         }
     }
 
-    pub fn due_for_update(&self) -> bool {
+    pub fn clamp_interval_hours(hours: u64) -> u64 {
+        hours.clamp(MIN_UPDATE_INTERVAL_HOURS, MAX_UPDATE_INTERVAL_HOURS)
+    }
+
+    pub fn parse_interval_hours(raw: &str) -> crate::Result<u64> {
+        let trimmed = raw.trim();
+        let hours = trimmed.parse::<u64>().map_err(|_| {
+            crate::Error::config(format!(
+                "更新间隔须为 {MIN_UPDATE_INTERVAL_HOURS} 至 {MAX_UPDATE_INTERVAL_HOURS} 之间的整数小时"
+            ))
+        })?;
+        if !(MIN_UPDATE_INTERVAL_HOURS..=MAX_UPDATE_INTERVAL_HOURS).contains(&hours) {
+            return Err(crate::Error::config(format!(
+                "更新间隔须为 {MIN_UPDATE_INTERVAL_HOURS} 至 {MAX_UPDATE_INTERVAL_HOURS} 之间的整数小时"
+            )));
+        }
+        Ok(hours)
+    }
+
+    pub fn effective_update_interval_secs(&self, global_default_hours: u64) -> u64 {
+        let min_secs = MIN_UPDATE_INTERVAL_HOURS * 3600;
+        let max_secs = MAX_UPDATE_INTERVAL_HOURS * 3600;
+        if let Some(custom) = self.custom_update_interval_secs.filter(|&secs| secs > 0) {
+            return custom.clamp(min_secs, max_secs);
+        }
+        if let Some(server) = self.server_update_interval_secs.filter(|&secs| secs > 0) {
+            return server.clamp(min_secs, max_secs);
+        }
+        let hours = if global_default_hours == 0 {
+            DEFAULT_UPDATE_INTERVAL_HOURS
+        } else {
+            Self::clamp_interval_hours(global_default_hours)
+        };
+        hours * 3600
+    }
+
+    pub fn effective_update_interval_hours(&self, global_default_hours: u64) -> u64 {
+        (self.effective_update_interval_secs(global_default_hours) / 3600)
+            .max(MIN_UPDATE_INTERVAL_HOURS)
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.usage.as_ref().is_some_and(SubscriptionUsage::expired)
+    }
+
+    pub fn due_for_update_with(&self, global_default_hours: u64) -> bool {
         if !self.enabled {
             return false;
         }
+        let interval = self.effective_update_interval_secs(global_default_hours);
         match self.last_updated {
             None => true,
-            Some(last) => now_unix().saturating_sub(last) >= self.update_interval_secs as i64,
+            Some(last) => now_unix().saturating_sub(last) >= interval as i64,
         }
+    }
+
+    pub fn due_for_update(&self) -> bool {
+        self.due_for_update_with(DEFAULT_UPDATE_INTERVAL_HOURS)
     }
 
     pub fn masked_url(&self) -> String {
@@ -217,5 +281,45 @@ mod tests {
     fn qr_renders() {
         let qr = qr_ascii("vless://example").unwrap();
         assert!(qr.lines().count() > 10);
+    }
+
+    #[test]
+    fn interval_precedence_and_expiry_rules() {
+        let mut sub = Subscription::new("feed", "https://example.com/sub");
+        assert_eq!(sub.effective_update_interval_hours(6), 6);
+        assert_eq!(
+            sub.effective_update_interval_hours(0),
+            DEFAULT_UPDATE_INTERVAL_HOURS
+        );
+
+        // Server hint takes effect while subscription follows defaults.
+        sub.server_update_interval_secs = Some(24 * 3600);
+        assert_eq!(sub.effective_update_interval_hours(6), 24);
+
+        // User per-subscription override takes precedence over server hint and global default.
+        sub.custom_update_interval_secs = Some(4 * 3600);
+        assert_eq!(sub.effective_update_interval_hours(6), 4);
+
+        sub.last_updated = Some(now_unix() - 5 * 3600);
+        assert!(sub.due_for_update_with(24));
+        sub.last_updated = Some(now_unix() - 2 * 3600);
+        assert!(!sub.due_for_update_with(1));
+
+        assert_eq!(Subscription::parse_interval_hours("24").unwrap(), 24);
+        assert!(Subscription::parse_interval_hours("0").is_err());
+        assert!(Subscription::parse_interval_hours("721").is_err());
+        assert!(Subscription::parse_interval_hours("abc").is_err());
+
+        assert!(!sub.is_expired());
+        sub.usage = Some(SubscriptionUsage {
+            expire: Some(now_unix() - 60),
+            ..Default::default()
+        });
+        assert!(sub.is_expired());
+        sub.usage = Some(SubscriptionUsage {
+            expire: Some(now_unix() + 3600),
+            ..Default::default()
+        });
+        assert!(!sub.is_expired());
     }
 }
