@@ -1,4 +1,5 @@
 mod about;
+mod config_import;
 mod connections;
 mod dialogs;
 mod dns;
@@ -293,6 +294,7 @@ pub struct AppView {
     mesh_form: mesh::MeshForm,
     forward_editor: Option<mesh::ForwardEditor>,
     mesh_sync_ui: mesh_sync::SyncUi,
+    config_import_ui: config_import::ConfigImportUi,
     mesh_probe_feedback: mesh::ProbeFeedback,
     mesh_expanded: std::collections::HashSet<String>,
     mesh_card_tabs: std::collections::HashMap<String, mesh::MeshCardTab>,
@@ -588,6 +590,7 @@ impl AppView {
             mesh_form: mesh::MeshForm::new(window, cx),
             forward_editor: None,
             mesh_sync_ui: mesh_sync::SyncUi::new(window, cx),
+            config_import_ui: config_import::ConfigImportUi::default(),
             mesh_probe_feedback: mesh::ProbeFeedback::default(),
             mesh_expanded: std::collections::HashSet::new(),
             mesh_card_tabs: std::collections::HashMap::new(),

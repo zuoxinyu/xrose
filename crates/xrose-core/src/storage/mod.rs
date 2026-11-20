@@ -486,6 +486,17 @@ impl Store {
 
     /// Human readable export with decrypted contents (for migration/backup).
     pub fn export_json(&self, path: &Path) -> Result<()> {
+        let bundle = self.build_backup_bundle()?;
+        atomic_write_json(path, &bundle)
+    }
+
+    /// Serializes a decrypted backup bundle as pretty JSON for file or stdout export.
+    pub fn export_json_string(&self) -> Result<String> {
+        let bundle = self.build_backup_bundle()?;
+        Ok(serde_json::to_string_pretty(&bundle)?)
+    }
+
+    fn build_backup_bundle(&self) -> Result<BackupBundle> {
         let mut profiles = Vec::new();
         for meta in self.profiles()? {
             if let Some(profile) = self.load_profile(&meta.id)? {
@@ -506,13 +517,12 @@ impl Store {
                 headers: sub.headers,
             })
             .collect();
-        let bundle = BackupBundle {
+        Ok(BackupBundle {
             format: 1,
             exported_at: now_rfc3339(),
             profiles,
             subscriptions,
-        };
-        atomic_write_json(path, &bundle)
+        })
     }
 
     /// Imports profiles/subscriptions from an export file. Existing ids are kept
@@ -525,8 +535,7 @@ impl Store {
         }
         let mut imported = 0;
         for mut profile in bundle.profiles {
-            migrate_work_mode(&mut profile.model_json)?;
-            migrate_routing_rules(&mut profile.model_json)?;
+            migrate_backup_model(&mut profile.model_json)?;
             let model: AppModel = serde_json::from_value(profile.model_json)?;
             let id = if self.load_profile(&profile.id)?.is_some() {
                 crate::util::new_id("profile")
@@ -547,6 +556,65 @@ impl Store {
         }
         Ok(imported)
     }
+
+    /// Persists a reviewed configuration import in a single encrypted transaction.
+    pub(crate) fn commit_config_import(
+        &self,
+        profile_id: &str,
+        model: Option<&AppModel>,
+        subscriptions: Option<(&[Subscription], bool)>,
+    ) -> Result<()> {
+        let seal = |json: String| -> Result<String> {
+            let value = self.secrets.encrypt(&json);
+            SecretBox::is_encrypted(&value)
+                .then_some(value)
+                .ok_or_else(|| Error::other("配置加密失败"))
+        };
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let active: Option<String> = tx
+            .query_row(
+                "SELECT value FROM app_state WHERE key = 'active_profile'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active.as_deref() != Some(profile_id) {
+            return Err(Error::config("当前配置已切换，请重新预览后导入"));
+        }
+        if let Some(model) = model {
+            let payload = seal(serde_json::to_string(model)?)?;
+            let changed = tx.execute(
+                "UPDATE profiles SET name = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
+                params![model.name, payload, now_unix(), profile_id],
+            )?;
+            if changed != 1 {
+                return Err(Error::config("当前配置已失效，请重新预览后导入"));
+            }
+        }
+        if let Some((subs, replace_all)) = subscriptions {
+            if replace_all {
+                tx.execute("DELETE FROM subscriptions", [])?;
+            }
+            for sub in subs {
+                let payload = seal(serde_json::to_string(sub)?)?;
+                tx.execute(
+                    "INSERT INTO subscriptions (id, payload, sort) VALUES (?1, ?2, ?3)
+                     ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, sort = excluded.sort",
+                    params![sub.id, payload, sub.sort],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
+
+/// Applies legacy backup migrations to an `AppModel` JSON payload before deserializing.
+pub(crate) fn migrate_backup_model(model: &mut serde_json::Value) -> Result<()> {
+    migrate_work_mode(model)?;
+    migrate_routing_rules(model)?;
+    Ok(())
 }
 
 /// Convert legacy switches to visible rules without resetting user order or unknown fields.

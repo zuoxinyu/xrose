@@ -7,6 +7,7 @@
 
 pub mod adapters;
 pub mod bundled;
+pub mod config_import;
 pub mod core;
 pub mod diagnostics;
 pub mod dns;

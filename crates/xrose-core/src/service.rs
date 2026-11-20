@@ -1,6 +1,7 @@
 //! The single facade the UI talks to. All heavy work is dispatched to an
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
+mod config_import;
 mod http_tests;
 mod mesh_discovery;
 mod mesh_exit;
@@ -289,6 +290,8 @@ pub struct UiSnapshot {
     pub rule_set_updates: Vec<RuleSetUpdate>,
     #[serde(default)]
     pub route_import: Option<(String, crate::route::transfer::ImportSummary)>,
+    #[serde(default)]
+    pub config_import: Option<crate::config_import::ConfigImportView>,
     pub trace: Option<TraceSession>,
     #[serde(default)]
     pub recording: DiagnosticRecording,
@@ -472,6 +475,7 @@ struct Inner {
     rule_set_updates: RwLock<BTreeMap<String, RuleSetUpdate>>,
     rule_set_lock: tokio::sync::Mutex<()>,
     route_import: Mutex<Option<routing_transfer::PendingImport>>,
+    config_import: Mutex<Option<config_import::PendingConfigImport>>,
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
     recording: Mutex<DiagnosticRecording>,
@@ -633,6 +637,7 @@ impl AppService {
             rule_set_updates: RwLock::new(rule_set_updates),
             rule_set_lock: Default::default(),
             route_import: Mutex::new(None),
+            config_import: Mutex::new(None),
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
             recording: Mutex::new(DiagnosticRecording::default()),
@@ -867,6 +872,12 @@ impl AppService {
                 .lock()
                 .as_ref()
                 .map(|p| (p.id.clone(), p.plan.summary.clone())),
+            config_import: self
+                .inner
+                .config_import
+                .lock()
+                .as_ref()
+                .map(config_import::PendingConfigImport::view),
             trace: self.inner.trace.read().clone(),
             recording: self.inner.recording.lock().clone(),
         }

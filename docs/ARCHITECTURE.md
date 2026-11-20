@@ -92,6 +92,7 @@
 - **规则编译**：`RoutingConfig.rule_groups` 保存自定义分组；启用分组按顺序优先于未分组与预设规则展开，内核编译、本地路由预览（`effective_rules()`）与 PAC 直连收集共用同一规则顺序。局域网与中国大陆 IP 直连仅由可见规则管理，适配器不再生成独立的优先直连规则。所有模板默认启用局域网 IP 和局域网域名直连两条规则，分别匹配地址与域名；GFWList 与指定应用模板未命中时直连，绕过大陆与全局代理模板未命中时代理，自定义模板保留当前默认动作。
 - **规则集更新**：sing-box 启动只准备当前路由和 DNS 实际引用的文件。路由页的批量更新还包括其他内置路由模板、已保存但未启用的规则和 DNS 引用，按标签去重并优先采用配置的镜像。默认上游、MetaCubeX、jsDelivr 及自定义地址模板按配置档保存，供列表、编译与下载共用；显式指定的独立地址保留。列表从本地缓存恢复最后更新时间；条件请求按下载 URL 区分，切源后首次更新重新获取内容，失败与 HTTP 304 保留上一次写入时间。
 - **路由交换**（`route/transfer.rs`）：定义独立于数据库版本的 `xrose-routing` v1 JSON（包含 `rules`、`rule_groups`、`rule_sets` 与用于跨配置解析出站组的 `outbound_names`），不含节点、订阅或运行状态。同标签且同定义的规则集直接复用，定义冲突则拒绝整批导入；规则集来源限制为无凭据与无查询参数的 HTTP(S) URL。
+- **配置导入**（`config_import`、`service/config_import.rs`）：统一识别 Xrose 备份 JSON（含旧版备份迁移与多配置档选择）、Clash / Mihomo YAML（节点、策略组嵌套展开、规则、兼容规则集、DNS 与 HTTP `proxy-providers`）、sing-box JSON（1.12+ typed DNS 与旧格式回退、出站组、规则与远程规则集）及 Xray JSON（出站、`balancers`、规则与 DNS），并支持 JSONC 注释。解析结果仅暂存内存供预览，确认后按所选模块与合并／覆盖策略在单次加密 SQLite 事务内提交；本地文件规则集与不安全来源被跳过并汇总提示，覆盖节点时保留本机组网出口网关并修复悬空引用。
 - **SwitchyOmega / AutoProxy 转换**（`route/transfer/omega.rs`）：按 [SwitchyOmega 解析顺序](https://github.com/FelisCatus/SwitchyOmega/blob/master/omega-pac/src/rule_list.coffee) 转换为统一意图模型并生成预览摘要，不支持的浏览器专有条件记入跳过提示。后台解析结果仅存内存，用户确认后验证预览 ID 与引用完整性再事务提交。
 
 ## 6. 异地组网架构

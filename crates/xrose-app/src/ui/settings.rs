@@ -1185,8 +1185,8 @@ impl AppView {
                             &p,
                             self.tr("更新与备份", "Updates & backups"),
                             self.tr(
-                                "检查更新与保存配置备份",
-                                "Check for updates and back up configuration",
+                                "检查更新，以及备份、导出或导入配置",
+                                "Check for updates, and back up, export, or import configuration",
                             ),
                         ))
                         .child(
@@ -1388,6 +1388,15 @@ impl AppView {
                                 .label(self.tr("导出 JSON 备份", "Export JSON"))
                                 .on_click(cx.listener(|this, _, _, _| {
                                     let _ = this.service.export_backup();
+                                })),
+                        )
+                        .child(
+                            Button::new("import-config")
+                                .compact()
+                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                .label(self.tr("导入配置…", "Import config…"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_config_import_dialog(window, cx);
                                 })),
                         )
                         .child(

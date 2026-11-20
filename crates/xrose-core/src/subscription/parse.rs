@@ -172,7 +172,7 @@ pub fn parse_clash_yaml(content: &str) -> ParsedSubscription {
     };
     let mut name_to_id: BTreeMap<String, String> = BTreeMap::new();
     for entry in proxies {
-        match clone_to_node(entry) {
+        match parse_clash_proxy(entry) {
             Ok(node) => {
                 name_to_id.insert(node.name.clone(), node.id.clone());
                 parsed.nodes.push(node);
@@ -211,7 +211,7 @@ pub fn parse_clash_yaml(content: &str) -> ParsedSubscription {
     parsed
 }
 
-fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
+pub(crate) fn parse_clash_proxy(value: &Value) -> std::result::Result<Node, String> {
     let name = yaml_str(value, "name").unwrap_or_else(|| "未命名节点".into());
     let proxy_type = yaml_str(value, "type").unwrap_or_default();
     let protocol = Protocol::parse(&proxy_type)
@@ -220,6 +220,9 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
     let port = yaml_u16(value, "port").ok_or_else(|| format!("节点“{name}”缺少 port"))?;
     let mut node = Node::new(name.clone(), protocol, server, port);
     node.source = crate::model::NodeSource::Subscription;
+    if let Some(udp) = yaml_bool(value, "udp") {
+        node.udp = udp;
+    }
 
     let tls_enabled = yaml_bool(value, "tls").unwrap_or(false)
         || matches!(
@@ -248,6 +251,7 @@ fn clone_to_node(value: &Value) -> std::result::Result<Node, String> {
     match protocol {
         Protocol::Vmess => {
             node.credentials.uuid = yaml_str(value, "uuid");
+            node.credentials.method = yaml_str(value, "cipher");
             node.credentials.alter_id = yaml_u16(value, "alterId").unwrap_or(0) as u32;
         }
         Protocol::Vless => {
@@ -512,6 +516,216 @@ fn parse_wireguard_json(value: &serde_json::Value) -> crate::Result<Node> {
     Ok(node)
 }
 
+pub(crate) fn parse_singbox_outbound(
+    outbound: &serde_json::Value,
+) -> Option<std::result::Result<Node, String>> {
+    let outbound_type = outbound.get("type").and_then(|v| v.as_str())?;
+    if matches!(
+        outbound_type,
+        "selector" | "urltest" | "direct" | "block" | "dns"
+    ) {
+        return None;
+    }
+    let Some(protocol) = Protocol::parse(outbound_type) else {
+        return Some(Err(format!("出站类型 {outbound_type} 不支持")));
+    };
+    if protocol.is_vpn() {
+        return Some(
+            crate::adapters::singbox::vpn::parse(outbound).map_err(|error| error.to_string()),
+        );
+    }
+    if protocol == Protocol::Wireguard {
+        return Some(parse_wireguard_json(outbound).map_err(|err| err.to_string()));
+    }
+    let anytls = if protocol == Protocol::Anytls {
+        Some(crate::model::AnytlsOptions {
+            idle_session_check_interval: outbound
+                .get("idle_session_check_interval")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            idle_session_timeout: outbound
+                .get("idle_session_timeout")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
+            min_idle_session: outbound
+                .get("min_idle_session")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| v.try_into().ok()),
+        })
+    } else {
+        None
+    };
+    let name = outbound
+        .get("tag")
+        .and_then(|v| v.as_str())
+        .unwrap_or(outbound_type);
+    let Some(host) = outbound.get("server").and_then(|v| v.as_str()) else {
+        return Some(Err(format!("节点“{name}”缺少 server")));
+    };
+    let Some(port) = outbound
+        .get("server_port")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u16::try_from(v).ok())
+        .filter(|p| *p > 0)
+    else {
+        return Some(Err(format!("节点“{name}”缺少有效 server_port")));
+    };
+    let mut node = Node::new(name, protocol, host, port);
+    node.credentials.anytls = anytls;
+    node.source = crate::model::NodeSource::Subscription;
+    let string = |key: &str| {
+        outbound
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
+    match protocol {
+        Protocol::Vmess | Protocol::Vless => {
+            node.credentials.uuid = string("uuid");
+            node.credentials.flow = string("flow");
+            if protocol == Protocol::Vmess {
+                node.credentials.method = string("security");
+            }
+            node.credentials.alter_id = outbound
+                .get("alter_id")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+        }
+        Protocol::Trojan | Protocol::Hysteria2 | Protocol::Anytls => {
+            node.credentials.password = string("password");
+            node.credentials.obfs = outbound
+                .get("obfs")
+                .and_then(|o| o.get("type"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            node.credentials.obfs_password = outbound
+                .get("obfs")
+                .and_then(|o| o.get("password"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+        Protocol::Shadowsocks => {
+            node.credentials.method = string("method");
+            node.credentials.password = string("password");
+            node.credentials.plugin = string("plugin");
+            node.credentials.plugin_opts = string("plugin_opts");
+        }
+        Protocol::Tuic => {
+            node.credentials.uuid = string("uuid");
+            node.credentials.password = string("password");
+            node.credentials.congestion_control = string("congestion_control");
+            node.credentials.udp_relay_mode = string("udp_relay_mode");
+        }
+        Protocol::Socks | Protocol::Http => {
+            node.credentials.username = string("username");
+            node.credentials.password = string("password");
+        }
+        Protocol::Wireguard | Protocol::Openvpn | Protocol::Openconnect => {}
+    }
+    if let Some(tls) = outbound.get("tls") {
+        node.tls.enabled = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        node.tls.server_name = tls
+            .get("server_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        node.tls.insecure = tls
+            .get("insecure")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        node.tls.alpn = tls
+            .get("alpn")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(utls) = tls.get("utls") {
+            node.tls.fingerprint = utls
+                .get("fingerprint")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+        }
+        if let Some(reality) = tls.get("reality") {
+            node.tls.reality =
+                reality
+                    .get("public_key")
+                    .and_then(|v| v.as_str())
+                    .map(|public_key| RealityOptions {
+                        public_key: public_key.to_string(),
+                        short_id: reality
+                            .get("short_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+        }
+    }
+    if let Some(transport) = outbound.get("transport") {
+        let transport_type = transport
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tcp");
+        node.transport = match transport_type {
+            "ws" => {
+                let mut headers = BTreeMap::new();
+                if let Some(map) = transport.get("headers").and_then(|v| v.as_object()) {
+                    for (k, v) in map {
+                        if let Some(v) = v.as_str() {
+                            headers.insert(k.clone(), v.to_string());
+                        }
+                    }
+                }
+                Transport::WebSocket {
+                    path: transport
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("/")
+                        .into(),
+                    host: headers.get("Host").cloned(),
+                    headers,
+                }
+            }
+            "grpc" => Transport::Grpc {
+                service_name: transport
+                    .get("service_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .into(),
+            },
+            "http" | "h2" => Transport::Http2 {
+                path: transport
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/")
+                    .into(),
+                host: transport
+                    .get("host")
+                    .and_then(|v| {
+                        v.as_str()
+                            .or_else(|| v.as_array().and_then(|a| a.first()?.as_str()))
+                    })
+                    .map(str::to_string),
+            },
+            "httpupgrade" => Transport::HttpUpgrade {
+                path: transport
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("/")
+                    .into(),
+                host: transport
+                    .get("host")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            },
+            "quic" => Transport::Quic,
+            _ => Transport::Tcp,
+        };
+    }
+    Some(Ok(node))
+}
+
 pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
     let mut parsed = ParsedSubscription {
         format: SourceFormat::SingBoxJson,
@@ -529,214 +743,11 @@ pub fn parse_singbox_json(value: &serde_json::Value) -> ParsedSubscription {
         return parsed;
     };
     for outbound in outbounds {
-        let Some(outbound_type) = outbound.get("type").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if matches!(
-            outbound_type,
-            "selector" | "urltest" | "direct" | "block" | "dns"
-        ) {
-            continue;
+        match parse_singbox_outbound(outbound) {
+            Some(Ok(node)) => parsed.nodes.push(node),
+            Some(Err(reason)) => parsed.warnings.push(reason),
+            None => {}
         }
-        let Some(protocol) = Protocol::parse(outbound_type) else {
-            parsed
-                .warnings
-                .push(format!("出站类型 {outbound_type} 不支持"));
-            continue;
-        };
-        if protocol.is_vpn() {
-            match crate::adapters::singbox::vpn::parse(outbound) {
-                Ok(node) => parsed.nodes.push(node),
-                Err(error) => parsed.warnings.push(error.to_string()),
-            }
-            continue;
-        }
-        if protocol == Protocol::Wireguard {
-            match parse_wireguard_json(outbound) {
-                Ok(node) => parsed.nodes.push(node),
-                Err(err) => parsed.warnings.push(err.to_string()),
-            }
-            continue;
-        }
-        let anytls = if protocol == Protocol::Anytls {
-            Some(crate::model::AnytlsOptions {
-                idle_session_check_interval: outbound
-                    .get("idle_session_check_interval")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                idle_session_timeout: outbound
-                    .get("idle_session_timeout")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                min_idle_session: outbound
-                    .get("min_idle_session")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| v.try_into().ok()),
-            })
-        } else {
-            None
-        };
-        let Some(host) = outbound.get("server").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(port) = outbound.get("server_port").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        if port > u16::MAX as u64 {
-            continue;
-        }
-        let name = outbound
-            .get("tag")
-            .and_then(|v| v.as_str())
-            .unwrap_or(outbound_type);
-        let mut node = Node::new(name, protocol, host, port as u16);
-        node.credentials.anytls = anytls;
-        node.source = crate::model::NodeSource::Subscription;
-        let string = |key: &str| {
-            outbound
-                .get(key)
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        match protocol {
-            Protocol::Vmess | Protocol::Vless => {
-                node.credentials.uuid = string("uuid");
-                node.credentials.flow = string("flow");
-                node.credentials.alter_id = outbound
-                    .get("alter_id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-            }
-            Protocol::Trojan | Protocol::Hysteria2 | Protocol::Anytls => {
-                node.credentials.password = string("password");
-                node.credentials.obfs = outbound
-                    .get("obfs")
-                    .and_then(|o| o.get("type"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                node.credentials.obfs_password = outbound
-                    .get("obfs")
-                    .and_then(|o| o.get("password"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-            }
-            Protocol::Shadowsocks => {
-                node.credentials.method = string("method");
-                node.credentials.password = string("password");
-                node.credentials.plugin = string("plugin");
-                node.credentials.plugin_opts = string("plugin_opts");
-            }
-            Protocol::Tuic => {
-                node.credentials.uuid = string("uuid");
-                node.credentials.password = string("password");
-                node.credentials.congestion_control = string("congestion_control");
-                node.credentials.udp_relay_mode = string("udp_relay_mode");
-            }
-            Protocol::Socks | Protocol::Http => {
-                node.credentials.username = string("username");
-                node.credentials.password = string("password");
-            }
-            Protocol::Wireguard | Protocol::Openvpn | Protocol::Openconnect => {}
-        }
-        if let Some(tls) = outbound.get("tls") {
-            node.tls.enabled = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            node.tls.server_name = tls
-                .get("server_name")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            node.tls.insecure = tls
-                .get("insecure")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            node.tls.alpn = tls
-                .get("alpn")
-                .and_then(|v| v.as_array())
-                .map(|list| {
-                    list.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if let Some(utls) = tls.get("utls") {
-                node.tls.fingerprint = utls
-                    .get("fingerprint")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-            }
-            if let Some(reality) = tls.get("reality") {
-                node.tls.reality =
-                    reality
-                        .get("public_key")
-                        .and_then(|v| v.as_str())
-                        .map(|public_key| RealityOptions {
-                            public_key: public_key.to_string(),
-                            short_id: reality
-                                .get("short_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default()
-                                .to_string(),
-                        });
-            }
-        }
-        if let Some(transport) = outbound.get("transport") {
-            let transport_type = transport
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("tcp");
-            node.transport = match transport_type {
-                "ws" => {
-                    let mut headers = BTreeMap::new();
-                    if let Some(map) = transport.get("headers").and_then(|v| v.as_object()) {
-                        for (k, v) in map {
-                            if let Some(v) = v.as_str() {
-                                headers.insert(k.clone(), v.to_string());
-                            }
-                        }
-                    }
-                    Transport::WebSocket {
-                        path: transport
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("/")
-                            .into(),
-                        host: headers.get("Host").cloned(),
-                        headers,
-                    }
-                }
-                "grpc" => Transport::Grpc {
-                    service_name: transport
-                        .get("service_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .into(),
-                },
-                "http" | "h2" => Transport::Http2 {
-                    path: transport
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("/")
-                        .into(),
-                    host: transport
-                        .get("host")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                },
-                "httpupgrade" => Transport::HttpUpgrade {
-                    path: transport
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("/")
-                        .into(),
-                    host: transport
-                        .get("host")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string),
-                },
-                "quic" => Transport::Quic,
-                _ => Transport::Tcp,
-            };
-        }
-        parsed.nodes.push(node);
     }
     if parsed.nodes.is_empty() {
         parsed

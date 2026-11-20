@@ -27,6 +27,7 @@ fn main() {
         Some("check") => check(&args[1..]),
         Some("parse") => parse(&args[1..]),
         Some("route") => route_files(&args[1..]),
+        Some("config") => config_command(&args[1..]),
         Some("import") => import(&args[1..]),
         Some("export") => export(&args[1..]),
         Some("add-node") => add_node(&args[1..]),
@@ -66,6 +67,9 @@ fn usage() {
   xrose-cli route preview|import <file|-> [--home DIR]   预览或追加路由规则与规则集
   xrose-cli route convert <file|-> [-o FILE] [--home DIR]   转换为 Xrose 路由文件
   xrose-cli route export [--sets-only] [-o FILE] [--home DIR]
+  xrose-cli config preview <file|-> [--profile N] [--home DIR]   预览配置文件导入摘要（Clash / sing-box / Xray / Xrose 备份）
+  xrose-cli config import  <file|-> [--mode merge|replace] [--only nodes,groups,routing,dns,subscriptions] [--profile N] [--home DIR]
+  xrose-cli config export  [-o FILE] [--home DIR]                导出 Xrose JSON 配置备份
   xrose-cli parse <file|->          解析订阅并打印摘要
   xrose-cli import <file|->         导入节点到当前配置
   xrose-cli export [--all]          导出分享链接
@@ -781,6 +785,135 @@ fn route_files(args: &[String]) -> Result<(), String> {
         _ => return Err(usage.into()),
     }
     Ok(())
+}
+
+fn config_command(args: &[String]) -> Result<(), String> {
+    use std::collections::BTreeSet;
+    use xrose_core::config_import::{self, ImportMode, ImportOptions, ImportSection};
+
+    let usage = "用法：config preview <文件|-> [--profile N] [--home DIR] | config import <文件|-> [--mode merge|replace] [--only nodes,groups,routing,dns,subscriptions] [--profile N] [--home DIR] | config export [-o FILE] [--home DIR]";
+    let mut home = None;
+    let mut out = None;
+    let mut mode = ImportMode::Merge;
+    let mut only: Option<BTreeSet<ImportSection>> = None;
+    let mut profile_index = 0usize;
+    let mut positional = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--home" => {
+                i += 1;
+                home = Some(PathBuf::from(args.get(i).ok_or("--home 缺少目录参数")?));
+            }
+            "-o" | "--output" => {
+                i += 1;
+                out = Some(PathBuf::from(args.get(i).ok_or("-o 缺少输出文件路径")?));
+            }
+            "--mode" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--mode 缺少参数（merge 或 replace）")?;
+                mode = ImportMode::parse(raw)
+                    .ok_or_else(|| format!("不支持的导入模式：{raw}（可选 merge 或 replace）"))?;
+            }
+            "--only" => {
+                i += 1;
+                let raw = args
+                    .get(i)
+                    .ok_or("--only 缺少模块列表（如 nodes,groups,routing,dns,subscriptions）")?;
+                let mut set = BTreeSet::new();
+                for token in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    let section = ImportSection::parse(token).ok_or_else(|| {
+                        format!(
+                            "未知配置模块：{token}（可选 nodes、groups、routing、dns、subscriptions）"
+                        )
+                    })?;
+                    set.insert(section);
+                }
+                if set.is_empty() {
+                    return Err("--only 至少需要指定一个模块".into());
+                }
+                only = Some(set);
+            }
+            "--profile" => {
+                i += 1;
+                let raw = args.get(i).ok_or("--profile 缺少序号参数")?;
+                profile_index = raw
+                    .parse::<usize>()
+                    .map_err(|_| format!("无效的配置档序号：{raw}"))?;
+            }
+            other if other.starts_with('-') && other != "-" => {
+                return Err(format!("未知选项：{other}\n{usage}"));
+            }
+            other => positional.push(other),
+        }
+        i += 1;
+    }
+
+    match positional.as_slice() {
+        ["export"] => {
+            let service = service(home)?;
+            let text = service.export_backup_json().map_err(|e| e.to_string())?;
+            if let Some(path) = out {
+                xrose_core::util::atomic_write_private(&path, text.as_bytes())
+                    .map_err(|_| "无法导出，请选择可写文件位置".to_string())?;
+            } else {
+                println!("{text}");
+            }
+            Ok(())
+        }
+        [cmd @ ("preview" | "import"), file] => {
+            if out.is_some() {
+                return Err(usage.into());
+            }
+            let (text, source_name) = if *file == "-" {
+                (
+                    config_import::read_text(std::io::stdin().lock()).map_err(|e| e.to_string())?,
+                    Some("stdin".to_string()),
+                )
+            } else {
+                let path = std::path::Path::new(file);
+                (
+                    config_import::read_file(path).map_err(|e| e.to_string())?,
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(str::to_string),
+                )
+            };
+            let service = service(home)?;
+            let (id, mut summary) = service
+                .preview_config_import(&text, source_name)
+                .map_err(|e| e.to_string())?;
+            if profile_index > 0 {
+                summary = service
+                    .select_config_import_profile(&id, profile_index)
+                    .map_err(|e| e.to_string())?;
+            }
+            if *cmd == "preview" {
+                service.cancel_config_import(&id);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?
+                );
+                return Ok(());
+            }
+            let sections =
+                only.unwrap_or_else(|| summary.available_sections.iter().copied().collect());
+            let options = ImportOptions {
+                mode,
+                sections,
+                profile_index,
+            };
+            let result = service
+                .commit_config_import(&id, &options)
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
+            );
+            Ok(())
+        }
+        _ => Err(usage.into()),
+    }
 }
 
 fn import(args: &[String]) -> Result<(), String> {

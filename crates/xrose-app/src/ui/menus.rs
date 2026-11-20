@@ -46,6 +46,7 @@ pub(super) enum Command {
     ShareLogs(LogAction, LogPrivacy),
     BatchHttp(Vec<String>),
     BatchDownload(Vec<String>),
+    ImportConfig,
     ImportRoute,
     ValidateConfig,
     SetRuleSetSource(xrose_core::model::RuleSetSource),
@@ -626,6 +627,12 @@ impl AppView {
                     || busy("core")
                     || busy("mesh");
                 menu = menu
+                    .item(add(
+                        "导入配置文件…",
+                        "Import configuration…",
+                        !busy("config-import"),
+                        Command::ImportConfig,
+                    ))
                     .item(add(
                         "管理出站组…",
                         "Manage outbound groups…",
@@ -1302,6 +1309,7 @@ impl AppView {
                 }
             }
             Command::NodeSwitchSettings => self.open_node_switch_dialog(window, cx),
+            Command::ImportConfig => self.open_config_import_dialog(window, cx),
             Command::ImportRoute => self.pick_route_import(cx),
             Command::ValidateConfig => self.service.validate_config(),
             Command::SetRuleSetSource(source) => {

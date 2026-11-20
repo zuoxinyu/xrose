@@ -20,7 +20,7 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 ### 节点与代理
 
 - [x] 节点健康度分析（详见 [NODE-HEALTH.md](NODE-HEALTH.md)）
-- [ ] 配置导入
+- [x] 配置导入
 - [ ] 链式代理
 - [ ] 完善策略组
 - [x] 配置测速地址
