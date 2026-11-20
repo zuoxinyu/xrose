@@ -240,7 +240,7 @@ impl Backend {
             }
             if !self.added && self.add_attempts == 3 && !self.reported_failure {
                 self.reported_failure = true;
-                service.toast(
+                service.notify(
                     xrose_core::service::ToastLevel::Warning,
                     crate::i18n::tr(
                         service.settings().language,

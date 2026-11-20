@@ -171,20 +171,12 @@ impl AppService {
                         self.inner.proxy_observation.write().clear_expected();
                     }
                     self.record_proxy_state(enabled);
-                    self.toast(
-                        ToastLevel::Success,
-                        if enabled {
-                            "系统代理已开启"
-                        } else {
-                            "系统代理已还原"
-                        },
-                    );
                 }
                 Err(error) => {
                     if enabled && manager.has_snapshot() {
                         if let Err(restore) = manager.restore() {
                             self.record_proxy_state(true);
-                            self.toast(ToastLevel::Error, format!("设置系统代理失败：{error}。还原失败：{restore}，请重试关闭系统代理"));
+                            self.notify(ToastLevel::Error, format!("设置系统代理失败：{error}。还原失败：{restore}，请重试关闭系统代理"));
                             continue;
                         }
                     }
@@ -196,7 +188,7 @@ impl AppService {
                         self.inner.proxy_observation.write().clear_expected();
                     }
                     self.record_proxy_state(manager.has_snapshot());
-                    self.toast(
+                    self.notify(
                         ToastLevel::Error,
                         format!(
                             "{}失败：{error}",
@@ -322,7 +314,7 @@ impl AppService {
         if managed {
             let manager = self.inner.proxy.lock();
             if let Err(err) = manager.restore() {
-                self.toast(ToastLevel::Error, format!("退出时还原系统代理失败：{err}"));
+                self.notify(ToastLevel::Error, format!("退出时还原系统代理失败：{err}"));
             } else {
                 self.record_proxy_state(false);
             }

@@ -256,7 +256,7 @@ impl AppService {
                     .collect();
                 for profile in profiles {
                     if let Err(error) = service.prepare_exit_gateway(&profile).await {
-                        service.toast(
+                        service.notify(
                             ToastLevel::Error,
                             format!("出口分流更新失败，保留已应用配置：{error}"),
                         );

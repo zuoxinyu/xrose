@@ -60,6 +60,7 @@ use crate::util::now_unix;
 // Pasted links have historically shared this synthetic source, not a node subscription.
 const PASTED_SOURCE: &str = "import";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TOAST_TTL_SECS: i64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +69,28 @@ pub enum ToastLevel {
     Success,
     Warning,
     Error,
+}
+
+enum SubscriptionRefresh {
+    Missing,
+    Busy,
+    NotModified {
+        name: String,
+    },
+    Empty {
+        name: String,
+        detail: String,
+    },
+    Updated {
+        name: String,
+        added: usize,
+        format: &'static str,
+        warnings: usize,
+    },
+    Failed {
+        name: String,
+        error: String,
+    },
 }
 
 /// Summary of a direct import, including successful parts of a mixed batch.
@@ -114,14 +137,14 @@ pub struct Toast {
     pub level: ToastLevel,
     pub message: String,
     pub at: i64,
-    /// Retained in history for CLI errors, but excluded from the in-app overlay.
+    /// True when delivered to the OS notification center instead of the in-app overlay.
     #[serde(default)]
     pub system_notification: bool,
 }
 
 impl Toast {
-    pub fn visible_in_app(&self, system_notifications: bool) -> bool {
-        !system_notifications && !self.system_notification
+    pub fn visible_in_app(&self) -> bool {
+        !self.system_notification
     }
 }
 
@@ -998,7 +1021,13 @@ impl AppService {
         self.local_toast(ToastLevel::Warning, message);
     }
 
+    /// Show an in-app toast only; never routed to OS system notifications.
     pub fn toast(&self, level: ToastLevel, message: impl Into<String>) {
+        self.push_toast(level, message.into(), false);
+    }
+
+    /// Show an OS notification when enabled, falling back to an in-app toast otherwise.
+    pub fn notify(&self, level: ToastLevel, message: impl Into<String>) {
         self.push_toast(level, message.into(), true);
     }
 
@@ -1007,22 +1036,39 @@ impl AppService {
         self.push_toast(level, message.into(), false);
     }
 
+    /// Keep active in-app toasts alive while the user hovers over the toast stack.
+    pub fn touch_toasts(&self) {
+        let now = now_unix();
+        let cutoff = now - TOAST_TTL_SECS;
+        let mut toasts = self.inner.toasts.lock();
+        for toast in toasts.iter_mut() {
+            if !toast.system_notification && toast.at >= cutoff {
+                toast.at = now;
+            }
+        }
+    }
+
     fn push_toast(&self, level: ToastLevel, message: String, native: bool) {
+        let now = now_unix();
         let id = self.inner.toast_seq.fetch_add(1, Ordering::SeqCst);
-        let system_notification = self.inner.settings.read().system_notifications;
+        let deliver_native = native && self.inner.settings.read().system_notifications;
         let toast = Toast {
             id,
             level,
             message: message.clone(),
-            at: now_unix(),
-            system_notification,
+            at: now,
+            system_notification: deliver_native,
         };
-        if native && system_notification {
+        if deliver_native {
             if let Some(sender) = self.inner.notification_sender.read().as_ref() {
                 let _ = sender.send(NotificationEvent::Show(toast.clone()));
             }
         }
         let mut toasts = self.inner.toasts.lock();
+        if !deliver_native {
+            let cutoff = now - TOAST_TTL_SECS;
+            toasts.retain(|t| t.system_notification || t.at < cutoff || t.message != toast.message);
+        }
         toasts.push(toast);
         while toasts.len() > 20 {
             toasts.remove(0);
@@ -1043,7 +1089,7 @@ impl AppService {
     }
 
     fn active_toasts(&self) -> Vec<Toast> {
-        let cutoff = now_unix() - 12;
+        let cutoff = now_unix() - TOAST_TTL_SECS;
         let mut toasts = self.inner.toasts.lock();
         toasts.retain(|t| t.at >= cutoff);
         toasts.clone()
@@ -1205,10 +1251,6 @@ impl AppService {
         self.refresh_profiles();
         self.finish_idle_mode_switch();
         self.schedule_exit_gateway_refresh();
-        self.toast(
-            ToastLevel::Success,
-            format!("已切换到配置“{}”", profile.name),
-        );
         Ok(())
     }
 
@@ -1242,7 +1284,6 @@ impl AppService {
         self.refresh_profiles();
         self.finish_idle_mode_switch();
         self.schedule_exit_gateway_refresh();
-        self.toast(ToastLevel::Success, "已创建新配置");
         Ok(())
     }
 
@@ -1264,7 +1305,6 @@ impl AppService {
                 self.switch_profile(&first.id)?;
             }
         }
-        self.toast(ToastLevel::Info, "配置已删除");
         Ok(())
     }
 
@@ -1272,12 +1312,11 @@ impl AppService {
         let name = name.into();
         {
             let mut model = self.inner.model.write();
-            model.name = name.clone();
+            model.name = name;
             model.updated_at = now_unix();
         }
         let _ = self.persist_model();
         self.refresh_profiles();
-        self.toast(ToastLevel::Success, format!("配置已重命名为“{name}”"));
     }
 
     fn refresh_profiles(&self) {
@@ -1391,7 +1430,6 @@ impl AppService {
         })?;
         self.remove_health_targets(&removed_ids);
         self.refresh_doctor();
-        self.toast(ToastLevel::Info, "订阅及对应节点已删除");
         Ok(())
     }
 
@@ -1403,124 +1441,191 @@ impl AppService {
     }
 
     pub fn refresh_subscription(&self, id: &str) {
-        let key = format!("sub:{id}");
-        let subscription = {
-            let subs = self.inner.subs.read();
-            let Some(subscription) = subs.iter().find(|s| s.id == id) else {
+        let subscription = match self.claim_subscription_refresh(id) {
+            Ok(subscription) => subscription,
+            Err(SubscriptionRefresh::Missing) => {
                 self.toast(ToastLevel::Error, "订阅不存在");
                 return;
-            };
-            if !self.inner.busy.write().insert(key.clone()) {
-                return;
             }
-            subscription.clone()
+            Err(_) => return,
         };
         let service = self.clone();
         self.spawn(async move {
-            let settings = service.settings();
-            let network = service
-                .inner
-                .core
-                .update_network(&settings, settings.proxy_subscription_updates);
-            let user_agent = if !subscription.user_agent.is_empty() {
-                subscription.user_agent.clone()
-            } else if !settings.update_user_agent.is_empty() {
-                settings.update_user_agent
-            } else {
-                crate::subscription::DEFAULT_USER_AGENT.into()
-            };
-            let same_agent = subscription.last_user_agent.as_ref() == Some(&user_agent);
-            let request = crate::subscription::FetchRequest {
-                network,
-                url: subscription.url.clone(),
-                user_agent: user_agent.clone(),
-                headers: subscription.headers.clone(),
-                etag: subscription.etag.clone().filter(|_| same_agent),
-                last_modified: subscription.last_modified.clone().filter(|_| same_agent),
-            };
-            let result = crate::subscription::fetch_subscription(request).await;
-            match result {
-                Ok(response)
-                    if response.status == crate::subscription::FetchStatus::NotModified =>
-                {
-                    let mut sub = subscription.clone();
-                    sub.last_updated = Some(now_unix());
-                    sub.last_error = None;
-                    let _ = service.update_subscription_settings(sub);
-                    service.toast(ToastLevel::Info, format!("“{}”已是最新", subscription.name));
+            match service.execute_subscription_refresh(subscription).await {
+                SubscriptionRefresh::NotModified { name } => {
+                    service.toast(ToastLevel::Info, format!("“{name}”已是最新"));
                 }
-                Ok(response) => {
-                    let mut parsed = parse_subscription(&response.body);
-                    if let Some(title) = response.title.clone() {
-                        if !title.trim().is_empty() {
-                            parsed.warnings.push(format!("订阅标题：{title}"));
-                        }
-                    }
-                    let added = match service.merge_parsed(&subscription.id, &parsed) {
-                        Ok(count) => count,
-                        Err(error) => {
-                            service.toast(ToastLevel::Error, format!("保存订阅节点失败：{error}"));
-                            service.set_busy(&key, false);
-                            return;
-                        }
-                    };
-                    let mut updated = subscription.clone();
-                    updated.last_user_agent = Some(user_agent);
-                    updated.etag = response.etag;
-                    updated.last_modified = response.last_modified;
-                    updated.usage = response
-                        .userinfo
-                        .as_ref()
-                        .map(SubscriptionUsage::from_userinfo);
-                    updated.last_updated = Some(now_unix());
-                    updated.last_error = if parsed.is_empty() {
-                        Some(format!("未解析出节点：{}", parsed.warnings.join("；")))
-                    } else {
-                        None
-                    };
-                    updated.node_count = added;
-                    if let Some(hours) = response.update_interval_hours {
-                        if hours > 0 {
-                            updated.update_interval_secs = hours * 3600;
-                        }
-                    }
-                    let _ = service.update_subscription_settings(updated);
-                    if parsed.is_empty() {
+                SubscriptionRefresh::Empty { name, detail } => {
+                    service.toast(
+                        ToastLevel::Warning,
+                        format!("“{name}”未解析出节点：{detail}"),
+                    );
+                }
+                SubscriptionRefresh::Updated {
+                    name,
+                    added,
+                    format,
+                    warnings,
+                } => {
+                    if warnings > 0 {
                         service.toast(
                             ToastLevel::Warning,
                             format!(
-                                "“{}”未解析出节点：{}",
-                                subscription.name,
-                                parsed.warnings.join("；")
+                                "“{name}”更新完成：{added} 个新节点（{format}，{warnings} 条解析警告见日志）"
                             ),
                         );
                     } else {
                         service.toast(
                             ToastLevel::Success,
-                            format!(
-                                "“{}”更新完成：{} 个新节点（{}）",
-                                subscription.name,
-                                added,
-                                parsed.format.label()
-                            ),
+                            format!("“{name}”更新完成：{added} 个新节点（{format}）"),
                         );
                     }
-                    for warning in parsed.warnings.iter().take(3) {
-                        service.toast(ToastLevel::Warning, warning.clone());
-                    }
                 }
-                Err(err) => {
-                    let mut sub = subscription.clone();
-                    sub.last_error = Some(err.to_string());
-                    let _ = service.update_subscription_settings(sub);
-                    service.toast(
-                        ToastLevel::Error,
-                        format!("更新订阅“{}”失败：{err}", subscription.name),
-                    );
+                SubscriptionRefresh::Failed { name, error } => {
+                    service.toast(ToastLevel::Error, format!("更新订阅“{name}”失败：{error}"));
+                }
+                SubscriptionRefresh::Missing | SubscriptionRefresh::Busy => {}
+            }
+        });
+    }
+
+    fn claim_subscription_refresh(
+        &self,
+        id: &str,
+    ) -> std::result::Result<Subscription, SubscriptionRefresh> {
+        let key = format!("sub:{id}");
+        let subs = self.inner.subs.read();
+        let Some(subscription) = subs.iter().find(|s| s.id == id) else {
+            return Err(SubscriptionRefresh::Missing);
+        };
+        if !self.inner.busy.write().insert(key) {
+            return Err(SubscriptionRefresh::Busy);
+        }
+        Ok(subscription.clone())
+    }
+
+    async fn refresh_subscription_once(&self, id: &str) -> SubscriptionRefresh {
+        match self.claim_subscription_refresh(id) {
+            Ok(subscription) => self.execute_subscription_refresh(subscription).await,
+            Err(status) => status,
+        }
+    }
+
+    async fn execute_subscription_refresh(
+        &self,
+        subscription: Subscription,
+    ) -> SubscriptionRefresh {
+        let key = format!("sub:{}", subscription.id);
+        let settings = self.settings();
+        let network = self
+            .inner
+            .core
+            .update_network(&settings, settings.proxy_subscription_updates);
+        let user_agent = if !subscription.user_agent.is_empty() {
+            subscription.user_agent.clone()
+        } else if !settings.update_user_agent.is_empty() {
+            settings.update_user_agent
+        } else {
+            crate::subscription::DEFAULT_USER_AGENT.into()
+        };
+        let same_agent = subscription.last_user_agent.as_ref() == Some(&user_agent);
+        let request = crate::subscription::FetchRequest {
+            network,
+            url: subscription.url.clone(),
+            user_agent: user_agent.clone(),
+            headers: subscription.headers.clone(),
+            etag: subscription.etag.clone().filter(|_| same_agent),
+            last_modified: subscription.last_modified.clone().filter(|_| same_agent),
+        };
+        let result = crate::subscription::fetch_subscription(request).await;
+        let outcome = match result {
+            Ok(response) if response.status == crate::subscription::FetchStatus::NotModified => {
+                let mut sub = subscription.clone();
+                sub.last_updated = Some(now_unix());
+                sub.last_error = None;
+                let _ = self.update_subscription_settings(sub);
+                SubscriptionRefresh::NotModified {
+                    name: subscription.name,
                 }
             }
-            service.set_busy(&key, false);
-        });
+            Ok(response) => {
+                let parsed = parse_subscription(&response.body);
+                if let Some(title) = response
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    self.inner.core.logs().push(
+                        LogStream::App,
+                        LogLevel::Info,
+                        format!("订阅“{}”标题：{title}", subscription.name),
+                    );
+                }
+                for warning in &parsed.warnings {
+                    self.inner.core.logs().push(
+                        LogStream::App,
+                        LogLevel::Warn,
+                        format!("订阅“{}”解析警告：{warning}", subscription.name),
+                    );
+                }
+                let added = match self.merge_parsed(&subscription.id, &parsed) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        self.set_busy(&key, false);
+                        return SubscriptionRefresh::Failed {
+                            name: subscription.name,
+                            error: format!("保存订阅节点失败：{error}"),
+                        };
+                    }
+                };
+                let mut updated = subscription.clone();
+                updated.last_user_agent = Some(user_agent);
+                updated.etag = response.etag;
+                updated.last_modified = response.last_modified;
+                updated.usage = response
+                    .userinfo
+                    .as_ref()
+                    .map(SubscriptionUsage::from_userinfo);
+                updated.last_updated = Some(now_unix());
+                updated.last_error = if parsed.is_empty() {
+                    Some(format!("未解析出节点：{}", parsed.warnings.join("；")))
+                } else {
+                    None
+                };
+                updated.node_count = added;
+                if let Some(hours) = response.update_interval_hours {
+                    if hours > 0 {
+                        updated.update_interval_secs = hours * 3600;
+                    }
+                }
+                let _ = self.update_subscription_settings(updated);
+                if parsed.is_empty() {
+                    SubscriptionRefresh::Empty {
+                        name: subscription.name,
+                        detail: parsed.warnings.join("；"),
+                    }
+                } else {
+                    SubscriptionRefresh::Updated {
+                        name: subscription.name,
+                        added,
+                        format: parsed.format.label(),
+                        warnings: parsed.warnings.len(),
+                    }
+                }
+            }
+            Err(err) => {
+                let mut sub = subscription.clone();
+                sub.last_error = Some(err.to_string());
+                let _ = self.update_subscription_settings(sub);
+                SubscriptionRefresh::Failed {
+                    name: subscription.name,
+                    error: err.to_string(),
+                }
+            }
+        };
+        self.set_busy(&key, false);
+        outcome
     }
 
     pub fn refresh_all_subscriptions(&self) {
@@ -1535,9 +1640,65 @@ impl AppService {
             self.toast(ToastLevel::Info, "还没有订阅");
             return;
         }
-        for id in ids {
-            self.refresh_subscription(&id);
+        let claimed: Vec<_> = ids
+            .into_iter()
+            .filter_map(|id| self.claim_subscription_refresh(&id).ok())
+            .collect();
+        if claimed.is_empty() {
+            return;
         }
+        let service = self.clone();
+        self.spawn(async move {
+            use futures_util::{StreamExt, stream};
+            let results: Vec<_> = stream::iter(claimed)
+                .map(|subscription| {
+                    let service = service.clone();
+                    async move { service.execute_subscription_refresh(subscription).await }
+                })
+                .buffer_unordered(4)
+                .collect()
+                .await;
+            let mut updated = 0usize;
+            let mut unchanged = 0usize;
+            let mut failed = 0usize;
+            let mut added_nodes = 0usize;
+            for result in results {
+                match result {
+                    SubscriptionRefresh::Updated { added, .. } => {
+                        updated += 1;
+                        added_nodes += added;
+                    }
+                    SubscriptionRefresh::NotModified { .. } => unchanged += 1,
+                    SubscriptionRefresh::Empty { .. } | SubscriptionRefresh::Failed { .. } => {
+                        failed += 1
+                    }
+                    SubscriptionRefresh::Missing | SubscriptionRefresh::Busy => {}
+                }
+            }
+            let total = updated + unchanged + failed;
+            if total == 0 {
+                return;
+            }
+            if failed == total {
+                service.toast(ToastLevel::Error, format!("全部 {failed} 个订阅更新失败"));
+            } else if failed > 0 {
+                service.toast(
+                    ToastLevel::Warning,
+                    format!(
+                        "订阅更新完成：{updated} 个更新（+{added_nodes} 节点），{unchanged} 个已是最新，{failed} 个失败"
+                    ),
+                );
+            } else if updated == 0 {
+                service.toast(ToastLevel::Info, "所有订阅均已是最新");
+            } else {
+                service.toast(
+                    ToastLevel::Success,
+                    format!(
+                        "订阅更新完成：新增 {added_nodes} 个节点（{updated}/{total} 个订阅有更新）"
+                    ),
+                );
+            }
+        });
     }
 
     /// Adds parsed nodes + groups to the model. Returns how many nodes were new.
@@ -1716,10 +1877,6 @@ impl AppService {
             Ok(true)
         })?;
         self.refresh_doctor();
-        self.toast(
-            ToastLevel::Success,
-            format!("已添加节点“{}”（{}:{}）", node.name, node.server, node.port),
-        );
         Ok(node.id)
     }
 
@@ -1762,7 +1919,6 @@ impl AppService {
         self.remove_health_targets(&[node_id.to_owned()]);
         self.refresh_doctor();
         self.mark_dirty();
-        self.toast(ToastLevel::Success, "节点已保存");
         Ok(())
     }
 
@@ -1805,28 +1961,12 @@ impl AppService {
         })?;
         if changed {
             if self.is_running() {
-                self.apply_config();
+                self.apply_config_silent();
             } else {
                 self.finish_idle_mode_switch();
-                self.notify_work_mode(mode);
             }
         }
         Ok(())
-    }
-
-    fn notify_work_mode(&self, mode: WorkMode) {
-        use crate::settings::Language;
-        let message = match (mode, self.inner.settings.read().language) {
-            (WorkMode::Direct, Language::Zh) => "已切换至本机直连",
-            (WorkMode::Direct, Language::En) => "Switched to Direct",
-            (WorkMode::Proxy, Language::Zh) => "已切换至代理模式",
-            (WorkMode::Proxy, Language::En) => "Switched to proxy mode",
-            (WorkMode::Mesh, Language::Zh) => "组网模式已启动，系统流量由所选出口接管",
-            (WorkMode::Mesh, Language::En) => {
-                "Mesh mode started; the selected exit handles system traffic"
-            }
-        };
-        self.toast(ToastLevel::Success, message);
     }
 
     pub fn select_node(&self, group_id: &str, node_id: &str) {
@@ -1881,7 +2021,7 @@ impl AppService {
         self.schedule_exit_gateway_refresh();
         if mode_changed {
             self.mark_dirty();
-            self.apply_config();
+            self.apply_config_silent();
         } else if settings.core == CoreKind::SingBox {
             // sing-box's selector supports instant switching through Clash API.
             let client = ClashClient::new(settings.api_port, "");
@@ -1900,24 +2040,20 @@ impl AppService {
                                 .or_default()
                                 .now = Some(tag);
                         }
-                        service.toast(ToastLevel::Success, format!("已切换到“{}”", node.name))
                     }
                     Err(err) => {
                         // Fall back to a config reapply if the group is not live.
-                        service.toast(
-                            ToastLevel::Warning,
+                        service.inner.core.logs().push(
+                            LogStream::App,
+                            LogLevel::Warn,
                             format!("实时切换失败，将重载内核：{err}"),
                         );
-                        service.apply_config();
+                        service.apply_config_silent();
                     }
                 }
             });
         } else {
-            self.toast(
-                ToastLevel::Info,
-                "Xray 不支持热切换节点，正在重载内核以应用新节点",
-            );
-            self.apply_config();
+            self.apply_config_silent();
         }
     }
 
@@ -1975,14 +2111,12 @@ impl AppService {
         self.remove_health_targets(&[node_id.to_owned()]);
         self.refresh_doctor();
         self.mark_dirty();
-        self.toast(ToastLevel::Info, "节点已删除");
     }
 
     pub fn delete_nodes(&self, node_ids: &[String]) {
         if node_ids.is_empty() {
             return;
         }
-        let count = node_ids.len();
         {
             let mut model = self.inner.model.write();
             for id in node_ids {
@@ -1999,7 +2133,6 @@ impl AppService {
         self.remove_health_targets(node_ids);
         self.refresh_doctor();
         self.mark_dirty();
-        self.toast(ToastLevel::Info, format!("已批量删除 {count} 个节点"));
     }
 
     pub fn select_group_kind(&self, group_id: &str, kind: crate::model::GroupKind) {
@@ -2214,10 +2347,12 @@ impl AppService {
                 service.set_busy(&format!("latency:{key}"), false);
             }
             service.set_busy("latency", false);
-            service.toast(
-                ToastLevel::Info,
-                format!("测速完成：{ok_count}/{total_count} 个节点可用"),
-            );
+            if total_count > 1 {
+                service.toast(
+                    ToastLevel::Info,
+                    format!("测速完成：{ok_count}/{total_count} 个节点可用"),
+                );
+            }
         });
     }
 
@@ -2280,16 +2415,6 @@ impl AppService {
                 let (entry, err_stage) = match result {
                     Ok(entry) => {
                         successful += 1;
-                        if count == 1 {
-                            service.toast(
-                                ToastLevel::Success,
-                                format!(
-                                    "“{}”下载速度 {:.2} MiB/s",
-                                    node.name,
-                                    entry.bytes_per_second as f64 / 1048576.0
-                                ),
-                            );
-                        }
                         (entry, crate::runtime::health::ErrStage::None)
                     }
                     Err(err) => {
@@ -2340,7 +2465,6 @@ impl AppService {
     pub fn clear_latency(&self) {
         self.inner.latency.write().clear();
         let _ = self.inner.store.clear_latency();
-        self.toast(ToastLevel::Info, "已清除测速结果");
     }
 
     pub(crate) fn current_probe_budget_used(&self) -> u64 {
@@ -2542,7 +2666,6 @@ impl AppService {
         self.inner.health.lock().clear_all();
         *self.inner.health_views.write() = Arc::default();
         let _ = self.inner.store.clear_health_data();
-        self.toast(ToastLevel::Info, "已清除节点健康记录");
     }
 
     pub(crate) fn resolve_chain_target_key(model: &AppModel, chains: &[String]) -> Option<String> {
@@ -2684,8 +2807,9 @@ impl AppService {
         if missing.is_empty() {
             return Ok(());
         }
-        self.toast(
-            ToastLevel::Info,
+        self.inner.core.logs().push(
+            LogStream::App,
+            LogLevel::Info,
             format!("正在预下载 {} 个规则集…", missing.len()),
         );
         let results = self.download_rule_sets(&missing).await;
@@ -2736,8 +2860,9 @@ impl AppService {
             }
             Err(_) => {}
         }
-        self.toast(
-            ToastLevel::Info,
+        self.inner.core.logs().push(
+            LogStream::App,
+            LogLevel::Info,
             format!("正在下载 {} 内核…", settings.core.display_name()),
         );
         self.set_busy("install", true);
@@ -2817,7 +2942,7 @@ impl AppService {
             }
             let (ids, missing) = resolve_startup_mesh(&settings, &service.inner.mesh.snapshot());
             for provider in missing {
-                service.toast(
+                service.notify(
                     ToastLevel::Warning,
                     format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
                 );
@@ -2833,7 +2958,6 @@ impl AppService {
                 .store(true, Ordering::Release);
         }
         if self.is_running() {
-            self.toast(ToastLevel::Info, "core 已在运行");
             return;
         }
         if !self.inner.busy.write().insert("core".into()) {
@@ -2852,7 +2976,7 @@ impl AppService {
             let success = match service.start_core_task().await {
                 Ok(started) => started,
                 Err(error) => {
-                    service.toast(ToastLevel::Error, error);
+                    service.notify(ToastLevel::Error, error);
                     false
                 }
             };
@@ -2886,7 +3010,7 @@ impl AppService {
         self.ensure_rule_sets(&model, &settings).await?;
         self.ensure_tun_helper().await?;
         if let Some(warning) = self.prepare_tun_via_helper().await {
-            self.toast(
+            self.notify(
                 ToastLevel::Warning,
                 format!("提权助手未能准备 TUN：{warning}"),
             );
@@ -2906,18 +3030,6 @@ impl AppService {
             self.update_mode_system_proxy()
                 .await
                 .map_err(|e| e.to_string())?;
-            if model.work_mode == WorkMode::Mesh {
-                self.notify_work_mode(WorkMode::Mesh);
-            } else {
-                self.toast(
-                    ToastLevel::Success,
-                    format!(
-                        "{} 已启动，代理端口 {}",
-                        settings.core.display_name(),
-                        settings.mixed_port
-                    ),
-                );
-            }
         }
         Ok(started)
     }
@@ -2927,7 +3039,6 @@ impl AppService {
             .mesh_takeover_requested
             .store(false, Ordering::Release);
         if !self.is_running() {
-            self.toast(ToastLevel::Info, "core 未运行");
             return;
         }
         if !self.inner.busy.write().insert("core".into()) {
@@ -2946,9 +3057,8 @@ impl AppService {
                     service.inner.traffic.lock().reset();
                     service.inner.connections.write().clear();
                     *service.inner.proxies.write() = Default::default();
-                    service.toast(ToastLevel::Success, "core 已停止");
                 }
-                Err(err) => service.toast(ToastLevel::Error, format!("停止失败：{err}")),
+                Err(err) => service.notify(ToastLevel::Error, format!("停止失败：{err}")),
             }
             service.finish_core_stop();
             service.set_busy("core", false);
@@ -3001,7 +3111,6 @@ impl AppService {
                 self.inner.mesh_reconnect.lock().forget_provider(provider);
             }
             if has_reconnecting && !core_running && disconnect_providers.is_empty() {
-                self.toast(ToastLevel::Info, "已取消组网重连");
                 return;
             }
             if !core_running && disconnect_providers.is_empty() {
@@ -3029,7 +3138,7 @@ impl AppService {
         let settings = self.settings();
         let plan = plan_unified_start(&settings, &mesh);
         for provider in plan.missing_startup {
-            self.toast(
+            self.notify(
                 ToastLevel::Warning,
                 format!("{} 应用启动连接配置不存在，请重新选择", provider.label()),
             );
@@ -3080,10 +3189,20 @@ impl AppService {
     /// Apply the saved intent now, validating before replacing a running core.
     pub fn apply_config(&self) {
         self.refresh_exit_gateway_policies(true);
-        self.apply_config_with_tun_cleanup(false, false);
+        self.apply_config_with_tun_cleanup(false, false, true);
     }
 
-    fn apply_config_with_tun_cleanup(&self, cleanup_old_tun: bool, automatic: bool) {
+    pub(super) fn apply_config_silent(&self) {
+        self.refresh_exit_gateway_policies(true);
+        self.apply_config_with_tun_cleanup(false, false, false);
+    }
+
+    fn apply_config_with_tun_cleanup(
+        &self,
+        cleanup_old_tun: bool,
+        automatic: bool,
+        notify_success: bool,
+    ) {
         if !self.claim_config_apply(automatic) {
             return;
         }
@@ -3100,7 +3219,7 @@ impl AppService {
             let model = service.inner.model.read().clone();
             if let Err(error) = service.prepare_mesh_mode(&model).await {
                 service.set_busy("core", false);
-                service.toast(ToastLevel::Error, error.to_string());
+                service.notify(ToastLevel::Error, error.to_string());
                 return;
             }
             let mut ctx = crate::adapters::CompileContext::new(
@@ -3114,24 +3233,24 @@ impl AppService {
                 crate::adapters::adapter_for(settings.core).compile(&model, &settings, &ctx)
             {
                 service.set_busy("core", false);
-                service.toast(ToastLevel::Error, err.to_string());
+                service.notify(ToastLevel::Error, err.to_string());
                 return;
             }
             if let Err(err) = service.ensure_core_binary(&mut settings).await {
                 service.set_busy("core", false);
-                service.toast(ToastLevel::Error, format!("准备内核失败：{err}"));
+                service.notify(ToastLevel::Error, format!("准备内核失败：{err}"));
                 return;
             }
             // Prepare dependencies even when applying a stopped configuration.
             if let Err(err) = service.ensure_rule_sets(&model, &settings).await {
                 service.set_busy("core", false);
-                service.toast(ToastLevel::Error, err);
+                service.notify(ToastLevel::Error, err);
                 return;
             }
             if was_running {
                 if let Err(err) = service.ensure_tun_helper().await {
                     service.set_busy("core", false);
-                    service.toast(ToastLevel::Error, err);
+                    service.notify(ToastLevel::Error, err);
                     return;
                 }
                 if settings.traffic_statistics_enabled {
@@ -3143,7 +3262,6 @@ impl AppService {
                 service.set_busy("core", false);
                 return;
             }
-            let previous_mode = service.inner.core.applied_work_mode();
             let result = if was_running {
                 service
                     .inner
@@ -3153,7 +3271,7 @@ impl AppService {
                             service.cleanup_tun_interface_via_helper().await;
                         }
                         if let Some(warning) = service.prepare_tun_via_helper().await {
-                            service.toast(
+                            service.notify(
                                 ToastLevel::Warning,
                                 format!("提权助手未能准备 TUN：{warning}"),
                             );
@@ -3176,22 +3294,22 @@ impl AppService {
                         *service.inner.proxies.write() = Default::default();
                         service.finish_config_apply(&model, &settings);
                         if let Err(error) = service.update_mode_system_proxy().await {
-                            service.toast(ToastLevel::Error, error.to_string());
+                            service.notify(ToastLevel::Error, error.to_string());
                         }
-                        if previous_mode.is_some_and(|mode| mode != model.work_mode) {
-                            service.notify_work_mode(model.work_mode);
-                        } else {
+                        if notify_success {
                             service.toast(ToastLevel::Success, "配置已应用，内核已重载");
                         }
                     } else if !was_running && ok {
                         if let Err(error) = service.update_mode_system_proxy().await {
-                            service.toast(ToastLevel::Error, error.to_string());
+                            service.notify(ToastLevel::Error, error.to_string());
                         }
                         service.finish_config_apply(&model, &settings);
-                        service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
+                        if notify_success {
+                            service.toast(ToastLevel::Success, "配置校验通过（core 未运行）");
+                        }
                     }
                 }
-                Err(err) => service.toast(ToastLevel::Error, format!("应用配置失败：{err}")),
+                Err(err) => service.notify(ToastLevel::Error, format!("应用配置失败：{err}")),
             }
             service.set_busy("core", false);
         });
@@ -3252,7 +3370,7 @@ impl AppService {
                 .take(4)
                 .collect::<Vec<_>>()
                 .join("\n");
-            self.toast(
+            self.notify(
                 ToastLevel::Error,
                 format!(
                     "配置校验失败：{}",
@@ -3367,18 +3485,12 @@ impl AppService {
                     let mut current = service.settings();
                     current.autostart = old.autostart;
                     let _ = service.save_settings(&current);
-                    service.toast(
+                    service.notify(
                         ToastLevel::Error,
                         "设置登录启动失败，已恢复原设置，请检查系统权限",
                     );
                 }
             });
-        }
-        if new.core != old.core && self.is_running() && !new.hot_reload {
-            self.toast(
-                ToastLevel::Warning,
-                format!("已选择 {}，需重载内核生效", new.core.display_name()),
-            );
         }
         if new.system_proxy != old.system_proxy {
             self.set_system_proxy(new.system_proxy);
@@ -3447,10 +3559,7 @@ impl AppService {
             return;
         }
         if running {
-            self.toast(ToastLevel::Info, "正在重载内核以应用 TUN 设置");
-            self.apply_config_with_tun_cleanup(old_tun, false);
-        } else {
-            self.toast(ToastLevel::Info, "TUN 设置已保存，下次启动内核时生效");
+            self.apply_config_with_tun_cleanup(old_tun, false, false);
         }
     }
 
@@ -3466,10 +3575,6 @@ impl AppService {
         }
         let _ = self.persist_model();
         self.mark_dirty();
-        self.toast(
-            ToastLevel::Info,
-            format!("路由模板已切换为“{}”，应用配置后生效", preset.label()),
-        );
     }
 
     /// Quick routing switch used by the tray, applying through a validated restart.
@@ -3484,10 +3589,7 @@ impl AppService {
         let running = self.is_running();
         self.set_route_preset(preset);
         if running {
-            self.toast(ToastLevel::Info, "正在重载内核以应用路由设置");
-            self.apply_config();
-        } else {
-            self.toast(ToastLevel::Info, "路由设置已保存，下次启动内核时生效");
+            self.apply_config_silent();
         }
     }
 
@@ -3535,7 +3637,6 @@ impl AppService {
             }
             Ok(true)
         })?;
-        self.toast(ToastLevel::Info, "规则已保存，应用配置后生效");
         Ok(())
     }
 
@@ -3730,10 +3831,6 @@ impl AppService {
         }
         let _ = self.persist_model();
         self.mark_dirty();
-        self.toast(
-            ToastLevel::Info,
-            format!("DNS 模板已切换：{}", preset.label()),
-        );
     }
 
     pub fn set_dns_enabled(&self, enabled: bool) {
@@ -3900,7 +3997,7 @@ impl AppService {
         self.set_busy("helper", false);
         match result {
             Ok(message) => self.toast(ToastLevel::Success, message),
-            Err(err) => self.toast(
+            Err(err) => self.notify(
                 ToastLevel::Error,
                 format!("提权助手自动更新失败，可在设置中重试：{err}"),
             ),
@@ -3952,10 +4049,10 @@ impl AppService {
                 }
                 Ok((Err(err), status)) => {
                     *service.inner.helper.write() = status;
-                    service.toast(ToastLevel::Error, format!("{label}失败：{err}"));
+                    service.notify(ToastLevel::Error, format!("{label}失败：{err}"));
                 }
                 Err(err) => {
-                    service.toast(ToastLevel::Error, format!("{label}任务异常：{err}"));
+                    service.notify(ToastLevel::Error, format!("{label}任务异常：{err}"));
                 }
             }
             service.set_busy("helper", false);
@@ -4009,7 +4106,6 @@ impl AppService {
                 return (Ok(String::new()), service.update_outdated_helper(current));
             }
             let outcome = if current.installed {
-                service.toast(ToastLevel::Info, "正在启动提权助手…");
                 privilege::start()
             } else {
                 service.toast(ToastLevel::Info, "正在安装提权助手，请完成系统授权");
@@ -4164,10 +4260,6 @@ impl AppService {
                     settings.active_versions.remove(core.as_str());
                     let _ = self.save_settings(&settings);
                 }
-                self.toast(
-                    ToastLevel::Info,
-                    format!("已删除 {} {}", core.display_name(), version),
-                );
             }
             Err(err) => self.toast(ToastLevel::Error, format!("删除失败：{err}")),
         }
@@ -4189,10 +4281,6 @@ impl AppService {
             .active_versions
             .insert(core.as_str().into(), version.to_string());
         self.save_settings(&settings)?;
-        self.toast(
-            ToastLevel::Info,
-            format!("{} 将使用版本 {}", core.display_name(), version),
-        );
         Ok(())
     }
 
@@ -4323,8 +4411,9 @@ impl AppService {
                 },
                 None => None,
             };
-            service.toast(
-                ToastLevel::Info,
+            service.inner.core.logs().push(
+                LogStream::App,
+                LogLevel::Info,
                 format!("正在下载 {} {}…", core.display_name(), candidate.version),
             );
             let result = service
@@ -4347,16 +4436,16 @@ impl AppService {
                         .insert(core.as_str().into(), record.version.clone());
                     if let Err(err) = service.save_settings(&settings) {
                         service.set_busy("install", false);
-                        service.toast(ToastLevel::Error, format!("内核已下载，但启用失败：{err}"));
+                        service.notify(ToastLevel::Error, format!("内核已下载，但启用失败：{err}"));
                         return;
                     }
                     service.record_core_check(core, &settings, Ok(None));
-                    service.toast(
+                    service.notify(
                         ToastLevel::Success,
                         format!("{} {} 安装完成", core.display_name(), record.version),
                     );
                 }
-                Err(err) => service.toast(ToastLevel::Error, format!("安装失败：{err}")),
+                Err(err) => service.notify(ToastLevel::Error, format!("安装失败：{err}")),
             }
             service.set_busy("install", false);
         });
@@ -4475,7 +4564,6 @@ impl AppService {
 
     pub fn clear_logs(&self) {
         self.inner.core.logs().clear();
-        self.toast(ToastLevel::Info, "日志已清空（磁盘日志仍保留）");
     }
 
     fn log_redactor(&self, privacy: LogPrivacy) -> Result<Option<LogRedactor>> {
@@ -4569,15 +4657,10 @@ impl AppService {
         let now = now_unix();
         recording.start(now);
         recording.observe(&connections.rows, now);
-        self.toast(
-            ToastLevel::Info,
-            "已开始录制连接元数据和测试结果；不采集请求正文",
-        );
     }
 
     pub fn stop_recording(&self) {
         self.inner.recording.lock().stop(now_unix());
-        self.toast(ToastLevel::Info, "录制已停止，记录保留到清空或退出应用");
     }
 
     pub fn clear_recording(&self) {
@@ -4686,7 +4769,7 @@ impl AppService {
             if self.model().work_mode == WorkMode::Mesh {
                 "规则已保存至本机；组网模式暂停本地代理分流，远端出口规则未修改"
             } else {
-                "规则已置顶保存，点击应用配置后重新测试"
+                "规则已置顶保存"
             },
         );
         Ok(())
@@ -4708,7 +4791,7 @@ impl AppService {
                 Ok(Ok(())) => {
                     service.toast(ToastLevel::Success, "阻止联网规则已保存");
                     if service.is_running() {
-                        service.apply_config();
+                        service.apply_config_silent();
                     }
                 }
                 Ok(Err(err)) => service.toast(ToastLevel::Error, err.to_string()),
@@ -4841,7 +4924,6 @@ impl AppService {
             .await;
             match result {
                 Some(Ok(())) => {
-                    service.toast(ToastLevel::Info, "所选连接已断开");
                     service.poll_traffic_statistics().await;
                 }
                 Some(Err(err)) => {
@@ -4892,9 +4974,8 @@ impl AppService {
                 .await;
             service.set_busy("mesh-forward", false);
             service.set_busy("mesh", false);
-            match result {
-                Ok(()) => service.toast(ToastLevel::Success, "端口转发已更新"),
-                Err(e) => service.toast(ToastLevel::Error, e.to_string()),
+            if let Err(e) = result {
+                service.toast(ToastLevel::Error, e.to_string());
             }
         });
         Ok(())
@@ -4960,7 +5041,6 @@ impl AppService {
                 Error::other(format!("组网配置已保存，但应用启动设置保存失败：{err}"))
             })?;
         }
-        self.toast(ToastLevel::Success, "组网配置已保存");
         Ok(id)
     }
 
@@ -5062,7 +5142,11 @@ impl AppService {
                         )
                         .is_err()
                         {
-                            service.toast(ToastLevel::Info, "正在下载 Tailscale 组网组件…");
+                            service.inner.core.logs().push(
+                                LogStream::App,
+                                LogLevel::Info,
+                                "正在下载 Tailscale 组网组件…",
+                            );
                             service
                                 .inner
                                 .mesh
@@ -5145,21 +5229,18 @@ impl AppService {
                         .into_iter()
                         .find(|state| state.profile_id == value);
                     match state {
-                        Some(state) if state.phase == crate::mesh::MeshPhase::NeedsLogin => service
-                            .toast(
-                                ToastLevel::Info,
-                                if state.login_url.is_some() {
-                                    "请点击“在浏览器登录”完成 Tailscale 设备授权"
-                                } else {
-                                    "正在获取 Tailscale 登录链接"
-                                },
-                            ),
+                        Some(state) if state.phase == crate::mesh::MeshPhase::NeedsLogin => {
+                            if state.login_url.is_some() {
+                                service.notify(
+                                    ToastLevel::Info,
+                                    "请点击“在浏览器登录”完成 Tailscale 设备授权",
+                                );
+                            }
+                        }
                         Some(state) if state.phase == crate::mesh::MeshPhase::NeedsApproval => {
-                            service.toast(ToastLevel::Info, "请联系目标网络的管理员批准此设备")
+                            service.notify(ToastLevel::Info, "请联系目标网络的管理员批准此设备")
                         }
-                        Some(state) if state.phase == crate::mesh::MeshPhase::Connected => {
-                            service.toast(ToastLevel::Success, "组网已连接")
-                        }
+                        Some(state) if state.phase == crate::mesh::MeshPhase::Connected => {}
                         other => service.mesh_connection_failed(
                             &value,
                             other
@@ -5168,19 +5249,17 @@ impl AppService {
                         ),
                     }
                 }
-                Ok(()) => service.toast(
-                    ToastLevel::Success,
-                    match action {
-                        "disconnect" => "组网已断开，身份已保留",
-                        "logout" => "已请求注销组网身份",
-                        "install" => "Tailscale 组网组件已安装并验证",
-                        _ => "正在探测组网设备",
-                    },
-                ),
+                Ok(()) => match action {
+                    "logout" => service.toast(ToastLevel::Success, "已请求注销组网身份"),
+                    "install" => {
+                        service.notify(ToastLevel::Success, "Tailscale 组网组件已安装并验证")
+                    }
+                    _ => {}
+                },
                 Err(error) if action == "connect" => {
                     service.mesh_connection_failed(&value, error.to_string())
                 }
-                Err(error) => service.toast(ToastLevel::Error, error.to_string()),
+                Err(error) => service.notify(ToastLevel::Error, error.to_string()),
             }
             service.set_busy("mesh", false);
         });
@@ -5191,7 +5270,7 @@ impl AppService {
             .mesh_connection_errors
             .write()
             .insert(profile_id.to_owned(), reason.clone());
-        self.toast(ToastLevel::Error, reason);
+        self.notify(ToastLevel::Error, reason);
     }
 
     async fn apply_mesh_plan(&self, plan: crate::mesh::coexist::CoexistencePlan) -> Result<bool> {
@@ -5277,6 +5356,7 @@ impl AppService {
             let mut tick: u64 = 0;
             let mut last_phase = crate::core::ProcessPhase::Stopped;
             let mut last_pid = None;
+            let mut last_reconcile_error: Option<String> = None;
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 let Some(inner) = weak.upgrade() else { break };
@@ -5333,11 +5413,16 @@ impl AppService {
                                 .is_empty()
                         {
                             service
-                                .toast(ToastLevel::Warning, "与提权助手失去联系，请检查助手状态");
+                                .notify(ToastLevel::Warning, "与提权助手失去联系，请检查助手状态");
                         }
                         if let Err(error) = service.reconcile_mesh().await {
-                            service.toast(ToastLevel::Error, error.to_string());
+                            let message = error.to_string();
+                            if last_reconcile_error.as_deref() != Some(message.as_str()) {
+                                service.notify(ToastLevel::Error, message.clone());
+                                last_reconcile_error = Some(message);
+                            }
                         } else {
+                            last_reconcile_error = None;
                             service.schedule_mesh_reconnect();
                         }
                     }
@@ -5392,7 +5477,7 @@ impl AppService {
                     && last_phase != crate::core::ProcessPhase::Failed
                 {
                     if let Some(exit) = &state.last_exit {
-                        service.toast(ToastLevel::Error, format!("core 已退出：{}", exit.reason));
+                        service.notify(ToastLevel::Error, format!("core 已退出：{}", exit.reason));
                     }
                 }
                 if state.phase != last_phase || state.pid != last_pid {
@@ -5447,7 +5532,7 @@ impl AppService {
                     .map(|s| s.id.clone())
                     .collect();
                 for id in due {
-                    service.refresh_subscription(&id);
+                    let _ = service.refresh_subscription_once(&id).await;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(600)).await;
             }
@@ -6289,7 +6374,18 @@ mod tests {
                 user_initiated: false
             }
         ));
-        service.toast(ToastLevel::Success, "fixture");
+        // Routine in-app toasts never spam OS notifications and stay visible in-app.
+        service.toast(ToastLevel::Success, "in-app only");
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            service
+                .active_toasts()
+                .iter()
+                .any(|t| t.message == "in-app only" && t.visible_in_app())
+        );
+
+        // System-worthy notifications route to the OS channel when enabled.
+        service.notify(ToastLevel::Success, "fixture");
         assert!(
             matches!(receiver.try_recv().unwrap(), NotificationEvent::Show(toast)
             if toast.message == "fixture")
@@ -6301,8 +6397,10 @@ mod tests {
             service
                 .active_toasts()
                 .iter()
-                .all(|t| !t.visible_in_app(true))
+                .filter(|t| t.message == "fixture")
+                .all(|t| !t.visible_in_app())
         );
+
         let mut settings = service.settings();
         settings.system_notifications = false;
         service.update_settings(settings.clone());
@@ -6313,20 +6411,20 @@ mod tests {
                 user_initiated: true
             }
         ));
-        service.toast(ToastLevel::Info, "disabled");
+        service.notify(ToastLevel::Info, "disabled");
         assert!(receiver.try_recv().is_err());
         assert!(
             service
                 .active_toasts()
                 .iter()
-                .any(|t| t.message == "disabled" && t.visible_in_app(false))
+                .any(|t| t.message == "disabled" && t.visible_in_app())
         );
         assert!(
             service
                 .active_toasts()
                 .iter()
                 .filter(|t| t.message == "fixture")
-                .all(|t| !t.visible_in_app(false))
+                .all(|t| !t.visible_in_app())
         );
         settings.system_notifications = true;
         service.update_settings(settings.clone());
@@ -6340,16 +6438,42 @@ mod tests {
         ));
         service.update_settings(settings);
         assert!(receiver.try_recv().is_err());
+        // Delivery/permission errors must remain visible in-app and never recurse into native delivery.
         service.report_notification_error("fixture permission failure");
         assert!(receiver.try_recv().is_err());
         assert!(
             service
                 .active_toasts()
                 .iter()
-                .any(|t| t.message == "fixture permission failure"
-                    && !t.visible_in_app(true)
-                    && !t.visible_in_app(false))
+                .any(|t| t.message == "fixture permission failure" && t.visible_in_app())
         );
+    }
+
+    #[test]
+    fn in_app_toasts_deduplicate_identical_messages_and_touch_refreshes_expiry() {
+        let (service, _dir) = service();
+        service.toast(ToastLevel::Warning, "same warning");
+        let first_id = service.active_toasts().last().unwrap().id;
+        service.toast(ToastLevel::Warning, "same warning");
+        let active = service.active_toasts();
+        assert_eq!(
+            active
+                .iter()
+                .filter(|t| t.message == "same warning")
+                .count(),
+            1
+        );
+        assert!(active.last().unwrap().id > first_id);
+
+        // Touching refreshes timestamps of active in-app toasts (hover pause).
+        {
+            let mut guard = service.inner.toasts.lock();
+            guard.last_mut().unwrap().at = now_unix() - (TOAST_TTL_SECS - 1);
+        }
+        let before = service.inner.toasts.lock().last().unwrap().at;
+        service.touch_toasts();
+        let after = service.inner.toasts.lock().last().unwrap().at;
+        assert!(after >= before);
     }
 
     #[test]
@@ -6503,7 +6627,7 @@ mod tests {
         settings.system_notifications = true;
         service.update_settings(settings.clone());
         for index in 0..40 {
-            service.toast(ToastLevel::Info, format!("fixture {index}"));
+            service.notify(ToastLevel::Info, format!("fixture {index}"));
         }
         settings.system_notifications = false;
         service.update_settings(settings);

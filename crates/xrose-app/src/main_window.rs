@@ -165,7 +165,7 @@ impl MainWindow {
     pub fn show(&mut self, target: ShowTarget, cx: &mut App) {
         if self.visible.is_none() {
             if let Err(err) = self.open(cx) {
-                self.service.toast(
+                self.service.notify(
                     xrose_core::service::ToastLevel::Error,
                     format!(
                         "{}{err}",

@@ -201,7 +201,6 @@ impl AppService {
                         .data
                         .lock()
                         .clear(CoreEpoch::from_state(&service.inner.core.state()));
-                    service.toast(ToastLevel::Success, "流量统计已清空");
                 }
                 _ => service.toast(ToastLevel::Error, "清空统计失败，请检查数据库权限后重试"),
             }

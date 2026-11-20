@@ -74,22 +74,8 @@ impl AppService {
                 if let HttpTestTarget::Node(id) = &target {
                     service.record_proxy_probe(active.as_ref(), id, result.is_ok());
                 }
-                let label = match (&target, &node) {
-                    (HttpTestTarget::Direct, _) => "本机直连".to_owned(),
-                    (_, Some(n)) => format!("“{}”", n.name),
-                    _ => key.clone(),
-                };
                 let (entry, err_stage) = match result {
-                    Ok(entry) => {
-                        service.toast(
-                            ToastLevel::Success,
-                            format!(
-                                "{label}下载速度 {:.2} MiB/s",
-                                entry.bytes_per_second as f64 / 1048576.0
-                            ),
-                        );
-                        (entry, crate::runtime::health::ErrStage::None)
-                    }
+                    Ok(entry) => (entry, crate::runtime::health::ErrStage::None),
                     Err(error) => {
                         let msg = test_error_message(error);
                         service.toast(ToastLevel::Warning, msg.clone());
@@ -256,6 +242,7 @@ impl AppService {
         else {
             return;
         };
+        let count = targets.len();
         let settings = self.settings();
         let overseas_url = settings.urltest_url;
         let domestic_url = settings.domestic_urltest_url;
@@ -347,10 +334,12 @@ impl AppService {
                 service.set_busy(&format!("latency:{key}"), false);
             }
             service.set_busy("latency", false);
-            service.toast(
-                ToastLevel::Info,
-                format!("HTTP 测速完成：{successful} 个出口可用"),
-            );
+            if count > 1 {
+                service.toast(
+                    ToastLevel::Info,
+                    format!("HTTP 测速完成：{successful}/{count} 个出口可用"),
+                );
+            }
         });
     }
 
@@ -423,18 +412,7 @@ impl AppService {
                 match result {
                     Ok(outcome) => {
                         successful += 1;
-                        let from_cache = outcome.from_cache;
                         service.record_reachability_outcome(&key, &outcome);
-                        if count == 1 {
-                            service.toast(
-                                ToastLevel::Success,
-                                if from_cache {
-                                    "可达性检测完成（复用同出口缓存）"
-                                } else {
-                                    "可达性检测完成"
-                                },
-                            );
-                        }
                     }
                     Err(error) => {
                         let msg = test_error_message(error);

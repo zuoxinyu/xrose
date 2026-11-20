@@ -44,7 +44,7 @@ impl AppService {
                         changed = wake.changed() => if changed.is_err() { break },
                         _ = tokio::time::sleep_until(deadline.into()) => {
                             let Some(inner) = weak.upgrade() else { break };
-                            AppService { inner }.apply_config_with_tun_cleanup(false, true);
+                            AppService { inner }.apply_config_with_tun_cleanup(false, true, false);
                         }
                     }
                 } else if wake.changed().await.is_err() {

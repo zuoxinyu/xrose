@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 struct RoundState {
     failures: u8,
     no_match_reported: bool,
+    last_error: Option<String>,
     due: Option<Instant>,
     cooldown_until: Option<Instant>,
     candidate_streak: Option<(String, u8)>,
@@ -313,6 +314,7 @@ impl AppService {
                         if service.switch_session_current(&process)
                             && service.inner.busy.write().insert("core".into()) =>
                     {
+                        state.last_error = None;
                         let switched = service
                             .apply_switch(
                                 &process,
@@ -334,8 +336,16 @@ impl AppService {
                         session = Some((new.pid, new.started_at));
                         service.set_busy("core", false);
                     }
-                    Err(err) => service.toast(ToastLevel::Warning, err.to_string()),
-                    _ => (),
+                    Err(err) => {
+                        let msg = err.to_string();
+                        if state.last_error.as_deref() != Some(msg.as_str()) {
+                            service.notify(ToastLevel::Warning, msg.clone());
+                            state.last_error = Some(msg);
+                        }
+                    }
+                    Ok(_) => {
+                        state.last_error = None;
+                    }
                 }
                 state.due = Instant::now().checked_add(Duration::from_secs(
                     group.interval_secs.clamp(30, u32::MAX as u64),
@@ -398,6 +408,7 @@ impl AppService {
                 service.set_busy("auto-probe", false);
                 match result {
                     Ok(Some(decision)) if service.exit_switch_session_current(&core, &process) => {
+                        state.last_error = None;
                         // The manager locks its operation and rechecks the process
                         // epoch and applied group before replacing its configuration.
                         match core
@@ -420,28 +431,43 @@ impl AppService {
                                         )
                                     })
                                     .unwrap_or_default();
-                                service.toast(
-                                    ToastLevel::Success,
-                                    if decision.recover {
-                                        format!("出口分流已切换到备用节点{delta}")
-                                    } else if !delta.is_empty() {
+                                if decision.recover {
+                                    service.notify(
+                                        ToastLevel::Success,
+                                        format!("出口分流已切换到备用节点{delta}"),
+                                    );
+                                } else {
+                                    let message = if !delta.is_empty() {
                                         format!("出口分流已按健康评分切换节点{delta}")
                                     } else {
                                         "出口分流已按性能优先策略切换节点".into()
-                                    },
-                                );
+                                    };
+                                    service.inner.core.logs().push(
+                                        LogStream::App,
+                                        LogLevel::Info,
+                                        message,
+                                    );
+                                }
                             }
                             Ok(false) => {}
-                            Err(error) => service
-                                .toast(ToastLevel::Error, format!("出口分流自动切换失败：{error}")),
+                            Err(error) => service.notify(
+                                ToastLevel::Error,
+                                format!("出口分流自动切换失败：{error}"),
+                            ),
                         }
                         let current = core.state();
                         session = Some((current.pid, current.started_at));
                     }
                     Err(error) => {
-                        service.toast(ToastLevel::Warning, format!("出口分流检查失败：{error}"))
+                        let msg = format!("出口分流检查失败：{error}");
+                        if state.last_error.as_deref() != Some(msg.as_str()) {
+                            service.notify(ToastLevel::Warning, msg.clone());
+                            state.last_error = Some(msg);
+                        }
                     }
-                    _ => {}
+                    Ok(_) => {
+                        state.last_error = None;
+                    }
                 }
                 state.due = Instant::now().checked_add(Duration::from_secs(
                     group.interval_secs.clamp(30, u32::MAX as u64),
@@ -470,8 +496,9 @@ impl AppService {
         recover: bool,
         scores: Option<(f32, f32)>,
     ) -> bool {
-        self.toast(
-            ToastLevel::Info,
+        self.inner.core.logs().push(
+            LogStream::App,
+            LogLevel::Info,
             if recover {
                 "当前节点不可用，正在切换备用节点并重载内核"
             } else {
@@ -493,21 +520,24 @@ impl AppService {
                         format!("（{} → {}）", old.round() as u32, new.round() as u32)
                     })
                     .unwrap_or_default();
-                self.toast(
-                    ToastLevel::Success,
-                    if recover {
-                        format!("已切换到备用节点{delta}")
-                    } else if !delta.is_empty() {
+                if recover {
+                    self.notify(ToastLevel::Success, format!("已切换到备用节点{delta}"));
+                } else {
+                    let message = if !delta.is_empty() {
                         format!("已按健康评分切换节点{delta}")
                     } else {
                         "已按性能优先策略切换节点".into()
-                    },
-                );
+                    };
+                    self.inner
+                        .core
+                        .logs()
+                        .push(LogStream::App, LogLevel::Info, message);
+                }
                 true
             }
             Ok(false) => false,
             Err(err) => {
-                self.toast(ToastLevel::Error, format!("自动切换失败：{err}"));
+                self.notify(ToastLevel::Error, format!("自动切换失败：{err}"));
                 false
             }
         }
@@ -642,7 +672,7 @@ impl AppService {
             })
         };
         if decision.is_none() && search == Search::Recover && !state.no_match_reported {
-            self.toast(
+            self.notify(
                 ToastLevel::Warning,
                 if report_main {
                     "回退范围内没有可用节点，保留当前节点并在下轮重试"

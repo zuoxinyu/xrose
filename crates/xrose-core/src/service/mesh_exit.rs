@@ -32,9 +32,9 @@ impl AppService {
             service.set_busy("mesh-exit", false);
             service.set_busy("mesh", false);
             match result {
-                Ok(()) if service.is_running() => service.apply_config(),
-                Ok(()) => service.toast(ToastLevel::Success, "已选中组网出口节点"),
-                Err(error) => service.toast(ToastLevel::Error, error.to_string()),
+                Ok(()) if service.is_running() => service.apply_config_silent(),
+                Ok(()) => {}
+                Err(error) => service.notify(ToastLevel::Error, error.to_string()),
             }
         });
     }

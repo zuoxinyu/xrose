@@ -273,7 +273,7 @@ impl AppService {
                         Err(_) if failed.insert(ip) => AppService {
                             inner: inner.clone(),
                         }
-                        .toast(ToastLevel::Warning, "无法监听组网发现端口，请检查端口占用"),
+                        .notify(ToastLevel::Warning, "无法监听组网发现端口，请检查端口占用"),
                         Err(_) => {}
                     }
                 }

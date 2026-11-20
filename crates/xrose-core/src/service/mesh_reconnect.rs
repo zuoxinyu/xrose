@@ -1,8 +1,10 @@
 //! Restore only networks requested in this app session after their worker is lost.
-use super::{AppService, ToastLevel};
+use super::AppService;
 use crate::{
     Result,
+    core::LogStream,
     mesh::{MeshPhase, MeshProfile, MeshProvider, MeshSnapshot},
+    settings::LogLevel,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -207,8 +209,9 @@ impl AppService {
             return self.reconcile_mesh().await;
         }
         self.inner.mesh_connection_errors.write().remove(id);
-        self.toast(
-            ToastLevel::Info,
+        self.inner.core.logs().push(
+            LogStream::App,
+            LogLevel::Info,
             format!("已重新启动 {} 组网连接", provider.label()),
         );
         Ok(())

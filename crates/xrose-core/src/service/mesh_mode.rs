@@ -57,9 +57,8 @@ impl AppService {
         let service = self.clone();
         self.spawn(async move {
             let result = service.switch_system_exit(&profile_id, &peer_id).await;
-            match result {
-                Ok(()) => service.notify_work_mode(WorkMode::Mesh),
-                Err(error) => service.toast(ToastLevel::Error, error.to_string()),
+            if let Err(error) = result {
+                service.notify(ToastLevel::Error, error.to_string());
             }
             service.set_busy("mesh-exit", false);
             service.set_busy("mesh", false);
@@ -424,7 +423,7 @@ impl AppService {
         let service = self.clone();
         self.spawn(async move {
             if let Err(error) = service.restore_mesh_split_target().await {
-                service.toast(ToastLevel::Error, format!("恢复组网分流出口失败：{error}"));
+                service.notify(ToastLevel::Error, format!("恢复组网分流出口失败：{error}"));
             }
             // The main core is stopped: keep desktop proxy disabled until it starts again.
             service.set_busy("core", false);

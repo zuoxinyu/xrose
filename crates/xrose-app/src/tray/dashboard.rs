@@ -504,7 +504,7 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
                 WorkMode::Mesh => service.select_mesh_mode(),
             };
             if let Err(error) = result {
-                service.toast(xrose_core::service::ToastLevel::Error, error.to_string());
+                service.notify(xrose_core::service::ToastLevel::Error, error.to_string());
             }
         }
         TrayAction::TestAll => service.test_all_http_latency(),

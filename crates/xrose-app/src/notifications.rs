@@ -33,7 +33,7 @@ pub fn install(service: &AppService) {
                                         "系统通知权限已确认",
                                     );
                                     if user_initiated && service.settings().system_notifications {
-                                        service.toast(
+                                        service.notify(
                                             ToastLevel::Success,
                                             crate::i18n::tr(
                                                 service.settings().language,

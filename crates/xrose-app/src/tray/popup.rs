@@ -146,7 +146,7 @@ impl PopupManager {
                 self.view = Some(view);
                 self.last_refresh = Some(Instant::now());
             }
-            Err(err) => error_service.toast(
+            Err(err) => error_service.notify(
                 xrose_core::service::ToastLevel::Error,
                 format!(
                     "{}{err}",

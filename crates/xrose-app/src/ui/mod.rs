@@ -398,6 +398,7 @@ pub struct AppView {
     pub(crate) rule_action: RouteActionKind,
     pub(crate) rule_outbound_group: Option<String>,
     pub(crate) about_note_hovered: bool,
+    hovered_toast: Option<u64>,
 }
 
 impl AppView {
@@ -690,6 +691,7 @@ impl AppView {
             matcher_kind: initial_matcher_kind,
             rule_action: RouteActionKind::Proxy,
             rule_outbound_group: None,
+            hovered_toast: None,
         };
         view.init_import(window, cx);
         view.refresh_header_location();
@@ -849,7 +851,19 @@ impl AppView {
     fn refresh_snapshot(&mut self) {
         // An earlier poll must not overwrite the result of an explicit action.
         self.snapshot_task = None;
+        if self.hovered_toast.is_some() {
+            self.service.touch_toasts();
+        }
         self.snapshot = self.service.snapshot();
+        if let Some(id) = self.hovered_toast
+            && !self
+                .snapshot
+                .toasts
+                .iter()
+                .any(|t| t.id == id && t.visible_in_app())
+        {
+            self.hovered_toast = None;
+        }
         self.log_revision = self.service.logs().revision();
         self.last_refresh = std::time::Instant::now();
     }
@@ -921,14 +935,27 @@ impl AppView {
         if refresh_due && self.snapshot_task.is_none() {
             self.last_refresh = now;
             let service = self.service.clone();
-            let read = cx
-                .background_executor()
-                .spawn(async move { service.snapshot() });
+            let toast_hovered = self.hovered_toast.is_some();
+            let read = cx.background_executor().spawn(async move {
+                if toast_hovered {
+                    service.touch_toasts();
+                }
+                service.snapshot()
+            });
             self.snapshot_task = Some(cx.spawn(async move |view, cx| {
                 let snapshot = read.await;
                 let _ = view.update(cx, |view, cx| {
                     view.snapshot_task = None;
                     view.snapshot = snapshot;
+                    if let Some(id) = view.hovered_toast
+                        && !view
+                            .snapshot
+                            .toasts
+                            .iter()
+                            .any(|t| t.id == id && t.visible_in_app())
+                    {
+                        view.hovered_toast = None;
+                    }
                     view.log_revision = view.service.logs().revision();
                     if !view.snapshot.busy.iter().any(|key| key == "mesh") {
                         view.mesh_probe_feedback
@@ -1543,6 +1570,17 @@ impl AppView {
 
     fn toasts(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let visible: Vec<_> = self
+            .snapshot
+            .toasts
+            .iter()
+            .rev()
+            .filter(|toast| toast.visible_in_app())
+            .take(3)
+            .collect();
+        if visible.is_empty() {
+            return div().into_any_element();
+        }
         div()
             .absolute()
             .right(px(18.))
@@ -1552,67 +1590,75 @@ impl AppView {
             .flex()
             .flex_col()
             .gap_2()
-            .children(
-                self.snapshot
-                    .toasts
-                    .iter()
-                    .rev()
-                    .filter(|toast| {
-                        toast.visible_in_app(self.snapshot.settings.system_notifications)
-                    })
-                    .take(5)
-                    .map(|toast| {
-                        let color = match toast.level {
-                            xrose_core::service::ToastLevel::Info => p.info,
-                            xrose_core::service::ToastLevel::Success => p.success,
-                            xrose_core::service::ToastLevel::Warning => p.warning,
-                            xrose_core::service::ToastLevel::Error => p.danger,
-                        };
-                        let id = toast.id;
+            .children(visible.into_iter().map(|toast| {
+                let color = match toast.level {
+                    xrose_core::service::ToastLevel::Info => p.info,
+                    xrose_core::service::ToastLevel::Success => p.success,
+                    xrose_core::service::ToastLevel::Warning => p.warning,
+                    xrose_core::service::ToastLevel::Error => p.danger,
+                };
+                let id = toast.id;
+                div()
+                    .id(SharedString::from(format!("toast-card-{id}")))
+                    .block_mouse_except_scroll()
+                    .on_hover(cx.listener(move |this, hovered, _, _| {
+                        if *hovered {
+                            this.hovered_toast = Some(id);
+                            this.service.touch_toasts();
+                        } else if this.hovered_toast == Some(id) {
+                            this.hovered_toast = None;
+                        }
+                    }))
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .flex()
+                    .items_start()
+                    .w_full()
+                    .min_w(px(0.))
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(p.panel)
+                    .border_1()
+                    .border_color(color)
+                    .shadow_md()
+                    .child(
                         div()
+                            .h(px(20.))
                             .flex()
-                            .items_start()
-                            .w_full()
+                            .items_center()
+                            .flex_shrink_0()
+                            .child(dot(color)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
                             .min_w(px(0.))
-                            .gap_2()
-                            .p_3()
-                            .rounded_md()
-                            .bg(p.panel)
-                            .border_1()
-                            .border_color(color)
-                            .shadow_md()
-                            .child(
-                                div()
-                                    .h(px(20.))
-                                    .flex()
-                                    .items_center()
-                                    .flex_shrink_0()
-                                    .child(dot(color)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.))
-                                    .text_sm()
-                                    .line_height(px(20.))
-                                    .whitespace_normal()
-                                    .overflow_hidden()
-                                    .text_color(p.fg)
-                                    .child(toast.message.clone()),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("toast-{id}")))
-                                    .compact()
-                                    .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                    .custom(icon_button_style(&p, false, cx))
-                                    .icon(IconName::X)
-                                    .flex_shrink_0()
-                                    .on_click(cx.listener(move |this, _, _, _| {
-                                        this.service.dismiss_toast(id);
-                                    })),
-                            )
-                    }),
-            )
+                            .text_sm()
+                            .line_height(px(20.))
+                            .whitespace_normal()
+                            .overflow_hidden()
+                            .text_color(p.fg)
+                            .child(toast.message.clone()),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("toast-{id}")))
+                            .compact()
+                            .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                            .custom(icon_button_style(&p, false, cx))
+                            .icon(IconName::X)
+                            .flex_shrink_0()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if this.hovered_toast == Some(id) {
+                                    this.hovered_toast = None;
+                                }
+                                this.service.dismiss_toast(id);
+                                this.sync(cx);
+                            })),
+                    )
+            }))
+            .into_any_element()
     }
 
     fn traffic_chart(&self, p: &Palette) -> impl IntoElement {
