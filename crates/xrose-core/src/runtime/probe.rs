@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::model::{CoreKind, Node};
+use crate::settings::HttpLatencyMode;
+
+const LATENCY_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_WARMUP_DRAIN_BYTES: usize = 64 * 1024;
 
 pub const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=99000000";
 pub const DOMESTIC_DOWNLOAD_URL: &str = "https://mensura.cdn-apple.com/api/v1/gm/large";
@@ -35,6 +39,7 @@ pub(crate) struct Probe {
     child: tokio::process::Child,
     _directory: tempfile::TempDir,
     pub(crate) client: reqwest::Client,
+    pub(crate) port: u16,
 }
 
 pub(crate) async fn resolve_probe_node(
@@ -134,7 +139,7 @@ pub(crate) async fn spawn_isolated_probe_core(
 }
 
 impl Probe {
-    async fn start_target(
+    pub(crate) async fn start_target(
         binary: &Path,
         core: CoreKind,
         node: Option<&Node>,
@@ -168,6 +173,7 @@ impl Probe {
             child,
             _directory,
             client,
+            port,
         })
     }
 
@@ -239,7 +245,7 @@ async fn default_uplink() -> Result<String> {
 pub(crate) fn probe_client(port: u16) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .no_proxy()
-        .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))?)
+        .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))?)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("Xrose-Probe/", env!("CARGO_PKG_VERSION")))
         .no_gzip()
@@ -256,8 +262,9 @@ pub async fn http_latency(
     node: &Node,
     url: &str,
     bypass_tun: bool,
+    mode: HttpLatencyMode,
 ) -> Result<u32> {
-    http_target_latency(binary, core, Some(node), url, bypass_tun).await
+    http_target_latency(binary, core, Some(node), url, bypass_tun, mode).await
 }
 
 pub async fn http_target_latency(
@@ -266,28 +273,108 @@ pub async fn http_target_latency(
     node: Option<&Node>,
     url: &str,
     bypass_tun: bool,
+    mode: HttpLatencyMode,
 ) -> Result<u32> {
     let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
-    let result = measure_http_latency(&probe.client, url).await;
+    let result = measure_http_latency(&probe.client, url, mode).await;
     probe.stop().await;
     result
 }
 
-pub(crate) async fn measure_http_latency(client: &reqwest::Client, url: &str) -> Result<u32> {
-    let started = Instant::now();
+enum LatencyRequestError {
+    Transport,
+    BadStatus(reqwest::StatusCode),
+}
+
+impl LatencyRequestError {
+    fn into_error(self) -> Error {
+        match self {
+            Self::Transport => Error::other("HTTP 测速失败，请检查出口连接或测试地址"),
+            Self::BadStatus(status) => Error::other(format!("测速地址返回 HTTP {status}")),
+        }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u32 {
+    started.elapsed().as_millis().min(u32::MAX as u128) as u32
+}
+
+async fn send_latency_request(
+    client: &reqwest::Client,
+    url: &str,
+) -> std::result::Result<reqwest::Response, LatencyRequestError> {
     let response = client
         .get(url)
-        .timeout(Duration::from_secs(5))
+        .timeout(LATENCY_TIMEOUT)
         .send()
         .await
-        .map_err(|_| Error::other("HTTP 测速失败，请检查出口连接或测试地址"))?;
+        .map_err(|_| LatencyRequestError::Transport)?;
     if !response.status().is_success() {
-        return Err(Error::other(format!(
-            "测速地址返回 HTTP {}",
-            response.status()
-        )));
+        return Err(LatencyRequestError::BadStatus(response.status()));
     }
-    Ok(started.elapsed().as_millis().min(u32::MAX as u128) as u32)
+    Ok(response)
+}
+
+fn response_requests_close(response: &reqwest::Response) -> bool {
+    for name in [
+        reqwest::header::CONNECTION,
+        reqwest::header::HeaderName::from_static("proxy-connection"),
+    ] {
+        for value in response.headers().get_all(name) {
+            if let Ok(text) = value.to_str()
+                && text
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("close"))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Drain a small warm-up response body so HTTP/1.1 keep-alive connections are
+/// returned cleanly to the client pool before the timed follow-up request.
+async fn drain_response_body(mut response: reqwest::Response) {
+    let deadline = tokio::time::Instant::now() + LATENCY_TIMEOUT;
+    let mut total = 0usize;
+    while total < MAX_WARMUP_DRAIN_BYTES {
+        match tokio::time::timeout_at(deadline, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => total = total.saturating_add(chunk.len()),
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
+    }
+}
+
+pub(crate) async fn measure_http_latency(
+    client: &reqwest::Client,
+    url: &str,
+    mode: HttpLatencyMode,
+) -> Result<u32> {
+    let first_started = Instant::now();
+    let first = send_latency_request(client, url)
+        .await
+        .map_err(LatencyRequestError::into_error)?;
+    let first_ms = elapsed_ms(first_started);
+    if mode == HttpLatencyMode::FullHandshake {
+        return Ok(first_ms);
+    }
+
+    if response_requests_close(&first) {
+        drop(first);
+    } else {
+        drain_response_body(first).await;
+    }
+    // Yield once so hyper's background connection task returns the idle
+    // socket to the keep-alive pool before starting the timed request.
+    tokio::task::yield_now().await;
+
+    let second_started = Instant::now();
+    match send_latency_request(client, url).await {
+        Ok(_) => Ok(elapsed_ms(second_started)),
+        Err(err @ LatencyRequestError::BadStatus(_)) => Err(err.into_error()),
+        Err(LatencyRequestError::Transport) => Ok(first_ms),
+    }
 }
 
 pub async fn download(
@@ -429,65 +516,230 @@ async fn measure_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn fake_proxy(
+    async fn read_socks5_connect(socket: &mut tokio::net::TcpStream) -> String {
+        let mut head = [0u8; 2];
+        socket.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], 0x05);
+        let mut methods = vec![0u8; head[1] as usize];
+        socket.read_exact(&mut methods).await.unwrap();
+        socket.write_all(&[0x05, 0x00]).await.unwrap();
+
+        let mut req = [0u8; 4];
+        socket.read_exact(&mut req).await.unwrap();
+        assert_eq!(req[0], 0x05);
+        assert_eq!(req[1], 0x01); // CONNECT
+        let host = match req[3] {
+            0x01 => {
+                let mut ip = [0u8; 4];
+                socket.read_exact(&mut ip).await.unwrap();
+                std::net::Ipv4Addr::from(ip).to_string()
+            }
+            0x03 => {
+                let len = socket.read_u8().await.unwrap() as usize;
+                let mut domain = vec![0u8; len];
+                socket.read_exact(&mut domain).await.unwrap();
+                String::from_utf8(domain).unwrap()
+            }
+            other => panic!("unexpected SOCKS5 atyp {other}"),
+        };
+        let mut port = [0u8; 2];
+        socket.read_exact(&mut port).await.unwrap();
+        socket
+            .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+            .await
+            .unwrap();
+        host
+    }
+
+    async fn read_http_head(socket: &mut tokio::net::TcpStream) -> Option<String> {
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            match socket.read_u8().await {
+                Ok(byte) => request.push(byte),
+                Err(_) if request.is_empty() => return None,
+                Err(_) => return None,
+            }
+        }
+        Some(String::from_utf8(request).unwrap())
+    }
+
+    struct FakeSocksReport {
+        host: String,
+        requests: Vec<String>,
+        connections: usize,
+    }
+
+    async fn fake_socks5_proxy(
         response: &'static [u8],
+        max_requests_per_conn: usize,
+        handshake_delay: Duration,
         stall: bool,
-    ) -> (u16, tokio::task::JoinHandle<String>) {
+    ) -> (u16, tokio::task::JoinHandle<FakeSocksReport>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_task = connections.clone();
         let task = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                request.push(socket.read_u8().await.unwrap());
+            connections_task.fetch_add(1, Ordering::SeqCst);
+            if !handshake_delay.is_zero() {
+                tokio::time::sleep(handshake_delay).await;
             }
-            socket.write_all(response).await.unwrap();
-            if stall {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            let host = read_socks5_connect(&mut socket).await;
+            let mut requests = Vec::new();
+            for _ in 0..max_requests_per_conn {
+                let Some(request) = read_http_head(&mut socket).await else {
+                    break;
+                };
+                requests.push(request);
+                socket.write_all(response).await.unwrap();
+                if stall {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
-            String::from_utf8(request).unwrap()
+            FakeSocksReport {
+                host,
+                requests,
+                connections: connections_task.load(Ordering::SeqCst),
+            }
         });
         (port, task)
     }
 
     #[tokio::test]
     async fn http_latency_measures_successful_requests_and_rejects_error_statuses() {
-        for response in [
-            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".as_slice(),
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
-        ] {
-            let (port, task) = fake_proxy(response, false).await;
-            assert!(
-                measure_http_latency(&probe_client(port).unwrap(), "http://probe.invalid/test")
+        for mode in [HttpLatencyMode::Unified, HttpLatencyMode::FullHandshake] {
+            let expected_reqs = if mode == HttpLatencyMode::Unified {
+                2
+            } else {
+                1
+            };
+            for response in [
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".as_slice(),
+            ] {
+                let (port, task) =
+                    fake_socks5_proxy(response, expected_reqs, Duration::ZERO, false).await;
+                assert!(
+                    measure_http_latency(
+                        &probe_client(port).unwrap(),
+                        "http://probe.invalid/test",
+                        mode,
+                    )
                     .await
                     .is_ok()
-            );
-            assert!(
-                task.await
-                    .unwrap()
-                    .starts_with("GET http://probe.invalid/test HTTP/1.1")
-            );
-        }
-        for response in [
-            b"HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\n\r\n".as_slice(),
-            b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
-        ] {
-            let (port, task) = fake_proxy(response, false).await;
-            assert!(
-                measure_http_latency(&probe_client(port).unwrap(), "http://probe.invalid/test")
+                );
+                let report = task.await.unwrap();
+                assert_eq!(report.host, "probe.invalid");
+                assert_eq!(report.connections, 1);
+                assert_eq!(report.requests.len(), expected_reqs);
+                assert!(report.requests[0].starts_with("GET /test HTTP/1.1"));
+            }
+            for response in [
+                b"HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            ] {
+                let (port, task) = fake_socks5_proxy(response, 1, Duration::ZERO, false).await;
+                assert!(
+                    measure_http_latency(
+                        &probe_client(port).unwrap(),
+                        "http://probe.invalid/test",
+                        mode,
+                    )
                     .await
                     .is_err()
-            );
-            task.await.unwrap();
+                );
+                task.await.unwrap();
+            }
         }
     }
 
     #[tokio::test]
+    async fn unified_mode_excludes_cold_handshake_while_full_handshake_includes_it() {
+        let response = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".as_slice();
+        let handshake_delay = Duration::from_millis(140);
+
+        let (unified_port, unified_task) =
+            fake_socks5_proxy(response, 2, handshake_delay, false).await;
+        let unified_ms = measure_http_latency(
+            &probe_client(unified_port).unwrap(),
+            "http://probe.invalid/generate_204",
+            HttpLatencyMode::Unified,
+        )
+        .await
+        .unwrap();
+        let unified_report = unified_task.await.unwrap();
+        assert_eq!(unified_report.connections, 1);
+        assert_eq!(unified_report.requests.len(), 2);
+        assert!(
+            unified_ms < 100,
+            "expected unified latency to exclude 140ms handshake, got {unified_ms}ms"
+        );
+
+        let (cold_port, cold_task) = fake_socks5_proxy(response, 1, handshake_delay, false).await;
+        let cold_ms = measure_http_latency(
+            &probe_client(cold_port).unwrap(),
+            "http://probe.invalid/generate_204",
+            HttpLatencyMode::FullHandshake,
+        )
+        .await
+        .unwrap();
+        let cold_report = cold_task.await.unwrap();
+        assert_eq!(cold_report.connections, 1);
+        assert_eq!(cold_report.requests.len(), 1);
+        assert!(
+            cold_ms >= 120,
+            "expected full-handshake latency to include 140ms handshake, got {cold_ms}ms"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unified_mode_consistently_reuses_single_connection_on_multithreaded_runtime() {
+        let response = b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".as_slice();
+        for _ in 0..10 {
+            let (port, task) = fake_socks5_proxy(response, 2, Duration::ZERO, false).await;
+            let result = measure_http_latency(
+                &probe_client(port).unwrap(),
+                "http://probe.invalid/generate_204",
+                HttpLatencyMode::Unified,
+            )
+            .await;
+            assert!(result.is_ok());
+            let report = task.await.unwrap();
+            assert_eq!(report.connections, 1);
+            assert_eq!(report.requests.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn unified_mode_falls_back_gracefully_when_server_closes_after_first_response() {
+        let response =
+            b"HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n".as_slice();
+        let (port, task) = fake_socks5_proxy(response, 1, Duration::ZERO, false).await;
+        let ms = measure_http_latency(
+            &probe_client(port).unwrap(),
+            "http://probe.invalid/generate_204",
+            HttpLatencyMode::Unified,
+        )
+        .await
+        .unwrap();
+        assert!(ms < 2000);
+        let report = task.await.unwrap();
+        assert_eq!(report.requests.len(), 1);
+    }
+
+    #[tokio::test]
     async fn download_uses_explicit_proxy_and_caps_bytes() {
-        let (port, task) = fake_proxy(
+        let (port, task) = fake_socks5_proxy(
             b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nabcdefgh",
+            1,
+            Duration::ZERO,
             false,
         )
         .await;
@@ -501,16 +753,23 @@ mod tests {
         .unwrap();
         assert_eq!(result.bytes, 4);
         assert!(result.bytes_per_second > 0);
-        let request = task.await.unwrap();
-        assert!(request.starts_with("GET http://node-probe.invalid/file HTTP/1.1"));
+        let report = task.await.unwrap();
+        assert_eq!(report.host, "node-probe.invalid");
+        let request = &report.requests[0];
+        assert!(request.starts_with("GET /file HTTP/1.1"));
         assert!(request.to_lowercase().contains("accept-encoding: identity"));
         assert!(request.to_lowercase().contains("user-agent: xrose-probe/"));
     }
 
     #[tokio::test]
     async fn stalled_download_finishes_at_deadline_with_received_bytes() {
-        let (port, task) =
-            fake_proxy(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n1234", true).await;
+        let (port, task) = fake_socks5_proxy(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n1234",
+            1,
+            Duration::ZERO,
+            true,
+        )
+        .await;
         let started = Instant::now();
         let result = measure_download(
             &probe_client(port).unwrap(),
@@ -534,8 +793,17 @@ mod tests {
             &b"HTTP/1.1 302 Found\r\nLocation: http://elsewhere.invalid\r\nContent-Length: 0\r\n\r\n"[..],
             &b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n1234"[..],
         ] {
-            let (port, task) = fake_proxy(response, false).await;
-            assert!(measure_download(&probe_client(port).unwrap(), "http://node-probe.invalid/file", Duration::from_secs(1), 1000).await.is_err());
+            let (port, task) = fake_socks5_proxy(response, 1, Duration::ZERO, false).await;
+            assert!(
+                measure_download(
+                    &probe_client(port).unwrap(),
+                    "http://node-probe.invalid/file",
+                    Duration::from_secs(1),
+                    1000
+                )
+                .await
+                .is_err()
+            );
             task.await.unwrap();
         }
     }

@@ -520,6 +520,22 @@ impl AppService {
             traffic_statistics::StatisticsState::new(settings.traffic_statistics_enabled);
         let rule_set_updates = updates::cached_rule_set_updates(&paths.rule_sets_dir());
         let now = now_unix();
+        if store.stored_health_latency_mode() != Some(settings.http_latency_mode) {
+            if let Err(err) = store.reset_health_http_history() {
+                tracing::warn!(
+                    target: "xrose::health",
+                    error = %err,
+                    "reset stale health latency history failed"
+                );
+            }
+            if let Err(err) = store.set_stored_health_latency_mode(settings.http_latency_mode) {
+                tracing::warn!(
+                    target: "xrose::health",
+                    error = %err,
+                    "save health latency mode failed"
+                );
+            }
+        }
         let mut health_engine = crate::runtime::health::HealthEngine::new();
         if let Ok((samples, buckets, reachability)) = store.load_health_snapshot(now) {
             health_engine.load_persisted(samples, buckets, reachability, now);
@@ -2109,6 +2125,7 @@ impl AppService {
         for node in &targets {
             self.set_busy(&format!("latency:{}", node.id), true);
         }
+        let latency_mode = settings.http_latency_mode;
         let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
@@ -2120,7 +2137,12 @@ impl AppService {
                     async move {
                         let result = if let Some(binary) = binary {
                             match crate::runtime::probe::http_latency(
-                                &binary, core, &node, &url, bypass_tun,
+                                &binary,
+                                core,
+                                &node,
+                                &url,
+                                bypass_tun,
+                                latency_mode,
                             )
                             .await
                             {
@@ -2164,7 +2186,11 @@ impl AppService {
                     ok: result.ok,
                     rtt_ms: result.delay_ms,
                     bps: None,
-                    bytes_used: if use_http { 512 } else { 0 },
+                    bytes_used: if use_http {
+                        latency_mode.estimated_bytes()
+                    } else {
+                        0
+                    },
                     err_stage,
                 };
                 let entry = LatencyEntry {
@@ -2174,7 +2200,7 @@ impl AppService {
                     detail: result.error.clone().or_else(|| {
                         Some(
                             if use_http {
-                                "HTTP 延迟"
+                                latency_mode.detail_label()
                             } else {
                                 "TCP 延迟"
                             }
@@ -2401,7 +2427,7 @@ impl AppService {
                 key: target_key.to_owned(),
                 delay_ms: Some(delay_ms),
                 checked_at: outcome.report.checked_at,
-                detail: Some("HTTP 延迟".into()),
+                detail: Some(outcome.latency_mode.detail_label().into()),
             };
             let _ = self.inner.store.set_latency(&entry);
             self.inner
@@ -2409,7 +2435,12 @@ impl AppService {
                 .write()
                 .insert(target_key.to_owned(), entry);
         }
-        let rtt_ms = outcome.latency_ms.or(outcome.trace_rtt_ms);
+        let rtt_ms = match outcome.latency_mode {
+            crate::settings::HttpLatencyMode::Unified => outcome.latency_ms,
+            crate::settings::HttpLatencyMode::FullHandshake => {
+                outcome.latency_ms.or(outcome.trace_rtt_ms)
+            }
+        };
         let ok = outcome.bytes_used > 0 || rtt_ms.is_some();
         let sample = crate::runtime::health::ProbeSampleRecord {
             target_key: target_key.to_owned(),
@@ -3288,6 +3319,20 @@ impl AppService {
         if let Err(err) = self.save_settings(&new) {
             self.toast(ToastLevel::Error, format!("保存设置失败：{err}"));
             return;
+        }
+        if new.http_latency_mode != old.http_latency_mode {
+            let _ = self.inner.store.reset_health_http_history();
+            let _ = self
+                .inner
+                .store
+                .set_stored_health_latency_mode(new.http_latency_mode);
+            let now = now_unix();
+            let views = {
+                let mut health = self.inner.health.lock();
+                health.reset_http_history();
+                health.build_all_views(now)
+            };
+            *self.inner.health_views.write() = Arc::new(views);
         }
         if new.system_notifications != old.system_notifications {
             if let Some(sender) = self.inner.notification_sender.read().as_ref() {
@@ -8296,6 +8341,7 @@ proxy-groups:
                 bytes_used: 4096,
                 trace_rtt_ms: Some(110),
                 latency_ms: Some(110),
+                latency_mode: crate::settings::HttpLatencyMode::Unified,
                 from_cache: false,
             },
         );
@@ -8307,5 +8353,158 @@ proxy-groups:
 
         assert!(!service.snapshot().config_dirty);
         assert!(!service.inner.reload.lock().dirty);
+    }
+
+    #[test]
+    fn health_http_history_resets_across_latency_mode_upgrade_and_switch() {
+        use crate::runtime::health::{
+            ErrStage, HealthDim, ProbeKind, ProbeSampleRecord, ReachabilityCheckStatus,
+            ReachabilityReport, ServiceCheckResult,
+        };
+        use crate::runtime::reachability::ReachabilityOutcome;
+        use crate::settings::HttpLatencyMode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_root(dir.path());
+        paths.ensure().unwrap();
+        let now = now_unix();
+
+        // Simulate pre-upgrade persisted database with legacy cold-handshake samples
+        // and no stored `health_latency_mode`.
+        {
+            let store = Store::open(&paths).unwrap();
+            for i in 0..10 {
+                store
+                    .record_health_probe(&ProbeSampleRecord {
+                        target_key: "node-vision".into(),
+                        kind: ProbeKind::Http,
+                        ts: now - 3600 - i * 30,
+                        ok: true,
+                        rtt_ms: Some(1200),
+                        bps: None,
+                        bytes_used: 512,
+                        err_stage: ErrStage::None,
+                    })
+                    .unwrap();
+            }
+            let mut report = ReachabilityReport {
+                checked_at: now - 600,
+                ..Default::default()
+            };
+            report.chatgpt = ServiceCheckResult::new(ReachabilityCheckStatus::Pass);
+            store
+                .save_reachability("node-vision", Some("198.51.100.10"), &report)
+                .unwrap();
+        }
+
+        // First startup in Unified mode clears legacy HTTP samples while keeping reachability.
+        let service = AppService::with_paths(paths.clone()).unwrap();
+        let view = service
+            .snapshot()
+            .node_health
+            .get("node-vision")
+            .cloned()
+            .unwrap();
+        assert!(view.reachability.is_some());
+        assert!(
+            view.general
+                .unwrap()
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Latency)
+                .unwrap()
+                .p50_ms
+                .is_none()
+        );
+
+        // Recording a Unified reachability outcome with no latency_ms does not pollute
+        // latency with cold-handshake trace_rtt_ms.
+        service.record_reachability_outcome(
+            "node-vision",
+            &ReachabilityOutcome {
+                egress_ip: Some("198.51.100.10".into()),
+                report: ReachabilityReport {
+                    checked_at: now,
+                    ..Default::default()
+                },
+                bytes_used: 2048,
+                trace_rtt_ms: Some(1150),
+                latency_ms: None,
+                latency_mode: HttpLatencyMode::Unified,
+                from_cache: false,
+            },
+        );
+        let after_trace_only = service
+            .snapshot()
+            .node_health
+            .get("node-vision")
+            .cloned()
+            .unwrap();
+        assert!(
+            after_trace_only
+                .general
+                .unwrap()
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Latency)
+                .unwrap()
+                .p50_ms
+                .is_none()
+        );
+
+        // New Unified HTTP sample is persisted and survives restart in the same mode.
+        service.record_health_sample(ProbeSampleRecord {
+            target_key: "node-vision".into(),
+            kind: ProbeKind::Http,
+            ts: now,
+            ok: true,
+            rtt_ms: Some(260),
+            bps: None,
+            bytes_used: 1024,
+            err_stage: ErrStage::None,
+        });
+        drop(service);
+
+        let reopened = AppService::with_paths(paths).unwrap();
+        let persisted = reopened
+            .snapshot()
+            .node_health
+            .get("node-vision")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            persisted
+                .general
+                .unwrap()
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Latency)
+                .unwrap()
+                .p50_ms,
+            Some(260)
+        );
+
+        // Switching latency mode in Settings immediately clears cross-mode HTTP history.
+        let mut settings = reopened.settings();
+        settings.http_latency_mode = HttpLatencyMode::FullHandshake;
+        reopened.update_settings(settings);
+        let switched = reopened
+            .snapshot()
+            .node_health
+            .get("node-vision")
+            .cloned()
+            .unwrap();
+        assert!(switched.reachability.is_some());
+        assert!(
+            switched
+                .general
+                .unwrap()
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Latency)
+                .unwrap()
+                .p50_ms
+                .is_none()
+        );
     }
 }

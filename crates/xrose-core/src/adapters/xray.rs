@@ -829,32 +829,28 @@ fn tun_inbound(
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
     compile_probe_with_inbounds(
         Some(node),
-        vec![
-            json!({"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}}),
-        ],
+        vec![json!({
+            "protocol": "socks",
+            "tag": "probe",
+            "listen": "127.0.0.1",
+            "port": port,
+            "settings": {"auth": "noauth", "udp": true, "userLevel": 0}
+        })],
     )
 }
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
     compile_probe_with_inbounds(
         None,
-        vec![json!({"protocol": "http", "tag": "probe", "listen": "127.0.0.1", "port": port, "settings": {}})],
+        vec![json!({
+            "protocol": "socks",
+            "tag": "probe",
+            "listen": "127.0.0.1",
+            "port": port,
+            "settings": {"auth": "noauth", "udp": true, "userLevel": 0}
+        })],
     )
     .expect("direct probe compiles")
-}
-
-pub(super) fn compile_reachability_probe(
-    node: Option<&Node>,
-    http_port: u16,
-    socks_port: u16,
-) -> Result<Value> {
-    compile_probe_with_inbounds(
-        node,
-        vec![
-            json!({"protocol": "http", "tag": "probe-http", "listen": "127.0.0.1", "port": http_port, "settings": {}}),
-            json!({"protocol": "socks", "tag": "probe-socks", "listen": "127.0.0.1", "port": socks_port, "settings": {"auth": "noauth", "udp": true, "userLevel": 0}}),
-        ],
-    )
 }
 
 fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {

@@ -536,6 +536,7 @@ impl AppService {
         let url = group.url.as_deref().unwrap_or(&settings.urltest_url);
         let bypass_tun = self.inner.core.native_tun_active();
         let mode = group.switch_mode();
+        let latency_mode = self.settings().http_latency_mode;
         let probe = GroupProbe {
             service: self,
             binary: Path::new(binary),
@@ -543,6 +544,7 @@ impl AppService {
             url,
             bypass_tun,
             mode,
+            latency_mode,
         };
         let target = report_main.then(|| self.tray_probe_target()).flatten();
         let current = probe.measure(active).await;
@@ -678,6 +680,7 @@ struct GroupProbe<'a> {
     url: &'a str,
     bypass_tun: bool,
     mode: SwitchMode,
+    latency_mode: crate::settings::HttpLatencyMode,
 }
 
 impl GroupProbe<'_> {
@@ -720,15 +723,22 @@ impl GroupProbe<'_> {
                 .insert(node.id.clone(), entry);
             speed
         } else {
-            let result =
-                probe::http_latency(self.binary, self.core, node, self.url, self.bypass_tun).await;
+            let result = probe::http_latency(
+                self.binary,
+                self.core,
+                node,
+                self.url,
+                self.bypass_tun,
+                self.latency_mode,
+            )
+            .await;
             let ok = result.is_ok();
             let ms = result.as_ref().ok().copied();
             let checked_at = now_unix();
             let detail = result
                 .err()
                 .map(|e| e.to_string())
-                .unwrap_or_else(|| "HTTP 延迟".into());
+                .unwrap_or_else(|| self.latency_mode.detail_label().into());
             let err_stage = if ok {
                 crate::runtime::health::ErrStage::None
             } else {
@@ -742,7 +752,11 @@ impl GroupProbe<'_> {
                     ok,
                     rtt_ms: ms,
                     bps: None,
-                    bytes_used: if ok { 512 } else { 0 },
+                    bytes_used: if ok {
+                        self.latency_mode.estimated_bytes()
+                    } else {
+                        0
+                    },
                     err_stage,
                 });
             let entry = LatencyEntry {

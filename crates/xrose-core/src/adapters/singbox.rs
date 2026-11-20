@@ -690,30 +690,16 @@ fn tun_inbound(inbound: &Inbound) -> Value {
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
     compile_probe_with_inbounds(
         Some(node),
-        vec![json!({"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
+        vec![json!({"type": "socks", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
     )
 }
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
     compile_probe_with_inbounds(
         None,
-        vec![json!({"type": "http", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
+        vec![json!({"type": "socks", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
     )
     .expect("direct probe compiles")
-}
-
-pub(super) fn compile_reachability_probe(
-    node: Option<&Node>,
-    http_port: u16,
-    socks_port: u16,
-) -> Result<Value> {
-    compile_probe_with_inbounds(
-        node,
-        vec![
-            json!({"type": "http", "tag": "probe-http", "listen": "127.0.0.1", "listen_port": http_port}),
-            json!({"type": "socks", "tag": "probe-socks", "listen": "127.0.0.1", "listen_port": socks_port}),
-        ],
-    )
 }
 
 fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {

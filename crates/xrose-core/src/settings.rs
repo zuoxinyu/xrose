@@ -125,6 +125,35 @@ impl ProxyAccount {
 pub const DEFAULT_OVERSEAS_URLTEST_URL: &str = "https://www.gstatic.com/generate_204";
 pub const DEFAULT_DOMESTIC_URLTEST_URL: &str = "https://connect.rom.miui.com/generate_204";
 
+/// How HTTP latency probes measure round-trip time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpLatencyMode {
+    /// Warm up the connection with one request, then time a follow-up request
+    /// over the reused keep-alive tunnel (aligned with unified-delay tools).
+    #[default]
+    Unified,
+    /// Measure a single cold-start request including TCP, proxy, and TLS
+    /// handshakes.
+    FullHandshake,
+}
+
+impl HttpLatencyMode {
+    pub const fn detail_label(self) -> &'static str {
+        match self {
+            Self::Unified => "HTTP 延迟（统一延迟）",
+            Self::FullHandshake => "HTTP 延迟（含首次握手）",
+        }
+    }
+
+    pub const fn estimated_bytes(self) -> u64 {
+        match self {
+            Self::Unified => 1024,
+            Self::FullHandshake => 512,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct Settings {
@@ -175,6 +204,8 @@ pub struct Settings {
     pub urltest_url: String,
     #[serde(default = "default_domestic_urltest_url")]
     pub domestic_urltest_url: String,
+    #[serde(default)]
+    pub http_latency_mode: HttpLatencyMode,
     pub urltest_interval_secs: u64,
     pub subscription_update_hours: u64,
     /// Selected managed version per core. Without a version, use the local executable.
@@ -250,6 +281,7 @@ impl Default for Settings {
             watchdog_max_retries: 5,
             urltest_url: DEFAULT_OVERSEAS_URLTEST_URL.into(),
             domestic_urltest_url: DEFAULT_DOMESTIC_URLTEST_URL.into(),
+            http_latency_mode: HttpLatencyMode::default(),
             urltest_interval_secs: 300,
             subscription_update_hours: 12,
             check_app_updates: true,
@@ -607,6 +639,7 @@ mod tests {
         new.update_user_agent = "Fixture/1".into();
         new.check_app_updates = !old.check_app_updates;
         new.last_update_check = Some(123);
+        new.http_latency_mode = HttpLatencyMode::FullHandshake;
         for core in CoreKind::all() {
             let mut baseline = old.clone();
             baseline.core = core;
@@ -807,6 +840,15 @@ mod tests {
 
         let mut changed = loaded.clone();
         changed.domestic_urltest_url = "https://connect.rom.miui.com/generate_204?v=2".into();
+        changed.http_latency_mode = HttpLatencyMode::FullHandshake;
         assert!(!changed.requires_core_restart(&loaded, &crate::model::AppModel::default()));
+        assert_eq!(loaded.http_latency_mode, HttpLatencyMode::Unified);
+        changed.save(&path).unwrap();
+        let saved_json = std::fs::read_to_string(&path).unwrap();
+        assert!(saved_json.contains("full_handshake"));
+        assert_eq!(
+            Settings::load(&path).unwrap().http_latency_mode,
+            HttpLatencyMode::FullHandshake
+        );
     }
 }

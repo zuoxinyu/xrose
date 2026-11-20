@@ -12,7 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::error::{Error, Result};
 use crate::model::{CoreKind, Node};
 use crate::runtime::health::{ReachabilityCheckStatus, ReachabilityReport, ServiceCheckResult};
-use crate::runtime::probe::{probe_client, resolve_probe_node, spawn_isolated_probe_core};
+use crate::runtime::probe::Probe;
+use crate::settings::HttpLatencyMode;
 use crate::util::now_unix;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,6 +27,7 @@ pub struct ReachabilityOutcome {
     pub bytes_used: u64,
     pub trace_rtt_ms: Option<u32>,
     pub latency_ms: Option<u32>,
+    pub latency_mode: HttpLatencyMode,
     pub from_cache: bool,
 }
 
@@ -39,64 +41,7 @@ struct HttpObservation {
     rtt_ms: u32,
 }
 
-struct IsolatedDualProbe {
-    child: tokio::process::Child,
-    _directory: tempfile::TempDir,
-    client: reqwest::Client,
-    socks_port: u16,
-}
-
-impl IsolatedDualProbe {
-    async fn start(
-        binary: &Path,
-        core: CoreKind,
-        node: Option<&Node>,
-        bypass_tun: bool,
-    ) -> Result<Self> {
-        let http_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let http_port = http_listener.local_addr()?.port();
-        let socks_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let socks_port = socks_listener.local_addr()?.port();
-        let (target, interface) = resolve_probe_node(core, node, bypass_tun).await?;
-        let mut config = crate::adapters::compile_reachability_probe(
-            core,
-            target.as_ref(),
-            http_port,
-            socks_port,
-        )?;
-        if let Some(interface) = interface {
-            match core {
-                CoreKind::Xray => {
-                    crate::adapters::xray::bind_probe_interface(&mut config, &interface);
-                }
-                CoreKind::SingBox => {
-                    crate::adapters::singbox::bind_probe_interface(
-                        &mut config,
-                        &interface,
-                        target.is_none(),
-                    );
-                }
-            }
-        }
-        drop(http_listener);
-        drop(socks_listener);
-        let client = probe_client(http_port)?;
-        let (child, _directory) =
-            spawn_isolated_probe_core(binary, core, &config, http_port).await?;
-        Ok(Self {
-            child,
-            _directory,
-            client,
-            socks_port,
-        })
-    }
-
-    async fn stop(&mut self) {
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 pub async fn probe_reachability<F>(
     binary: &Path,
     core: CoreKind,
@@ -105,18 +50,20 @@ pub async fn probe_reachability<F>(
     udp_enabled: bool,
     force_refresh: bool,
     latency_url: Option<&str>,
+    latency_mode: HttpLatencyMode,
     lookup_cached: F,
 ) -> Result<ReachabilityOutcome>
 where
     F: FnOnce(&str) -> Option<ReachabilityReport>,
 {
-    let mut probe = IsolatedDualProbe::start(binary, core, node, bypass_tun).await?;
+    let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
     let outcome = run_reachability_suite(
         &probe.client,
-        probe.socks_port,
+        probe.port,
         udp_enabled,
         force_refresh,
         latency_url,
+        latency_mode,
         lookup_cached,
     )
     .await;
@@ -130,11 +77,24 @@ async fn run_reachability_suite<F>(
     udp_enabled: bool,
     force_refresh: bool,
     latency_url: Option<&str>,
+    latency_mode: HttpLatencyMode,
     lookup_cached: F,
 ) -> Result<ReachabilityOutcome>
 where
     F: FnOnce(&str) -> Option<ReachabilityReport>,
 {
+    // Measure HTTP latency before starting concurrent UDP STUN and trace probes
+    // so cold proxy transports (such as QUIC/TUIC or AnyTLS) are not contended
+    // during timing, and the subsequent probes reuse the warmed session.
+    let latency_ms = match latency_url {
+        Some(url) if !url.trim().is_empty() => {
+            crate::runtime::probe::measure_http_latency(client, url, latency_mode)
+                .await
+                .ok()
+        }
+        _ => None,
+    };
+
     let udp_fut = async {
         if udp_enabled {
             socks5_stun_probe(
@@ -149,17 +109,7 @@ where
         }
     };
     let trace_fut = fetch_egress_trace(client, "https://www.cloudflare.com/cdn-cgi/trace");
-    let latency_fut = async {
-        match latency_url {
-            Some(url) if !url.trim().is_empty() => {
-                crate::runtime::probe::measure_http_latency(client, url)
-                    .await
-                    .ok()
-            }
-            _ => None,
-        }
-    };
-    let (udp_stun, trace_result, latency_ms) = tokio::join!(udp_fut, trace_fut, latency_fut);
+    let (udp_stun, trace_result) = tokio::join!(udp_fut, trace_fut);
 
     let (egress_ip, egress_region, mut bytes_used, trace_rtt_ms, trace_cf_mitigated) =
         match trace_result {
@@ -167,7 +117,7 @@ where
             Err(_) => (None, None, 0, None, false),
         };
     if latency_ms.is_some() {
-        bytes_used = bytes_used.saturating_add(512);
+        bytes_used = bytes_used.saturating_add(latency_mode.estimated_bytes());
     }
 
     if !force_refresh
@@ -182,6 +132,7 @@ where
             bytes_used,
             trace_rtt_ms,
             latency_ms,
+            latency_mode,
             from_cache: true,
         });
     }
@@ -265,6 +216,7 @@ where
         bytes_used,
         trace_rtt_ms,
         latency_ms,
+        latency_mode,
         from_cache: false,
     })
 }

@@ -1388,10 +1388,7 @@ fn http_row_controls(
             format!(
                 "{} · {}",
                 age_text(lang, latency_age_secs(entry)),
-                entry
-                    .detail
-                    .as_deref()
-                    .unwrap_or(super::tr(lang, "HTTP 延迟", "HTTP latency").as_ref())
+                latency_detail_text(lang, entry.detail.as_deref())
             )
         })
         .unwrap_or_else(|| {
@@ -1491,6 +1488,19 @@ fn clear_winner(mut measured: Vec<(String, u32)>) -> Option<String> {
     let (_, second) = measured.get(1)?;
     let threshold = FASTEST_MIN_GAP_MS.max((*second as f32 * FASTEST_MIN_GAP_RATIO) as u32);
     (second.saturating_sub(*best) >= threshold).then(|| best_id.clone())
+}
+
+fn latency_detail_text(lang: Language, detail: Option<&str>) -> String {
+    match (lang, detail) {
+        (Language::En, None | Some("HTTP 延迟")) => "HTTP latency".into(),
+        (Language::En, Some("HTTP 延迟（统一延迟）")) => "HTTP latency (unified)".into(),
+        (Language::En, Some("HTTP 延迟（含首次握手）")) => {
+            "HTTP latency (with handshake)".into()
+        }
+        (Language::En, Some("TCP 延迟")) => "TCP latency".into(),
+        (_, Some(text)) => text.to_owned(),
+        (Language::Zh, None) => "HTTP 延迟".into(),
+    }
 }
 
 fn age_text(lang: Language, secs: i64) -> String {

@@ -259,6 +259,7 @@ impl AppService {
         let settings = self.settings();
         let overseas_url = settings.urltest_url;
         let domestic_url = settings.domestic_urltest_url;
+        let latency_mode = settings.http_latency_mode;
         let active = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
@@ -290,6 +291,7 @@ impl AppService {
                                     node.as_ref(),
                                     &url,
                                     bypass_tun,
+                                    latency_mode,
                                 )
                                 .await
                             }
@@ -312,7 +314,7 @@ impl AppService {
                 let delay_ms = result.as_ref().ok().copied();
                 let checked_at = now_unix();
                 let detail = match result {
-                    Ok(_) => "HTTP 延迟".into(),
+                    Ok(_) => latency_mode.detail_label().into(),
                     Err(error) => format!("HTTP 测速失败：{}", test_error_message(error)),
                 };
                 let err_stage = if ok {
@@ -327,7 +329,11 @@ impl AppService {
                     ok,
                     rtt_ms: delay_ms,
                     bps: None,
-                    bytes_used: if ok { 512 } else { 0 },
+                    bytes_used: if ok {
+                        latency_mode.estimated_bytes()
+                    } else {
+                        0
+                    },
                     err_stage,
                 });
                 let entry = LatencyEntry {
@@ -358,6 +364,7 @@ impl AppService {
         let settings = self.settings();
         let overseas_url = settings.urltest_url;
         let domestic_url = settings.domestic_urltest_url;
+        let latency_mode = settings.http_latency_mode;
         let active = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
@@ -391,6 +398,7 @@ impl AppService {
                                     udp_enabled,
                                     force_refresh,
                                     Some(&url),
+                                    latency_mode,
                                     move |ip| {
                                         store
                                             .get_cached_reachability(ip, 6 * 3600, now_unix())

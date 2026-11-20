@@ -102,7 +102,7 @@ $$
 
 ### 3.5 可达性 `R`（AI / 流媒体 / 出口环境）
 
-可达性探测复用单次隔离测试内核（`compile_reachability_probe` 同时暴露本地 HTTP 与支持 UDP 的 SOCKS5 回环入站），先解析落地出口 IP 并以本机 `SecretBox` 派生密钥计算 `keyed_hash("egress-v1", egress_ip)`：
+可达性探测复用单次隔离测试内核（`compile_probe` 暴露支持 TCP 与 UDP 的本地 SOCKS5 回环入站），先独立完成 HTTP 延迟采样再解析落地出口 IP 并以本机 `SecretBox` 派生密钥计算 `keyed_hash("egress-v1", egress_ip)`：
 - **同出口共享缓存**：命中 6 小时内有效缓存时直接复用检测结果（`UdpStun` 仍按节点独立保留）。
 - **被动与合规限制**：所有检测均为无 Cookie、不带账号凭据、禁止自动重定向的单次轻量 HTTP 或 RFC 5389 STUN 绑定请求。遇到 `403`、`429`、地区拦截重定向或反爬/人机验证响应头（如 `cf-mitigated`、`/sorry/`）时立即停止并记为 `Limited` 或 `Blocked`，绝不重试或绕过验证机制。
 

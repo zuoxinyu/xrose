@@ -1060,6 +1060,30 @@ impl HealthEngine {
         self.dirty_buckets.clear();
     }
 
+    /// Clears HTTP / reachability probe history when the latency measurement
+    /// mode changes, while keeping reachability unlock reports, passive flow
+    /// observations, throughput samples, and mesh peer metrics.
+    pub fn reset_http_history(&mut self) {
+        for state in self.targets.values_mut() {
+            state
+                .samples
+                .retain(|s| !matches!(s.kind, ProbeKind::Http | ProbeKind::Reachability));
+            if !state.is_mesh_exit {
+                for acc in state.hourly.values_mut() {
+                    acc.ok_weighted = 0.0;
+                    acc.total_weighted = 0.0;
+                    acc.rtts.clear();
+                    acc.stored_p50 = None;
+                    acc.stored_p90 = None;
+                }
+                state.hourly.retain(|_, acc| {
+                    acc.total_weighted > 0.0 || acc.p50_ms().is_some() || acc.tput_p75().is_some()
+                });
+            }
+        }
+        self.dirty_buckets.clear();
+    }
+
     pub fn take_dirty_hourly_buckets(&mut self) -> Vec<HourlyBucket> {
         let dirty = std::mem::take(&mut self.dirty_buckets);
         dirty
@@ -1297,35 +1321,41 @@ fn compute_window(
         })
         .filter_map(|s| s.rtt_ms.filter(|&r| r > 0).map(|rtt| (s.ts, rtt)))
         .collect();
-    let mut rtts: Vec<u32> = if !include_hourly {
-        let recent: Vec<u32> = latency_candidates
+    let mut rtts: Vec<(u32, f64)> = if !include_hourly {
+        let recent: Vec<(u32, f64)> = latency_candidates
             .iter()
             .filter(|(ts, _)| now.saturating_sub(*ts) <= 1800)
-            .map(|(_, rtt)| *rtt)
+            .map(|&(ts, rtt)| (rtt, decay_weight(now.saturating_sub(ts), half_life)))
             .collect();
         if recent.is_empty() {
             latency_candidates
                 .iter()
                 .rev()
                 .take(3)
-                .map(|(_, rtt)| *rtt)
+                .map(|&(ts, rtt)| (rtt, decay_weight(now.saturating_sub(ts), half_life)))
                 .collect()
         } else {
             recent
         }
     } else {
-        latency_candidates.iter().map(|(_, rtt)| *rtt).collect()
+        latency_candidates
+            .iter()
+            .map(|&(ts, rtt)| (rtt, decay_weight(now.saturating_sub(ts), half_life)))
+            .collect()
     };
     if rtts.is_empty() && include_hourly {
         for acc in state.hourly.values() {
             if let Some(p50) = acc.p50_ms() {
-                rtts.push(p50);
+                rtts.push((
+                    p50,
+                    decay_weight(now.saturating_sub(acc.hour_bucket), half_life),
+                ));
             }
         }
     }
     let (p50_ms, p90_ms, s_lat) = if !rtts.is_empty() {
-        let p50 = percentile_u32(&rtts, 50).unwrap_or(0);
-        let p90 = percentile_u32(&rtts, 90).unwrap_or(p50);
+        let p50 = weighted_percentile_u32(&rtts, 50).unwrap_or(0);
+        let p90 = weighted_percentile_u32(&rtts, 90).unwrap_or(p50);
         let mix = (0.60 * p50 as f64 + 0.40 * p90 as f64).max(1.0);
         let (l_good, l_bad) = if state.is_mesh_exit {
             (30.0f64, 300.0f64)
@@ -1346,30 +1376,30 @@ fn compute_window(
         .filter(|s| s.ok)
         .filter_map(|s| s.rtt_ms.filter(|&r| r > 0).map(|rtt| (s.ts, rtt)))
         .collect();
-    let ok_rtts: Vec<u32> = if !include_hourly {
-        let recent: Vec<u32> = ok_rtt_candidates
+    let ok_rtts: Vec<(i64, u32)> = if !include_hourly {
+        let recent: Vec<(i64, u32)> = ok_rtt_candidates
             .iter()
+            .copied()
             .filter(|(ts, _)| now.saturating_sub(*ts) <= 1800)
-            .map(|(_, rtt)| *rtt)
             .collect();
         if recent.is_empty() {
             let skip = ok_rtt_candidates.len().saturating_sub(3);
-            ok_rtt_candidates[skip..]
-                .iter()
-                .map(|(_, rtt)| *rtt)
-                .collect()
+            ok_rtt_candidates[skip..].to_vec()
         } else {
             recent
         }
     } else {
-        ok_rtt_candidates.iter().map(|(_, rtt)| *rtt).collect()
+        ok_rtt_candidates
     };
     let jitter_ms = if ok_rtts.len() >= 2 {
-        let mut diffs = 0.0f64;
+        let mut weighted_diff = 0.0f64;
+        let mut weight_sum = 0.0f64;
         for w in ok_rtts.windows(2) {
-            diffs += (w[1] as f64 - w[0] as f64).abs();
+            let wt = decay_weight(now.saturating_sub(w[1].0), half_life);
+            weighted_diff += (w[1].1 as f64 - w[0].1 as f64).abs() * wt;
+            weight_sum += wt;
         }
-        Some((diffs / (ok_rtts.len() - 1) as f64).round() as u32)
+        (weight_sum > 0.0).then(|| (weighted_diff / weight_sum).round() as u32)
     } else {
         None
     };
@@ -1813,6 +1843,31 @@ fn percentile_u32(values: &[u32], pct: usize) -> Option<u32> {
     Some(sorted[idx])
 }
 
+fn weighted_percentile_u32(samples: &[(u32, f64)], pct: usize) -> Option<u32> {
+    let mut valid: Vec<(u32, f64)> = samples
+        .iter()
+        .copied()
+        .filter(|&(v, w)| v > 0 && w.is_finite() && w > 0.0)
+        .collect();
+    if valid.is_empty() {
+        return None;
+    }
+    valid.sort_unstable_by_key(|&(v, _)| v);
+    let total: f64 = valid.iter().map(|&(_, w)| w).sum();
+    if total <= 0.0 {
+        return Some(valid[0].0);
+    }
+    let target = total * (pct as f64 / 100.0);
+    let mut acc = 0.0;
+    for &(val, w) in &valid {
+        acc += w;
+        if acc >= target {
+            return Some(val);
+        }
+    }
+    valid.last().map(|&(v, _)| v)
+}
+
 fn percentile_u64(values: &[u64], pct: usize) -> Option<u64> {
     if values.is_empty() {
         return None;
@@ -2138,5 +2193,74 @@ mod tests {
         let resumed = tput_dim(engine.build_view("node-vision", now).unwrap());
         assert!(resumed.passive_throughput);
         assert_eq!(resumed.throughput_bps, Some(4_725_000));
+    }
+
+    #[test]
+    fn reset_http_history_and_time_decayed_percentiles_keep_recent_latency_accurate() {
+        let mut engine = HealthEngine::new();
+        let now = 1_750_000_000i64;
+        // Older high-latency samples from 3 days ago plus fresh low-latency samples now.
+        for i in 0..4 {
+            engine.record_probe(http_sample(
+                "node-a",
+                now - 72 * 3600 - i * 60,
+                true,
+                Some(1200),
+            ));
+        }
+        for i in 0..3 {
+            engine.record_probe(http_sample("node-a", now - (3 - i) * 10, true, Some(260)));
+        }
+        let eval = engine
+            .evaluate_for_profile("node-a", HealthProfile::General, now)
+            .unwrap();
+        let lat = eval
+            .dims
+            .iter()
+            .find(|d| d.dim == HealthDim::Latency)
+            .unwrap();
+        // Fresh 260ms samples outweigh 3-day-old 1200ms samples under 24h half-life decay.
+        assert_eq!(lat.p50_ms, Some(260));
+
+        // Preserve reachability & download while clearing HTTP history on mode change.
+        let mut report = ReachabilityReport {
+            checked_at: now,
+            ..Default::default()
+        };
+        report.chatgpt = ServiceCheckResult::new(ReachabilityCheckStatus::Pass);
+        engine.set_reachability("node-a", report);
+        engine.record_probe(ProbeSampleRecord {
+            target_key: "node-a".into(),
+            kind: ProbeKind::Download,
+            ts: now - 5,
+            ok: true,
+            rtt_ms: None,
+            bps: Some(9_000_000),
+            bytes_used: 4_000_000,
+            err_stage: ErrStage::None,
+        });
+        engine.reset_http_history();
+
+        let view = engine.build_view("node-a", now).unwrap();
+        assert!(view.reachability.is_some());
+        let eval_after = view.general.unwrap();
+        assert!(
+            eval_after
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Latency)
+                .unwrap()
+                .p50_ms
+                .is_none()
+        );
+        assert_eq!(
+            eval_after
+                .dims
+                .iter()
+                .find(|d| d.dim == HealthDim::Throughput)
+                .unwrap()
+                .throughput_bps,
+            Some(9_000_000)
+        );
     }
 }

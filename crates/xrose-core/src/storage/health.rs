@@ -52,6 +52,7 @@ CREATE INDEX IF NOT EXISTS health_hourly_buckets_time ON health_hourly_buckets(h
 "#;
 
 const BUDGET_KEY: &str = "probe_budget_usage";
+const HEALTH_LATENCY_MODE_KEY: &str = "health_latency_mode";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct BudgetUsage {
@@ -362,6 +363,72 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) fn stored_health_latency_mode(&self) -> Option<crate::settings::HttpLatencyMode> {
+        let conn = self.conn.lock();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = ?1",
+                [HEALTH_LATENCY_MODE_KEY],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        match raw.as_deref() {
+            Some("unified") => Some(crate::settings::HttpLatencyMode::Unified),
+            Some("full_handshake") => Some(crate::settings::HttpLatencyMode::FullHandshake),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_stored_health_latency_mode(
+        &self,
+        mode: crate::settings::HttpLatencyMode,
+    ) -> Result<()> {
+        let value = match mode {
+            crate::settings::HttpLatencyMode::Unified => "unified",
+            crate::settings::HttpLatencyMode::FullHandshake => "full_handshake",
+        };
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![HEALTH_LATENCY_MODE_KEY, value],
+        )?;
+        Ok(())
+    }
+
+    /// Clears HTTP / reachability probe history whose RTT values belong to a
+    /// different `HttpLatencyMode`, while preserving reachability unlock
+    /// caches, throughput samples/buckets, and mesh peer history.
+    pub(crate) fn reset_health_http_history(&self) -> Result<()> {
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM health_probe_samples WHERE kind IN ('http', 'reachability')",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE health_hourly_buckets
+             SET ok_weighted = 0.0,
+                 total_weighted = 0.0,
+                 rtt_p50_ms = NULL,
+                 rtt_p90_ms = NULL
+             WHERE target_key NOT LIKE 'mesh-http:%'
+               AND target_key NOT LIKE 'mesh-exit-%'",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM health_hourly_buckets
+             WHERE total_weighted <= 0.0
+               AND rtt_p50_ms IS NULL
+               AND tput_p75_bps IS NULL",
+            [],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub(crate) fn probe_budget_usage(&self, day: &str) -> u64 {
         let conn = self.conn.lock();
         let raw: Option<String> = conn
@@ -525,5 +592,123 @@ mod tests {
             .unwrap();
         assert_eq!(version, crate::storage::SCHEMA_VERSION);
         assert!(reopened.load_health_snapshot(now_unix()).is_ok());
+    }
+
+    #[test]
+    fn reset_health_http_history_clears_stale_http_samples_but_keeps_reachability_and_throughput() {
+        let (store, _dir) = open_store();
+        let now = now_unix();
+        let bucket = (now / 3600) * 3600;
+
+        assert_eq!(store.stored_health_latency_mode(), None);
+        store
+            .set_stored_health_latency_mode(crate::settings::HttpLatencyMode::Unified)
+            .unwrap();
+        assert_eq!(
+            store.stored_health_latency_mode(),
+            Some(crate::settings::HttpLatencyMode::Unified)
+        );
+
+        store
+            .record_health_probe(&ProbeSampleRecord {
+                target_key: "node-1".into(),
+                kind: ProbeKind::Http,
+                ts: now - 10,
+                ok: true,
+                rtt_ms: Some(1200),
+                bps: None,
+                bytes_used: 512,
+                err_stage: ErrStage::None,
+            })
+            .unwrap();
+        store
+            .record_health_probe(&ProbeSampleRecord {
+                target_key: "node-1".into(),
+                kind: ProbeKind::Download,
+                ts: now - 5,
+                ok: true,
+                rtt_ms: None,
+                bps: Some(10_000_000),
+                bytes_used: 1_000_000,
+                err_stage: ErrStage::None,
+            })
+            .unwrap();
+        store
+            .record_health_probe(&ProbeSampleRecord {
+                target_key: "mesh-http:p:peer".into(),
+                kind: ProbeKind::MeshPeer,
+                ts: now - 5,
+                ok: true,
+                rtt_ms: Some(25),
+                bps: None,
+                bytes_used: 0,
+                err_stage: ErrStage::None,
+            })
+            .unwrap();
+        store
+            .save_hourly_buckets(
+                &[
+                    HourlyBucket {
+                        target_key: "node-1".into(),
+                        hour_bucket: bucket,
+                        ok_weighted: 10.0,
+                        total_weighted: 12.0,
+                        rtt_p50_ms: Some(1100),
+                        rtt_p90_ms: Some(1500),
+                        tput_p75_bps: Some(10_000_000),
+                    },
+                    HourlyBucket {
+                        target_key: "node-2".into(),
+                        hour_bucket: bucket,
+                        ok_weighted: 5.0,
+                        total_weighted: 5.0,
+                        rtt_p50_ms: Some(900),
+                        rtt_p90_ms: Some(1200),
+                        tput_p75_bps: None,
+                    },
+                    HourlyBucket {
+                        target_key: "mesh-http:p:peer".into(),
+                        hour_bucket: bucket,
+                        ok_weighted: 4.0,
+                        total_weighted: 4.0,
+                        rtt_p50_ms: Some(25),
+                        rtt_p90_ms: Some(30),
+                        tput_p75_bps: None,
+                    },
+                ],
+                bucket - 3600,
+            )
+            .unwrap();
+        let mut report = ReachabilityReport {
+            checked_at: now,
+            ..Default::default()
+        };
+        report.chatgpt = ServiceCheckResult::new(ReachabilityCheckStatus::Pass);
+        store
+            .save_reachability("node-1", Some("198.51.100.24"), &report)
+            .unwrap();
+
+        store.reset_health_http_history().unwrap();
+
+        let (samples, buckets, reachability) = store.load_health_snapshot(now).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert!(samples.iter().all(|s| s.kind != ProbeKind::Http));
+        assert!(samples.iter().any(|s| s.kind == ProbeKind::Download));
+        assert!(samples.iter().any(|s| s.kind == ProbeKind::MeshPeer));
+        assert_eq!(reachability.len(), 1);
+        assert_eq!(reachability[0].0, "node-1");
+
+        // node-1 bucket keeps throughput only; node-2 empty bucket deleted; mesh kept.
+        assert_eq!(buckets.len(), 2);
+        let n1 = buckets.iter().find(|b| b.target_key == "node-1").unwrap();
+        assert_eq!(n1.rtt_p50_ms, None);
+        assert_eq!(n1.rtt_p90_ms, None);
+        assert_eq!(n1.total_weighted, 0.0);
+        assert_eq!(n1.tput_p75_bps, Some(10_000_000));
+        let mesh = buckets
+            .iter()
+            .find(|b| b.target_key == "mesh-http:p:peer")
+            .unwrap();
+        assert_eq!(mesh.rtt_p50_ms, Some(25));
     }
 }

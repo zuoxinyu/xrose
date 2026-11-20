@@ -326,8 +326,8 @@ pub fn adapter_for(core: CoreKind) -> &'static dyn CoreAdapter {
 static XRAY: XrayAdapter = XrayAdapter;
 static SINGBOX: SingBoxAdapter = SingBoxAdapter;
 
-/// A private HTTP listener routed exclusively through the requested node.
-/// No selectors, TUN, cache file, API ports or user routing are shared.
+/// A private SOCKS5 (TCP + UDP) listener routed exclusively through the requested
+/// node. No selectors, TUN, cache file, API ports or user routing are shared.
 pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16) -> Result<Value> {
     if !node.usable_with(core) {
         return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
@@ -338,30 +338,11 @@ pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16
     }
 }
 
-/// A direct baseline uses the same isolated HTTP ingress as proxy probes.
+/// A direct baseline uses the same isolated SOCKS5 ingress as proxy probes.
 pub(crate) fn compile_direct_probe(core: CoreKind, port: u16) -> Value {
     match core {
         CoreKind::Xray => xray::compile_direct_probe(port),
         CoreKind::SingBox => singbox::compile_direct_probe(port),
-    }
-}
-
-/// Minimal HTTP + SOCKS5 (UDP-enabled) probe listeners routed exclusively through
-/// the requested node (or direct when `node` is `None`).
-pub(crate) fn compile_reachability_probe(
-    core: CoreKind,
-    node: Option<&crate::model::Node>,
-    http_port: u16,
-    socks_port: u16,
-) -> Result<Value> {
-    if let Some(node) = node
-        && !node.usable_with(core)
-    {
-        return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
-    }
-    match core {
-        CoreKind::SingBox => singbox::compile_reachability_probe(node, http_port, socks_port),
-        CoreKind::Xray => xray::compile_reachability_probe(node, http_port, socks_port),
     }
 }
 

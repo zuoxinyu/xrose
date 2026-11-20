@@ -9,7 +9,9 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::CoreKind;
 use xrose_core::service::ToastLevel;
-use xrose_core::settings::{BackdropStyle, Language, LogLevel, Settings, ThemeMode};
+use xrose_core::settings::{
+    BackdropStyle, HttpLatencyMode, Language, LogLevel, Settings, ThemeMode,
+};
 use xrose_core::system::CheckLevel;
 
 use super::AppView;
@@ -157,6 +159,30 @@ impl AppView {
         let lang = self.lang();
         let lan_account = self.lan_account_input(cx);
         let lan_port = valid_port(self.lan_port_input.read(cx).value().as_ref());
+        let latency_mode_row = setting_row(
+            p,
+            self.tr("延迟测速口径", "Latency mode"),
+            self.tr(
+                "「统一延迟」建立连接后仅计单次请求往返，剔除协议握手差异；「含首次握手」计入冷启动建连与 TLS 握手耗时。",
+                "\"Unified\" warms the connection and measures one round trip; \"With handshake\" includes cold connection and TLS setup.",
+            ),
+            ChoiceGroup::new(
+                "http-latency-mode",
+                vec![
+                    self.tr("统一延迟", "Unified"),
+                    self.tr("含首次握手", "With handshake"),
+                ],
+                usize::from(settings.http_latency_mode == HttpLatencyMode::FullHandshake),
+            )
+            .on_change(cx.listener(|this, index: &usize, _, cx| {
+                let mode = if *index == 0 {
+                    HttpLatencyMode::Unified
+                } else {
+                    HttpLatencyMode::FullHandshake
+                };
+                this.modify_settings(cx, |s| s.http_latency_mode = mode);
+            })),
+        );
         let domestic_row = self.urltest_setting_row(
             p,
             self.tr("国内出口测速地址", "Domestic URL test"),
@@ -188,6 +214,7 @@ impl AppView {
             cx,
         );
         div().flex().flex_col().gap_3()
+            .child(latency_mode_row)
             .child(domestic_row)
             .child(overseas_row)
             .child(divider(p))
