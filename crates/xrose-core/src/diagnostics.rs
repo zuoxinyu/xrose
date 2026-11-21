@@ -97,12 +97,18 @@ impl DiagnosticTarget {
 
     pub fn from_trace(trace: &TraceSession) -> Self {
         let host_ip = trace.host.parse::<IpAddr>().ok();
+        let domain = if host_ip.is_none() {
+            trace.host.clone()
+        } else {
+            trace
+                .sni
+                .as_deref()
+                .filter(|sni| !sni.is_empty() && sni.parse::<IpAddr>().is_err())
+                .unwrap_or_default()
+                .to_string()
+        };
         Self {
-            domain: if host_ip.is_none() {
-                trace.host.clone()
-            } else {
-                String::new()
-            },
+            domain,
             ip: host_ip
                 .map(|ip| ip.to_string())
                 .or_else(|| trace.resolved_ips.first().cloned())
@@ -148,6 +154,92 @@ impl DiagnosticTarget {
     }
 }
 
+/// Returns true for Fake-IP ranges configured by Xrose (`198.18.0.0/15`, `fc00::/18`).
+pub fn is_fake_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, _, _] = v4.octets();
+            a == 198 && (b == 18 || b == 19)
+        }
+        IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            segments[0] == 0xfc00 && (segments[1] & 0xc000) == 0
+        }
+    }
+}
+
+/// Ports that overwhelmingly speak TLS and benefit from an end-to-end TLS/HTTPS
+/// handshake instead of a bare SOCKS5 TCP probe.
+pub fn is_tls_port(port: u16) -> bool {
+    matches!(
+        port,
+        443 | 465 | 853 | 993 | 995 | 2053 | 2083 | 2087 | 2096 | 8443
+    )
+}
+
+pub(crate) fn format_url_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+pub fn connection_domain_test_target(connection: &ClashConnection) -> Option<String> {
+    let domain = connection.host();
+    if domain.is_empty() || domain.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let port = connection
+        .metadata
+        .destination_port
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)?;
+    if connection.metadata.network.eq_ignore_ascii_case("udp") {
+        return Some(format!("udp://{domain}:{port}"));
+    }
+    Some(match port {
+        443 => format!("https://{domain}"),
+        80 => format!("http://{domain}"),
+        _ if is_tls_port(port) || !connection.metadata.sniff_host.is_empty() => {
+            format!("tls://{domain}:{port}")
+        }
+        _ => format!("tcp://{domain}:{port}"),
+    })
+}
+
+pub fn connection_ip_test_target(connection: &ClashConnection) -> Option<String> {
+    let ip: IpAddr = connection
+        .metadata
+        .destination_ip
+        .trim()
+        .trim_matches(['[', ']'])
+        .parse()
+        .ok()?;
+    if is_fake_ip(ip) {
+        return None;
+    }
+    let port = connection
+        .metadata
+        .destination_port
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port > 0)?;
+    let formatted_ip = format_url_host(&ip.to_string());
+    if connection.metadata.network.eq_ignore_ascii_case("udp") {
+        return Some(format!("udp://{formatted_ip}:{port}"));
+    }
+    let host = connection.host();
+    let sni = (!host.is_empty() && host.parse::<IpAddr>().is_err()).then_some(host);
+    Some(match (port, sni) {
+        (80, _) => format!("tcp://{formatted_ip}:80"),
+        (_, Some(sni)) => format!("tls://{formatted_ip}:{port}?sni={sni}"),
+        (p, None) if is_tls_port(p) => format!("tls://{formatted_ip}:{p}"),
+        (_, None) => format!("tcp://{formatted_ip}:{port}"),
+    })
+}
+
 pub fn connection_test_target(connection: &ClashConnection) -> Option<String> {
     let host = connection.host();
     if host.is_empty() {
@@ -159,19 +251,30 @@ pub fn connection_test_target(connection: &ClashConnection) -> Option<String> {
         .parse::<u16>()
         .ok()
         .filter(|port| *port > 0)?;
-    let host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
-        format!("[{host}]")
-    } else {
-        host
-    };
-    Some(format!(
-        "{}://{host}:{port}",
-        if connection.metadata.network.eq_ignore_ascii_case("udp") {
-            "udp"
-        } else {
-            "tcp"
+    if connection.metadata.network.eq_ignore_ascii_case("udp") {
+        let host = format_url_host(&host);
+        return Some(format!("udp://{host}:{port}"));
+    }
+    if host.parse::<IpAddr>().is_err() {
+        let non_standard_tun_ip = port != 443
+            && port != 80
+            && (!connection.metadata.sniff_host.is_empty()
+                || connection
+                    .metadata
+                    .kind
+                    .to_ascii_lowercase()
+                    .contains("tun"));
+        if non_standard_tun_ip && let Some(ip_target) = connection_ip_test_target(connection) {
+            return Some(ip_target);
         }
-    ))
+        return connection_domain_test_target(connection);
+    }
+    let host = format_url_host(&host);
+    if is_tls_port(port) {
+        Some(format!("tls://{host}:{port}"))
+    } else {
+        Some(format!("tcp://{host}:{port}"))
+    }
 }
 
 pub const RECORDING_CONNECTION_LIMIT: usize = 2000;
@@ -357,16 +460,58 @@ mod tests {
                 .process_names,
             ["Browser.EXE"]
         );
+        // Domain on 443 replays via HTTPS; original IP target preserves SNI over TLS.
+        assert_eq!(
+            connection_test_target(&c).as_deref(),
+            Some("https://Example.com")
+        );
+        assert_eq!(
+            connection_ip_test_target(&c).as_deref(),
+            Some("tls://[2001:db8::1]:443?sni=Example.com")
+        );
+        // Non-standard port with sniffed SNI replays original IP + SNI directly.
+        c.metadata.destination_port = "2084".into();
+        c.metadata.kind = "tun/tun-in".into();
+        assert_eq!(
+            connection_test_target(&c).as_deref(),
+            Some("tls://[2001:db8::1]:2084?sni=Example.com")
+        );
+        assert_eq!(
+            connection_domain_test_target(&c).as_deref(),
+            Some("tls://Example.com:2084")
+        );
+        // FakeIP destination is never offered as an original-IP replay target.
+        c.metadata.destination_ip = "198.18.0.42".into();
+        assert!(connection_ip_test_target(&c).is_none());
+        assert!(is_fake_ip("198.19.255.1".parse().unwrap()));
+        assert!(is_fake_ip("fc00::1234".parse().unwrap()));
+        assert!(!is_fake_ip("2001:db8::1".parse().unwrap()));
+
+        // IP-only connections use tls:// on 443 and tcp:// on plain ports.
+        c.metadata.destination_ip = "2001:db8::1".into();
+        c.metadata.destination_port = "443".into();
         c.metadata.host.clear();
         c.metadata.sniff_host.clear();
         assert_eq!(
             connection_test_target(&c).unwrap(),
-            "tcp://[2001:db8::1]:443"
+            "tls://[2001:db8::1]:443"
+        );
+        c.metadata.destination_port = "8080".into();
+        assert_eq!(
+            connection_test_target(&c).unwrap(),
+            "tcp://[2001:db8::1]:8080"
         );
         assert!(
             DiagnosticTarget::from_connection(&c)
                 .matchers(DiagnosticRuleKind::Domain)
                 .is_err()
         );
+
+        let tls_target =
+            crate::trace::parse_target("tls://[2001:db8::1]:2084?sni=www.example.com").unwrap();
+        let trace = TraceSession::new(1, &tls_target);
+        let from_trace = DiagnosticTarget::from_trace(&trace);
+        assert_eq!(from_trace.domain, "www.example.com");
+        assert_eq!(from_trace.ip, "2001:db8::1");
     }
 }

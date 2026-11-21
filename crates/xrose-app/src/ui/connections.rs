@@ -10,7 +10,8 @@ use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::diagnostics::{
-    DiagnosticRuleKind, DiagnosticTarget, connection_matches_query, connection_test_target,
+    DiagnosticRuleKind, DiagnosticTarget, connection_ip_test_target, connection_matches_query,
+    connection_test_target,
 };
 use xrose_core::failed_connections::{
     DomainMatchGranularity, FailedConnectionRecord, FailedRuleDraft, FailureCategory, FailureKind,
@@ -1845,7 +1846,17 @@ impl AppView {
             .iter()
             .any(|k| k == "failed-rule" || k == "core");
         let test_target = record.test_target();
-        let test_tip = self.tr("链路测试", "Link trace");
+        let test_tip = if test_target
+            .as_deref()
+            .is_some_and(|t| t.starts_with("tls://") && t.contains("?sni="))
+        {
+            self.tr(
+                "链路测试（按原目标 IP 与 SNI 发起 TLS 握手）",
+                "Link trace (TLS handshake to original IP with SNI)",
+            )
+        } else {
+            self.tr("链路测试", "Link trace")
+        };
         let row_menu = MenuTarget::FailedConnectionRow(record.clone());
         let suggested_kind = suggested.kind;
         let outbound_text = if record.outbound_label.is_empty() {
@@ -1853,12 +1864,20 @@ impl AppView {
         } else {
             record.outbound_label.clone()
         };
-        let detail_text = if self.hide_ips || record.raw_detail.is_empty() {
+        let is_synthetic_tcp = record.raw_detail.starts_with("TCP ");
+        let detail_text = if self.hide_ips
+            || record.raw_detail.is_empty()
+            || (is_synthetic_tcp && self.lang() == Language::Zh)
+        {
             record.reason_summary.clone()
         } else {
             record.raw_detail.clone()
         };
-        let detail_tip = detail_text.clone();
+        let detail_tip = if self.hide_ips || record.raw_detail.is_empty() {
+            record.reason_summary.clone()
+        } else {
+            record.raw_detail.clone()
+        };
         let process_text = if record.process_name.is_empty() {
             self.tr("进程未提供", "Process unavailable").to_string()
         } else {
@@ -2141,6 +2160,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let target = connection_test_target(c);
+        let ip_target = connection_ip_test_target(c).filter(|ip_t| target.as_ref() != Some(ip_t));
         let probing = self
             .snapshot
             .trace
@@ -2244,6 +2264,19 @@ impl AppView {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if let Some(target) = &target { this.replay_connection(target, window, cx); }
                                 })))
+                            .when_some(ip_target, |d, ip_target| {
+                                d.child(Button::new("replay-connection-ip")
+                                    .compact().ghost().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                    .label(self.tr("重放原 IP", "Replay original IP"))
+                                    .disabled(probing)
+                                    .tooltip(self.tr(
+                                        "按原始目标 IP 与 SNI 发起 TLS/传输层测试，绕过重新解析 DNS",
+                                        "Replay against the original destination IP and SNI without re-resolving DNS",
+                                    ))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.replay_connection(&ip_target, window, cx);
+                                    })))
+                            })
                             .child(
                                 Button::new("back-to-connections")
                                     .compact()
@@ -2287,12 +2320,18 @@ impl AppView {
                             .child(div().mt_2().text_sm().text_color(p.fg).child(value))
                     })),
             )
-            .child(self.diagnostic_rule_bar(DiagnosticTarget::from_connection(c), "connection", cx))
+            .child(self.diagnostic_rule_bar(
+                DiagnosticTarget::from_connection(c),
+                None,
+                "connection",
+                cx,
+            ))
     }
 
     fn diagnostic_rule_bar(
         &self,
         target: DiagnosticTarget,
+        trace: Option<&TraceSession>,
         prefix: &'static str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -2301,6 +2340,29 @@ impl AppView {
         let value = target.value(kind).to_string();
         let blocked_protected =
             is_protected_process_block(kind, self.diagnostic_rule_action, &value);
+        let same_failed_outbound_hint = trace.filter(|t| t.success == Some(false)).and_then(|t| {
+            let selected_same_proxy = t.actual_direct == Some(false)
+                && self.diagnostic_rule_action == RouteActionKind::Proxy
+                && self.diagnostic_rule_group.as_deref().is_none_or(|gid| {
+                    self.snapshot.model.group(gid).map(|g| g.name.as_str())
+                        == t.group_name.as_deref()
+                });
+            if selected_same_proxy {
+                Some(self.tr(
+                    "当前测试经代理失败，建议改选「直连」或切换其他出站组",
+                    "This trace failed via proxy; try Direct or a different outbound group",
+                ))
+            } else if t.actual_direct == Some(true)
+                && self.diagnostic_rule_action == RouteActionKind::Direct
+            {
+                Some(self.tr(
+                    "当前测试直连失败，建议改选「代理」",
+                    "This trace failed via direct; try Proxy instead",
+                ))
+            } else {
+                None
+            }
+        });
         let outbound_label = self
             .diagnostic_rule_group
             .as_deref()
@@ -2433,13 +2495,40 @@ impl AppView {
                                 this.sync(cx);
                             })),
                     )
-                    .child(div().text_xs().text_color(if blocked_protected { p.danger_text } else { p.muted_fg }).child(if blocked_protected {
-                        self.tr("不能阻止 Xrose 或提权助手联网", "Cannot block Xrose or the privilege helper")
-                    } else if self.snapshot.model.work_mode == WorkMode::Mesh {
-                        self.tr("保存至本机规则；组网模式暂停本地代理分流，不会修改远端出口规则", "Saved locally; Mesh mode pauses local proxy routing and does not change the remote exit's rules")
-                    } else {
-                        self.tr("置顶保存至自定义规则，应用配置后生效", "Saved at the top of custom rules; apply config to take effect")
-                    })),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if blocked_protected {
+                                p.danger_text
+                            } else if same_failed_outbound_hint.is_some() {
+                                p.warn_text
+                            } else {
+                                p.muted_fg
+                            })
+                            .child(if blocked_protected {
+                                self.tr(
+                                    "不能阻止 Xrose 或提权助手联网",
+                                    "Cannot block Xrose or the privilege helper",
+                                )
+                            } else if let Some(hint) = same_failed_outbound_hint {
+                                hint
+                            } else if self.snapshot.model.work_mode == WorkMode::Mesh {
+                                self.tr(
+                                    "保存至本机规则；组网模式暂停本地代理分流，不会修改远端出口规则",
+                                    "Saved locally; Mesh mode pauses local proxy routing and does not change the remote exit's rules",
+                                )
+                            } else if self.snapshot.settings.hot_reload {
+                                self.tr(
+                                    "置顶保存至自定义规则并自动热重载",
+                                    "Saved at the top of custom rules and hot-reloaded automatically",
+                                )
+                            } else {
+                                self.tr(
+                                    "置顶保存至自定义规则，应用配置后生效",
+                                    "Saved at the top of custom rules; apply config to take effect",
+                                )
+                            }),
+                    ),
             )
     }
 
@@ -2503,8 +2592,13 @@ impl AppView {
             .as_ref()
             .is_some_and(|t| matches!(t.phase, TracePhase::Request | TracePhase::Response));
         let success = trace.as_ref().and_then(|t| t.success);
+        let remote_warn = trace
+            .as_ref()
+            .and_then(|t| t.step(TraceStepKind::Remote))
+            .is_some_and(|s| s.status == TraceStatus::Warn);
         let presets = [
             (TraceProtocol::Https, "https://www.gstatic.com/generate_204"),
+            (TraceProtocol::Tls, "tls://www.gstatic.com:443"),
             (TraceProtocol::Tcp, "tcp://1.1.1.1:443"),
             (TraceProtocol::Udp, "udp://8.8.8.8:53"),
             (TraceProtocol::Icmp, "icmp://1.1.1.1"),
@@ -2527,10 +2621,37 @@ impl AppView {
                 input.set_value(presets[*index].1, window, cx)
             });
         }));
+        let (status_label, status_fg, status_bg) = if active {
+            (
+                self.tr("● 探测中", "● Probing"),
+                p.primary,
+                p.primary.opacity(0.1),
+            )
+        } else if success == Some(false) {
+            (
+                self.tr("! 发现问题", "! Issue found"),
+                p.danger_text,
+                p.danger.opacity(0.12),
+            )
+        } else if success == Some(true) && remote_warn {
+            (
+                self.tr("! 未完全验证", "! Unverified"),
+                p.warn_text,
+                p.warning.opacity(0.14),
+            )
+        } else if success == Some(true) {
+            (
+                self.tr("✓ 请求完成", "✓ Completed"),
+                p.primary,
+                p.primary.opacity(0.1),
+            )
+        } else {
+            (self.tr("就绪", "Ready"), p.primary, p.primary.opacity(0.1))
+        };
         card(&p)
             .child(div().flex().items_center().justify_between().gap_3().flex_wrap()
                 .child(section_title(&p, self.tr("链路测试", "Link trace"), self.tr("发起探测请求，依次检查 DNS 解析、路由匹配与出站连通性", "Send a probe request to inspect DNS resolution, route matching, and outbound connectivity")))
-                .child(pill(if active { self.tr("● 探测中", "● Probing") } else if success == Some(true) { self.tr("✓ 请求完成", "✓ Completed") } else if success == Some(false) { self.tr("! 发现问题", "! Issue found") } else { self.tr("就绪", "Ready") }, if success == Some(false) { p.danger } else { p.primary }, p.primary.opacity(0.1))))
+                .child(pill(status_label, status_fg, status_bg)))
             .child(div().flex().items_center().gap_2().flex_wrap()
                 .child(protocol_group)
                 .child(div().flex_1().min_w(px(200.)).child(Input::new(&self.trace_input)))
@@ -2547,12 +2668,59 @@ impl AppView {
             .child(self.trace_graph(trace.as_ref(), cx))
             .when_some(trace.as_ref(), |d, trace| {
                 let failed = trace.steps.iter().find(|s| s.status == TraceStatus::Error);
-                let focused = self.expanded_trace_step.and_then(|kind| trace.step(kind)).or(failed);
+                let remote_warned = trace
+                    .step(TraceStepKind::Remote)
+                    .filter(|s| s.status == TraceStatus::Warn);
+                let warned = remote_warned
+                    .or_else(|| trace.steps.iter().find(|s| s.status == TraceStatus::Warn));
+                let focused = self
+                    .expanded_trace_step
+                    .and_then(|kind| trace.step(kind))
+                    .or(failed)
+                    .or(warned);
+                let tls_fallback = (trace.protocol == TraceProtocol::Tcp
+                    && focused.is_some_and(|s| {
+                        s.kind == TraceStepKind::Remote && s.status == TraceStatus::Warn
+                    }))
+                .then(|| {
+                    let host = if trace.host.parse::<std::net::Ipv6Addr>().is_ok() {
+                        format!("[{}]", trace.host)
+                    } else {
+                        trace.host.clone()
+                    };
+                    format!("tls://{host}:{}", trace.port)
+                });
                 d.when_some(focused, |d, step| d.child(div().flex().flex_col().gap_2().p_3().rounded_lg().bg(p.bg).border_l_2().border_color(status_color(step.status, &p))
                     .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(status_color(step.status, &p)).child(self.trace_step_label(step.kind)))
-                    .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))))
-                    .when_some(trace.error.as_ref().filter(|error| focused.is_none_or(|step| step.detail != **error)), |d, error| d.child(div().text_sm().text_color(p.danger).child(error.clone())))
-                    .child(div().text_xs().text_color(if trace.success == Some(false) { p.danger } else { p.muted_fg }).child(trace.summary.clone().unwrap_or_default()))
+                    .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))
+                    .when_some(tls_fallback, |d, tls_target| {
+                        d.child(div().flex().items_center().gap_2().child(
+                            Button::new("trace-switch-tls")
+                                .compact()
+                                .outline()
+                                .h(px(26.))
+                                .icon(IconName::Radar)
+                                .label(self.tr("改用 TLS 握手测试", "Switch to TLS handshake"))
+                                .disabled(active)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.replay_connection(&tls_target, window, cx);
+                                })),
+                        ))
+                    })))
+                    .when_some(
+                        trace.error.as_ref().filter(|error| {
+                            focused.is_none_or(|step| step.detail != **error)
+                        }),
+                        |d, error| {
+                            d.child(div().text_sm().text_color(p.danger_text).child(error.clone()))
+                        },
+                    )
+                    .when_some(
+                        trace.summary.as_ref().filter(|summary| !summary.is_empty()),
+                        |d, summary| {
+                            d.child(div().text_xs().text_color(p.muted_fg).child(summary.clone()))
+                        },
+                    )
                     .when_some(trace.blocked_rule_id.as_ref(), |d, id| {
                         let enabled = self.snapshot.model.routing.effective_rules().any(|rule| &rule.id == id);
                         let rule_id = id.clone();
@@ -2574,7 +2742,12 @@ impl AppView {
                                     this.sync(cx);
                                 }))))
                     })
-                    .child(self.diagnostic_rule_bar(DiagnosticTarget::from_trace(trace), "trace", cx))
+                    .child(self.diagnostic_rule_bar(
+                        DiagnosticTarget::from_trace(trace),
+                        Some(trace),
+                        "trace",
+                        cx,
+                    ))
             })
     }
 

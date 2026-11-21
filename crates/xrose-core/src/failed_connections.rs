@@ -10,7 +10,9 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
+use crate::diagnostics::{
+    DiagnosticRuleKind, DiagnosticTarget, format_url_host, is_fake_ip, is_tls_port,
+};
 use crate::error::{Error, Result};
 use crate::flow::is_protected_process;
 use crate::model::{AppModel, CoreKind, Matchers, RouteAction, WorkMode};
@@ -148,6 +150,7 @@ pub struct AppliedRuleSummary {
 pub struct FailedConnectionRecord {
     pub id: u64,
     pub domain: String,
+    pub domain_is_sniffed: bool,
     pub root_domain: Option<String>,
     pub destination_ip: String,
     pub destination_port: String,
@@ -261,6 +264,65 @@ impl FailedConnectionRecord {
         }
     }
 
+    pub fn domain_test_target(&self) -> Option<String> {
+        if self.domain.is_empty() || self.domain.parse::<IpAddr>().is_ok() {
+            return None;
+        }
+        let port = self
+            .destination_port
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)?;
+        if self.network.eq_ignore_ascii_case("udp") {
+            return Some(format!("udp://{}:{port}", self.domain));
+        }
+        if self.network.eq_ignore_ascii_case("dns") {
+            return Some(format!("https://{}", self.domain));
+        }
+        Some(match port {
+            443 => format!("https://{}", self.domain),
+            80 => format!("http://{}", self.domain),
+            _ if is_tls_port(port)
+                || self.domain_is_sniffed
+                || self.failure_kind == FailureKind::TlsError =>
+            {
+                format!("tls://{}:{port}", self.domain)
+            }
+            _ => format!("tcp://{}:{port}", self.domain),
+        })
+    }
+
+    pub fn ip_test_target(&self) -> Option<String> {
+        let ip: IpAddr = self
+            .destination_ip
+            .trim()
+            .trim_matches(['[', ']'])
+            .parse()
+            .ok()?;
+        if is_fake_ip(ip) {
+            return None;
+        }
+        let port = self
+            .destination_port
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p > 0)?;
+        let formatted_ip = format_url_host(&ip.to_string());
+        if self.network.eq_ignore_ascii_case("udp") {
+            return Some(format!("udp://{formatted_ip}:{port}"));
+        }
+        let sni = (!self.domain.is_empty() && self.domain.parse::<IpAddr>().is_err())
+            .then_some(self.domain.as_str());
+        Some(match (port, sni) {
+            (80, _) => format!("tcp://{formatted_ip}:80"),
+            (_, Some(sni)) => format!("tls://{formatted_ip}:{port}?sni={sni}"),
+            (p, None) if is_tls_port(p) || self.failure_kind == FailureKind::TlsError => {
+                format!("tls://{formatted_ip}:{p}")
+            }
+            (_, None) => format!("tcp://{formatted_ip}:{port}"),
+        })
+    }
+
     pub fn test_target(&self) -> Option<String> {
         let host = self.host();
         if host.is_empty() {
@@ -271,17 +333,30 @@ impl FailedConnectionRecord {
             .parse::<u16>()
             .ok()
             .filter(|p| *p > 0)?;
-        let formatted_host = if host.parse::<std::net::Ipv6Addr>().is_ok() {
-            format!("[{host}]")
+        if self.network.eq_ignore_ascii_case("udp") {
+            let formatted_host = format_url_host(host);
+            return Some(format!("udp://{formatted_host}:{port}"));
+        }
+        if !self.domain.is_empty() && self.domain.parse::<IpAddr>().is_err() {
+            // For non-standard ports where SNI was sniffed from a raw-IP connection
+            // (e.g. TUN IPv6:2084 with SNI), replay the exact IP + SNI over TLS.
+            let prefer_ip_sni = port != 443
+                && port != 80
+                && (self.domain_is_sniffed || self.inbound.to_ascii_lowercase().contains("tun"));
+            if prefer_ip_sni && let Some(ip_target) = self.ip_test_target() {
+                return Some(ip_target);
+            }
+            return self.domain_test_target();
+        }
+        if let Some(ip_target) = self.ip_test_target() {
+            return Some(ip_target);
+        }
+        let formatted_host = format_url_host(host);
+        if is_tls_port(port) || self.failure_kind == FailureKind::TlsError {
+            Some(format!("tls://{formatted_host}:{port}"))
         } else {
-            host.to_string()
-        };
-        let scheme = if self.network.eq_ignore_ascii_case("udp") {
-            "udp"
-        } else {
-            "tcp"
-        };
-        Some(format!("{scheme}://{formatted_host}:{port}"))
+            Some(format!("tcp://{formatted_host}:{port}"))
+        }
     }
 
     pub fn matches_query(&self, query: &str) -> bool {
@@ -477,6 +552,7 @@ struct TrackedTcpFlow {
 
 struct FailureEvent {
     domain: String,
+    domain_is_sniffed: bool,
     destination_ip: String,
     destination_port: String,
     network: String,
@@ -758,7 +834,14 @@ impl FailedConnectionTracker {
                     .last_seen_ts
                     .saturating_sub(flow.first_zero_rx_ts)
                     .max(0) as u64;
-                self.finalize_disappeared_stalled(rec_id, &key, flow.has_rx, stalled_for, now);
+                self.finalize_disappeared_stalled(
+                    rec_id,
+                    &key,
+                    flow.has_rx,
+                    stalled_for,
+                    flow.last_upload,
+                    now,
+                );
             }
         }
 
@@ -794,6 +877,7 @@ impl FailedConnectionTracker {
         flow_key: &(String, String),
         had_rx: bool,
         stalled_secs: u64,
+        last_upload: u64,
         now: i64,
     ) {
         if let Some(idx) = self.records.iter().position(|e| e.record.id == record_id) {
@@ -805,16 +889,15 @@ impl FailedConnectionTracker {
                     self.records.remove(idx);
                 } else if entry.record.failure_kind == FailureKind::Stalled {
                     entry.only_from_stalled = false;
-                    entry.record.failure_kind = if stalled_secs >= 8 {
-                        FailureKind::Timeout
-                    } else {
-                        FailureKind::Reset
-                    };
-                    entry.record.reason_summary = if stalled_secs >= 8 {
-                        format!("无响应 {stalled_secs} 秒后超时关闭")
-                    } else {
-                        format!("无响应 {stalled_secs} 秒后连接中断")
-                    };
+                    // Without an explicit RST log from the core, a 0-download stalled
+                    // connection closing is an unresponsive timeout/drop rather than RST.
+                    entry.record.failure_kind = FailureKind::Timeout;
+                    let upload = crate::util::format_bytes(last_upload);
+                    entry.record.reason_summary =
+                        format!("已发送 {upload}，无响应 {stalled_secs} 秒后连接关闭（下行 0 B）");
+                    entry.record.raw_detail = format!(
+                        "TCP closed after {stalled_secs}s with upload={upload}, download=0 B"
+                    );
                     entry.record.last_seen = now;
                 }
             }
@@ -837,11 +920,11 @@ impl FailedConnectionTracker {
             entry.record.stalled_secs = entry.record.stalled_secs.max(elapsed_secs);
             entry.record.last_seen = now;
             if entry.record.failure_kind == FailureKind::Stalled {
-                entry.record.reason_summary = format!(
-                    "已发送 {}，持续 {} 秒无下行返回",
-                    crate::util::format_bytes(conn.upload),
-                    elapsed_secs
-                );
+                let upload = crate::util::format_bytes(conn.upload);
+                entry.record.reason_summary =
+                    format!("已发送 {upload}，持续 {elapsed_secs} 秒无下行返回");
+                entry.record.raw_detail =
+                    format!("TCP active {elapsed_secs}s with upload={upload}, download=0 B");
             }
             return Some(id);
         }
@@ -864,6 +947,14 @@ impl FailedConnectionTracker {
         } else {
             String::new()
         };
+        let domain_is_sniffed = !domain.is_empty()
+            && (!conn.metadata.sniff_host.is_empty()
+                || (conn.metadata.kind.to_ascii_lowercase().contains("tun")
+                    && conn
+                        .metadata
+                        .destination_ip
+                        .parse::<IpAddr>()
+                        .is_ok_and(|ip| !is_fake_ip(ip))));
         let target_key = if !domain.is_empty() {
             domain.clone()
         } else {
@@ -883,6 +974,7 @@ impl FailedConnectionTracker {
             entry.record.is_stalled_live = true;
             entry.record.stalled_secs = entry.record.stalled_secs.max(elapsed_secs);
             entry.record.last_seen = now;
+            entry.record.domain_is_sniffed |= domain_is_sniffed;
             if entry.record.process_name.is_empty() {
                 entry.record.process_name = conn.process_name();
                 entry.record.process_path = conn.process_path().to_owned();
@@ -891,11 +983,11 @@ impl FailedConnectionTracker {
                 entry.record.matched_rule = format_clash_rule(&conn.rule, &conn.rule_payload);
             }
             if entry.record.failure_kind == FailureKind::Stalled {
-                entry.record.reason_summary = format!(
-                    "已发送 {}，持续 {} 秒无下行返回",
-                    crate::util::format_bytes(conn.upload),
-                    elapsed_secs
-                );
+                let upload = crate::util::format_bytes(conn.upload);
+                entry.record.reason_summary =
+                    format!("已发送 {upload}，持续 {elapsed_secs} 秒无下行返回");
+                entry.record.raw_detail =
+                    format!("TCP active {elapsed_secs}s with upload={upload}, download=0 B");
             }
             return Some(entry.record.id);
         }
@@ -909,9 +1001,11 @@ impl FailedConnectionTracker {
         };
         let mut active_stalled_flows = HashSet::new();
         active_stalled_flows.insert(flow_key.clone());
+        let upload = crate::util::format_bytes(conn.upload);
         let record = FailedConnectionRecord {
             id,
             domain,
+            domain_is_sniffed,
             root_domain,
             destination_ip: conn.metadata.destination_ip.clone(),
             destination_port: conn.metadata.destination_port.clone(),
@@ -924,15 +1018,8 @@ impl FailedConnectionTracker {
             outbound_direction: direction,
             matched_rule: format_clash_rule(&conn.rule, &conn.rule_payload),
             failure_kind: FailureKind::Stalled,
-            reason_summary: format!(
-                "已发送 {}，持续 {} 秒无下行返回",
-                crate::util::format_bytes(conn.upload),
-                elapsed_secs
-            ),
-            raw_detail: format!(
-                "TCP active {}s with upload={} B, download=0 B",
-                elapsed_secs, conn.upload
-            ),
+            reason_summary: format!("已发送 {upload}，持续 {elapsed_secs} 秒无下行返回"),
+            raw_detail: format!("TCP active {elapsed_secs}s with upload={upload}, download=0 B"),
             is_stalled_live: true,
             stalled_secs: elapsed_secs,
             count: 1,
@@ -994,6 +1081,7 @@ impl FailedConnectionTracker {
                 self.record_failure(
                     FailureEvent {
                         domain: normalized,
+                        domain_is_sniffed: false,
                         destination_ip: String::new(),
                         destination_port: "53".into(),
                         network: "dns".into(),
@@ -1105,11 +1193,17 @@ impl FailedConnectionTracker {
                     ctx.sniff_domain = normalize_domain(domain);
                     return;
                 }
-                if let Some(path) = rest
+                if let Some(raw_path) = rest
                     .strip_prefix("found process path: ")
                     .or_else(|| rest.strip_prefix("found process: "))
                 {
-                    let path = path.trim();
+                    let raw_path = raw_path.trim();
+                    let path = raw_path
+                        .split_once(", user:")
+                        .or_else(|| raw_path.split_once(", uid:"))
+                        .or_else(|| raw_path.split_once(", pid:"))
+                        .map_or(raw_path, |(head, _)| head)
+                        .trim();
                     let name = crate::flow::process_basename("", path).to_owned();
                     let ctx = self.touch_singbox_context(cid, now);
                     ctx.process_path = path.to_owned();
@@ -1287,6 +1381,7 @@ impl FailedConnectionTracker {
                 self.record_failure(
                     FailureEvent {
                         domain: normalized,
+                        domain_is_sniffed: false,
                         destination_ip: String::new(),
                         destination_port: "53".into(),
                         network: "dns".into(),
@@ -1340,6 +1435,7 @@ impl FailedConnectionTracker {
         self.record_failure(
             FailureEvent {
                 domain,
+                domain_is_sniffed: false,
                 destination_ip,
                 destination_port: port.to_owned(),
                 network: network.to_owned(),
@@ -1402,9 +1498,12 @@ impl FailedConnectionTracker {
         } else {
             String::new()
         };
+        let domain_is_sniffed = !ctx.sniff_domain.is_empty()
+            && (ctx.target_host.is_empty() || ctx.target_host.parse::<IpAddr>().is_ok());
         self.record_failure(
             FailureEvent {
                 domain,
+                domain_is_sniffed,
                 destination_ip,
                 destination_port: ctx.destination_port.clone(),
                 network: if ctx.network.is_empty() {
@@ -1504,6 +1603,7 @@ impl FailedConnectionTracker {
             existing.record.reason_summary = event.reason_summary;
             existing.record.raw_detail = event.raw_detail;
             existing.record.is_stalled_live = false;
+            existing.record.domain_is_sniffed |= event.domain_is_sniffed;
             if existing.record.destination_ip.is_empty() && !event.destination_ip.is_empty() {
                 existing.record.destination_ip = event.destination_ip;
             }
@@ -1533,6 +1633,7 @@ impl FailedConnectionTracker {
         let record = FailedConnectionRecord {
             id,
             domain: event.domain,
+            domain_is_sniffed: event.domain_is_sniffed,
             root_domain,
             destination_ip: event.destination_ip,
             destination_port: event.destination_port,
@@ -2341,7 +2442,49 @@ mod tests {
         assert_eq!(snap.records.len(), 1);
         assert_eq!(snap.records[0].domain, "dead.example.com");
         assert!(!snap.records[0].is_stalled_live);
-        assert_eq!(snap.records[0].failure_kind, FailureKind::Reset);
+        assert_eq!(snap.records[0].failure_kind, FailureKind::Timeout);
+        assert!(snap.records[0].raw_detail.contains("TCP closed after"));
+        assert!(snap.records[0].reason_summary.contains("连接关闭"));
+    }
+
+    #[test]
+    fn test_target_prefers_https_and_preserves_original_ip_with_sni() {
+        let mut rec = FailedConnectionRecord {
+            domain: "www.example.com".into(),
+            domain_is_sniffed: true,
+            destination_ip: "2001:db8::42".into(),
+            destination_port: "2084".into(),
+            network: "tcp".into(),
+            inbound: "tun/tun-in".into(),
+            failure_kind: FailureKind::Timeout,
+            ..Default::default()
+        };
+        assert_eq!(
+            rec.test_target().as_deref(),
+            Some("tls://[2001:db8::42]:2084?sni=www.example.com")
+        );
+        assert_eq!(
+            rec.domain_test_target().as_deref(),
+            Some("tls://www.example.com:2084")
+        );
+        assert_eq!(
+            rec.ip_test_target().as_deref(),
+            Some("tls://[2001:db8::42]:2084?sni=www.example.com")
+        );
+
+        rec.destination_port = "443".into();
+        assert_eq!(
+            rec.test_target().as_deref(),
+            Some("https://www.example.com")
+        );
+        assert_eq!(
+            rec.ip_test_target().as_deref(),
+            Some("tls://[2001:db8::42]:443?sni=www.example.com")
+        );
+
+        // FakeIP destination is never returned as an original-IP replay target.
+        rec.destination_ip = "198.18.0.15".into();
+        assert!(rec.ip_test_target().is_none());
     }
 
     #[test]
@@ -2428,5 +2571,32 @@ mod tests {
         let snap = tracker.snapshot(506);
         assert_eq!(snap.records.len(), 1);
         assert!(!snap.records[0].is_stalled_live);
+    }
+
+    #[test]
+    fn singbox_found_process_strips_user_suffix_and_filters_xrose_app() {
+        let model = demo_model();
+        let mut tracker = FailedConnectionTracker::new();
+        for line in [
+            "INFO[0010] [991 0ms] inbound/tun[tun-in]: inbound connection to 203.0.113.50:11010",
+            "DEBUG[0010] [991 1ms] router: found process: xrose-app, user: root",
+            "INFO[0010] [991 2ms] outbound/direct[direct]: outbound connection to 203.0.113.50:11010",
+            "ERROR[0011] [991 800ms] inbound/tun[tun-in]: process connection from 198.18.0.1:50000: dial tcp 203.0.113.50:11010: connect: connection refused",
+        ] {
+            tracker.observe_log_line(CoreKind::SingBox, line, &model, 600);
+        }
+        assert!(tracker.snapshot(600).records.is_empty());
+
+        for line in [
+            "INFO[0012] [992 0ms] inbound/tun[tun-in]: inbound connection to api.example.net:443",
+            "DEBUG[0012] [992 1ms] router: found process: /Applications/Browser.app/Contents/MacOS/Browser, user: demo",
+            "INFO[0012] [992 2ms] outbound/direct[direct]: outbound connection to api.example.net:443",
+            "ERROR[0014] [992 2s] inbound/tun[tun-in]: process connection from 198.18.0.1:50001: dial tcp 203.0.113.51:443: i/o timeout",
+        ] {
+            tracker.observe_log_line(CoreKind::SingBox, line, &model, 605);
+        }
+        let snap = tracker.snapshot(605);
+        assert_eq!(snap.records.len(), 1);
+        assert_eq!(snap.records[0].process_name, "Browser");
     }
 }

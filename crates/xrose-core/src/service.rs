@@ -5092,10 +5092,18 @@ impl AppService {
         action: crate::model::RouteAction,
     ) -> Result<()> {
         self.save_diagnostic_rule(target, kind, action)?;
+        let work_mode = self.model().work_mode;
+        let reloaded =
+            work_mode != WorkMode::Mesh && self.is_running() && self.settings().hot_reload;
+        if reloaded {
+            self.apply_config_silent();
+        }
         self.toast(
             ToastLevel::Success,
-            if self.model().work_mode == WorkMode::Mesh {
+            if work_mode == WorkMode::Mesh {
                 "规则已保存至本机；组网模式暂停本地代理分流，远端出口规则未修改"
+            } else if reloaded {
+                "规则已置顶并正在热重载"
             } else {
                 "规则已置顶保存"
             },
@@ -5148,21 +5156,11 @@ impl AppService {
             }
         }
         let mut next = model.clone();
-        if let Some(index) = next
-            .routing
-            .rules
-            .iter()
-            .position(|rule| rule.matchers == matchers && rule.action == action)
-        {
-            let mut rule = next.routing.rules.remove(index);
-            rule.enabled = true;
-            next.routing.rules.insert(0, rule);
-        } else {
-            next.routing.rules.insert(
-                0,
-                RouteRule::new(format!("诊断 · {}", target.value(kind)), matchers, action),
-            );
-        }
+        next.routing.rules.retain(|rule| rule.matchers != matchers);
+        next.routing.rules.insert(
+            0,
+            RouteRule::new(format!("诊断 · {}", target.value(kind)), matchers, action),
+        );
         if !next.routing.rule_groups.is_empty() {
             let rule = next.routing.rules.remove(0);
             let index = next
@@ -5178,9 +5176,7 @@ impl AppService {
                     ..Default::default()
                 });
             group.enabled = true;
-            group
-                .rules
-                .retain(|r| r.matchers != rule.matchers || r.action != rule.action);
+            group.rules.retain(|r| r.matchers != rule.matchers);
             group.rules.insert(0, rule);
             next.routing.rule_groups.insert(0, group);
         }

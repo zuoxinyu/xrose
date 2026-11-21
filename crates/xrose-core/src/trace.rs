@@ -5,14 +5,18 @@
 //! publishes each stage for the animated graph.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use tokio_rustls::rustls;
 use url::Url;
 
-use crate::model::{AppModel, CoreKind, DnsServer, MeshDnsMode, Node, RouteActionKind, WorkMode};
+use crate::model::{
+    AppModel, CoreKind, DnsServer, MeshDnsMode, Node, Protocol, RouteActionKind, WorkMode,
+};
 use crate::route::{self, ConnectionInfo};
 use crate::runtime::clash::{ClashClient, ClashConnection};
 use crate::service::AppService;
@@ -24,6 +28,7 @@ use crate::util::{format_bytes, now_unix};
 pub enum TraceProtocol {
     Http,
     Https,
+    Tls,
     Tcp,
     Udp,
     Icmp,
@@ -34,6 +39,7 @@ impl TraceProtocol {
         match self {
             TraceProtocol::Http => "HTTP",
             TraceProtocol::Https => "HTTPS",
+            TraceProtocol::Tls => "TLS",
             TraceProtocol::Tcp => "TCP",
             TraceProtocol::Udp => "UDP",
             TraceProtocol::Icmp => "ICMP",
@@ -42,6 +48,7 @@ impl TraceProtocol {
     pub fn icon(&self) -> &'static str {
         match self {
             TraceProtocol::Http | TraceProtocol::Https => "⇄",
+            TraceProtocol::Tls => "◈",
             TraceProtocol::Tcp => "◇",
             TraceProtocol::Udp => "≋",
             TraceProtocol::Icmp => "◉",
@@ -50,13 +57,14 @@ impl TraceProtocol {
     fn is_stream(&self) -> bool {
         matches!(
             self,
-            TraceProtocol::Tcp | TraceProtocol::Http | TraceProtocol::Https
+            TraceProtocol::Tcp | TraceProtocol::Tls | TraceProtocol::Http | TraceProtocol::Https
         )
     }
     fn scheme(&self) -> &'static str {
         match self {
             TraceProtocol::Http => "http",
             TraceProtocol::Https => "https",
+            TraceProtocol::Tls => "tls",
             TraceProtocol::Tcp => "tcp",
             TraceProtocol::Udp => "udp",
             TraceProtocol::Icmp => "icmp",
@@ -70,18 +78,34 @@ pub struct TraceTarget {
     pub host: String,
     pub port: u16,
     pub path: String,
+    pub sni: Option<String>,
     pub url: Option<String>,
     pub original: String,
 }
 
+fn format_url_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
 impl TraceTarget {
     pub fn display(&self) -> String {
+        let host = format_url_host(&self.host);
         match self.protocol {
             TraceProtocol::Icmp => format!("icmp://{}", self.host),
-            _ => format!(
-                "{}://{}:{}{}",
+            TraceProtocol::Tls => match &self.sni {
+                Some(sni) => format!("tls://{host}:{}?sni={sni}", self.port),
+                None => format!("tls://{host}:{}", self.port),
+            },
+            TraceProtocol::Tcp | TraceProtocol::Udp => {
+                format!("{}://{host}:{}", self.protocol.scheme(), self.port)
+            }
+            TraceProtocol::Http | TraceProtocol::Https => format!(
+                "{}://{host}:{}{}",
                 self.protocol.scheme(),
-                self.host,
                 self.port,
                 self.path
             ),
@@ -107,10 +131,11 @@ pub fn parse_target(input: &str) -> Result<TraceTarget, String> {
     let protocol = match url.scheme().to_ascii_lowercase().as_str() {
         "http" => TraceProtocol::Http,
         "https" => TraceProtocol::Https,
+        "tls" => TraceProtocol::Tls,
         "tcp" | "tcping" => TraceProtocol::Tcp,
         "udp" => TraceProtocol::Udp,
         "icmp" | "ping" => TraceProtocol::Icmp,
-        other => return Err(format!("暂不支持 {other}，请使用 https/tcp/udp/icmp")),
+        other => return Err(format!("暂不支持 {other}，请使用 https/tls/tcp/udp/icmp")),
     };
     let host = url
         .host_str()
@@ -122,7 +147,7 @@ pub fn parse_target(input: &str) -> Result<TraceTarget, String> {
     }
     let default_port = match protocol {
         TraceProtocol::Http => 80,
-        TraceProtocol::Https => 443,
+        TraceProtocol::Https | TraceProtocol::Tls => 443,
         TraceProtocol::Tcp => 443,
         TraceProtocol::Udp => 53,
         TraceProtocol::Icmp => 0,
@@ -131,6 +156,24 @@ pub fn parse_target(input: &str) -> Result<TraceTarget, String> {
     if protocol != TraceProtocol::Icmp && port == 0 {
         return Err("端口不能为 0".into());
     }
+    let sni = if protocol == TraceProtocol::Tls {
+        let value = url
+            .query_pairs()
+            .find(|(k, _)| k.eq_ignore_ascii_case("sni"))
+            .map(|(_, v)| v.trim().trim_end_matches('.').to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        if let Some(ref sni_host) = value
+            && (sni_host
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+                || sni_host.contains(['/', '\\']))
+        {
+            return Err("TLS SNI 主机名无效".into());
+        }
+        value
+    } else {
+        None
+    };
     let path = if protocol == TraceProtocol::Icmp {
         String::new()
     } else {
@@ -154,6 +197,7 @@ pub fn parse_target(input: &str) -> Result<TraceTarget, String> {
         host,
         port,
         path,
+        sni,
         url: http_url,
         original: trimmed.to_string(),
     })
@@ -214,6 +258,8 @@ pub struct TraceSession {
     pub host: String,
     pub port: u16,
     pub path: String,
+    #[serde(default)]
+    pub sni: Option<String>,
     pub steps: Vec<TraceStep>,
     pub phase: TracePhase,
     pub success: Option<bool>,
@@ -230,6 +276,8 @@ pub struct TraceSession {
     pub rule: Option<String>,
     #[serde(default)]
     pub blocked_rule_id: Option<String>,
+    #[serde(default)]
+    pub actual_direct: Option<bool>,
 }
 
 impl TraceSession {
@@ -248,6 +296,7 @@ impl TraceSession {
             host: target.host.clone(),
             port: target.port,
             path: target.path.clone(),
+            sni: target.sni.clone(),
             steps: vec![
                 step(TraceStepKind::Source, "请求源"),
                 step(TraceStepKind::Inbound, "入站"),
@@ -271,6 +320,7 @@ impl TraceSession {
             group_name: None,
             rule: None,
             blocked_rule_id: None,
+            actual_direct: None,
         }
     }
 
@@ -324,8 +374,8 @@ impl TraceSession {
         }
         self.phase = TracePhase::Failed;
         self.success = Some(false);
-        self.error = Some(error.clone());
-        self.summary = Some(format!("测试失败：{error}"));
+        self.error = Some(error);
+        self.summary = Some(format!("{} · 测试未完成", self.target));
         self.finished_at = Some(now_unix());
     }
 }
@@ -373,11 +423,18 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     session.set(
         TraceStepKind::Source,
         TraceStatus::Ok,
-        format!(
-            "Xrose · PID {} · 手动请求 · {}",
-            std::process::id(),
-            target.protocol.label()
-        ),
+        match &target.sni {
+            Some(sni) => format!(
+                "Xrose · PID {} · 手动请求 · {} · SNI {sni}",
+                std::process::id(),
+                target.protocol.label()
+            ),
+            None => format!(
+                "Xrose · PID {} · 手动请求 · {}",
+                std::process::id(),
+                target.protocol.label()
+            ),
+        },
         None,
     );
 
@@ -423,7 +480,10 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         session.set(
             TraceStepKind::Dns,
             TraceStatus::Skipped,
-            format!("{ip} 是 IP，无需 DNS 解析"),
+            match &target.sni {
+                Some(sni) => format!("{ip} 是 IP，无需 DNS 解析（TLS SNI：{sni}）"),
+                None => format!("{ip} 是 IP，无需 DNS 解析"),
+            },
             Some(0),
         );
     } else {
@@ -550,12 +610,17 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     let process = std::env::current_exe().ok();
     let protocol = match target.protocol {
         TraceProtocol::Http => Some("http"),
-        TraceProtocol::Https => Some("tls"),
+        TraceProtocol::Https | TraceProtocol::Tls => Some("tls"),
         TraceProtocol::Udp if target.port == 53 => Some("dns"),
         _ => None,
     };
+    let route_domain = if host_ip.is_none() {
+        Some(target.host.clone())
+    } else {
+        target.sni.clone()
+    };
     let info = ConnectionInfo {
-        domain: Some(target.host.clone()),
+        domain: route_domain,
         destination_ip: resolved_ip,
         destination_port: Some(target.port),
         network: (target.protocol != TraceProtocol::Icmp).then_some(network),
@@ -728,7 +793,8 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             .map_err(|e| e.to_string())?;
         if target.protocol == TraceProtocol::Icmp {
             return Err(
-                "当前组网出口转发链路不提供可验证的 ICMP 探测，请使用 TCP、HTTPS 或 UDP".into(),
+                "当前组网出口转发链路不提供可验证的 ICMP 探测，请使用 TLS、HTTPS、TCP 或 UDP"
+                    .into(),
             );
         }
         if !core.mesh_exit_runtime().is_some_and(|runtime| runtime.ipv6)
@@ -805,7 +871,7 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         Vec::new()
     };
     let resolved = mesh_mode.then_some(mesh_addresses.as_slice());
-    let remote = match target.protocol {
+    let mut remote = match target.protocol {
         TraceProtocol::Http | TraceProtocol::Https => {
             if use_proxy && http.is_none() {
                 return Err(
@@ -814,6 +880,24 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             }
             let http_proxy = if use_proxy { http.as_ref() } else { None };
             http_test(&settings, &target, http_proxy, resolved).await
+        }
+        TraceProtocol::Tls => {
+            if use_proxy {
+                match socks.as_ref() {
+                    Some(socks) => {
+                        tls_probe(
+                            &settings,
+                            socks,
+                            &target,
+                            running && settings.core == CoreKind::SingBox,
+                        )
+                        .await
+                    }
+                    None => return Err("没有启用的 SOCKS/mixed 入站，无法经 core 测试 TLS".into()),
+                }
+            } else {
+                tls_direct(&target, resolved).await
+            }
         }
         TraceProtocol::Tcp => {
             if use_proxy {
@@ -942,6 +1026,48 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         );
     }
 
+    let actual_direct = used_direct
+        || remote
+            .clash
+            .as_ref()
+            .is_some_and(|c| c.chains.iter().any(|tag| tag == "direct"))
+        || (remote.clash.is_none() && direct);
+    session.actual_direct = Some(actual_direct);
+    let resolved_node = remote
+        .clash
+        .as_ref()
+        .and_then(|c| chain_info(&model, &c.chains).1)
+        .or_else(|| {
+            (!actual_direct)
+                .then(|| {
+                    group
+                        .as_ref()
+                        .and_then(|g| g.active_node())
+                        .and_then(|nid| model.node(nid).cloned())
+                })
+                .flatten()
+        });
+    let tcp_lazy_proxy_unverified = target.protocol == TraceProtocol::Tcp
+        && use_proxy
+        && !actual_direct
+        && !mesh_mode
+        && remote.status == TraceStatus::Ok
+        && resolved_node
+            .as_ref()
+            .is_none_or(|node| protocol_uses_lazy_tcp_dial(node.protocol));
+    if tcp_lazy_proxy_unverified {
+        let elapsed = remote.duration_ms.unwrap_or(0);
+        let proto_hint = resolved_node
+            .as_ref()
+            .map(|n| n.protocol.display_name())
+            .unwrap_or("代理");
+        remote.status = TraceStatus::Warn;
+        remote.detail = format!(
+            "本地入站已接受（{elapsed} ms）；{proto_hint} 出站采用首包延迟拨号，纯 TCP 探测未发送应用数据，无法确认远端连通性，请改用 TLS 或 HTTPS 测试"
+        );
+        remote.warning = Some("纯 TCP 探测未验证远端连通，请改用 TLS 或 HTTPS".into());
+    }
+
     let remote_duration = remote.duration_ms;
     let remote_detail = remote.detail.clone();
     session.set(
@@ -969,11 +1095,6 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
     let response_ms = remote.duration_ms.unwrap_or(0);
     // The probe measures an end-to-end duration, not a separate return leg.
     session.response_ms = None;
-    let actual_direct = used_direct
-        || remote
-            .clash
-            .as_ref()
-            .is_some_and(|c| c.chains.iter().any(|tag| tag == "direct"));
     let endpoint = if mesh_mode {
         "组网链路".into()
     } else if actual_direct {
@@ -986,17 +1107,40 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
             .unwrap_or_else(|| "core（实际出站未观测）".into())
     };
     if session.success == Some(true) {
+        let (response_status, response_text) = if tcp_lazy_proxy_unverified {
+            (
+                TraceStatus::Warn,
+                format!("仅本地入站返回（未验证远端回包）· {endpoint} · {response_ms} ms"),
+            )
+        } else if remote.status == TraceStatus::Warn && target.protocol == TraceProtocol::Tls {
+            (
+                TraceStatus::Warn,
+                format!(
+                    "{} → Xrose · 耗时 {response_ms} ms（TLS 证书校验未通过）",
+                    if actual_direct {
+                        "目标 → 直连".into()
+                    } else {
+                        format!("目标 → {endpoint}")
+                    }
+                ),
+            )
+        } else {
+            (
+                TraceStatus::Ok,
+                format!(
+                    "{} → Xrose · 耗时 {response_ms} ms",
+                    if actual_direct {
+                        "目标 → 直连".into()
+                    } else {
+                        format!("目标 → {endpoint}")
+                    }
+                ),
+            )
+        };
         session.set(
             TraceStepKind::Response,
-            TraceStatus::Ok,
-            format!(
-                "{} → Xrose · 耗时 {response_ms} ms",
-                if actual_direct {
-                    "目标 → 直连".into()
-                } else {
-                    format!("目标 → {endpoint}")
-                }
-            ),
+            response_status,
+            response_text,
             None,
         );
         session.phase = TracePhase::Done;
@@ -1027,11 +1171,17 @@ async fn run_inner(service: &AppService, session: &mut TraceSession) -> Result<(
         session.set(
             TraceStepKind::Response,
             TraceStatus::Error,
-            format!("未能建立完整返回路径：{remote_detail}"),
+            format!(
+                "未收到目标响应 · 已在「目标服务」阶段失败（经 {endpoint} · 耗时 {response_ms} ms）"
+            ),
             None,
         );
         session.finished_at = Some(now_unix());
-        session.summary = Some(format!("{} · 失败：{remote_detail}", session.target));
+        session.summary = Some(format!(
+            "{} · 诊断总耗时 {} ms",
+            session.target,
+            overall.elapsed().as_millis()
+        ));
         service.logs().push(
             crate::core::logs::LogStream::App,
             crate::settings::LogLevel::Warn,
@@ -1461,6 +1611,363 @@ async fn tcp_probe(
         duration_ms: Some(elapsed),
         warning: None,
         clash,
+    }
+}
+
+/// Protocols that defer remote TCP dialing until the first application payload
+/// byte arrives (so a bare SOCKS5 CONNECT returns locally without probing the
+/// remote host).
+fn protocol_uses_lazy_tcp_dial(protocol: Protocol) -> bool {
+    matches!(
+        protocol,
+        Protocol::Vless
+            | Protocol::Vmess
+            | Protocol::Trojan
+            | Protocol::Shadowsocks
+            | Protocol::Hysteria2
+            | Protocol::Tuic
+            | Protocol::Anytls
+            | Protocol::Chain
+    )
+}
+
+fn build_tls_config() -> Result<Arc<rustls::ClientConfig>, String> {
+    let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| "初始化 TLS 客户端失败".to_string())?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(Arc::new(config))
+}
+
+fn tls_server_name(target: &TraceTarget) -> Result<rustls::pki_types::ServerName<'static>, String> {
+    let name = target.sni.as_deref().unwrap_or(&target.host);
+    rustls::pki_types::ServerName::try_from(name.to_owned())
+        .map_err(|_| format!("TLS SNI / 主机名无效：{name}"))
+}
+
+fn tls_version_label(version: Option<rustls::ProtocolVersion>) -> &'static str {
+    match version {
+        Some(rustls::ProtocolVersion::TLSv1_3) => "TLS 1.3",
+        Some(rustls::ProtocolVersion::TLSv1_2) => "TLS 1.2",
+        _ => "TLS",
+    }
+}
+
+fn classify_tls_handshake_error(
+    err: &std::io::Error,
+    elapsed: u64,
+    via: &str,
+    sni_note: &str,
+) -> (TraceStatus, String, Option<String>) {
+    if let Some(tls_err) = err
+        .get_ref()
+        .and_then(|e| e.downcast_ref::<rustls::Error>())
+    {
+        match tls_err {
+            rustls::Error::InvalidCertificate(cert_err) => {
+                let reason = match cert_err {
+                    rustls::CertificateError::UnknownIssuer => "证书签发机构不受信任",
+                    rustls::CertificateError::NotValidForName
+                    | rustls::CertificateError::NotValidForNameContext { .. } => {
+                        "证书域名与目标/SNI 不匹配"
+                    }
+                    rustls::CertificateError::Expired
+                    | rustls::CertificateError::ExpiredContext { .. } => "证书已过期",
+                    rustls::CertificateError::NotValidYet
+                    | rustls::CertificateError::NotValidYetContext { .. } => "证书尚未生效",
+                    _ => "证书校验未通过",
+                };
+                return (
+                    TraceStatus::Warn,
+                    format!(
+                        "{via}收到远端 TLS 证书，但{reason}（远端已连通{sni_note}）· {elapsed} ms"
+                    ),
+                    Some(format!("远端已响应但{reason}")),
+                );
+            }
+            rustls::Error::AlertReceived(alert) => {
+                return (
+                    TraceStatus::Error,
+                    format!("{via}TLS 握手被远端拒绝（Alert: {alert:?}{sni_note}）· {elapsed} ms"),
+                    None,
+                );
+            }
+            other => {
+                return (
+                    TraceStatus::Error,
+                    format!("{via}TLS 握手失败（{other}{sni_note}）· {elapsed} ms"),
+                    None,
+                );
+            }
+        }
+    }
+    let detail = match err.kind() {
+        std::io::ErrorKind::UnexpectedEof => {
+            format!(
+                "{via}TLS 握手中断：远端在握手阶段关闭连接（无有效 TLS 响应{sni_note}）· {elapsed} ms"
+            )
+        }
+        std::io::ErrorKind::ConnectionReset => {
+            format!("{via}TLS 握手中断：连接被重置（RST{sni_note}）· {elapsed} ms")
+        }
+        std::io::ErrorKind::TimedOut => format!("{via}TLS 握手超时（8 秒），远端无响应"),
+        _ => format!("{via}TLS 握手失败：{err} · {elapsed} ms"),
+    };
+    (TraceStatus::Error, detail, None)
+}
+
+async fn tls_direct(target: &TraceTarget, resolved: Option<&[IpAddr]>) -> RemoteResult {
+    let started = Instant::now();
+    let config = match build_tls_config() {
+        Ok(config) => config,
+        Err(detail) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail,
+                duration_ms: None,
+                warning: None,
+                clash: None,
+            };
+        }
+    };
+    let server_name = match tls_server_name(target) {
+        Ok(name) => name,
+        Err(detail) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail,
+                duration_ms: None,
+                warning: None,
+                clash: None,
+            };
+        }
+    };
+    let sni_note = target
+        .sni
+        .as_deref()
+        .map(|sni| format!(" · SNI {sni}"))
+        .unwrap_or_default();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let stream = match tokio::time::timeout_at(deadline, async {
+        if let Some(ips) = resolved {
+            let addresses: Vec<_> = ips
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, target.port))
+                .collect();
+            TcpStream::connect(addresses.as_slice()).await
+        } else {
+            TcpStream::connect((target.host.as_str(), target.port)).await
+        }
+    })
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail: format!("TCP 连接失败：{err}"),
+                duration_ms: Some(started.elapsed().as_millis() as u64),
+                warning: None,
+                clash: None,
+            };
+        }
+        Err(_) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail: "TLS 握手超时（8 秒，TCP 未建立）".into(),
+                duration_ms: Some(8000),
+                warning: None,
+                clash: None,
+            };
+        }
+    };
+    let connector = tokio_rustls::TlsConnector::from(config);
+    match tokio::time::timeout_at(deadline, connector.connect(server_name, stream)).await {
+        Ok(Ok(mut tls_stream)) => {
+            let elapsed = started.elapsed().as_millis() as u64;
+            let version = tls_version_label(tls_stream.get_ref().1.protocol_version());
+            let _ = tls_stream.shutdown().await;
+            RemoteResult {
+                status: TraceStatus::Ok,
+                detail: format!("TLS 握手成功（{version}{sni_note}）· {elapsed} ms"),
+                duration_ms: Some(elapsed),
+                warning: None,
+                clash: None,
+            }
+        }
+        Ok(Err(err)) => {
+            let elapsed = started.elapsed().as_millis() as u64;
+            let (status, detail, warning) =
+                classify_tls_handshake_error(&err, elapsed, "", &sni_note);
+            RemoteResult {
+                status,
+                detail,
+                duration_ms: Some(elapsed),
+                warning,
+                clash: None,
+            }
+        }
+        Err(_) => RemoteResult {
+            status: TraceStatus::Error,
+            detail: format!("TLS 握手超时（8 秒），远端无响应{sni_note}"),
+            duration_ms: Some(8000),
+            warning: None,
+            clash: None,
+        },
+    }
+}
+
+async fn tls_probe(
+    settings: &Settings,
+    socks: &crate::updates::LocalProxy,
+    target: &TraceTarget,
+    use_clash: bool,
+) -> RemoteResult {
+    let started = Instant::now();
+    let config = match build_tls_config() {
+        Ok(config) => config,
+        Err(detail) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail,
+                duration_ms: None,
+                warning: None,
+                clash: None,
+            };
+        }
+    };
+    let server_name = match tls_server_name(target) {
+        Ok(name) => name,
+        Err(detail) => {
+            return RemoteResult {
+                status: TraceStatus::Error,
+                detail,
+                duration_ms: None,
+                warning: None,
+                clash: None,
+            };
+        }
+    };
+    let sni_note = target
+        .sni
+        .as_deref()
+        .map(|sni| format!(" · SNI {sni}"))
+        .unwrap_or_default();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let stream =
+        match tokio::time::timeout_at(deadline, socks5_connect(socks, &target.host, target.port))
+            .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                return RemoteResult {
+                    status: TraceStatus::Error,
+                    detail: format!("经 core SOCKS5 连接失败：{err}"),
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
+                    warning: None,
+                    clash: None,
+                };
+            }
+            Err(_) => {
+                return RemoteResult {
+                    status: TraceStatus::Error,
+                    detail: "经 core 建立 TLS 隧道超时（8 秒）".into(),
+                    duration_ms: Some(8000),
+                    warning: None,
+                    clash: None,
+                };
+            }
+        };
+
+    let source_port = stream.local_addr().ok().map(|addr| addr.port());
+    let poll = if use_clash {
+        let api_port = settings.api_port;
+        let host = target.host.clone();
+        let sni = target.sni.clone();
+        let port = target.port;
+        Some(tokio::spawn(async move {
+            poll_clash_with_sni(
+                api_port,
+                &host,
+                sni.as_deref(),
+                port,
+                2400,
+                source_port,
+                &Default::default(),
+            )
+            .await
+        }))
+    } else {
+        None
+    };
+
+    // Sending a real TLS ClientHello forces lazy-dial proxy protocols (VLESS,
+    // Trojan, VMess, Shadowsocks, etc.) to dial the remote endpoint immediately.
+    let connector = tokio_rustls::TlsConnector::from(config);
+    let handshake = tokio::time::timeout_at(deadline, connector.connect(server_name, stream)).await;
+    let elapsed = started.elapsed().as_millis() as u64;
+
+    match handshake {
+        Ok(Ok(mut tls_stream)) => {
+            let version = tls_version_label(tls_stream.get_ref().1.protocol_version());
+            let clash = match poll {
+                Some(handle) => tokio::time::timeout(Duration::from_millis(800), handle)
+                    .await
+                    .ok()
+                    .and_then(|res| res.ok())
+                    .flatten(),
+                None => None,
+            };
+            let _ = tls_stream.shutdown().await;
+            drop(tls_stream);
+            RemoteResult {
+                status: TraceStatus::Ok,
+                detail: format!("经 core 完成 TLS 握手（{version}{sni_note}）· {elapsed} ms"),
+                duration_ms: Some(elapsed),
+                warning: None,
+                clash,
+            }
+        }
+        Ok(Err(err)) => {
+            let clash = match poll {
+                Some(handle) => tokio::time::timeout(Duration::from_millis(300), handle)
+                    .await
+                    .ok()
+                    .and_then(|res| res.ok())
+                    .flatten(),
+                None => None,
+            };
+            let (status, detail, warning) =
+                classify_tls_handshake_error(&err, elapsed, "经 core ", &sni_note);
+            RemoteResult {
+                status,
+                detail,
+                duration_ms: Some(elapsed),
+                warning,
+                clash,
+            }
+        }
+        Err(_) => {
+            let clash = match poll {
+                Some(handle) => tokio::time::timeout(Duration::from_millis(200), handle)
+                    .await
+                    .ok()
+                    .and_then(|res| res.ok())
+                    .flatten(),
+                None => None,
+            };
+            RemoteResult {
+                status: TraceStatus::Error,
+                detail: format!("经 core TLS 握手超时（8 秒），远端无响应{sni_note}"),
+                duration_ms: Some(8000),
+                warning: None,
+                clash,
+            }
+        }
     }
 }
 
@@ -1919,16 +2426,34 @@ async fn poll_clash(
     source_port: Option<u16>,
     excluded: &std::collections::BTreeSet<String>,
 ) -> Option<ClashConnection> {
+    poll_clash_with_sni(api_port, host, None, port, wait_ms, source_port, excluded).await
+}
+
+async fn poll_clash_with_sni(
+    api_port: u16,
+    host: &str,
+    sni: Option<&str>,
+    port: u16,
+    wait_ms: u64,
+    source_port: Option<u16>,
+    excluded: &std::collections::BTreeSet<String>,
+) -> Option<ClashConnection> {
     let client = ClashClient::new(api_port, "");
     let deadline = Instant::now() + Duration::from_millis(wait_ms);
     let host = host.to_ascii_lowercase();
+    let sni = sni.map(str::to_ascii_lowercase);
     loop {
         if let Ok(response) = client.connections().await {
-            if let Some(found) = response
-                .connections
-                .into_iter()
-                .find(|conn| matches_probe_connection(conn, &host, port, source_port, excluded))
-            {
+            if let Some(found) = response.connections.into_iter().find(|conn| {
+                matches_probe_connection_with_sni(
+                    conn,
+                    &host,
+                    sni.as_deref(),
+                    port,
+                    source_port,
+                    excluded,
+                )
+            }) {
                 return Some(found);
             }
         }
@@ -1939,6 +2464,7 @@ async fn poll_clash(
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn matches_probe_connection(
     connection: &ClashConnection,
     host: &str,
@@ -1946,12 +2472,37 @@ fn matches_probe_connection(
     source_port: Option<u16>,
     excluded: &std::collections::BTreeSet<String>,
 ) -> bool {
+    matches_probe_connection_with_sni(connection, host, None, port, source_port, excluded)
+}
+
+fn matches_host_or_ip(candidate: &str, expected: &str) -> bool {
+    if candidate.eq_ignore_ascii_case(expected) {
+        return true;
+    }
+    match (candidate.parse::<IpAddr>(), expected.parse::<IpAddr>()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn matches_probe_connection_with_sni(
+    connection: &ClashConnection,
+    host: &str,
+    sni: Option<&str>,
+    port: u16,
+    source_port: Option<u16>,
+    excluded: &std::collections::BTreeSet<String>,
+) -> bool {
+    let conn_host = connection.host();
+    let dest_ip = &connection.metadata.destination_ip;
+    let host_matched = matches_host_or_ip(&conn_host, host)
+        || matches_host_or_ip(dest_ip, host)
+        || sni.is_some_and(|sni| {
+            matches_host_or_ip(&conn_host, sni)
+                || connection.metadata.sniff_host.eq_ignore_ascii_case(sni)
+        });
     connection.metadata.destination_port == port.to_string()
-        && (connection.host().eq_ignore_ascii_case(host)
-            || connection
-                .metadata
-                .destination_ip
-                .eq_ignore_ascii_case(host))
+        && host_matched
         && !excluded.contains(&connection.id)
         && source_port.is_none_or(|port| connection.metadata.source_port == port.to_string())
 }
@@ -2189,6 +2740,20 @@ mod tests {
         assert_eq!(http.protocol, TraceProtocol::Https);
         assert_eq!(http.port, 443);
         assert_eq!(http.path, "/a?b=1");
+        let tls = parse_target("tls://example.com").unwrap();
+        assert_eq!(tls.protocol, TraceProtocol::Tls);
+        assert_eq!(tls.port, 443);
+        assert_eq!(tls.sni, None);
+        assert_eq!(tls.display(), "tls://example.com:443");
+        let tls_sni = parse_target("tls://[2001:db8::1]:2084?sni=www.example.com").unwrap();
+        assert_eq!(tls_sni.protocol, TraceProtocol::Tls);
+        assert_eq!(tls_sni.host, "2001:db8::1");
+        assert_eq!(tls_sni.port, 2084);
+        assert_eq!(tls_sni.sni.as_deref(), Some("www.example.com"));
+        assert_eq!(
+            tls_sni.display(),
+            "tls://[2001:db8::1]:2084?sni=www.example.com"
+        );
         let tcp = parse_target("tcp://1.2.3.4:8443").unwrap();
         assert_eq!(tcp.protocol, TraceProtocol::Tcp);
         assert_eq!(tcp.port, 8443);
@@ -2198,6 +2763,71 @@ mod tests {
         assert_eq!(icmp.port, 0);
         assert!(parse_target("ftp://example.com").is_err());
         assert!(parse_target("").is_err());
+    }
+
+    #[test]
+    fn lazy_tcp_dial_classification_and_tls_error_classification() {
+        assert!(protocol_uses_lazy_tcp_dial(Protocol::Vless));
+        assert!(protocol_uses_lazy_tcp_dial(Protocol::Trojan));
+        assert!(protocol_uses_lazy_tcp_dial(Protocol::Shadowsocks));
+        assert!(protocol_uses_lazy_tcp_dial(Protocol::Chain));
+        assert!(!protocol_uses_lazy_tcp_dial(Protocol::Wireguard));
+        assert!(!protocol_uses_lazy_tcp_dial(Protocol::Socks));
+
+        let cert_err = std::io::Error::other(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        let (status, detail, warning) =
+            classify_tls_handshake_error(&cert_err, 210, "经 core ", " · SNI www.example.com");
+        assert_eq!(status, TraceStatus::Warn);
+        assert!(detail.contains("不受信任"));
+        assert!(detail.contains("SNI www.example.com"));
+        assert!(warning.is_some());
+
+        let eof_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+        let (status, detail, warning) = classify_tls_handshake_error(&eof_err, 320, "经 core ", "");
+        assert_eq!(status, TraceStatus::Error);
+        assert!(detail.contains("握手中断"));
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn probe_metadata_matches_ipv6_and_sniffed_sni() {
+        let mut c = ClashConnection::default();
+        c.id = "tls-1".into();
+        c.metadata.host = "www.example.com".into();
+        c.metadata.destination_ip = "2001:db8:0:0::1".into();
+        c.metadata.destination_port = "2084".into();
+        c.metadata.source_port = "54321".into();
+        let excluded = std::collections::BTreeSet::new();
+        assert!(matches_probe_connection_with_sni(
+            &c,
+            "2001:db8::1",
+            Some("www.example.com"),
+            2084,
+            Some(54321),
+            &excluded
+        ));
+    }
+
+    #[test]
+    fn tls_direct_reports_error_when_peer_closes_before_handshake() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accept = tokio::spawn(async move {
+                if let Ok((stream, _)) = listener.accept().await {
+                    drop(stream);
+                }
+            });
+            let target =
+                parse_target(&format!("tls://127.0.0.1:{port}?sni=www.example.com")).unwrap();
+            let res = tls_direct(&target, None).await;
+            let _ = accept.await;
+            assert_eq!(res.status, TraceStatus::Error);
+            assert!(res.detail.contains("TLS 握手"));
+        });
     }
 
     #[test]

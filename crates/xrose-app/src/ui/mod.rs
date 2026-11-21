@@ -404,6 +404,7 @@ pub struct AppView {
     pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
     pub(crate) diagnostic_rule_action: RouteActionKind,
     pub(crate) diagnostic_rule_group: Option<String>,
+    diagnostic_rule_trace_id: Option<u64>,
     pub(crate) expanded_trace_step: Option<TraceStepKind>,
     pub(crate) auto_trace_started: bool,
     last_refresh: std::time::Instant,
@@ -555,7 +556,7 @@ impl AppView {
         let trace_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(
-                    "https://example.com 或 tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
+                    "https://example.com 或 tls://[ip]:443?sni=example.com / tcp://1.1.1.1:443 / udp://8.8.8.8:53",
                 )
                 .default_value("https://www.gstatic.com/generate_204")
         });
@@ -710,6 +711,7 @@ impl AppView {
             diagnostic_rule_kind: DiagnosticRuleKind::Domain,
             diagnostic_rule_action: RouteActionKind::Proxy,
             diagnostic_rule_group: None,
+            diagnostic_rule_trace_id: None,
             expanded_trace_step: None,
             auto_trace_started: false,
             last_refresh: std::time::Instant::now(),
@@ -866,8 +868,8 @@ impl AppView {
             (
                 &self.trace_input,
                 self.tr(
-                    "https://example.com 或 tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
-                    "https://example.com or tcp://1.1.1.1:443 / udp://8.8.8.8:53 / icmp://1.1.1.1",
+                    "https://example.com 或 tls://[ip]:443?sni=example.com / tcp://1.1.1.1:443 / udp://8.8.8.8:53",
+                    "https://example.com or tls://[ip]:443?sni=example.com / tcp://1.1.1.1:443 / udp://8.8.8.8:53",
                 ),
             ),
         ] {
@@ -879,6 +881,32 @@ impl AppView {
         self.chain_form.localize_inputs(self.lang(), window, cx);
     }
 
+    fn sync_diagnostic_rule_defaults(&mut self) {
+        let Some(trace) = self.snapshot.trace.as_ref() else {
+            return;
+        };
+        if !matches!(
+            trace.phase,
+            xrose_core::trace::TracePhase::Done | xrose_core::trace::TracePhase::Failed
+        ) || self.diagnostic_rule_trace_id == Some(trace.id)
+        {
+            return;
+        }
+        self.diagnostic_rule_trace_id = Some(trace.id);
+        if trace.host.parse::<std::net::IpAddr>().is_ok() {
+            self.diagnostic_rule_kind = DiagnosticRuleKind::Ip;
+        } else {
+            self.diagnostic_rule_kind = DiagnosticRuleKind::Domain;
+        }
+        if trace.success == Some(false) {
+            self.diagnostic_rule_action = if trace.actual_direct == Some(false) {
+                RouteActionKind::Direct
+            } else {
+                RouteActionKind::Proxy
+            };
+        }
+    }
+
     fn refresh_snapshot(&mut self) {
         // An earlier poll must not overwrite the result of an explicit action.
         self.snapshot_task = None;
@@ -886,6 +914,7 @@ impl AppView {
             self.service.touch_toasts();
         }
         self.snapshot = self.service.snapshot();
+        self.sync_diagnostic_rule_defaults();
         if let Some(id) = self.hovered_toast
             && !self
                 .snapshot
@@ -967,6 +996,7 @@ impl AppView {
             (None, None) => false,
         };
         self.snapshot.trace = current;
+        self.sync_diagnostic_rule_defaults();
         let refresh_due = now.duration_since(self.last_refresh) >= Duration::from_millis(400);
         if refresh_due && self.snapshot_task.is_none() {
             self.last_refresh = now;
@@ -983,6 +1013,7 @@ impl AppView {
                 let _ = view.update(cx, |view, cx| {
                     view.snapshot_task = None;
                     view.snapshot = snapshot;
+                    view.sync_diagnostic_rule_defaults();
                     if let Some(id) = view.hovered_toast
                         && !view
                             .snapshot

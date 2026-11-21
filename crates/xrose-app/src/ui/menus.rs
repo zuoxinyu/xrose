@@ -1254,14 +1254,35 @@ impl AppView {
                         ));
                 }
                 let host = record.host().to_owned();
+                let domain_target = record.domain_test_target();
+                let ip_target = record.ip_test_target();
                 menu = menu.separator();
-                if let Some(target) = record.test_target() {
-                    menu = menu.item(item(
-                        &view,
-                        tr(lang, "链路测试", "Link trace"),
-                        true,
-                        Command::TestFailedTarget(target),
-                    ));
+                match (ip_target, domain_target) {
+                    (Some(ip_t), Some(dom_t)) if ip_t != dom_t => {
+                        menu = menu
+                            .item(item(
+                                &view,
+                                tr(lang, "链路测试（按原目标 IP）", "Link trace (original IP)"),
+                                true,
+                                Command::TestFailedTarget(ip_t),
+                            ))
+                            .item(item(
+                                &view,
+                                tr(lang, "链路测试（按域名）", "Link trace (by domain)"),
+                                true,
+                                Command::TestFailedTarget(dom_t),
+                            ));
+                    }
+                    _ => {
+                        if let Some(target) = record.test_target() {
+                            menu = menu.item(item(
+                                &view,
+                                tr(lang, "链路测试", "Link trace"),
+                                true,
+                                Command::TestFailedTarget(target),
+                            ));
+                        }
+                    }
                 }
                 menu = menu
                     .item(item(

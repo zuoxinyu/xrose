@@ -82,7 +82,7 @@ Xrose provides three independent work modes and preserves your existing nodes, o
 
 - **Live Connections, Failed Requests & Active Processes**: Inspects active connections, captures failed, stalled, and rule-rejected connections, aggregates per-process bandwidth with application icons, and records sessions for replay. Supports closing connections, one-click root-domain or exact-target rule fixes, and batch rule creation.
 - **Multi-Dimensional Traffic Statistics**: Optional local traffic attribution by node, process, or main domain across session, daily, weekly, and monthly windows in bar chart or table views.
-- **6-Stage Visual Link Trace**: Probes HTTPS, TCP, UDP, or ICMP targets and visualizes each stage — **Request Source → Inbound → DNS Resolution → Routing / Rules → Outbound Node → Target Service** — with expandable stage details and inline top-priority rule creation. Includes concurrent DNS A/AAAA comparison, UDP / NAT probing, environment checks, and redacted diagnostic report export.
+- **6-Stage Visual Link Trace**: Probes HTTPS, TLS (including original IP with SNI), TCP, UDP, or ICMP targets and visualizes each stage — **Request Source → Inbound → DNS Resolution → Routing / Rules → Outbound Node → Target Service** — with expandable stage details and inline top-priority rule creation. Includes concurrent DNS A/AAAA comparison, UDP / NAT probing, environment checks, and redacted diagnostic report export.
 
 ### Tray Flyout & Privacy Mode
 
