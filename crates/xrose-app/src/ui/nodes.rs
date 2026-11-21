@@ -32,6 +32,7 @@ use gpui_kit::component::menu::{ContextMenuExt, DropdownMenu};
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum NodeSection<'a> {
     Manual,
+    Chains,
     Subscription(&'a str),
     MeshExits,
 }
@@ -209,7 +210,7 @@ impl AppView {
             .iter()
             .enumerate()
             .filter(|(_, node)| !node.is_mesh_gateway() || !discovered_gateways.contains(&node.id))
-            .filter(|(_, n)| node_matches_query(n, &search_query))
+            .filter(|(_, n)| node_matches_query(n, model, &search_query))
             .map(|(index, _)| index)
             .collect();
 
@@ -300,7 +301,17 @@ impl AppView {
                         .iter()
                         .map(|&index| {
                             let node = &this.snapshot.model.nodes[index];
-                            let usable = node.usable_with(this.snapshot.settings.core);
+                            let usable = this
+                                .snapshot
+                                .model
+                                .node_usable_with(node, this.snapshot.settings.core);
+                            let chain_subtitle = chain_row_subtitle(
+                                node,
+                                &this.snapshot.model,
+                                hide_ips,
+                                &suffixes,
+                                lang,
+                            );
                             render_node_row(
                                 RowProps {
                                     node,
@@ -310,6 +321,7 @@ impl AppView {
                                         && (!node.is_mesh_gateway()
                                             || this.snapshot.model.work_mode == WorkMode::Mesh),
                                     virtual_exit: None,
+                                    chain_subtitle,
                                     fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
                                     latency: this
                                         .snapshot
@@ -851,6 +863,8 @@ impl AppView {
                         let node = &model.nodes[index];
                         let section = if node.is_mesh_gateway() {
                             NodeSection::MeshExits
+                        } else if node.is_chain() {
+                            NodeSection::Chains
                         } else if let Some(id) = &node.subscription_id {
                             NodeSection::Subscription(id)
                         } else {
@@ -868,6 +882,7 @@ impl AppView {
                         let mesh = section == NodeSection::MeshExits;
                         let group_key = match section {
                             NodeSection::MeshExits => "mesh-exits".into(),
+                            NodeSection::Chains => "chains".into(),
                             NodeSection::Manual => "manual".into(),
                             NodeSection::Subscription(id) => format!("subscription-{id}"),
                         };
@@ -876,6 +891,7 @@ impl AppView {
                             NodeSection::MeshExits => {
                                 self.tr("组网出口节点", "Mesh exit nodes").to_string()
                             }
+                            NodeSection::Chains => self.tr("代理链", "Proxy chains").to_string(),
                             NodeSection::Subscription(id) => sub_names
                                 .get(id)
                                 .map(|&name| name.to_owned())
@@ -1010,7 +1026,8 @@ impl AppView {
                             .iter()
                             .filter_map(|id| node_index_by_id.get(id.as_str()).copied())
                             .filter(|&idx| {
-                                name_matches || node_matches_query(&model.nodes[idx], &search_query)
+                                name_matches
+                                    || node_matches_query(&model.nodes[idx], model, &search_query)
                             })
                             .collect();
                         sort_node_indices(&mut member_indices, node_sort, model, &self.snapshot);
@@ -1035,7 +1052,7 @@ impl AppView {
                             && group.members.iter().any(|id| {
                                 model
                                     .node(id)
-                                    .is_some_and(|n| n.usable_with(self.snapshot.settings.core))
+                                    .is_some_and(|n| model.node_usable_with(n, self.snapshot.settings.core))
                             });
                         let member_ids_for_ping: Vec<String> = member_indices
                             .iter()
@@ -1078,8 +1095,17 @@ impl AppView {
                                                 .iter()
                                                 .map(|&index| {
                                                     let node = &this.snapshot.model.nodes[index];
-                                                    let usable = node
-                                                        .usable_with(this.snapshot.settings.core);
+                                                    let usable = this.snapshot.model.node_usable_with(
+                                                        node,
+                                                        this.snapshot.settings.core,
+                                                    );
+                                                    let chain_subtitle = chain_row_subtitle(
+                                                        node,
+                                                        &this.snapshot.model,
+                                                        hide_ips,
+                                                        &suffixes,
+                                                        lang,
+                                                    );
                                                     render_node_row(
                                                         RowProps {
                                                             node,
@@ -1091,6 +1117,7 @@ impl AppView {
                                                             selected: group_active_node.as_deref()
                                                                 == Some(node.id.as_str()),
                                                             virtual_exit: None,
+                                                            chain_subtitle,
                                                             fastest: fastest_id.as_deref()
                                                                 == Some(node.id.as_str()),
                                                             latency: this
@@ -1528,11 +1555,42 @@ fn this_busy(busy: &[String], key: &str) -> bool {
     busy.iter().any(|b| b == key)
 }
 
-fn node_matches_query(node: &Node, query: &str) -> bool {
-    query.is_empty()
+fn node_matches_query(node: &Node, model: &AppModel, query: &str) -> bool {
+    if query.is_empty()
         || node.name.to_lowercase().contains(query)
         || node.endpoint().to_lowercase().contains(query)
         || node.protocol.display_name().to_lowercase().contains(query)
+    {
+        return true;
+    }
+    if node.is_chain() {
+        if "代理链".contains(query) {
+            return true;
+        }
+        return model
+            .chain_hop_summaries(node)
+            .iter()
+            .any(|hop| hop.label.to_lowercase().contains(query));
+    }
+    false
+}
+
+fn chain_row_subtitle(
+    node: &Node,
+    model: &AppModel,
+    hide_ips: bool,
+    suffixes: &[&str],
+    lang: Language,
+) -> Option<String> {
+    if !node.is_chain() {
+        return None;
+    }
+    let parts: Vec<String> = node
+        .chain_hops
+        .iter()
+        .map(|hop| super::chain_editor::format_hop_label(hop, model, hide_ips, suffixes, lang).0)
+        .collect();
+    Some(parts.join(" ──▶ "))
 }
 
 fn sort_node_indices(
@@ -1639,6 +1697,7 @@ struct RowProps<'a> {
     lang: Language,
     selected: bool,
     virtual_exit: Option<VirtualExit>,
+    chain_subtitle: Option<String>,
     fastest: bool,
     latency: Option<&'a LatencyEntry>,
     location: Option<&'a xrose_core::runtime::location::NodeLocation>,
@@ -1745,6 +1804,7 @@ fn render_virtual_node_row(
             lang: view.lang(),
             selected,
             virtual_exit: Some(exit),
+            chain_subtitle: None,
             fastest: false,
             latency: view
                 .snapshot
@@ -1793,6 +1853,8 @@ fn primary_badge_label(node: &Node, virtual_exit: Option<&VirtualExit>, lang: La
         || node.id.starts_with("mesh-exit-")
     {
         super::tr(lang, "组网出口", "Mesh exit").to_string()
+    } else if node.is_chain() {
+        super::tr(lang, "代理链", "Chain").to_string()
     } else {
         node.protocol.display_name().to_uppercase()
     }
@@ -1919,11 +1981,19 @@ fn row_tooltip(
             "Node is disabled; enable it from the context menu or More actions",
         )
     } else if !usable {
-        super::tr(
-            lang,
-            "当前内核不支持此协议，请切换内核后再使用",
-            "Unsupported by current core; switch cores to use this node",
-        )
+        if node.is_chain() {
+            super::tr(
+                lang,
+                "代理链存在已禁用、缺失或当前内核不支持的跳点，请编辑后使用",
+                "One or more hops in this chain are disabled, missing, or unsupported by the current core",
+            )
+        } else {
+            super::tr(
+                lang,
+                "当前内核不支持此协议，请切换内核后再使用",
+                "Unsupported by current core; switch cores to use this node",
+            )
+        }
     } else if auto_mode {
         if group_context {
             super::tr(
@@ -2357,6 +2427,7 @@ fn render_node_row(
         lang,
         selected,
         virtual_exit,
+        chain_subtitle,
         fastest: is_fastest,
         latency,
         location,
@@ -2647,6 +2718,22 @@ fn render_node_row(
                                 .when_some(mesh_provider, |d, provider| {
                                     d.child(pill(provider.label(), p.primary, p.panel))
                                 })
+                                .when(node.is_chain(), |d| {
+                                    let hop_count = node.chain_hops.len();
+                                    let hops_label = if lang == Language::Zh {
+                                        format!("{hop_count} 跳")
+                                    } else {
+                                        format!("{hop_count} hops")
+                                    };
+                                    d.child(pill(hops_label, p.muted_fg, p.panel))
+                                })
+                                .when(node.is_chain() && node.enabled && !usable, |d| {
+                                    d.child(pill(
+                                        super::tr(lang, "配置异常", "Invalid"),
+                                        p.warn_text,
+                                        p.panel,
+                                    ))
+                                })
                                 .when(!node.enabled, |d| {
                                     d.child(pill(
                                         super::tr(lang, "已禁用", "Disabled"),
@@ -2707,6 +2794,42 @@ fn render_node_row(
                                         .text_color(p.muted_fg)
                                         .child(exit.detail().to_owned())
                                         .into_any_element()
+                                } else if let Some(chain_flow) = chain_subtitle {
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .text_xs()
+                                        .min_w(px(0.))
+                                        .child(
+                                            div()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_color(p.muted_fg)
+                                                .child(chain_flow),
+                                        )
+                                        .when_some(location_label, |d, label| {
+                                            let tip = label.clone();
+                                            d.child(
+                                                div()
+                                                    .text_color(p.muted_fg.opacity(0.6))
+                                                    .child("·"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "node-location-{row_key}"
+                                                    )))
+                                                    .min_w(px(0.))
+                                                    .truncate()
+                                                    .text_color(p.muted_fg)
+                                                    .tooltip(move |window, cx| {
+                                                        Tooltip::new(tip.clone()).build(window, cx)
+                                                    })
+                                                    .child(label),
+                                            )
+                                        })
+                                        .into_any_element()
                                 } else {
                                     div()
                                         .flex()
@@ -2725,7 +2848,7 @@ fn render_node_row(
                                         .child(
                                             div()
                                                 .text_color(p.muted_fg)
-                                                .child(node.transport.kind_name().to_uppercase()),
+                                                .child(node.transport_label().to_uppercase()),
                                         )
                                         .when_some(location_label, |d, label| {
                                             let tip = label.clone();
@@ -3146,5 +3269,55 @@ mod tests {
         let (mesh_nodes, proxy_nodes) = super::split_flat_nodes(vec![0, 1, 2, 3], &model);
         assert_eq!(mesh_nodes, vec![1, 3]);
         assert_eq!(proxy_nodes, vec![0, 2]);
+    }
+
+    #[test]
+    fn chain_rows_render_badge_subtitle_search_and_tooltip() {
+        use xrose_core::model::{AppModel, ChainHop, Node, Protocol};
+        use xrose_core::settings::Language;
+
+        let mut model = AppModel::new("fixture");
+        let entry = Node::new("HK-Edge", Protocol::Vless, "203.0.113.10", 443);
+        let exit = Node::new("US-Home", Protocol::Socks, "203.0.113.20", 1080);
+        model.add_nodes([entry.clone(), exit.clone()]);
+        let chain = Node::new_chain(
+            "AI Residential",
+            vec![
+                ChainHop::Node(entry.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        model.nodes.push(chain.clone());
+
+        assert_eq!(
+            super::primary_badge_label(&chain, None, Language::Zh),
+            "代理链"
+        );
+        assert_eq!(
+            super::primary_badge_label(&chain, None, Language::En),
+            "Chain"
+        );
+        assert_eq!(
+            super::chain_row_subtitle(&chain, &model, false, &[], Language::Zh).as_deref(),
+            Some("HK-Edge ──▶ US-Home")
+        );
+        assert!(super::node_matches_query(&chain, &model, "hk-edge"));
+        assert!(super::node_matches_query(&chain, &model, "代理链"));
+        assert!(super::node_matches_query(&chain, &model, "chain"));
+        assert_eq!(
+            super::row_tooltip(
+                &chain,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                false,
+                Language::Zh
+            ),
+            "代理链存在已禁用、缺失或当前内核不支持的跳点，请编辑后使用"
+        );
     }
 }

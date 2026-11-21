@@ -1,20 +1,22 @@
 //! Core-agnostic application model.
 
+pub mod chain;
 pub mod dns;
 pub mod inbound;
 pub mod mesh_mode;
 pub mod node;
 pub mod route;
 pub mod vpn;
+pub use chain::{ChainHopSummary, MAX_CHAIN_HOPS};
 pub use vpn::{OpenConnectOptions, OpenVpnOptions, VpnCertificates};
 
 pub use dns::{DnsConfig, DnsServer, DnsServerType};
 pub use inbound::{Inbound, InboundKind, TunOptions, TunStack};
 pub use mesh_mode::{MeshDnsMode, MeshExitTarget, MeshModeConfig};
 pub use node::{
-    AnytlsOptions, Credentials, FallbackScope, GroupKind, HealthProfile, Network, Node, NodeDraft,
-    NodeSource, NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode, TlsOptions,
-    Transport, TransportKind, WireguardOptions,
+    AnytlsOptions, ChainHop, Credentials, FallbackScope, GroupKind, HealthProfile, Network, Node,
+    NodeDraft, NodeSource, NodeSwitchPolicy, OutboundGroup, Protocol, RealityOptions, SwitchMode,
+    TlsOptions, Transport, TransportKind, WireguardOptions,
 };
 pub use route::{
     DomainStrategy, Matchers, Placement, RouteAction, RouteActionKind, RoutePreset, RouteRule,
@@ -254,19 +256,23 @@ impl AppModel {
             .and_then(|id| self.group(&id))
             .is_some_and(|g| {
                 g.enabled
-                    && g.members
-                        .iter()
-                        .any(|id| self.node(id).is_some_and(|n| n.usable_with(core)))
+                    && g.members.iter().any(|id| {
+                        self.node(id)
+                            .is_some_and(|n| self.node_usable_with(n, core))
+                    })
             })
     }
 
-    /// Checks every stored reference, including disabled rules.
+    /// Checks every stored reference, including disabled rules and proxy chains.
     pub fn outbound_group_deletion_reason(&self, id: &str) -> Option<&'static str> {
         let Some(group) = self.group(id) else {
             return Some("出站组不存在，请刷新后重试");
         };
         if self.default_group_id().as_deref() == Some(id) {
             return Some("此组为默认代理出站，请先选择其他默认出站组");
+        }
+        if !self.group_chain_references(id).is_empty() {
+            return Some("此组被代理链引用，请先修改或删除对应代理链");
         }
         if self
             .routing
@@ -304,7 +310,7 @@ impl AppModel {
             .or_else(|| self.default_group_id())
     }
 
-    /// Probe groups used by traffic or DNS, including their implicit defaults.
+    /// Probe groups used by traffic, DNS, or proxy chains transitively referenced by them.
     pub(crate) fn managed_route_groups(&self) -> Vec<OutboundGroup> {
         let mut used: std::collections::HashSet<_> = self
             .routing
@@ -329,6 +335,26 @@ impl AppModel {
                         .map(|group| group.id.clone()),
                 }
             }));
+        }
+        // Transitively include groups used as entry hops of proxy chains inside used groups.
+        let mut queue: Vec<String> = used.iter().cloned().collect();
+        while let Some(gid) = queue.pop() {
+            let Some(group) = self.group(&gid).filter(|g| g.enabled) else {
+                continue;
+            };
+            for member_id in &group.members {
+                let Some(node) = self.node(member_id).filter(|n| n.enabled && n.is_chain()) else {
+                    continue;
+                };
+                for hop in &node.chain_hops {
+                    if let ChainHop::Group(dep_gid) = hop
+                        && self.group(dep_gid).is_some_and(|g| g.enabled)
+                        && used.insert(dep_gid.clone())
+                    {
+                        queue.push(dep_gid.clone());
+                    }
+                }
+            }
         }
         self.groups
             .iter()

@@ -21,6 +21,7 @@ pub enum Protocol {
     Wireguard,
     Openvpn,
     Openconnect,
+    Chain,
 }
 
 impl Protocol {
@@ -72,6 +73,7 @@ impl Protocol {
             Protocol::Wireguard => "wireguard",
             Protocol::Openvpn => "openvpn",
             Protocol::Openconnect => "openconnect",
+            Protocol::Chain => "chain",
         }
     }
     pub fn display_name(&self) -> &'static str {
@@ -88,6 +90,7 @@ impl Protocol {
             Protocol::Wireguard => "WireGuard",
             Protocol::Openvpn => "OpenVPN",
             Protocol::Openconnect => "OpenConnect",
+            Protocol::Chain => "Chain",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -104,6 +107,7 @@ impl Protocol {
             "wireguard" | "wg" => Some(Protocol::Wireguard),
             "openvpn" | "openvpn-client" => Some(Protocol::Openvpn),
             "openconnect" => Some(Protocol::Openconnect),
+            "chain" => Some(Protocol::Chain),
             _ => None,
         }
     }
@@ -358,6 +362,14 @@ pub enum NodeSource {
     Import,
 }
 
+/// One ordered hop in a composite proxy chain (`entry -> ... -> landing`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum ChainHop {
+    Node(String),
+    Group(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Node {
     pub id: String,
@@ -383,6 +395,9 @@ pub struct Node {
     pub sort: i64,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Ordered hops `[entry, ..., exit]` for `Protocol::Chain` nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain_hops: Vec<ChainHop>,
 }
 
 impl Node {
@@ -407,10 +422,81 @@ impl Node {
             source: NodeSource::Manual,
             sort: 0,
             tags: Vec::new(),
+            chain_hops: Vec::new(),
         }
     }
 
+    pub fn new_chain(name: impl Into<String>, hops: Vec<ChainHop>) -> Self {
+        Self {
+            id: new_id("chain"),
+            name: name.into(),
+            protocol: Protocol::Chain,
+            server: String::new(),
+            port: 0,
+            credentials: Credentials::default(),
+            tls: TlsOptions::default(),
+            transport: Transport::default(),
+            enabled: true,
+            udp: true,
+            subscription_id: None,
+            source: NodeSource::Manual,
+            sort: 0,
+            tags: Vec::new(),
+            chain_hops: hops,
+        }
+    }
+
+    pub fn is_chain(&self) -> bool {
+        self.protocol == Protocol::Chain
+    }
+
+    /// Effective transport label for display (accounts for protocols with fixed
+    /// underlying transports such as TUIC/Hysteria2 over QUIC or WireGuard over UDP).
+    pub fn transport_label(&self) -> &'static str {
+        match self.protocol {
+            Protocol::Tuic | Protocol::Hysteria2 => "quic",
+            Protocol::Wireguard => "udp",
+            Protocol::Openvpn => {
+                let raw = self
+                    .credentials
+                    .openvpn
+                    .as_ref()
+                    .map(|o| o.transport.as_str())
+                    .unwrap_or("udp");
+                if raw.to_ascii_lowercase().starts_with("tcp") {
+                    "tcp"
+                } else {
+                    "udp"
+                }
+            }
+            Protocol::Openconnect => "tls",
+            Protocol::Chain => "chain",
+            _ => self.transport.kind_name(),
+        }
+    }
+
+    /// Whether dialing this node itself requires UDP/QUIC transport from its upstream hop.
+    pub fn uses_udp_transport(&self) -> bool {
+        matches!(self.transport_label(), "quic" | "udp" | "kcp")
+    }
+
+    /// Whether this concrete outbound can forward a UDP datagram to its destination.
+    pub(crate) fn can_relay_udp(&self) -> bool {
+        self.udp && self.protocol != Protocol::Http
+    }
+
     pub fn fingerprint(&self) -> String {
+        if self.is_chain() {
+            let hops: Vec<String> = self
+                .chain_hops
+                .iter()
+                .map(|hop| match hop {
+                    ChainHop::Node(id) => format!("n:{id}"),
+                    ChainHop::Group(id) => format!("g:{id}"),
+                })
+                .collect();
+            return format!("chain|{}|{}", self.id, hops.join(">"));
+        }
         format!(
             "{}|{}|{}|{}|{}|{}",
             self.protocol.as_str(),
@@ -423,6 +509,9 @@ impl Node {
     }
 
     pub fn endpoint(&self) -> String {
+        if self.is_chain() {
+            return String::new();
+        }
         crate::util::host_port(&self.server, self.port)
     }
 
@@ -435,6 +524,9 @@ impl Node {
     }
 
     pub fn usable_with(&self, core: crate::model::CoreKind) -> bool {
+        if self.is_chain() {
+            return self.enabled && self.chain_hops.len() >= 2;
+        }
         self.enabled && self.protocol.supported_by(core) && !self.server.is_empty() && self.port > 0
     }
 }
@@ -710,6 +802,9 @@ impl NodeDraft {
     }
 
     pub fn into_node(&self, core: crate::model::CoreKind) -> crate::error::Result<Node> {
+        if self.protocol == Protocol::Chain {
+            return Err(crate::error::Error::config("代理链请使用代理链编辑器创建"));
+        }
         let server = self.server.trim();
         if server.is_empty() {
             return Err(crate::error::Error::other("服务器地址不能为空"));
@@ -840,6 +935,7 @@ impl NodeDraft {
                 wg.validate()?;
                 credentials.wireguard = Some(wg);
             }
+            Protocol::Chain => unreachable!("checked at top of into_node"),
         }
         node.credentials = credentials;
 
@@ -1527,5 +1623,39 @@ mod tests {
         draft.password = "pass".into();
         let node = draft.into_node(CoreKind::SingBox).unwrap();
         assert_eq!(node.credentials.username.as_deref(), Some("user"));
+    }
+
+    #[test]
+    fn transport_label_reflects_protocol_native_transport() {
+        let tuic = Node::new("HK-TUIC", Protocol::Tuic, "203.0.113.10", 443);
+        assert_eq!(tuic.transport_label(), "quic");
+
+        let hy2 = Node::new("HK-Hy2", Protocol::Hysteria2, "203.0.113.11", 443);
+        assert_eq!(hy2.transport_label(), "quic");
+
+        let wg = Node::new("WG", Protocol::Wireguard, "203.0.113.12", 51820);
+        assert_eq!(wg.transport_label(), "udp");
+
+        let mut ovpn = Node::new("OVPN", Protocol::Openvpn, "203.0.113.13", 1194);
+        assert_eq!(ovpn.transport_label(), "udp");
+        ovpn.credentials.openvpn = Some(OpenVpnOptions {
+            transport: "tcp-client".into(),
+            ..Default::default()
+        });
+        assert_eq!(ovpn.transport_label(), "tcp");
+
+        let oc = Node::new("OC", Protocol::Openconnect, "203.0.113.14", 443);
+        assert_eq!(oc.transport_label(), "tls");
+
+        let mut vmess = Node::new("VMess", Protocol::Vmess, "203.0.113.15", 443);
+        vmess.transport = Transport::WebSocket {
+            path: "/ws".into(),
+            host: None,
+            headers: BTreeMap::new(),
+        };
+        assert_eq!(vmess.transport_label(), "ws");
+
+        let anytls = Node::new("AnyTLS", Protocol::Anytls, "203.0.113.16", 443);
+        assert_eq!(anytls.transport_label(), "tcp");
     }
 }

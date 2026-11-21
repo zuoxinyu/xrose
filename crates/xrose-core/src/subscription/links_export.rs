@@ -17,6 +17,7 @@ pub fn node_to_share_link(node: &Node) -> Option<String> {
         Protocol::Socks => export_plain(node, "socks"),
         Protocol::Http => export_plain(node, "http"),
         Protocol::Wireguard => export_wireguard(node),
+        Protocol::Chain => None,
         Protocol::Openvpn | Protocol::Openconnect => {
             let mut portable = node.clone();
             portable.id.clear();

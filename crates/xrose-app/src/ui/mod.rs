@@ -1,4 +1,5 @@
 mod about;
+mod chain_editor;
 mod config_import;
 mod connections;
 mod dialogs;
@@ -318,7 +319,9 @@ pub struct AppView {
     pub(crate) node_search: Entity<InputState>,
     pub(crate) show_import_box: bool,
     pub(crate) show_manual_form: bool,
+    pub(crate) show_chain_form: bool,
     pub(crate) manual_form: ManualNodeForm,
+    pub(crate) chain_form: chain_editor::ChainForm,
     pub(crate) manual_error: Option<String>,
     pub(crate) editing_node: Option<String>,
     pub(crate) hide_ips: bool,
@@ -576,6 +579,7 @@ impl AppView {
         })
         .detach();
         let manual_form = ManualNodeForm::new(window, cx);
+        let chain_form = chain_editor::ChainForm::new(window, cx);
 
         let initial_page = match std::env::var("XROSE_PAGE").unwrap_or_default().as_str() {
             "mesh" => Page::Mesh,
@@ -617,7 +621,9 @@ impl AppView {
             node_search,
             show_import_box: false,
             show_manual_form,
+            show_chain_form: false,
             manual_form,
+            chain_form,
             manual_error: None,
             editing_node: None,
             hide_ips,
@@ -859,6 +865,7 @@ impl AppView {
             });
         }
         self.manual_form.localize_inputs(self.lang(), window, cx);
+        self.chain_form.localize_inputs(self.lang(), window, cx);
     }
 
     fn refresh_snapshot(&mut self) {

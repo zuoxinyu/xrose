@@ -8,8 +8,8 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::model::{
-    AppModel, CoreKind, DomainStrategy, GroupKind, Inbound, InboundKind, Node, Protocol, RuleSet,
-    Transport,
+    AppModel, ChainHop, CoreKind, DomainStrategy, GroupKind, Inbound, InboundKind, Node, Protocol,
+    RuleSet, Transport,
 };
 use crate::settings::Settings;
 
@@ -325,7 +325,7 @@ impl CoreAdapter for SingBoxAdapter {
         let mut outbounds = Vec::new();
         let mut endpoints = Vec::new();
         for node in &model.nodes {
-            if !node.enabled {
+            if !node.enabled || node.is_chain() {
                 continue;
             }
             if !node.protocol.supported_by(CoreKind::SingBox) {
@@ -359,6 +359,22 @@ impl CoreAdapter for SingBoxAdapter {
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
             }
         }
+
+        // Compile proxy chains in topological passes using cloned per-chain outbounds
+        // so standalone hops remain untouched.
+        let mut valid_tags: std::collections::HashSet<String> = outbounds
+            .iter()
+            .chain(endpoints.iter())
+            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
+            .collect();
+        let filtered_entries = compile_singbox_chains(
+            model,
+            &mut outbounds,
+            &mut endpoints,
+            &mut valid_tags,
+            &mut warnings,
+        );
+
         if !direct
             && outbounds.is_empty()
             && endpoints.is_empty()
@@ -378,12 +394,7 @@ impl CoreAdapter for SingBoxAdapter {
         // `block` is a legacy special outbound; reject is expressed as a rule action.
         outbounds.push(json!({"type": "direct", "tag": "direct"}));
 
-        // Resolve group selections against successfully compiled nodes only.
-        let valid_tags: std::collections::HashSet<String> = outbounds
-            .iter()
-            .chain(endpoints.iter())
-            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
-            .collect();
+        // Resolve group selections against successfully compiled nodes and chains only.
         let nodes = &effective.nodes;
         for group in &mut effective.groups {
             group.members.retain(|id| {
@@ -407,17 +418,40 @@ impl CoreAdapter for SingBoxAdapter {
         let default_group =
             proxy_group_tag(model, &model.routing.final_action).unwrap_or_else(|| "direct".into());
 
-        for group in model.groups.iter().filter(|g| g.enabled) {
+        // Build restricted entry groups after all eligible chain members have compiled.
+        let mut entry_groups = Vec::new();
+        for chain in model
+            .nodes
+            .iter()
+            .filter(|n| filtered_entries.contains(&n.id))
+        {
+            if let Some(ChainHop::Group(id)) = chain.chain_hops.first()
+                && let Some(group) = model.group(id)
+            {
+                let mut filtered = group.clone();
+                filtered
+                    .members
+                    .retain(|id| model.chain_entry_allows(&chain.chain_hops, id));
+                filtered.repair();
+                entry_groups.push((chain_entry_tag(chain), filtered));
+            }
+        }
+        let groups = model
+            .groups
+            .iter()
+            .filter(|g| g.enabled)
+            .map(|g| (g.tag(), g, false))
+            .chain(entry_groups.iter().map(|(tag, g)| (tag.clone(), g, true)));
+        for (tag, group, restricted) in groups {
             let members: Vec<String> = group
                 .members
                 .iter()
                 .filter_map(|id| model.node(id))
-                .filter(|n| n.usable_with(CoreKind::SingBox))
                 .map(|n| n.outbound_tag())
                 .filter(|tag| valid_tags.contains(tag))
                 .collect();
             if members.is_empty() {
-                if group.tag() == default_group {
+                if tag == default_group {
                     return Err(Error::config(format!(
                         "默认出站组“{}”没有可用成员",
                         group.name
@@ -434,17 +468,17 @@ impl CoreAdapter for SingBoxAdapter {
                     .map(Node::outbound_tag)
                     .unwrap_or_else(|| members[0].clone());
                 // A pinned group must not restore a different choice from the Clash cache.
-                let choices = if group.managed() {
+                let choices = if group.managed() || restricted {
                     vec![selected.clone()]
                 } else {
                     members
                 };
-                json!({"type": "selector", "tag": group.tag(), "outbounds": choices,
+                json!({"type": "selector", "tag": tag, "outbounds": choices,
                            "default": selected, "interrupt_exist_connections": true})
             } else if group.kind == GroupKind::UrlTest {
                 json!({
                     "type": "urltest",
-                    "tag": group.tag(),
+                    "tag": tag,
                     "outbounds": members,
                     "url": group.url.clone().unwrap_or_else(|| ctx.urltest_url.clone()),
                     "interval": interval,
@@ -457,7 +491,7 @@ impl CoreAdapter for SingBoxAdapter {
                 ));
                 json!({
                     "type": "selector",
-                    "tag": group.tag(),
+                    "tag": tag,
                     "outbounds": members,
                     "interrupt_exist_connections": true
                 })
@@ -686,40 +720,60 @@ fn tun_inbound(inbound: &Inbound) -> Value {
     value
 }
 
-/// Minimal configuration used only by private per-node probes.
+/// Minimal configuration used only by private per-node or chain probes.
+#[cfg(test)]
 pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+    compile_probe_hops(std::slice::from_ref(node), port)
+}
+
+pub(super) fn compile_probe_hops(hops: &[Node], port: u16) -> Result<Value> {
     compile_probe_with_inbounds(
-        Some(node),
+        hops,
         vec![json!({"type": "socks", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
     )
 }
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
     compile_probe_with_inbounds(
-        None,
+        &[],
         vec![json!({"type": "socks", "tag": "probe", "listen": "127.0.0.1", "listen_port": port})],
     )
     .expect("direct probe compiles")
 }
 
-fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {
+fn compile_probe_with_inbounds(hops: &[Node], inbounds: Vec<Value>) -> Result<Value> {
     let mut endpoints = Vec::new();
     let mut outbounds = Vec::new();
-    let is_mesh_exit = node.is_some_and(Node::is_mesh_gateway);
-    let final_tag = match node {
-        Some(node) => {
-            let outbound = node_outbound(node, &mut [])?;
+    let is_mesh_exit = hops.last().is_some_and(Node::is_mesh_gateway);
+    let final_tag = if hops.is_empty() {
+        outbounds.push(json!({"type": "direct", "tag": "direct"}));
+        "direct".to_owned()
+    } else {
+        let last_idx = hops.len() - 1;
+        let mut prev_tag: Option<String> = None;
+        let mut final_tag = String::new();
+        for (idx, node) in hops.iter().enumerate() {
+            let mut outbound = node_outbound(node, &mut [])?;
+            let tag = if idx == last_idx {
+                node.outbound_tag()
+            } else {
+                format!("probe-hop-{idx}")
+            };
+            outbound["tag"] = json!(tag);
+            if let Some(detour) = &prev_tag {
+                outbound["detour"] = json!(detour);
+            }
             if node.protocol == Protocol::Wireguard || node.protocol.is_vpn() {
                 endpoints.push(outbound);
             } else {
                 outbounds.push(outbound);
             }
-            node.outbound_tag()
+            if idx == last_idx {
+                final_tag = tag.clone();
+            }
+            prev_tag = Some(tag);
         }
-        None => {
-            outbounds.push(json!({"type": "direct", "tag": "direct"}));
-            "direct".into()
-        }
+        final_tag
     };
     let (dns, route) = if is_mesh_exit {
         (
@@ -746,7 +800,7 @@ fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Res
     };
     Ok(json!({
         "endpoints": endpoints,
-        "log": {"disabled": true},
+        "log": {"level": "error"},
         "dns": dns,
         "inbounds": inbounds,
         "outbounds": outbounds,
@@ -755,16 +809,18 @@ fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Res
 }
 
 pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str, is_direct: bool) {
-    if let Some(last) = config["outbounds"]
+    // Only bind the entry hop (the one without `detour`); sing-box rejects dial
+    // fields combined with `detour`.
+    let bound_outbound = config["outbounds"]
         .as_array_mut()
-        .and_then(|arr| arr.last_mut())
-    {
-        last["bind_interface"] = json!(interface);
-    } else if let Some(last) = config["endpoints"]
+        .and_then(|arr| arr.iter_mut().find(|entry| entry.get("detour").is_none()));
+    if let Some(entry) = bound_outbound {
+        entry["bind_interface"] = json!(interface);
+    } else if let Some(entry) = config["endpoints"]
         .as_array_mut()
-        .and_then(|arr| arr.last_mut())
+        .and_then(|arr| arr.iter_mut().find(|entry| entry.get("detour").is_none()))
     {
-        last["bind_interface"] = json!(interface);
+        entry["bind_interface"] = json!(interface);
     }
     if is_direct {
         config["dns"] = json!({
@@ -791,6 +847,182 @@ pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str, is_direc
             }
         }
     }
+}
+
+fn chain_entry_tag(chain: &Node) -> String {
+    format!("chain-entry-{}", chain.id)
+}
+
+fn compile_singbox_chains(
+    model: &AppModel,
+    outbounds: &mut Vec<Value>,
+    endpoints: &mut Vec<Value>,
+    valid_tags: &mut std::collections::HashSet<String>,
+    warnings: &mut Vec<String>,
+) -> std::collections::HashSet<String> {
+    let mut filtered_entries = std::collections::HashSet::new();
+    let chains: Vec<&Node> = model
+        .nodes
+        .iter()
+        .filter(|n| n.enabled && n.is_chain())
+        .collect();
+    if chains.is_empty() {
+        return filtered_entries;
+    }
+    let mut compiled = std::collections::HashSet::new();
+    let mut failed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    loop {
+        let mut progress = false;
+        for &chain in &chains {
+            if compiled.contains(&chain.id) || failed.contains_key(&chain.id) {
+                continue;
+            }
+            if model.node_in_cycle(&chain.id) {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”存在循环引用，已跳过", chain.name),
+                );
+                continue;
+            }
+            if chain.chain_hops.len() < 2 {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”跳点不足，已跳过", chain.name),
+                );
+                continue;
+            }
+            if let Err(err) = model.validate_chain_transports(&chain.chain_hops) {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”已跳过：{err}", chain.name),
+                );
+                continue;
+            }
+            let entry_tag = match &chain.chain_hops[0] {
+                ChainHop::Node(id) => model
+                    .node(id)
+                    .filter(|n| !n.is_chain() && valid_tags.contains(&n.outbound_tag()))
+                    .map(Node::outbound_tag),
+                ChainHop::Group(gid) => model
+                    .group(gid)
+                    .filter(|g| {
+                        g.enabled
+                            && g.members.iter().any(|mid| {
+                                model.chain_entry_allows(&chain.chain_hops, mid)
+                                    && model
+                                        .node(mid)
+                                        .is_some_and(|n| valid_tags.contains(&n.outbound_tag()))
+                            })
+                    })
+                    .map(|g| {
+                        if model.needs_filtered_chain_entry(chain, g) {
+                            chain_entry_tag(chain)
+                        } else {
+                            g.tag()
+                        }
+                    }),
+            };
+            let Some(mut prev_tag) = entry_tag else {
+                continue;
+            };
+            let filtered_entry = prev_tag == chain_entry_tag(chain);
+            let mut trailing_nodes = Vec::with_capacity(chain.chain_hops.len() - 1);
+            let mut trailing_ok = true;
+            for hop in &chain.chain_hops[1..] {
+                match hop {
+                    ChainHop::Node(id) => {
+                        if let Some(node) = model
+                            .node(id)
+                            .filter(|n| !n.is_chain() && valid_tags.contains(&n.outbound_tag()))
+                        {
+                            if node.is_mesh_gateway() {
+                                failed.insert(
+                                    chain.id.clone(),
+                                    format!(
+                                        "代理链“{}”的后续跳点包含组网出口网关，已跳过",
+                                        chain.name
+                                    ),
+                                );
+                                trailing_ok = false;
+                                break;
+                            }
+                            trailing_nodes.push(node);
+                        } else {
+                            trailing_ok = false;
+                            break;
+                        }
+                    }
+                    ChainHop::Group(_) => {
+                        failed.insert(
+                            chain.id.clone(),
+                            format!("代理链“{}”仅第 1 跳支持出站组，已跳过", chain.name),
+                        );
+                        trailing_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !trailing_ok {
+                continue;
+            }
+            let mut staged_outbounds = Vec::new();
+            let mut staged_endpoints = Vec::new();
+            let mut compile_err = None;
+            let last_idx = trailing_nodes.len() - 1;
+            for (idx, hop_node) in trailing_nodes.iter().enumerate() {
+                match node_outbound(hop_node, warnings) {
+                    Ok(mut cloned) => {
+                        let tag = if idx == last_idx {
+                            chain.outbound_tag()
+                        } else {
+                            format!("chain-hop-{}-{}", chain.id, idx + 1)
+                        };
+                        cloned["tag"] = json!(tag);
+                        cloned["detour"] = json!(prev_tag);
+                        if hop_node.protocol == Protocol::Wireguard || hop_node.protocol.is_vpn() {
+                            staged_endpoints.push(cloned);
+                        } else {
+                            staged_outbounds.push(cloned);
+                        }
+                        prev_tag = tag;
+                    }
+                    Err(err) => {
+                        compile_err = Some(format!(
+                            "代理链“{}”跳点“{}”编译失败：{err}",
+                            chain.name, hop_node.name
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(message) = compile_err {
+                failed.insert(chain.id.clone(), message);
+                continue;
+            }
+            outbounds.extend(staged_outbounds);
+            endpoints.extend(staged_endpoints);
+            if filtered_entry {
+                filtered_entries.insert(chain.id.clone());
+            }
+            valid_tags.insert(chain.outbound_tag());
+            compiled.insert(chain.id.clone());
+            progress = true;
+        }
+        if !progress {
+            break;
+        }
+    }
+    for chain in chains {
+        if !compiled.contains(&chain.id) {
+            warnings.push(failed.remove(&chain.id).unwrap_or_else(|| {
+                format!(
+                    "代理链“{}”包含不可用或当前内核不支持的跳点，已跳过",
+                    chain.name
+                )
+            }));
+        }
+    }
+    filtered_entries
 }
 
 fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
@@ -969,6 +1201,7 @@ fn node_outbound(node: &Node, warnings: &mut [String]) -> Result<Value> {
                     "pre_shared_key":wg.pre_shared_key,"allowed_ips":wg.allowed_ips,"reserved":wg.reserved}]}),
             );
         }
+        Protocol::Chain => return Err(Error::config("代理链不能直接作为单跳出站编译")),
     };
 
     if node.protocol == Protocol::Anytls {
@@ -1406,7 +1639,11 @@ fn build_dns(
 
     // Node server domains must resolve without the proxy, otherwise a
     // proxy-detoured remote DNS creates a bootstrap loop.
-    for node in model.nodes.iter().filter(|n| n.enabled) {
+    for node in model
+        .nodes
+        .iter()
+        .filter(|n| n.enabled && !n.is_chain() && !n.server.trim().is_empty())
+    {
         if node.server.parse::<std::net::IpAddr>().is_ok() {
             continue;
         }
@@ -2234,5 +2471,200 @@ mod tests {
         assert_eq!(local["bind_interface"], "en0");
         let exit_dns = servers.iter().find(|s| s["tag"] == "exit-dns").unwrap();
         assert_eq!(exit_dns["detour"], gateway.outbound_tag());
+    }
+
+    #[test]
+    fn tuic_exit_uses_vision_for_live_traffic_and_isolated_probes() {
+        use crate::model::{OutboundGroup, RealityOptions};
+        let (mut model, settings, ctx) = sample();
+        let entry = &mut model.nodes[0];
+        entry.credentials.flow = Some("xtls-rprx-vision".into());
+        entry.tls.reality = Some(RealityOptions {
+            public_key: crate::util::encode_base64(&[1; 32]),
+            short_id: "0011".into(),
+        });
+        let entry = entry.clone();
+        let mut exit = Node::new("TUIC", Protocol::Tuic, "exit.test", 8443);
+        exit.credentials.uuid = entry.credentials.uuid.clone();
+        exit.credentials.password = Some("fixture".into());
+        exit.tls.enabled = true;
+        exit.tls.server_name = Some("tls.exit.test".into());
+        let http = Node::new("HTTP", Protocol::Http, "proxy.test", 8080);
+        let mut group = OutboundGroup::new("Entry", GroupKind::UrlTest);
+        group.members = vec![exit.id.clone(), http.id.clone(), entry.id.clone()];
+        group.selected = Some(exit.id.clone());
+        let ordinary = Node::new_chain(
+            "fixed",
+            vec![
+                ChainHop::Node(entry.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        let grouped = Node::new_chain(
+            "grouped",
+            vec![
+                ChainHop::Group(group.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        model.add_nodes([
+            exit.clone(),
+            http.clone(),
+            ordinary.clone(),
+            grouped.clone(),
+        ]);
+        model.groups.push(group.clone());
+
+        for kind in [GroupKind::UrlTest, GroupKind::Selector] {
+            model.group_mut(&group.id).unwrap().kind = kind;
+            let config = SingBoxAdapter
+                .compile(&model, &settings, &ctx)
+                .unwrap()
+                .json;
+            let outs = config["outbounds"].as_array().unwrap();
+            let get = |tag: String| outs.iter().find(|out| out["tag"] == tag).unwrap();
+            let filtered_tag = chain_entry_tag(&grouped);
+            let restricted = get(filtered_tag.clone());
+            assert_eq!(
+                restricted["type"],
+                if kind == GroupKind::UrlTest {
+                    "urltest"
+                } else {
+                    "selector"
+                }
+            );
+            assert_eq!(restricted["outbounds"], json!([entry.outbound_tag()]));
+            assert_eq!(get(group.tag())["outbounds"].as_array().unwrap().len(), 3);
+            assert_eq!(get(grouped.outbound_tag())["detour"], filtered_tag);
+            let landing = get(ordinary.outbound_tag());
+            assert_eq!(landing["detour"], entry.outbound_tag());
+            assert_eq!(landing["server_port"], 8443);
+            assert_eq!(landing["tls"]["server_name"], "tls.exit.test");
+            assert!(get(exit.outbound_tag())["detour"].is_null());
+
+            let hops = model
+                .resolve_probe_hops(&grouped, CoreKind::SingBox)
+                .unwrap();
+            let probe = compile_probe_hops(&hops, 1080).unwrap();
+            let probe_entry = &probe["outbounds"][0];
+            assert_eq!(probe_entry["flow"], "xtls-rprx-vision");
+            assert_eq!(probe_entry["tls"]["reality"]["enabled"], true);
+            assert_eq!(probe_entry["packet_encoding"], "xudp");
+            let probe_exit = &probe["outbounds"][1];
+            assert_eq!(probe_exit["type"], "tuic");
+            assert_eq!(probe_exit["detour"], probe_entry["tag"]);
+            assert_eq!(probe_exit["tls"], landing["tls"]);
+            assert_eq!(probe["route"]["final"], probe_exit["tag"]);
+        }
+
+        model.node_mut(&entry.id).unwrap().udp = false;
+        let invalid = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        assert!(invalid.warnings.iter().any(|w| w.contains("UDP/8443")));
+        assert!(
+            invalid.json["outbounds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|out| out["tag"] != ordinary.outbound_tag()
+                    && out["tag"] != grouped.outbound_tag())
+        );
+    }
+
+    #[test]
+    fn compiles_proxy_chains_with_cloned_detours_group_entry_and_probe() {
+        use crate::adapters::singbox::bind_probe_interface;
+        use crate::model::{ChainHop, OutboundGroup};
+
+        let (mut model, settings, ctx) = sample();
+        let entry = model.nodes[0].clone();
+        let mut mid = Node::new("Mid-SOCKS", Protocol::Socks, "203.0.113.20", 1080);
+        mid.id = "node-mid".into();
+        let mut exit = Node::new("US-Home", Protocol::Socks, "203.0.113.30", 1080);
+        exit.id = "node-exit".into();
+        model.add_nodes([mid.clone(), exit.clone()]);
+
+        let mut relay = OutboundGroup::new("HK Relay", GroupKind::UrlTest);
+        relay.members = vec![entry.id.clone()];
+        relay.selected = Some(entry.id.clone());
+        model.groups.push(relay.clone());
+
+        let chain_3 = Node::new_chain(
+            "3-Hop",
+            vec![
+                ChainHop::Node(entry.id.clone()),
+                ChainHop::Node(mid.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        let chain_grp = Node::new_chain(
+            "Group-Entry",
+            vec![
+                ChainHop::Group(relay.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        model.add_nodes([chain_3.clone(), chain_grp.clone()]);
+
+        let compiled = SingBoxAdapter.compile(&model, &settings, &ctx).unwrap();
+        let outbounds = compiled.json["outbounds"].as_array().unwrap();
+
+        // Original single-hop nodes must remain untouched without `detour`.
+        let orig_mid = outbounds
+            .iter()
+            .find(|o| o["tag"] == mid.outbound_tag())
+            .unwrap();
+        assert!(orig_mid.get("detour").is_none());
+        let orig_exit = outbounds
+            .iter()
+            .find(|o| o["tag"] == exit.outbound_tag())
+            .unwrap();
+        assert!(orig_exit.get("detour").is_none());
+
+        // 3-hop chain clones hop 1 and final hop with sequential detours.
+        let mid_clone_tag = format!("chain-hop-{}-1", chain_3.id);
+        let mid_clone = outbounds
+            .iter()
+            .find(|o| o["tag"] == mid_clone_tag)
+            .unwrap();
+        assert_eq!(mid_clone["detour"], entry.outbound_tag());
+        let exit_clone = outbounds
+            .iter()
+            .find(|o| o["tag"] == chain_3.outbound_tag())
+            .unwrap();
+        assert_eq!(exit_clone["detour"], mid_clone_tag);
+
+        // Group-entry chain detours directly through the sing-box group tag.
+        let grp_exit = outbounds
+            .iter()
+            .find(|o| o["tag"] == chain_grp.outbound_tag())
+            .unwrap();
+        assert_eq!(grp_exit["detour"], relay.tag());
+
+        // DNS bootstrap rules must never contain empty chain server hostnames.
+        if let Some(rules) = compiled.json["dns"]["rules"].as_array() {
+            for rule in rules {
+                if let Some(domains) = rule["domain"].as_array() {
+                    assert!(domains.iter().all(|d| !d.as_str().unwrap_or("").is_empty()));
+                }
+            }
+        }
+
+        // Multi-hop isolated probe binds interface ONLY on the entry hop (not detoured hops).
+        let mut probe = super::super::compile_probe_hops(
+            CoreKind::SingBox,
+            &[entry.clone(), exit.clone()],
+            18082,
+        )
+        .unwrap();
+        bind_probe_interface(&mut probe, "en0", false);
+        let probe_outs = probe["outbounds"].as_array().unwrap();
+        assert_eq!(probe_outs.len(), 2);
+        assert_eq!(probe_outs[0]["tag"], "probe-hop-0");
+        assert!(probe_outs[0].get("detour").is_none());
+        assert_eq!(probe_outs[0]["bind_interface"], "en0");
+        assert_eq!(probe_outs[1]["tag"], exit.outbound_tag());
+        assert_eq!(probe_outs[1]["detour"], "probe-hop-0");
+        assert!(probe_outs[1].get("bind_interface").is_none());
+        assert_eq!(probe["route"]["final"], exit.outbound_tag());
     }
 }

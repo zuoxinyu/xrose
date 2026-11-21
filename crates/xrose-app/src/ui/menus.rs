@@ -8,7 +8,7 @@ use gpui_kit::*;
 use xrose_core::core::logs::LogPrivacy;
 use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
-use xrose_core::model::{SwitchMode, WorkMode};
+use xrose_core::model::{ChainHop, SwitchMode, WorkMode};
 use xrose_core::route::transfer::ExportScope;
 use xrose_core::service::{HttpTestTarget, ShareTarget, ToastLevel};
 
@@ -26,6 +26,7 @@ pub(super) enum MenuTarget {
     DiagnosticOutbound,
     OutboundGroup(String),
     GroupSwitchPolicy(String),
+    ChainHop(usize),
     Node(String),
     Exit(HttpTestTarget),
     Nodes,
@@ -63,6 +64,8 @@ pub(super) enum Command {
     SetGroupSwitchMode(String, SwitchMode),
     OpenGroupSwitchSettings(String),
     NodeOutboundGroups(String),
+    BuildChainFromNode(String),
+    PickChainHop(usize, ChainHop),
     EditNode(String),
     TestNode(String),
     TestExit(HttpTestTarget),
@@ -469,9 +472,9 @@ impl AppView {
                         model.default_group_id().as_ref() != Some(&id)
                             && group.enabled
                             && group.members.iter().any(|id| {
-                                model
-                                    .node(id)
-                                    .is_some_and(|n| n.usable_with(self.snapshot.settings.core))
+                                model.node(id).is_some_and(|n| {
+                                    model.node_usable_with(n, self.snapshot.settings.core)
+                                })
                             }),
                         Command::SetDefaultOutbound(id.clone()),
                     ))
@@ -489,6 +492,11 @@ impl AppView {
                                 "请先选择其他默认出站组",
                                 "Choose another default group first",
                             ),
+                        "此组被代理链引用，请先修改或删除对应代理链" => self
+                            .tr(
+                                "请先修改或删除引用此组的代理链",
+                                "Update or delete proxy chains referencing this group first",
+                            ),
                         "此组被路由规则引用，请先修改规则的出站组" => self.tr(
                             "请先修改引用此组的路由规则",
                             "Update routing rules that reference this group first",
@@ -499,6 +507,92 @@ impl AppView {
                         ),
                     };
                     menu = menu.label(reason);
+                }
+            }
+            MenuTarget::ChainHop(slot_index) => {
+                let model = &self.snapshot.model;
+                let current_choice = self
+                    .chain_form
+                    .hops
+                    .get(slot_index)
+                    .and_then(|s| s.as_ref());
+                let other_chosen_nodes: std::collections::HashSet<&str> = self
+                    .chain_form
+                    .hops
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != slot_index)
+                    .filter_map(|(_, slot)| match slot.as_ref() {
+                        Some(ChainHop::Node(id)) => Some(id.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+                let core = self.snapshot.settings.core;
+                if slot_index == 0 {
+                    let enabled_groups: Vec<_> = model
+                        .groups
+                        .iter()
+                        .filter(|g| g.enabled && !g.members.is_empty())
+                        .collect();
+                    if !enabled_groups.is_empty() {
+                        menu = menu
+                            .label(self.tr("出站组（仅第 1 跳）", "Outbound groups (hop 1 only)"));
+                        for group in enabled_groups {
+                            let hop = ChainHop::Group(group.id.clone());
+                            let is_checked = current_choice == Some(&hop);
+                            let label = format!(
+                                "{} · {}",
+                                self.outbound_group_label(group),
+                                self.tr("出站组", "Group")
+                            );
+                            menu = menu.item(
+                                item(
+                                    &view,
+                                    label.into(),
+                                    true,
+                                    Command::PickChainHop(slot_index, hop),
+                                )
+                                .checked(is_checked),
+                            );
+                        }
+                        menu = menu.separator();
+                    }
+                }
+                let single_nodes: Vec<_> = model.nodes.iter().filter(|n| !n.is_chain()).collect();
+                if single_nodes.is_empty() {
+                    menu = menu.label(self.tr("暂无可选节点", "No nodes available"));
+                } else {
+                    for node in single_nodes {
+                        let hop = ChainHop::Node(node.id.clone());
+                        let is_checked = current_choice == Some(&hop);
+                        let duplicate = other_chosen_nodes.contains(node.id.as_str());
+                        let mesh_disallowed = slot_index > 0 && node.is_mesh_gateway();
+                        let name = super::nodes::display_node_name(node, self.hide_ips, &suffixes);
+                        let label = if !node.enabled {
+                            format!("{name} ({})", self.tr("已禁用", "Disabled"))
+                        } else if mesh_disallowed {
+                            format!(
+                                "{name} ({})",
+                                self.tr("组网网关仅支持第 1 跳", "Mesh gateway: hop 1 only")
+                            )
+                        } else if !node.usable_with(core) {
+                            format!("{name} ({})", self.tr("当前内核不支持", "Unsupported"))
+                        } else if node.is_mesh_gateway() {
+                            format!("{name} ({})", self.tr("组网网关", "Mesh gateway"))
+                        } else {
+                            name
+                        };
+                        menu = menu.item(
+                            item(
+                                &view,
+                                label.into(),
+                                !duplicate && !mesh_disallowed,
+                                Command::PickChainHop(slot_index, hop),
+                            )
+                            .checked(is_checked),
+                        );
+                    }
                 }
             }
             MenuTarget::Exit(target) => {
@@ -580,6 +674,12 @@ impl AppView {
                     || busy("reachability")
                     || busy("auto-probe")
                     || busy("core");
+                let usable = self
+                    .snapshot
+                    .model
+                    .node_usable_with(node, self.snapshot.settings.core);
+                let chain_refs = self.snapshot.model.node_chain_references(&id);
+                let is_chain = node.is_chain();
                 menu = menu
                     .item(add(
                         "编辑",
@@ -592,23 +692,32 @@ impl AppView {
                         "Outbound group membership…",
                         !busy("core"),
                         Command::NodeOutboundGroups(id.clone()),
-                    ))
+                    ));
+                if !is_chain {
+                    menu = menu.item(add(
+                        "以此构建代理链…",
+                        "Build proxy chain…",
+                        !busy("core"),
+                        Command::BuildChainFromNode(id.clone()),
+                    ));
+                }
+                menu = menu
                     .item(add(
                         "HTTP 测速",
                         "HTTP test",
-                        node.enabled && !testing,
+                        usable && !testing,
                         Command::TestNode(id.clone()),
                     ))
                     .item(add(
                         "下载测速",
                         "Download test",
-                        node.enabled && !testing,
+                        usable && !testing,
                         Command::DownloadNode(id.clone()),
                     ))
                     .item(add(
                         "检测可达性",
                         "Check reachability",
-                        node.enabled && !testing,
+                        usable && !testing,
                         Command::TestReachability(HttpTestTarget::Node(id.clone())),
                     ))
                     .item(add(
@@ -633,14 +742,29 @@ impl AppView {
                     !busy("core") && !running,
                     Command::SetNodeEnabled(id.clone(), !node.enabled),
                 ));
-                menu = share_items(menu, ShareTarget::Node(id.clone()))
-                    .separator()
-                    .item(add(
-                        "删除节点",
-                        "Delete node",
-                        !busy("core"),
-                        Command::DeleteNode(id),
+                if !is_chain {
+                    menu = share_items(menu, ShareTarget::Node(id.clone()));
+                }
+                menu = menu.separator().item(add(
+                    if is_chain {
+                        "删除代理链"
+                    } else {
+                        "删除节点"
+                    },
+                    if is_chain {
+                        "Delete chain"
+                    } else {
+                        "Delete node"
+                    },
+                    !busy("core") && chain_refs.is_empty(),
+                    Command::DeleteNode(id),
+                ));
+                if !chain_refs.is_empty() {
+                    menu = menu.label(self.tr(
+                        "请先修改或删除引用此节点的代理链",
+                        "Update or delete proxy chains referencing this node first",
                     ));
+                }
             }
             MenuTarget::Nodes => {
                 let failed = self.snapshot.latency.values().any(|e| e.delay_ms.is_none());
@@ -1085,7 +1209,9 @@ impl AppView {
             }
             Command::SelectNode(group_id, node_id) => {
                 self.snapshot.model.node(node_id).is_some_and(|n| {
-                    n.enabled
+                    self.snapshot
+                        .model
+                        .node_usable_with(n, self.snapshot.settings.core)
                         && (n.is_mesh_gateway()
                             || self.snapshot.model.group(group_id).is_some_and(|g| {
                                 g.enabled && g.manually_selectable() && g.members.contains(node_id)
@@ -1123,10 +1249,12 @@ impl AppView {
             }
             Command::DeleteMesh(id) => self.snapshot.mesh.profiles.iter().any(|p| &p.id == id),
             Command::EditNode(id)
+            | Command::BuildChainFromNode(id)
             | Command::TestNode(id)
             | Command::SetNodeEnabled(id, _)
             | Command::DownloadNode(id)
             | Command::DeleteNode(id) => self.snapshot.model.node(id).is_some(),
+            Command::PickChainHop(index, _) => *index < self.chain_form.hops.len(),
             Command::SetGroupSwitchMode(id, _) => {
                 !busy("core") && self.snapshot.model.group(id).is_some()
             }
@@ -1318,6 +1446,14 @@ impl AppView {
         match command {
             Command::EditOutboundGroup(id) => self.open_outbound_group_editor(Some(id), window, cx),
             Command::NodeOutboundGroups(id) => self.open_node_outbound_groups(id, window, cx),
+            Command::BuildChainFromNode(id) => self.open_chain_dialog(Some(id), window, cx),
+            Command::PickChainHop(index, hop) => {
+                if let Some(slot) = self.chain_form.hops.get_mut(index) {
+                    *slot = Some(hop);
+                    self.manual_error = None;
+                    cx.notify();
+                }
+            }
             Command::DeleteOutboundGroup(id) => {
                 if let Err(error) = self.service.delete_outbound_group(&id) {
                     self.service.toast(ToastLevel::Error, error.to_string());

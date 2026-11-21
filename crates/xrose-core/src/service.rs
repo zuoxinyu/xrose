@@ -1,6 +1,7 @@
 //! The single facade the UI talks to. All heavy work is dispatched to an
 //! internal Tokio runtime; the UI polls [`UiSnapshot`] and issues plain calls.
 
+mod chains;
 mod config_import;
 mod http_tests;
 mod mesh_discovery;
@@ -397,8 +398,12 @@ impl UiSnapshot {
     }
 
     pub fn node_location(&self, node: &Node) -> Option<&NodeLocation> {
+        let target = self.model.chain_exit_node(node)?;
+        if target.server.trim().is_empty() {
+            return None;
+        }
         self.node_locations
-            .get(&location::cache_key(&node.server, self.settings.language))
+            .get(&location::cache_key(&target.server, self.settings.language))
     }
 }
 
@@ -885,13 +890,14 @@ impl AppService {
 
     /// Schedule a cached lookup; safe to call while refreshing a UI snapshot.
     pub fn request_node_location(&self, node_id: &str) {
-        let Some(server) = self
-            .inner
-            .model
-            .read()
-            .node(node_id)
-            .map(|n| n.server.clone())
-        else {
+        let Some(server) = ({
+            let model = self.inner.model.read();
+            model
+                .node(node_id)
+                .and_then(|n| model.chain_exit_node(n))
+                .filter(|n| !n.server.trim().is_empty())
+                .map(|n| n.server.clone())
+        }) else {
             return;
         };
         let language = self.inner.settings.read().language;
@@ -935,7 +941,7 @@ impl AppService {
             .read()
             .nodes
             .iter()
-            .filter(|node| node.enabled && !node.server.trim().is_empty())
+            .filter(|node| node.enabled && !node.is_chain() && !node.server.trim().is_empty())
             .map(|node| {
                 (
                     location::cache_key(&node.server, language),
@@ -2209,7 +2215,7 @@ impl AppService {
             return;
         }
         let settings = self.settings();
-        let (node, group_tag, mode_changed) = {
+        let (node, group_tag, mode_changed, filtered_entry_changed) = {
             let mut current = self.inner.model.write();
             let Some(group) = current.group(group_id).filter(|g| {
                 g.enabled && g.manually_selectable() && g.members.iter().any(|id| id == node_id)
@@ -2218,12 +2224,22 @@ impl AppService {
             };
             let Some(node) = current
                 .node(node_id)
-                .filter(|n| n.usable_with(settings.core))
+                .filter(|n| current.node_usable_with(n, settings.core))
             else {
                 return;
             };
             let mode_changed = current.work_mode != WorkMode::Proxy;
-            let selection = (node.clone(), group.tag(), mode_changed);
+            let filtered_entry_changed = settings.core == CoreKind::SingBox
+                && current
+                    .nodes
+                    .iter()
+                    .any(|n| n.enabled && current.needs_filtered_chain_entry(n, group));
+            let selection = (
+                node.clone(),
+                group.tag(),
+                mode_changed,
+                filtered_entry_changed,
+            );
             let mut next = current.clone();
             if !next.select_node(group_id, node_id) && !mode_changed {
                 return;
@@ -2251,7 +2267,7 @@ impl AppService {
             return;
         }
         self.schedule_exit_gateway_refresh();
-        if mode_changed {
+        if mode_changed || filtered_entry_changed {
             self.mark_dirty();
             self.apply_config_silent();
         } else if settings.core == CoreKind::SingBox {
@@ -2336,6 +2352,17 @@ impl AppService {
     pub fn delete_node(&self, node_id: &str) {
         {
             let mut model = self.inner.model.write();
+            let refs = model.node_chain_references(node_id);
+            if let Some(chain) = refs.first() {
+                self.toast(
+                    ToastLevel::Warning,
+                    format!(
+                        "该节点正被代理链“{}”引用，请先修改或删除对应代理链",
+                        chain.name
+                    ),
+                );
+                return;
+            }
             model.remove_node(node_id);
         }
         let _ = self.persist_model();
@@ -2349,20 +2376,44 @@ impl AppService {
         if node_ids.is_empty() {
             return;
         }
+        let deleting: BTreeSet<&str> = node_ids.iter().map(String::as_str).collect();
+        let mut removed = Vec::new();
+        let mut skipped_by_chain = 0usize;
         {
             let mut model = self.inner.model.write();
             for id in node_ids {
-                model.remove_node(id);
+                let referenced_by_kept_chain = model
+                    .node_chain_references(id)
+                    .iter()
+                    .any(|chain| !deleting.contains(chain.id.as_str()));
+                if referenced_by_kept_chain {
+                    skipped_by_chain += 1;
+                    continue;
+                }
+                if model.remove_node(id) {
+                    removed.push(id.clone());
+                }
             }
+        }
+        if skipped_by_chain > 0 {
+            self.toast(
+                ToastLevel::Warning,
+                format!(
+                    "已跳过 {skipped_by_chain} 个正被代理链引用的节点，请先修改或删除对应代理链"
+                ),
+            );
+        }
+        if removed.is_empty() {
+            return;
         }
         let _ = self.persist_model();
         {
             let mut lat = self.inner.latency.write();
-            for id in node_ids {
+            for id in &removed {
                 lat.remove(id);
             }
         }
-        self.remove_health_targets(node_ids);
+        self.remove_health_targets(&removed);
         self.refresh_doctor();
         self.mark_dirty();
     }
@@ -2461,7 +2512,8 @@ impl AppService {
         // Use the applied configuration, not a pending settings edit. A TUN TCP
         // handshake can terminate locally before any remote connection exists.
         let bypass_tun = self.inner.core.native_tun_active();
-        let use_http = force_http || bypass_tun;
+        let has_chain = targets.iter().any(Node::is_chain);
+        let use_http = force_http || bypass_tun || has_chain;
         let settings = self.settings();
         let core = if bypass_tun {
             self.inner.core.state().core.unwrap_or(settings.core)
@@ -2497,21 +2549,33 @@ impl AppService {
             use futures_util::{StreamExt, stream};
             let mut pending = stream::iter(targets)
                 .map(|node| {
+                    let service = service.clone();
                     let binary = binary.clone();
                     let url = settings.urltest_url.clone();
                     async move {
                         let result = if let Some(binary) = binary {
-                            match crate::runtime::probe::http_latency(
-                                &binary,
-                                core,
-                                &node,
-                                &url,
-                                bypass_tun,
-                                latency_mode,
-                            )
-                            .await
-                            {
-                                Ok(ms) => crate::runtime::LatencyResult::ok(ms),
+                            let route = if node.is_chain() || node.is_mesh_gateway() {
+                                service
+                                    .http_probe_route(&HttpTestTarget::Node(node.id.clone()), core)
+                            } else {
+                                Ok(crate::runtime::probe::ProbeRoute::from_node(Some(&node)))
+                            };
+                            match route {
+                                Ok(route) => match crate::runtime::probe::http_route_latency(
+                                    &binary,
+                                    core,
+                                    &route,
+                                    &url,
+                                    bypass_tun,
+                                    latency_mode,
+                                )
+                                .await
+                                {
+                                    Ok(ms) => crate::runtime::LatencyResult::ok(ms),
+                                    Err(err) => {
+                                        crate::runtime::LatencyResult::failed(err.to_string())
+                                    }
+                                },
                                 Err(err) => crate::runtime::LatencyResult::failed(err.to_string()),
                             }
                         } else {
@@ -2609,13 +2673,20 @@ impl AppService {
             settings.core
         };
         let model = self.model();
-        let nodes: Vec<_> = ids
+        let routes: Vec<_> = ids
             .iter()
-            .filter_map(|id| model.node(id))
-            .filter(|node| node.enabled && node.protocol.supported_by(core))
-            .cloned()
+            .filter_map(|id| {
+                let node = model.node(id)?;
+                if !node.enabled || !model.node_usable_with(node, core) {
+                    return None;
+                }
+                let route = self
+                    .http_probe_route(&HttpTestTarget::Node(id.clone()), core)
+                    .ok()?;
+                Some((id.clone(), route))
+            })
             .collect();
-        if nodes.is_empty() {
+        if routes.is_empty() {
             self.toast(ToastLevel::Warning, "没有已启用且当前内核支持的测速节点");
             return;
         }
@@ -2629,21 +2700,26 @@ impl AppService {
         if !self.try_begin_probe("download") {
             return;
         }
-        if let Some(first) = nodes.first() {
-            self.set_busy(&format!("download:{}", first.id), true);
+        if let Some((first_id, _)) = routes.first() {
+            self.set_busy(&format!("download:{first_id}"), true);
         }
         let target = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
             // Measure downloads sequentially so probes do not compete for bandwidth.
-            let count = nodes.len();
+            let count = routes.len();
             let mut successful = 0;
-            for node in nodes {
-                service.set_busy(&format!("download:{}", node.id), true);
-                service.inner.downloads.write().remove(&node.id);
+            for (node_id, route) in routes {
+                service.set_busy(&format!("download:{node_id}"), true);
+                service.inner.downloads.write().remove(&node_id);
+                let _mesh_guard = if route.uses_mesh_gateway() {
+                    Some(service.inner.mesh.operation.lock().await)
+                } else {
+                    None
+                };
                 let result =
-                    crate::runtime::probe::download(&binary, core, &node, bypass_tun).await;
-                service.record_proxy_probe(target.as_ref(), &node.id, result.is_ok());
+                    crate::runtime::probe::download_route(&binary, core, &route, bypass_tun).await;
+                service.record_proxy_probe(target.as_ref(), &node_id, result.is_ok());
                 let (entry, err_stage) = match result {
                     Ok(entry) => {
                         successful += 1;
@@ -2668,7 +2744,7 @@ impl AppService {
                     }
                 };
                 service.record_health_sample(crate::runtime::health::ProbeSampleRecord {
-                    target_key: node.id.clone(),
+                    target_key: node_id.clone(),
                     kind: crate::runtime::health::ProbeKind::Download,
                     ts: entry.checked_at,
                     ok: entry.error.is_none() && entry.bytes_per_second > 0,
@@ -2681,8 +2757,8 @@ impl AppService {
                     .inner
                     .downloads
                     .write()
-                    .insert(node.id.clone(), entry);
-                service.set_busy(&format!("download:{}", node.id), false);
+                    .insert(node_id.clone(), entry);
+                service.set_busy(&format!("download:{node_id}"), false);
             }
             service.set_busy("download", false);
             if count > 1 {
@@ -2797,7 +2873,7 @@ impl AppService {
                 outcome.latency_ms.or(outcome.trace_rtt_ms)
             }
         };
-        let ok = outcome.bytes_used > 0 || rtt_ms.is_some();
+        let ok = outcome.reached_target;
         let sample = crate::runtime::health::ProbeSampleRecord {
             target_key: target_key.to_owned(),
             kind: crate::runtime::health::ProbeKind::Reachability,
@@ -2809,7 +2885,11 @@ impl AppService {
             err_stage: if ok {
                 crate::runtime::health::ErrStage::None
             } else {
-                crate::runtime::health::ErrStage::Timeout
+                outcome
+                    .diagnostic
+                    .as_deref()
+                    .map(crate::runtime::health::classify_error)
+                    .unwrap_or(crate::runtime::health::ErrStage::Timeout)
             },
         };
         {
@@ -8876,6 +8956,8 @@ proxy-groups:
                 latency_ms: Some(110),
                 latency_mode: crate::settings::HttpLatencyMode::Unified,
                 from_cache: false,
+                diagnostic: None,
+                reached_target: true,
             },
         );
         service.set_daily_probe_budget_mb(250).unwrap();
@@ -8965,6 +9047,8 @@ proxy-groups:
                 latency_ms: None,
                 latency_mode: HttpLatencyMode::Unified,
                 from_cache: false,
+                diagnostic: None,
+                reached_target: true,
             },
         );
         let after_trace_only = service

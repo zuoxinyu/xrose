@@ -209,19 +209,24 @@ impl AppView {
             .filter(|node| query.is_empty() || node.name.to_lowercase().contains(&query))
             .map(|node| {
                 let name = display_node_name(node, self.hide_ips, &suffixes);
+                let usable = self
+                    .snapshot
+                    .model
+                    .node_usable_with(node, self.snapshot.settings.core);
                 let status = if !node.enabled {
                     self.tr("已禁用", "Disabled")
-                } else if !node.usable_with(self.snapshot.settings.core) {
-                    self.tr("当前内核不支持", "Unsupported by current core")
+                } else if !usable {
+                    if node.is_chain() {
+                        self.tr("代理链配置异常", "Invalid chain")
+                    } else {
+                        self.tr("当前内核不支持", "Unsupported by current core")
+                    }
+                } else if node.is_chain() {
+                    self.tr("代理链", "Chain")
                 } else {
                     "".into()
                 };
-                (
-                    node.id.clone(),
-                    name,
-                    status,
-                    node.usable_with(self.snapshot.settings.core),
-                )
+                (node.id.clone(), name, status, usable)
             })
             .collect();
         let list_editor = editor.clone();

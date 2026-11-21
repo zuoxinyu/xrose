@@ -215,9 +215,11 @@ impl AppService {
         self.commit_model_change(|model| {
             if !model.group(group_id).is_some_and(|g| {
                 g.enabled
-                    && g.members
-                        .iter()
-                        .any(|id| model.node(id).is_some_and(|n| n.usable_with(core)))
+                    && g.members.iter().any(|id| {
+                        model
+                            .node(id)
+                            .is_some_and(|n| model.node_usable_with(n, core))
+                    })
             }) {
                 return Err(Error::config("请选择已启用且有可用节点的出站组"));
             }
@@ -569,6 +571,7 @@ impl AppService {
         let latency_mode = self.settings().http_latency_mode;
         let probe = GroupProbe {
             service: self,
+            model: &model,
             binary: Path::new(binary),
             core,
             url,
@@ -613,7 +616,7 @@ impl AppService {
             FallbackScope::Group
         };
         let country = if scope == FallbackScope::SameRegion {
-            self.switch_country(active, settings.language).await
+            self.switch_country(&model, active, settings.language).await
         } else {
             None
         };
@@ -630,10 +633,11 @@ impl AppService {
             .filter_map(|id| model.node(id))
             .map(|node| {
                 let probe = &probe;
+                let model = &model;
                 let country = country.as_deref();
                 async move {
                     let other_country = if scope == FallbackScope::SameRegion && country.is_some() {
-                        self.switch_country(node, settings.language).await
+                        self.switch_country(model, node, settings.language).await
                     } else {
                         None
                     };
@@ -687,16 +691,24 @@ impl AppService {
 
     async fn switch_country(
         &self,
+        model: &AppModel,
         node: &Node,
         language: crate::settings::Language,
     ) -> Option<String> {
-        let key = location::cache_key(&node.server, language);
+        let server = model
+            .chain_exit_node(node)
+            .map(|n| n.server.as_str())
+            .unwrap_or(&node.server);
+        if server.trim().is_empty() {
+            return None;
+        }
+        let key = location::cache_key(server, language);
         if let Some(entry) = self.inner.node_locations.read().get(&key) {
             if !entry.needs_refresh(now_unix()) {
                 return entry.country.clone();
             }
         }
-        let location = location::lookup(&node.server, language).await;
+        let location = location::lookup(server, language).await;
         let country = location.country.clone();
         self.inner.node_locations.write().insert(key, location);
         country
@@ -705,6 +717,7 @@ impl AppService {
 
 struct GroupProbe<'a> {
     service: &'a AppService,
+    model: &'a AppModel,
     binary: &'a Path,
     core: CoreKind,
     url: &'a str,
@@ -715,9 +728,24 @@ struct GroupProbe<'a> {
 
 impl GroupProbe<'_> {
     async fn measure(&self, node: &Node) -> Option<u64> {
+        let route = self
+            .model
+            .resolve_probe_hops(node, self.core)
+            .map(probe::ProbeRoute::Hops);
         if self.mode == SwitchMode::Throughput {
-            let result =
-                probe::download_sample(self.binary, self.core, node, self.bypass_tun, true).await;
+            let result = match route {
+                Ok(route) => {
+                    probe::download_route_sample(
+                        self.binary,
+                        self.core,
+                        &route,
+                        self.bypass_tun,
+                        true,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            };
             let speed = result
                 .as_ref()
                 .ok()
@@ -753,15 +781,20 @@ impl GroupProbe<'_> {
                 .insert(node.id.clone(), entry);
             speed
         } else {
-            let result = probe::http_latency(
-                self.binary,
-                self.core,
-                node,
-                self.url,
-                self.bypass_tun,
-                self.latency_mode,
-            )
-            .await;
+            let result = match route {
+                Ok(route) => {
+                    probe::http_route_latency(
+                        self.binary,
+                        self.core,
+                        &route,
+                        self.url,
+                        self.bypass_tun,
+                        self.latency_mode,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            };
             let ok = result.is_ok();
             let ms = result.as_ref().ok().copied();
             let checked_at = now_unix();

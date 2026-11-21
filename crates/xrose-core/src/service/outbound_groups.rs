@@ -12,7 +12,11 @@ fn same_configuration(left: &OutboundGroup, right: &OutboundGroup) -> bool {
 }
 
 fn repair_selection(model: &AppModel, group: &mut OutboundGroup, core: CoreKind) {
-    let usable = |id: &String| model.node(id).is_some_and(|n| n.usable_with(core));
+    let usable = |id: &String| {
+        model
+            .node(id)
+            .is_some_and(|n| model.node_usable_with(n, core))
+    };
     if !group
         .selected
         .as_ref()
@@ -89,6 +93,7 @@ impl AppService {
             } else {
                 model.groups.push(group);
             }
+            model.validate_chain_graph()?;
             model.updated_at = now_unix();
             Ok(true)
         })?;
@@ -162,6 +167,7 @@ impl AppService {
                 repair_selection(model, &mut group, core);
                 model.groups[index] = group;
             }
+            model.validate_chain_graph()?;
             model.updated_at = now_unix();
             Ok(true)
         })?;

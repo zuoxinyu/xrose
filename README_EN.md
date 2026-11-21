@@ -61,7 +61,7 @@ Xrose provides three independent work modes and preserves your existing nodes, o
 ### Proxy & Dual-Core Orchestration
 
 - **Dual-Core Compilation & Hot Reload**: Compiles a single core-agnostic configuration into sing-box (1.12+, modern `.srs` rule sets and typed DNS) or Xray (1.8+; TUN requires 26.6.27+). Validates candidate configs with the selected core before swapping, enables hot reload by default, and restores the previous config if a reload fails.
-- **Proxy & VPN Protocols**: Supports VLESS (XTLS Vision / Reality), VMess, Trojan, AnyTLS, Shadowsocks, Hysteria2, TUIC, SOCKS, HTTP, WireGuard, OpenVPN, and OpenConnect (OpenVPN / OpenConnect require sing-box 1.14+).
+- **Proxy & VPN Protocols**: Supports VLESS (XTLS Vision / Reality), VMess, Trojan, AnyTLS, Shadowsocks, Hysteria2, TUIC, SOCKS, HTTP, WireGuard, OpenVPN, and OpenConnect (OpenVPN / OpenConnect require sing-box 1.14+). Multi-hop chains accept a node, outbound group, or mesh gateway as the first hop. A later UDP-based hop such as TUIC requires the preceding hop to forward UDP to its server port.
 - **Fast Import & Drag-and-Drop Organization**: Imports Base64 lists, share links, Clash YAML, SIP008, and sing-box JSON, and generates QR codes for sharing. Detects clipboard links/images automatically, accepts drag-and-drop files, offers a cross-monitor screen QR viewfinder (`Ctrl+Shift+S` / `⇧⌘S`), imports SwitchyOmega / AutoProxy rule lists, and supports drag-and-drop ordering for nodes, rules, and custom rule groups.
 - **Flexible Network Access**: Supports System Proxy, PAC, TUN mode, dedicated LAN ports, and authentication, with automatic system proxy restoration after unexpected exits.
 

@@ -8,8 +8,8 @@ use super::{
 };
 use crate::error::{Error, Result};
 use crate::model::{
-    AppModel, CoreKind, DomainStrategy, GroupKind, Inbound, InboundKind, Node, Protocol, RouteRule,
-    Transport,
+    AppModel, ChainHop, CoreKind, DomainStrategy, GroupKind, Inbound, InboundKind, Node, Protocol,
+    RouteRule, Transport,
 };
 use crate::settings::Settings;
 
@@ -199,7 +199,7 @@ impl CoreAdapter for XrayAdapter {
         // --- Outbounds ---------------------------------------------------
         let mut outbounds = Vec::new();
         for node in &model.nodes {
-            if !node.enabled {
+            if !node.enabled || node.is_chain() {
                 continue;
             }
             if !node.protocol.supported_by(CoreKind::Xray) {
@@ -215,6 +215,12 @@ impl CoreAdapter for XrayAdapter {
                 Err(err) => warnings.push(format!("节点“{}”编译失败：{err}", node.name)),
             }
         }
+        let mut valid_tags: std::collections::HashSet<String> = outbounds
+            .iter()
+            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
+            .collect();
+        compile_xray_chains(model, &mut outbounds, &mut valid_tags, &mut warnings);
+
         if !direct
             && super::mesh::requires_proxy(model)
             && !outbounds
@@ -229,11 +235,7 @@ impl CoreAdapter for XrayAdapter {
             outbounds.push(json!({"tag": "dns-out", "protocol": "dns", "settings": {}}));
         }
 
-        // Resolve group selections against successfully compiled nodes only.
-        let valid_tags: std::collections::HashSet<String> = outbounds
-            .iter()
-            .filter_map(|o| o["tag"].as_str().map(str::to_owned))
-            .collect();
+        // Resolve group selections against successfully compiled nodes and chains only.
         let nodes = &effective.nodes;
         for group in &mut effective.groups {
             group.members.retain(|id| {
@@ -262,8 +264,8 @@ impl CoreAdapter for XrayAdapter {
                 .members
                 .iter()
                 .filter_map(|id| model.node(id))
-                .filter(|n| n.usable_with(CoreKind::Xray))
                 .map(|n| n.outbound_tag())
+                .filter(|tag| valid_tags.contains(tag))
                 .collect();
             if group.manually_selectable() || group.managed() {
                 // Selector is compiled via routing target resolution; no
@@ -825,10 +827,10 @@ fn tun_inbound(
     )
 }
 
-/// Minimal configuration used only by private per-node probes.
-pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
+/// Minimal configuration used only by private per-node or chain probes.
+pub(super) fn compile_probe_hops(hops: &[Node], port: u16) -> Result<Value> {
     compile_probe_with_inbounds(
-        Some(node),
+        hops,
         vec![json!({
             "protocol": "socks",
             "tag": "probe",
@@ -841,7 +843,7 @@ pub(super) fn compile_probe(node: &Node, port: u16) -> Result<Value> {
 
 pub(super) fn compile_direct_probe(port: u16) -> Value {
     compile_probe_with_inbounds(
-        None,
+        &[],
         vec![json!({
             "protocol": "socks",
             "tag": "probe",
@@ -853,13 +855,36 @@ pub(super) fn compile_direct_probe(port: u16) -> Value {
     .expect("direct probe compiles")
 }
 
-fn compile_probe_with_inbounds(node: Option<&Node>, inbounds: Vec<Value>) -> Result<Value> {
-    let outbounds = match node {
-        Some(node) => vec![node_outbound(node, &mut Vec::new())?],
-        None => vec![json!({"protocol": "freedom", "tag": "direct", "settings": {}})],
+fn compile_probe_with_inbounds(hops: &[Node], inbounds: Vec<Value>) -> Result<Value> {
+    let outbounds = if hops.is_empty() {
+        vec![json!({"protocol": "freedom", "tag": "direct", "settings": {}})]
+    } else if hops.len() == 1 {
+        vec![node_outbound(&hops[0], &mut Vec::new())?]
+    } else {
+        // Place the landing hop at outbounds[0] (Xray's default routing target)
+        // and the entry hop at outbounds.last() (where bind_probe_interface binds).
+        let last_idx = hops.len() - 1;
+        let mut built = Vec::with_capacity(hops.len());
+        let mut prev_tag: Option<String> = None;
+        for (idx, node) in hops.iter().enumerate() {
+            let mut outbound = node_outbound(node, &mut Vec::new())?;
+            let tag = if idx == last_idx {
+                node.outbound_tag()
+            } else {
+                format!("probe-hop-{idx}")
+            };
+            outbound["tag"] = json!(tag);
+            if let Some(proxy_tag) = &prev_tag {
+                set_xray_dialer_proxy(&mut outbound, proxy_tag);
+            }
+            built.push(outbound);
+            prev_tag = Some(tag);
+        }
+        built.reverse();
+        built
     };
     Ok(json!({
-        "log": {"loglevel": "none"},
+        "log": {"loglevel": "error"},
         "inbounds": inbounds,
         "outbounds": outbounds
     }))
@@ -873,6 +898,184 @@ pub(crate) fn bind_probe_interface(config: &mut Value, interface: &str) {
         .last_mut()
         .unwrap();
     first_hop["streamSettings"]["sockopt"]["interface"] = json!(interface);
+}
+
+fn set_xray_dialer_proxy(outbound: &mut Value, proxy_tag: &str) {
+    let obj = outbound.as_object_mut().expect("outbound JSON object");
+    let stream = obj.entry("streamSettings").or_insert_with(|| json!({}));
+    let sockopt = stream
+        .as_object_mut()
+        .expect("streamSettings JSON object")
+        .entry("sockopt")
+        .or_insert_with(|| json!({}));
+    sockopt["dialerProxy"] = json!(proxy_tag);
+}
+
+fn compile_xray_chains(
+    model: &AppModel,
+    outbounds: &mut Vec<Value>,
+    valid_tags: &mut std::collections::HashSet<String>,
+    warnings: &mut Vec<String>,
+) {
+    let chains: Vec<&Node> = model
+        .nodes
+        .iter()
+        .filter(|n| n.enabled && n.is_chain())
+        .collect();
+    if chains.is_empty() {
+        return;
+    }
+    let mut compiled = std::collections::HashSet::new();
+    let mut failed: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    loop {
+        let mut progress = false;
+        for &chain in &chains {
+            if compiled.contains(&chain.id) || failed.contains_key(&chain.id) {
+                continue;
+            }
+            if model.node_in_cycle(&chain.id) {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”存在循环引用，已跳过", chain.name),
+                );
+                continue;
+            }
+            if chain.chain_hops.len() < 2 {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”跳点不足，已跳过", chain.name),
+                );
+                continue;
+            }
+            if let Err(err) = model.validate_chain_transports(&chain.chain_hops) {
+                failed.insert(
+                    chain.id.clone(),
+                    format!("代理链“{}”已跳过：{err}", chain.name),
+                );
+                continue;
+            }
+            let mut group_degrade_warning = None;
+            let entry_tag = match &chain.chain_hops[0] {
+                ChainHop::Node(id) => model
+                    .node(id)
+                    .filter(|n| !n.is_chain() && valid_tags.contains(&n.outbound_tag()))
+                    .map(Node::outbound_tag),
+                ChainHop::Group(gid) => model.group(gid).filter(|g| g.enabled).and_then(|g| {
+                    let resolved = g
+                        .selected
+                        .as_deref()
+                        .filter(|id| g.members.iter().any(|mid| mid.as_str() == *id) && model.chain_entry_allows(&chain.chain_hops, id))
+                        .and_then(|id| model.node(id))
+                        .filter(|n| valid_tags.contains(&n.outbound_tag()))
+                        .or_else(|| {
+                            g.members
+                                .iter()
+                                .filter(|id| model.chain_entry_allows(&chain.chain_hops, id))
+                                .filter_map(|id| model.node(id))
+                                .find(|n| valid_tags.contains(&n.outbound_tag()))
+                        });
+                    if resolved.is_some() && !g.manually_selectable() && !g.managed() {
+                        group_degrade_warning = Some(format!(
+                            "代理链“{}”的前置出站组“{}”在 Xray 中不支持作为负载均衡前置，已降级为该组当前可用节点",
+                            chain.name, g.name
+                        ));
+                    }
+                    resolved.map(Node::outbound_tag)
+                }),
+            };
+            let Some(mut prev_tag) = entry_tag else {
+                continue;
+            };
+            let mut trailing_nodes = Vec::with_capacity(chain.chain_hops.len() - 1);
+            let mut trailing_ok = true;
+            for hop in &chain.chain_hops[1..] {
+                match hop {
+                    ChainHop::Node(id) => {
+                        if let Some(node) = model
+                            .node(id)
+                            .filter(|n| !n.is_chain() && valid_tags.contains(&n.outbound_tag()))
+                        {
+                            if node.is_mesh_gateway() {
+                                failed.insert(
+                                    chain.id.clone(),
+                                    format!(
+                                        "代理链“{}”的后续跳点包含组网出口网关，已跳过",
+                                        chain.name
+                                    ),
+                                );
+                                trailing_ok = false;
+                                break;
+                            }
+                            trailing_nodes.push(node);
+                        } else {
+                            trailing_ok = false;
+                            break;
+                        }
+                    }
+                    ChainHop::Group(_) => {
+                        failed.insert(
+                            chain.id.clone(),
+                            format!("代理链“{}”仅第 1 跳支持出站组，已跳过", chain.name),
+                        );
+                        trailing_ok = false;
+                        break;
+                    }
+                }
+            }
+            if !trailing_ok {
+                continue;
+            }
+            let mut staged = Vec::new();
+            let mut compile_err = None;
+            let last_idx = trailing_nodes.len() - 1;
+            for (idx, hop_node) in trailing_nodes.iter().enumerate() {
+                match node_outbound(hop_node, warnings) {
+                    Ok(mut cloned) => {
+                        let tag = if idx == last_idx {
+                            chain.outbound_tag()
+                        } else {
+                            format!("chain-hop-{}-{}", chain.id, idx + 1)
+                        };
+                        cloned["tag"] = json!(tag);
+                        set_xray_dialer_proxy(&mut cloned, &prev_tag);
+                        staged.push(cloned);
+                        prev_tag = tag;
+                    }
+                    Err(err) => {
+                        compile_err = Some(format!(
+                            "代理链“{}”跳点“{}”编译失败：{err}",
+                            chain.name, hop_node.name
+                        ));
+                        break;
+                    }
+                }
+            }
+            if let Some(message) = compile_err {
+                failed.insert(chain.id.clone(), message);
+                continue;
+            }
+            if let Some(warning) = group_degrade_warning {
+                warnings.push(warning);
+            }
+            outbounds.extend(staged);
+            valid_tags.insert(chain.outbound_tag());
+            compiled.insert(chain.id.clone());
+            progress = true;
+        }
+        if !progress {
+            break;
+        }
+    }
+    for chain in chains {
+        if !compiled.contains(&chain.id) {
+            warnings.push(failed.remove(&chain.id).unwrap_or_else(|| {
+                format!(
+                    "代理链“{}”包含不可用或当前内核不支持的跳点，已跳过",
+                    chain.name
+                )
+            }));
+        }
+    }
 }
 
 fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
@@ -997,17 +1200,15 @@ fn node_outbound(node: &Node, warnings: &mut Vec<String>) -> Result<Value> {
                 node.protocol.display_name()
             )));
         }
+        Protocol::Chain => return Err(Error::config("代理链不能直接作为单跳出站编译")),
     };
 
-    // Stream settings (TLS / transport).
-    if node.protocol != Protocol::Shadowsocks
-        && node.protocol != Protocol::Socks
-        && node.protocol != Protocol::Http
+    if !node.protocol.is_plain_proxy()
+        || node.tls.enabled
+        || node.tls.reality.is_some()
+        || node.transport != Transport::Tcp
     {
-        let stream = stream_settings(node, warnings)?;
-        if !stream.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            outbound["streamSettings"] = stream;
-        }
+        outbound["streamSettings"] = stream_settings(node, warnings)?;
     }
     Ok(outbound)
 }
@@ -1593,5 +1794,122 @@ mod tests {
         for i in &shared.json["inbounds"].as_array().unwrap()[..2] {
             assert_eq!(i["settings"]["accounts"][0]["pass"], password);
         }
+    }
+
+    #[test]
+    fn compiles_proxy_chains_with_dialer_proxy_degradation_and_probe() {
+        use crate::adapters::xray::bind_probe_interface;
+        use crate::model::{ChainHop, OutboundGroup};
+
+        let (mut model, settings, ctx) = sample();
+        let entry = model.nodes[0].clone();
+        let mut mid = Node::new("Mid-SOCKS", Protocol::Socks, "203.0.113.20", 1080);
+        mid.id = "node-mid".into();
+        let mut exit = Node::new("HTTPS", Protocol::Http, "exit.test", 8443);
+        exit.id = "node-exit".into();
+        exit.tls.enabled = true;
+        exit.tls.server_name = Some("tls.exit.test".into());
+        model.add_nodes([mid.clone(), exit.clone()]);
+
+        let mut urltest = OutboundGroup::new("HK Auto", GroupKind::UrlTest);
+        urltest.members = vec![entry.id.clone()];
+        urltest.selected = Some(entry.id.clone());
+        model.groups.push(urltest.clone());
+
+        let chain_3 = Node::new_chain(
+            "3-Hop",
+            vec![
+                ChainHop::Node(entry.id.clone()),
+                ChainHop::Node(mid.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        let chain_grp = Node::new_chain(
+            "Auto-Entry",
+            vec![
+                ChainHop::Group(urltest.id.clone()),
+                ChainHop::Node(exit.id.clone()),
+            ],
+        );
+        model.add_nodes([chain_3.clone(), chain_grp.clone()]);
+
+        let compiled = XrayAdapter.compile(&model, &settings, &ctx).unwrap();
+        let outbounds = compiled.json["outbounds"].as_array().unwrap();
+
+        // Standalone hops must keep no dialerProxy.
+        let orig_exit = outbounds
+            .iter()
+            .find(|o| o["tag"] == exit.outbound_tag())
+            .unwrap();
+        assert!(orig_exit["streamSettings"]["sockopt"]["dialerProxy"].is_null());
+        assert_eq!(
+            orig_exit["streamSettings"]["tlsSettings"]["serverName"],
+            "tls.exit.test"
+        );
+
+        // 3-hop chain clones hop 1 and landing hop with dialerProxy.
+        let mid_clone_tag = format!("chain-hop-{}-1", chain_3.id);
+        let mid_clone = outbounds
+            .iter()
+            .find(|o| o["tag"] == mid_clone_tag)
+            .unwrap();
+        assert_eq!(
+            mid_clone["streamSettings"]["sockopt"]["dialerProxy"],
+            entry.outbound_tag()
+        );
+        let exit_clone = outbounds
+            .iter()
+            .find(|o| o["tag"] == chain_3.outbound_tag())
+            .unwrap();
+        assert_eq!(
+            exit_clone["streamSettings"]["sockopt"]["dialerProxy"],
+            mid_clone_tag
+        );
+        assert_eq!(exit_clone["streamSettings"]["security"], "tls");
+        assert_eq!(
+            exit_clone["streamSettings"]["tlsSettings"],
+            orig_exit["streamSettings"]["tlsSettings"]
+        );
+
+        // Native balancer group entry degrades to concrete node with a Chinese warning.
+        let grp_exit = outbounds
+            .iter()
+            .find(|o| o["tag"] == chain_grp.outbound_tag())
+            .unwrap();
+        assert_eq!(
+            grp_exit["streamSettings"]["sockopt"]["dialerProxy"],
+            entry.outbound_tag()
+        );
+        assert!(
+            compiled
+                .warnings
+                .iter()
+                .any(|w| w.contains("Auto-Entry") && w.contains("降级"))
+        );
+
+        // Multi-hop isolated probe places landing hop at index 0 and entry hop last.
+        let mut probe =
+            super::super::compile_probe_hops(CoreKind::Xray, &[entry.clone(), exit.clone()], 18083)
+                .unwrap();
+        bind_probe_interface(&mut probe, "en0");
+        let probe_outs = probe["outbounds"].as_array().unwrap();
+        assert_eq!(probe_outs.len(), 2);
+        assert_eq!(probe_outs[0]["tag"], exit.outbound_tag());
+        assert_eq!(probe_outs[0]["streamSettings"]["security"], "tls");
+        assert_eq!(
+            probe_outs[0]["streamSettings"]["tlsSettings"],
+            orig_exit["streamSettings"]["tlsSettings"]
+        );
+        assert_eq!(
+            probe_outs[0]["streamSettings"]["sockopt"]["dialerProxy"],
+            "probe-hop-0"
+        );
+        assert!(probe_outs[0]["streamSettings"]["sockopt"]["interface"].is_null());
+        assert_eq!(probe_outs[1]["tag"], "probe-hop-0");
+        assert!(probe_outs[1]["streamSettings"]["sockopt"]["dialerProxy"].is_null());
+        assert_eq!(
+            probe_outs[1]["streamSettings"]["sockopt"]["interface"],
+            "en0"
+        );
     }
 }

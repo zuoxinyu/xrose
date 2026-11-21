@@ -698,7 +698,7 @@ fn parse(args: &[String]) -> Result<(), String> {
             truncate(&node.name, 26),
             node.protocol.display_name(),
             node.endpoint(),
-            node.transport.kind_name(),
+            node.transport_label(),
             if node.tls.enabled { "TLS" } else { "plain" }
         );
     }

@@ -117,7 +117,9 @@ impl AppView {
                     checked: selected.is_some_and(|n| n.id == node.id),
                     command: (!automatic
                         && group.enabled
-                        && node.usable_with(snapshot.settings.core))
+                        && snapshot
+                            .model
+                            .node_usable_with(node, snapshot.settings.core))
                     .then(|| Command::SelectNode(group.id.clone(), node.id.clone())),
                 });
             }

@@ -119,6 +119,7 @@ impl AppView {
         self.manual_error = None;
         self.editing_node = None;
         self.show_manual_form = false;
+        self.show_chain_form = false;
         self.show_import_box = false;
         self.show_subscription_form = true;
         self.import_editor_epoch = self.import_editor_epoch.wrapping_add(1);
@@ -160,6 +161,7 @@ impl AppView {
         self.apply_subscription_prefill(url, default_name, error, window, cx);
         self.editing_node = None;
         self.show_manual_form = false;
+        self.show_chain_form = false;
         self.show_import_box = false;
         self.show_subscription_form = true;
         self.import_editor_epoch = self.import_editor_epoch.wrapping_add(1);
@@ -350,14 +352,21 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         self.manual_form.reset(window, cx);
+        self.chain_form.reset(window, cx);
         self.editing_node = node.as_ref().map(|node| node.id.clone());
+        let is_chain = node.as_ref().is_some_and(Node::is_chain);
         if let Some(node) = node {
-            self.manual_form.load(&node, window, cx);
+            if is_chain {
+                self.chain_form.load(&node, window, cx);
+            } else {
+                self.manual_form.load(&node, window, cx);
+            }
         }
         self.manual_error = None;
-        self.show_manual_form = manual;
+        self.show_chain_form = is_chain;
+        self.show_manual_form = !is_chain && manual;
         self.show_subscription_form = false;
-        self.show_import_box = !manual;
+        self.show_import_box = !is_chain && !manual;
         self.import_editor_epoch = self.import_editor_epoch.wrapping_add(1);
         let epoch = self.import_editor_epoch;
         let view = cx.entity().downgrade();
@@ -372,7 +381,40 @@ impl AppView {
             self.import_input.focus_handle(cx).focus(window, cx);
         } else if self.show_manual_form {
             self.manual_form.server.focus_handle(cx).focus(window, cx);
+        } else if self.show_chain_form {
+            self.chain_form.name.focus_handle(cx).focus(window, cx);
         }
+        cx.notify();
+    }
+
+    pub(crate) fn open_chain_dialog(
+        &mut self,
+        entry_node_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.manual_form.reset(window, cx);
+        self.chain_form.reset(window, cx);
+        if let Some(id) = entry_node_id {
+            self.chain_form.prefill_entry(id, window, cx);
+        }
+        self.editing_node = None;
+        self.manual_error = None;
+        self.show_chain_form = true;
+        self.show_manual_form = false;
+        self.show_subscription_form = false;
+        self.show_import_box = false;
+        self.import_editor_epoch = self.import_editor_epoch.wrapping_add(1);
+        let epoch = self.import_editor_epoch;
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, window, cx| {
+            if let Some(view) = view.upgrade() {
+                view.update(cx, |this, cx| this.node_dialog(dialog, epoch, window, cx))
+            } else {
+                dialog
+            }
+        });
+        self.chain_form.name.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
 
@@ -387,7 +429,11 @@ impl AppView {
         let p = palette(cx);
         let view = cx.entity().downgrade();
         let title = if editing {
-            self.tr("编辑节点", "Edit node")
+            if self.show_chain_form {
+                self.tr("编辑代理链", "Edit proxy chain")
+            } else {
+                self.tr("编辑节点", "Edit node")
+            }
         } else {
             self.tr("添加节点", "Add node")
         };
@@ -401,6 +447,13 @@ impl AppView {
                 });
             });
         if !editing {
+            let selected_mode = if self.show_chain_form {
+                2
+            } else if self.show_manual_form {
+                1
+            } else {
+                0
+            };
             dialog = dialog.child(dialog_toolbar(
                 &p,
                 ChoiceGroup::new(
@@ -408,23 +461,35 @@ impl AppView {
                     vec![
                         self.tr("链接与二维码", "Links and QR codes"),
                         self.tr("手动填写", "Enter manually"),
+                        self.tr("代理链", "Proxy chain"),
                     ],
-                    usize::from(self.show_manual_form),
+                    selected_mode,
                 )
                 .on_change(cx.listener(|this, index: &usize, window, cx| {
                     this.show_import_box = *index == 0;
                     this.show_manual_form = *index == 1;
+                    this.show_chain_form = *index == 2;
                     this.manual_error = None;
                     if this.show_import_box {
                         this.import_input.focus_handle(cx).focus(window, cx);
                     } else if this.show_manual_form {
                         this.manual_form.server.focus_handle(cx).focus(window, cx);
+                    } else if this.show_chain_form {
+                        this.chain_form.name.focus_handle(cx).focus(window, cx);
                     }
                     cx.notify();
                 })),
             ));
         }
-        if self.show_manual_form {
+        if self.show_chain_form {
+            dialog
+                .child(dialog_scroll_body(
+                    "chain-editor-scroll",
+                    px(520.).min(window.viewport_size().height * 0.58),
+                    self.chain_editor_fields(cx),
+                ))
+                .footer(self.chain_editor_footer(cx))
+        } else if self.show_manual_form {
             dialog
                 .child(dialog_scroll_body(
                     "manual-node-scroll",
@@ -502,11 +567,13 @@ impl AppView {
 
     pub(crate) fn clear_node_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.manual_form.reset(window, cx);
+        self.chain_form.reset(window, cx);
         self.manual_error = None;
         self.sub_error_url = None;
         self.sub_name_auto = None;
         self.editing_node = None;
         self.show_manual_form = false;
+        self.show_chain_form = false;
         self.show_import_box = false;
         self.show_subscription_form = false;
         cx.notify();

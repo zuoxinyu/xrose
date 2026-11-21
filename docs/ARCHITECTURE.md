@@ -8,7 +8,7 @@
 
 - `work_mode`：`WorkMode::Direct`（本机直连）、`WorkMode::Proxy`（代理）或 `WorkMode::Mesh`（组网），与分流模板、出站组选择正交。
 - `mesh_mode`：系统出口设备、DNS 策略（默认随出口 / 自定义）与本地 LAN 访问意图；与 `MeshProfile.exit_node` 保存的分流出口独立。
-- `nodes`：协议、凭据与 TLS / 传输参数，不含内核字段名。
+- `nodes`：协议、凭据、TLS / 传输参数及代理链跳点（`Protocol::Chain` + `chain_hops`），不含内核字段名。
 - `groups`：出站组（`selector` / `urltest` / `fallback` / `loadbalance`）及各组切换策略 `switch_policy`。
 - `routing`：自定义规则分组（`rule_groups`）、规则（`rules`，含 `geosite` / `geoip` / `rule_sets` / `process` 等语义匹配器）与规则集定义。
 - `dns`：上游服务器（`tag` / `address` / `domains` / `detour`）、Fake-IP、Hosts 与 `final` 策略。
@@ -49,6 +49,7 @@
 | OpenVPN | 不支持 | 1.14+ endpoint | TLS 客户端、UDP/TCP、账号密码与 PEM 证书、控制通道密钥、分域 DNS；旧内核跳过并修复组引用 |
 | OpenConnect | 不支持 | 1.14+ endpoint | 六种协议类型、HTTPS 路径、认证组、账号密码/证书/会话、分域 DNS；交互认证暂未接入 |
 | WireGuard | 用户态出站 | endpoint | 单对端、密钥、地址、允许网段、MTU、reserved；不创建系统 WireGuard 网卡 |
+| 代理链（多跳组合） | 克隆跳点 + `streamSettings.sockopt.dialerProxy` | 克隆跳点 + `detour` | 首跳支持单节点、组网网关或出站组，后续跳点为单节点。使用 UDP 的跳点要求前一跳能向其服务器端口转发 UDP。编译和探测均排除与后续跳点重复或无法转发所需 UDP 的入口组成员。Xray 的原生自动组前置降级为可用成员并提示。支持端到端 HTTP、吞吐与可达性检测 |
 | 自定义规则分组 | 按组展开 | 按组展开 | 启用组按顺序先于未分组/预设规则；本地预览共用 `effective_rules()`；PAC 从启用规则收集直连条件 |
 | selector 热切换 | 无 | Clash API | Xray 选择节点需改写配置并重启 |
 | urltest | `balancer` + `observatory` | 原生 `urltest` | 分别生成 |

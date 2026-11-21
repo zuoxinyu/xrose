@@ -58,7 +58,10 @@ pub(super) fn policy_groups(model: &AppModel, core: CoreKind) -> Result<Vec<&Out
             "" | "direct" => {}
             "proxy" | "default" => ids.push(model.default_group_id()),
             id if model.node(id).is_some() => {
-                if !model.node(id).is_some_and(|node| node.usable_with(core)) {
+                if !model
+                    .node(id)
+                    .is_some_and(|node| model.node_usable_with(node, core))
+                {
                     return Err(Error::config(
                         "出口 DNS 引用了不可用节点，请修改 DNS 出站设置",
                     ));
@@ -80,10 +83,11 @@ pub(super) fn policy_groups(model: &AppModel, core: CoreKind) -> Result<Vec<&Out
             .and_then(|id| model.group(id))
             .filter(|group| {
                 group.enabled
-                    && group
-                        .members
-                        .iter()
-                        .any(|id| model.node(id).is_some_and(|node| node.usable_with(core)))
+                    && group.members.iter().any(|id| {
+                        model
+                            .node(id)
+                            .is_some_and(|node| model.node_usable_with(node, core))
+                    })
             })
             .ok_or_else(|| {
                 Error::config("出口分流规则引用了不可用出站组，请启用该组并添加可用节点")

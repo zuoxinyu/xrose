@@ -328,13 +328,29 @@ static SINGBOX: SingBoxAdapter = SingBoxAdapter;
 
 /// A private SOCKS5 (TCP + UDP) listener routed exclusively through the requested
 /// node. No selectors, TUN, cache file, API ports or user routing are shared.
+#[cfg(test)]
 pub(crate) fn compile_probe(core: CoreKind, node: &crate::model::Node, port: u16) -> Result<Value> {
-    if !node.usable_with(core) {
-        return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
+    compile_probe_hops(core, std::slice::from_ref(node), port)
+}
+
+/// Private SOCKS5 listener routed through an ordered concrete hop sequence
+/// `[entry_hop, ..., landing_hop]`.
+pub(crate) fn compile_probe_hops(
+    core: CoreKind,
+    hops: &[crate::model::Node],
+    port: u16,
+) -> Result<Value> {
+    if hops.is_empty() {
+        return Err(crate::Error::config("缺少可测速的节点"));
+    }
+    for node in hops {
+        if node.is_chain() || !node.usable_with(core) {
+            return Err(crate::Error::config("该节点未启用或当前内核不支持该协议"));
+        }
     }
     match core {
-        CoreKind::SingBox => singbox::compile_probe(node, port),
-        CoreKind::Xray => xray::compile_probe(node, port),
+        CoreKind::SingBox => singbox::compile_probe_hops(hops, port),
+        CoreKind::Xray => xray::compile_probe_hops(hops, port),
     }
 }
 

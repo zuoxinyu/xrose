@@ -16,9 +16,8 @@ use crate::runtime::probe::Probe;
 use crate::settings::HttpLatencyMode;
 use crate::util::now_unix;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_SNIPPET_BYTES: usize = 64 * 1024;
 const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
+const MAX_SNIPPET_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ReachabilityOutcome {
@@ -29,6 +28,9 @@ pub struct ReachabilityOutcome {
     pub latency_ms: Option<u32>,
     pub latency_mode: HttpLatencyMode,
     pub from_cache: bool,
+    pub diagnostic: Option<String>,
+    /// A target replied over the measured route, including empty HTTP responses or STUN.
+    pub reached_target: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,21 +58,64 @@ pub async fn probe_reachability<F>(
 where
     F: FnOnce(&str) -> Option<ReachabilityReport>,
 {
-    let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
-    let outcome = run_reachability_suite(
-        &probe.client,
-        probe.port,
+    probe_reachability_route(
+        binary,
+        core,
+        &crate::runtime::probe::ProbeRoute::from_node(node),
+        bypass_tun,
         udp_enabled,
         force_refresh,
         latency_url,
         latency_mode,
         lookup_cached,
     )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn probe_reachability_route<F>(
+    binary: &Path,
+    core: CoreKind,
+    route: &crate::runtime::probe::ProbeRoute,
+    bypass_tun: bool,
+    udp_enabled: bool,
+    force_refresh: bool,
+    latency_url: Option<&str>,
+    latency_mode: HttpLatencyMode,
+    lookup_cached: F,
+) -> Result<ReachabilityOutcome>
+where
+    F: FnOnce(&str) -> Option<ReachabilityReport>,
+{
+    let probe = Probe::start_route(binary, core, route, bypass_tun).await?;
+    let request_timeout = route.latency_timeout();
+    let udp_timeout = if route.hop_count() > 1 {
+        Duration::from_secs(6)
+    } else {
+        Duration::from_secs(4)
+    };
+    let mut outcome = run_reachability_suite(
+        &probe.client,
+        probe.port,
+        udp_enabled,
+        force_refresh,
+        latency_url,
+        latency_mode,
+        request_timeout,
+        udp_timeout,
+        lookup_cached,
+    )
     .await;
-    probe.stop().await;
+    let diagnostic = probe.stop().await;
+    if let Ok(ref mut out) = outcome
+        && !out.reached_target
+    {
+        out.diagnostic = route.failure_diagnostic(diagnostic);
+    }
     outcome
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_reachability_suite<F>(
     client: &reqwest::Client,
     socks_port: u16,
@@ -78,6 +123,8 @@ async fn run_reachability_suite<F>(
     force_refresh: bool,
     latency_url: Option<&str>,
     latency_mode: HttpLatencyMode,
+    request_timeout: Duration,
+    udp_timeout: Duration,
     lookup_cached: F,
 ) -> Result<ReachabilityOutcome>
 where
@@ -88,27 +135,30 @@ where
     // during timing, and the subsequent probes reuse the warmed session.
     let latency_ms = match latency_url {
         Some(url) if !url.trim().is_empty() => {
-            crate::runtime::probe::measure_http_latency(client, url, latency_mode)
-                .await
-                .ok()
+            crate::runtime::probe::measure_http_latency_with_timeout(
+                client,
+                url,
+                latency_mode,
+                request_timeout,
+            )
+            .await
+            .ok()
         }
         _ => None,
     };
 
     let udp_fut = async {
         if udp_enabled {
-            socks5_stun_probe(
-                socks_port,
-                "stun.cloudflare.com",
-                3478,
-                Duration::from_secs(4),
-            )
-            .await
+            socks5_stun_probe(socks_port, "stun.cloudflare.com", 3478, udp_timeout).await
         } else {
             ServiceCheckResult::new(ReachabilityCheckStatus::Blocked).with_detail("节点未启用 UDP")
         }
     };
-    let trace_fut = fetch_egress_trace(client, "https://www.cloudflare.com/cdn-cgi/trace");
+    let trace_fut = fetch_egress_trace(
+        client,
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        request_timeout,
+    );
     let (udp_stun, trace_result) = tokio::join!(udp_fut, trace_fut);
 
     let (egress_ip, egress_region, mut bytes_used, trace_rtt_ms, trace_cf_mitigated) =
@@ -134,6 +184,8 @@ where
             latency_ms,
             latency_mode,
             from_cache: true,
+            diagnostic: None,
+            reached_target: true,
         });
     }
 
@@ -150,25 +202,44 @@ where
         scholar_obs,
         github_obs,
     ) = tokio::join!(
-        fetch_observation(client, "https://chatgpt.com/"),
-        fetch_observation(client, "https://claude.ai/login"),
-        fetch_observation(client, "https://gemini.google.com/"),
-        fetch_observation(client, "https://copilot-proxy.githubusercontent.com/_ping"),
-        fetch_observation(client, "https://www.netflix.com/title/81280792"),
-        fetch_observation(client, "https://www.youtube.com/premium"),
-        fetch_observation(client, "https://www.disneyplus.com/"),
-        fetch_observation(client, "https://www.tiktok.com/"),
-        fetch_observation(client, "https://www.google.com/generate_204"),
-        fetch_observation(client, "https://scholar.google.com/"),
-        fetch_observation(client, "https://github.com/robots.txt"),
+        fetch_observation(client, "https://chatgpt.com/", request_timeout),
+        fetch_observation(client, "https://claude.ai/login", request_timeout),
+        fetch_observation(client, "https://gemini.google.com/", request_timeout),
+        fetch_observation(
+            client,
+            "https://copilot-proxy.githubusercontent.com/_ping",
+            request_timeout
+        ),
+        fetch_observation(
+            client,
+            "https://www.netflix.com/title/81280792",
+            request_timeout
+        ),
+        fetch_observation(client, "https://www.youtube.com/premium", request_timeout),
+        fetch_observation(client, "https://www.disneyplus.com/", request_timeout),
+        fetch_observation(client, "https://www.tiktok.com/", request_timeout),
+        fetch_observation(
+            client,
+            "https://www.google.com/generate_204",
+            request_timeout
+        ),
+        fetch_observation(client, "https://scholar.google.com/", request_timeout),
+        fetch_observation(client, "https://github.com/robots.txt", request_timeout),
     );
 
     let nf_orig_obs = match &nf_main_obs {
         Ok(obs) if obs.status == 200 => None,
-        _ => Some(fetch_observation(client, "https://www.netflix.com/title/80018499").await),
+        _ => Some(
+            fetch_observation(
+                client,
+                "https://www.netflix.com/title/80018499",
+                request_timeout,
+            )
+            .await,
+        ),
     };
 
-    for obs in [
+    let observations = [
         &chatgpt_obs,
         &claude_obs,
         &gemini_obs,
@@ -180,12 +251,16 @@ where
         &google_obs,
         &scholar_obs,
         &github_obs,
-    ] {
-        if let Ok(o) = obs {
-            bytes_used = bytes_used.saturating_add(o.bytes);
-        }
-    }
-    if let Some(Ok(o)) = &nf_orig_obs {
+    ];
+    let mut reached_target = latency_ms.is_some()
+        || trace_rtt_ms.is_some()
+        || udp_stun.status == ReachabilityCheckStatus::Pass;
+    for o in observations
+        .into_iter()
+        .chain(nf_orig_obs.iter())
+        .filter_map(|obs| obs.as_ref().ok())
+    {
+        reached_target = true;
         bytes_used = bytes_used.saturating_add(o.bytes);
     }
 
@@ -218,14 +293,17 @@ where
         latency_ms,
         latency_mode,
         from_cache: false,
+        diagnostic: None,
+        reached_target,
     })
 }
 
 async fn fetch_egress_trace(
     client: &reqwest::Client,
     url: &str,
+    timeout: Duration,
 ) -> Result<(Option<String>, Option<String>, u64, u32, bool)> {
-    let obs = fetch_observation(client, url).await?;
+    let obs = fetch_observation(client, url, timeout).await?;
     if obs.status != 200 {
         return Err(Error::other(format!("Trace HTTP {}", obs.status)));
     }
@@ -247,11 +325,15 @@ async fn fetch_egress_trace(
     Ok((ip, loc, obs.bytes, obs.rtt_ms, obs.cf_mitigated))
 }
 
-async fn fetch_observation(client: &reqwest::Client, url: &str) -> Result<HttpObservation> {
+async fn fetch_observation(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<HttpObservation> {
     let started = Instant::now();
     let response = client
         .get(url)
-        .timeout(REQUEST_TIMEOUT)
+        .timeout(timeout)
         .send()
         .await
         .map_err(|err| Error::other(format!("请求失败：{err}")))?;
@@ -809,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socks5_udp_associate_completes_stun_binding_against_local_mock() {
+    async fn reachability_counts_a_stun_reply_when_all_http_requests_time_out() {
         let udp_relay = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_port = udp_relay.local_addr().unwrap().port();
         let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -844,8 +926,34 @@ mod tests {
             udp_relay.send_to(&resp, peer).await.unwrap();
         });
 
-        let result = socks5_stun_probe(socks_port, "127.0.0.1", 3478, Duration::from_secs(2)).await;
-        assert_eq!(result.status, ReachabilityCheckStatus::Pass);
+        // A local proxy that never replies keeps all HTTP probes off the network.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{}", silent.local_addr().unwrap())).unwrap())
+            .build()
+            .unwrap();
+        for udp_enabled in [true, false] {
+            let outcome = run_reachability_suite(
+                &http,
+                socks_port,
+                udp_enabled,
+                true,
+                None,
+                HttpLatencyMode::Unified,
+                Duration::from_millis(80),
+                Duration::from_secs(2),
+                |_| None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                outcome.report.udp_stun.status == ReachabilityCheckStatus::Pass,
+                udp_enabled
+            );
+            assert_eq!(outcome.reached_target, udp_enabled);
+            assert_eq!(outcome.bytes_used, 0);
+            assert!(outcome.trace_rtt_ms.is_none());
+        }
         tcp_task.await.unwrap();
         udp_task.await.unwrap();
     }

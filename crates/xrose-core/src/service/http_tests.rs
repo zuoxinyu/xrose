@@ -3,8 +3,11 @@
 use super::{AppService, ToastLevel};
 use crate::{
     Error, Result,
+    core::logs::LogStream,
     mesh::MeshPhase,
-    model::{DIRECT_VIRTUAL_NODE_ID, Node},
+    model::{CoreKind, DIRECT_VIRTUAL_NODE_ID, Node},
+    runtime::probe::ProbeRoute,
+    settings::LogLevel,
     storage::LatencyEntry,
     util::now_unix,
 };
@@ -36,7 +39,7 @@ impl AppService {
             && self
                 .model()
                 .node(id)
-                .is_some_and(|node| !node.is_mesh_gateway())
+                .is_some_and(|node| !node.is_mesh_gateway() && !node.is_chain())
         {
             self.test_download(id);
             return;
@@ -49,25 +52,20 @@ impl AppService {
         let active = self.tray_probe_target();
         let service = self.clone();
         self.spawn(async move {
-            for (target, node) in targets {
+            for (target, route) in targets {
                 let key = target.key();
                 service.inner.downloads.write().remove(&key);
                 let _mesh_guard = if matches!(target, HttpTestTarget::MeshExit { .. })
-                    || node.as_ref().is_some_and(Node::is_mesh_gateway)
+                    || route.uses_mesh_gateway()
                 {
                     Some(service.inner.mesh.operation.lock().await)
                 } else {
                     None
                 };
-                let result = match service.http_probe_node(&target) {
-                    Ok(current) if current == node => {
-                        crate::runtime::probe::download_target(
-                            &binary,
-                            core,
-                            node.as_ref(),
-                            bypass_tun,
-                        )
-                        .await
+                let result = match service.http_probe_route(&target, core) {
+                    Ok(current) if current == route => {
+                        crate::runtime::probe::download_route(&binary, core, &route, bypass_tun)
+                            .await
                     }
                     _ => Err(Error::other("出口配置已更改，请重新进行吞吐测速")),
                 };
@@ -112,6 +110,7 @@ impl AppService {
     fn all_exit_targets(&self) -> Vec<HttpTestTarget> {
         let model = self.model();
         let mesh = self.inner.mesh.snapshot();
+        let core = self.settings().core;
         let mut targets = vec![HttpTestTarget::Direct];
         targets.extend(
             model
@@ -127,7 +126,7 @@ impl AppService {
                     profile: profile.id.clone(),
                     peer: peer.id.clone(),
                 })
-                .filter(|target| self.http_probe_node(target).is_ok()),
+                .filter(|target| self.http_probe_route(target, core).is_ok()),
         );
         targets
     }
@@ -182,7 +181,7 @@ impl AppService {
         targets: Vec<HttpTestTarget>,
         busy_key: &str,
     ) -> Option<(
-        Vec<(HttpTestTarget, Option<Node>)>,
+        Vec<(HttpTestTarget, ProbeRoute)>,
         crate::model::CoreKind,
         std::path::PathBuf,
         bool,
@@ -196,21 +195,6 @@ impl AppService {
         {
             return None;
         }
-        let mut seen = std::collections::BTreeSet::new();
-        let targets: Vec<_> = targets
-            .into_iter()
-            .filter(|target| seen.insert(target.key()))
-            .filter_map(|target| match self.http_probe_node(&target) {
-                Ok(node) => Some((target, node)),
-                Err(error) => {
-                    self.toast(ToastLevel::Warning, test_error_message(error));
-                    None
-                }
-            })
-            .collect();
-        if targets.is_empty() {
-            return None;
-        }
         let settings = self.settings();
         let bypass_tun = self.inner.core.native_tun_active();
         let core = self
@@ -220,6 +204,21 @@ impl AppService {
             .core
             .filter(|_| bypass_tun)
             .unwrap_or(settings.core);
+        let mut seen = std::collections::BTreeSet::new();
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|target| seen.insert(target.key()))
+            .filter_map(|target| match self.http_probe_route(&target, core) {
+                Ok(route) => Some((target, route)),
+                Err(error) => {
+                    self.toast(ToastLevel::Warning, test_error_message(error));
+                    None
+                }
+            })
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
         let binary = match self.inner.core.resolve_binary(core, &settings) {
             Ok(binary) => binary,
             Err(error) => {
@@ -252,7 +251,7 @@ impl AppService {
         self.spawn(async move {
             use futures_util::{StreamExt, stream};
             let mut pending = stream::iter(targets)
-                .map(|(target, node)| {
+                .map(|(target, route)| {
                     let service = service.clone();
                     let binary = binary.clone();
                     let url = if matches!(target, HttpTestTarget::Direct) {
@@ -264,18 +263,18 @@ impl AppService {
                         // Keep the mesh operation lock while measuring its gateway so a concurrent
                         // exit switch cannot silently send this request through another device.
                         let _mesh_guard = if matches!(target, HttpTestTarget::MeshExit { .. })
-                            || node.as_ref().is_some_and(Node::is_mesh_gateway)
+                            || route.uses_mesh_gateway()
                         {
                             Some(service.inner.mesh.operation.lock().await)
                         } else {
                             None
                         };
-                        let result = match service.http_probe_node(&target) {
-                            Ok(current) if current == node => {
-                                crate::runtime::probe::http_target_latency(
+                        let result = match service.http_probe_route(&target, core) {
+                            Ok(current) if current == route => {
+                                crate::runtime::probe::http_route_latency(
                                     &binary,
                                     core,
-                                    node.as_ref(),
+                                    &route,
                                     &url,
                                     bypass_tun,
                                     latency_mode,
@@ -302,7 +301,18 @@ impl AppService {
                 let checked_at = now_unix();
                 let detail = match result {
                     Ok(_) => latency_mode.detail_label().into(),
-                    Err(error) => format!("HTTP 测速失败：{}", test_error_message(error)),
+                    Err(error) => {
+                        let reason = test_error_message(error);
+                        service.inner.core.logs().push(
+                            LogStream::App,
+                            LogLevel::Warn,
+                            format!(
+                                "HTTP 测速失败（{}）：{reason}",
+                                service.target_display_label(&target)
+                            ),
+                        );
+                        format!("HTTP 测速失败：{reason}")
+                    }
                 };
                 let err_stage = if ok {
                     crate::runtime::health::ErrStage::None
@@ -359,7 +369,7 @@ impl AppService {
         self.spawn(async move {
             use futures_util::{StreamExt, stream};
             let mut pending = stream::iter(targets)
-                .map(|(target, node)| {
+                .map(|(target, route)| {
                     let service = service.clone();
                     let binary = binary.clone();
                     let url = if matches!(target, HttpTestTarget::Direct) {
@@ -369,20 +379,20 @@ impl AppService {
                     };
                     async move {
                         let _mesh_guard = if matches!(target, HttpTestTarget::MeshExit { .. })
-                            || node.as_ref().is_some_and(Node::is_mesh_gateway)
+                            || route.uses_mesh_gateway()
                         {
                             Some(service.inner.mesh.operation.lock().await)
                         } else {
                             None
                         };
-                        let result = match service.http_probe_node(&target) {
-                            Ok(current) if current == node => {
-                                let udp_enabled = node.as_ref().is_none_or(|n| n.udp);
+                        let result = match service.http_probe_route(&target, core) {
+                            Ok(current) if current == route => {
+                                let udp_enabled = route.udp_enabled();
                                 let store = service.inner.store.clone();
-                                crate::runtime::reachability::probe_reachability(
+                                crate::runtime::reachability::probe_reachability_route(
                                     &binary,
                                     core,
-                                    node.as_ref(),
+                                    &route,
                                     bypass_tun,
                                     udp_enabled,
                                     force_refresh,
@@ -406,16 +416,46 @@ impl AppService {
             let mut successful = 0usize;
             while let Some((target, result)) = pending.next().await {
                 if let HttpTestTarget::Node(id) = &target {
-                    service.record_proxy_probe(active.as_ref(), id, result.is_ok());
+                    service.record_proxy_probe(
+                        active.as_ref(),
+                        id,
+                        result.as_ref().is_ok_and(|outcome| outcome.reached_target),
+                    );
                 }
                 let key = target.key();
                 match result {
                     Ok(outcome) => {
                         successful += 1;
                         service.record_reachability_outcome(&key, &outcome);
+                        if !outcome.reached_target {
+                            let label = service.target_display_label(&target);
+                            let reason = outcome
+                                .diagnostic
+                                .as_deref()
+                                .unwrap_or("所有探测请求均超时或连接失败");
+                            service.inner.core.logs().push(
+                                LogStream::App,
+                                LogLevel::Warn,
+                                format!("可达性检测全部未通过（{label}）：{reason}"),
+                            );
+                            if count == 1 {
+                                service.toast(
+                                    ToastLevel::Warning,
+                                    format!("可达性检测未通过：{reason}"),
+                                );
+                            }
+                        }
                     }
                     Err(error) => {
                         let msg = test_error_message(error);
+                        service.inner.core.logs().push(
+                            LogStream::App,
+                            LogLevel::Warn,
+                            format!(
+                                "可达性检测失败（{}）：{msg}",
+                                service.target_display_label(&target)
+                            ),
+                        );
                         service.record_health_sample(crate::runtime::health::ProbeSampleRecord {
                             target_key: key.clone(),
                             kind: crate::runtime::health::ProbeKind::Reachability,
@@ -443,38 +483,82 @@ impl AppService {
         });
     }
 
-    fn http_probe_node(&self, target: &HttpTestTarget) -> Result<Option<Node>> {
+    fn target_display_label(&self, target: &HttpTestTarget) -> String {
         match target {
-            HttpTestTarget::Direct => Ok(None),
+            HttpTestTarget::Direct => "本机直连".into(),
+            HttpTestTarget::Node(id) => self
+                .model()
+                .node(id)
+                .map(|node| node.name.clone())
+                .unwrap_or_else(|| id.clone()),
+            HttpTestTarget::MeshExit { .. } => "组网出口".into(),
+        }
+    }
+
+    fn resolve_mesh_gateway_probe_node(&self, gateway_id: &str) -> Result<Node> {
+        let profile = gateway_id
+            .strip_prefix("mesh-exit-")
+            .ok_or_else(|| Error::config("无效的组网出口网关标识"))?;
+        let snapshot = self.inner.mesh.snapshot();
+        let peer = snapshot
+            .exits()
+            .find(|(p, peer, address)| {
+                p.id == profile
+                    && peer.online
+                    && self
+                        .inner
+                        .mesh
+                        .profile(profile)
+                        .is_ok_and(|p| p.exit_node == address.to_string())
+            })
+            .map(|(_, peer, _)| peer.id.clone())
+            .ok_or_else(|| Error::config("请先选择并连接组网出口，再进行 HTTP 测速"))?;
+        let saved = self.inner.mesh.profile(profile)?;
+        connected_mesh_node(
+            &saved,
+            &snapshot,
+            &self.model(),
+            self.inner
+                .core
+                .mesh_exit_runtime()
+                .map(|runtime| runtime.node),
+            profile,
+            &peer,
+        )
+    }
+
+    pub(super) fn http_probe_route(
+        &self,
+        target: &HttpTestTarget,
+        core: CoreKind,
+    ) -> Result<ProbeRoute> {
+        match target {
+            HttpTestTarget::Direct => Ok(ProbeRoute::Direct),
             HttpTestTarget::Node(id) => {
-                let node = self
-                    .model()
+                let model = self.model();
+                let node = model
                     .node(id)
                     .filter(|node| node.enabled)
                     .cloned()
                     .ok_or_else(|| Error::config("节点不存在或已禁用，请先启用节点"))?;
-                if node.is_mesh_gateway() {
-                    let profile = id.strip_prefix("mesh-exit-").unwrap();
-                    let snapshot = self.inner.mesh.snapshot();
-                    let peer = snapshot
-                        .exits()
-                        .find(|(p, peer, address)| {
-                            p.id == profile
-                                && peer.online
-                                && self
-                                    .inner
-                                    .mesh
-                                    .profile(profile)
-                                    .is_ok_and(|p| p.exit_node == address.to_string())
-                        })
-                        .map(|(_, peer, _)| peer.id.clone())
-                        .ok_or_else(|| Error::config("请先选择并连接组网出口，再进行 HTTP 测速"))?;
-                    return self.http_probe_node(&HttpTestTarget::MeshExit {
-                        profile: profile.into(),
-                        peer,
-                    });
+                if node.is_chain() {
+                    let raw_hops = model.resolve_probe_hops(&node, core)?;
+                    let mut resolved = Vec::with_capacity(raw_hops.len());
+                    for hop in raw_hops {
+                        if hop.is_mesh_gateway() {
+                            resolved.push(self.resolve_mesh_gateway_probe_node(&hop.id)?);
+                        } else {
+                            resolved.push(hop);
+                        }
+                    }
+                    return Ok(ProbeRoute::Hops(resolved));
                 }
-                Ok(Some(node))
+                if node.is_mesh_gateway() {
+                    return self
+                        .resolve_mesh_gateway_probe_node(id)
+                        .map(|n| ProbeRoute::Hops(vec![n]));
+                }
+                Ok(ProbeRoute::Hops(vec![node]))
             }
             HttpTestTarget::MeshExit { profile, peer } => {
                 let snapshot = self.inner.mesh.snapshot();
@@ -490,7 +574,7 @@ impl AppService {
                     profile,
                     peer,
                 )
-                .map(Some)
+                .map(|n| ProbeRoute::Hops(vec![n]))
             }
         }
     }
@@ -645,17 +729,36 @@ mod tests {
         let mut node = Node::new("Fixture proxy", Protocol::Socks, "192.0.2.10", 1080);
         service.inner.model.write().add_nodes([node.clone()]);
         let before = service.model();
-        assert!(
+        assert_eq!(
             service
-                .http_probe_node(&HttpTestTarget::Direct)
-                .unwrap()
-                .is_none()
+                .http_probe_route(&HttpTestTarget::Direct, CoreKind::SingBox)
+                .unwrap(),
+            ProbeRoute::Direct
         );
         assert_eq!(
             service
-                .http_probe_node(&HttpTestTarget::Node(node.id.clone()))
+                .http_probe_route(&HttpTestTarget::Node(node.id.clone()), CoreKind::SingBox)
                 .unwrap(),
-            Some(node.clone())
+            ProbeRoute::Hops(vec![node.clone()])
+        );
+        let second_node = Node::new("Exit proxy", Protocol::Socks, "192.0.2.20", 1080);
+        service.inner.model.write().add_nodes([second_node.clone()]);
+        let chain = service
+            .save_proxy_chain(
+                None,
+                "Fixture chain".into(),
+                vec![
+                    crate::model::ChainHop::Node(node.id.clone()),
+                    crate::model::ChainHop::Node(second_node.id.clone()),
+                ],
+            )
+            .unwrap();
+        let stored_second = service.model().node(&second_node.id).unwrap().clone();
+        assert_eq!(
+            service
+                .http_probe_route(&HttpTestTarget::Node(chain.id.clone()), CoreKind::SingBox)
+                .unwrap(),
+            ProbeRoute::Hops(vec![node.clone(), stored_second])
         );
         let first = HttpTestTarget::MeshExit {
             profile: "fixture".into(),
@@ -666,13 +769,18 @@ mod tests {
             peer: "b".into(),
         };
         assert_ne!(first.key(), second.key());
-        assert!(service.http_probe_node(&first).is_err());
-        assert_eq!(service.model(), before);
+        assert!(service.http_probe_route(&first, CoreKind::SingBox).is_err());
+        assert_eq!(service.model().nodes[0].id, before.nodes[0].id);
         node.enabled = false;
         service.inner.model.write().nodes[0] = node.clone();
         assert!(
             service
-                .http_probe_node(&HttpTestTarget::Node(node.id))
+                .http_probe_route(&HttpTestTarget::Node(node.id), CoreKind::SingBox)
+                .is_err()
+        );
+        assert!(
+            service
+                .http_probe_route(&HttpTestTarget::Node(chain.id), CoreKind::SingBox)
                 .is_err()
         );
     }

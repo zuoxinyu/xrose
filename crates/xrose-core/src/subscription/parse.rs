@@ -285,6 +285,9 @@ pub(crate) fn parse_clash_proxy(value: &Value) -> std::result::Result<Node, Stri
         Protocol::Openvpn | Protocol::Openconnect => {
             return Err("OpenVPN / OpenConnect 请使用 OpenVPN 配置或 sing-box JSON 导入".into());
         }
+        Protocol::Chain => {
+            return Err("订阅中不支持直接导入代理链协议".into());
+        }
         Protocol::Wireguard => {
             let mut addresses = Vec::new();
             for (key, prefix) in [("ip", 32), ("ipv6", 128)] {
@@ -620,7 +623,7 @@ pub(crate) fn parse_singbox_outbound(
             node.credentials.username = string("username");
             node.credentials.password = string("password");
         }
-        Protocol::Wireguard | Protocol::Openvpn | Protocol::Openconnect => {}
+        Protocol::Wireguard | Protocol::Openvpn | Protocol::Openconnect | Protocol::Chain => {}
     }
     if let Some(tls) = outbound.get("tls") {
         node.tls.enabled = tls.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);

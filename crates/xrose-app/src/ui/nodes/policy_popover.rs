@@ -190,10 +190,11 @@ impl AppView {
             .iter()
             .map(|group| {
                 let usable = group.enabled
-                    && group
-                        .members
-                        .iter()
-                        .any(|id| model.node(id).is_some_and(|n| n.usable_with(core)));
+                    && group.members.iter().any(|id| {
+                        model
+                            .node(id)
+                            .is_some_and(|n| model.node_usable_with(n, core))
+                    });
                 (
                     group.id.clone(),
                     self.outbound_group_label(group),

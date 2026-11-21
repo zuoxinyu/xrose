@@ -2,15 +2,20 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 
 use crate::error::{Error, Result};
 use crate::model::{CoreKind, Node};
 use crate::settings::HttpLatencyMode;
 
 const LATENCY_TIMEOUT: Duration = Duration::from_secs(5);
+const OUTBOUND_TIMEOUT: &str = "出站连接超时";
+const UDP_FAILURE: &str = "UDP/QUIC 连接失败";
+const QUIC_FAILURE: &str = "QUIC 传输失败";
 const MAX_WARMUP_DRAIN_BYTES: usize = 64 * 1024;
 
 pub const DOWNLOAD_URL: &str = "https://speed.cloudflare.com/__down?bytes=99000000";
@@ -34,33 +39,123 @@ pub struct DownloadResult {
     pub error: Option<String>,
 }
 
+/// Concrete isolated probe route: either Direct or `[entry_hop, ..., landing_hop]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeRoute {
+    Direct,
+    Hops(Vec<Node>),
+}
+
+impl ProbeRoute {
+    pub(crate) fn from_node(node: Option<&Node>) -> Self {
+        match node {
+            Some(node) => Self::Hops(vec![node.clone()]),
+            None => Self::Direct,
+        }
+    }
+
+    pub(crate) fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+
+    pub(crate) fn uses_mesh_gateway(&self) -> bool {
+        match self {
+            Self::Direct => false,
+            Self::Hops(hops) => hops.iter().any(Node::is_mesh_gateway),
+        }
+    }
+
+    pub(crate) fn udp_enabled(&self) -> bool {
+        match self {
+            Self::Direct => true,
+            Self::Hops(hops) => hops.last().is_some_and(Node::can_relay_udp),
+        }
+    }
+
+    pub(crate) fn hop_count(&self) -> usize {
+        match self {
+            Self::Direct => 0,
+            Self::Hops(hops) => hops.len(),
+        }
+    }
+
+    /// Add the UDP links worth checking when the core could not identify a specific cause.
+    pub(crate) fn failure_diagnostic(&self, reason: Option<String>) -> Option<String> {
+        let Self::Hops(hops) = self else {
+            return reason;
+        };
+        if reason.as_deref().is_some_and(|s| {
+            s != OUTBOUND_TIMEOUT && !s.ends_with(UDP_FAILURE) && !s.ends_with(QUIC_FAILURE)
+        }) {
+            return reason;
+        }
+        let links: Vec<_> = hops
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(_, hop)| hop.uses_udp_transport())
+            .map(|(index, hop)| {
+                format!(
+                    "第 {index} 跳到第 {} 跳 {} 的 UDP/{}",
+                    index + 1,
+                    hop.protocol.display_name(),
+                    hop.port
+                )
+            })
+            .collect();
+        if links.is_empty() {
+            return reason;
+        }
+        let hint = format!("请检查{} 是否可达", links.join("、"));
+        Some(match reason {
+            Some(reason) => format!("{reason}。{hint}"),
+            None => hint,
+        })
+    }
+
+    /// Multi-hop chains stack TCP/TLS/QUIC handshakes across hops; keep single-hop
+    /// timing crisp at 5s while giving chained probes room to complete cold handshakes.
+    pub(crate) fn latency_timeout(&self) -> Duration {
+        let extra_hops = self.hop_count().saturating_sub(1) as u64;
+        if extra_hops == 0 {
+            LATENCY_TIMEOUT
+        } else {
+            Duration::from_secs((8 + 2 * extra_hops).min(15))
+        }
+    }
+}
+
 /// Normal completion reaps the child; cancellation also requests termination.
 pub(crate) struct Probe {
     child: tokio::process::Child,
     _directory: tempfile::TempDir,
+    diagnostics: ProbeDiagnostics,
     pub(crate) client: reqwest::Client,
     pub(crate) port: u16,
 }
 
-pub(crate) async fn resolve_probe_node(
+pub(crate) async fn resolve_probe_route(
     core: CoreKind,
-    node: Option<&Node>,
+    route: &ProbeRoute,
     bypass_tun: bool,
-) -> Result<(Option<Node>, Option<String>)> {
-    let mut target = node.cloned();
-    let loopback_gateway = node.is_some_and(|node| {
+) -> Result<(ProbeRoute, Option<String>)> {
+    let mut resolved = route.clone();
+    let entry_hop = match &mut resolved {
+        ProbeRoute::Direct => None,
+        ProbeRoute::Hops(hops) => hops.first_mut(),
+    };
+    let loopback_gateway = entry_hop.as_ref().is_some_and(|node| {
         node.server
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
     });
     let interface = if bypass_tun && !loopback_gateway {
         let interface = default_uplink().await?;
-        // Resolve before timing the request; the probe core must not recurse
-        // through a TUN-controlled system resolver while dialing its server.
+        // Resolve only the entry hop before timing the request; later hops dial
+        // through the entry tunnel rather than the host TUN.
         if core == CoreKind::Xray {
-            if let Some(node) = target
-                .as_mut()
-                .filter(|node| node.server.parse::<std::net::IpAddr>().is_err())
+            if let Some(node) =
+                entry_hop.filter(|node| node.server.parse::<std::net::IpAddr>().is_err())
             {
                 let address = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -91,15 +186,51 @@ pub(crate) async fn resolve_probe_node(
     } else {
         None
     };
-    Ok((target, interface))
+    Ok((resolved, interface))
 }
 
-pub(crate) async fn spawn_isolated_probe_core(
+struct ProbeDiagnostics {
+    latest: Arc<parking_lot::Mutex<Option<String>>>,
+    readers: [tokio::task::JoinHandle<()>; 2],
+}
+
+impl ProbeDiagnostics {
+    fn capture(child: &mut tokio::process::Child) -> Self {
+        let latest = Arc::new(parking_lot::Mutex::new(None));
+        let readers = [
+            Self::read(child.stdout.take().expect("piped stdout"), latest.clone()),
+            Self::read(child.stderr.take().expect("piped stderr"), latest.clone()),
+        ];
+        Self { latest, readers }
+    }
+
+    fn read(
+        reader: impl AsyncRead + Unpin + Send + 'static,
+        latest: Arc<parking_lot::Mutex<Option<String>>>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(reader).split(b'\n');
+            while let Ok(Some(line)) = lines.next_segment().await {
+                if let Some(cause) = summarize_probe_log(&String::from_utf8_lossy(&line)) {
+                    *latest.lock() = Some(cause);
+                }
+            }
+        })
+    }
+
+    async fn finish(&mut self) {
+        for reader in &mut self.readers {
+            let _ = reader.await;
+        }
+    }
+}
+
+async fn spawn_isolated_probe_core(
     binary: &Path,
     core: CoreKind,
     config: &serde_json::Value,
     ready_port: u16,
-) -> Result<(tokio::process::Child, tempfile::TempDir)> {
+) -> Result<(tokio::process::Child, tempfile::TempDir, ProbeDiagnostics)> {
     let directory = tempfile::Builder::new().prefix("xrose-probe-").tempdir()?;
     let path = directory.path().join("config.json");
     crate::util::atomic_write_private(&path, &serde_json::to_vec(config)?)?;
@@ -108,12 +239,13 @@ pub(crate) async fn spawn_isolated_probe_core(
         .args(crate::core::run_args(core, &path))
         .current_dir(directory.path())
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x08000000); // CREATE_NO_WINDOW
     let mut child = command.spawn()?;
+    let mut diagnostics = ProbeDiagnostics::capture(&mut child);
     #[cfg(windows)]
     if let Some(handle) = child.raw_handle() {
         let _ = crate::core::job::adopt(handle);
@@ -121,13 +253,19 @@ pub(crate) async fn spawn_isolated_probe_core(
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if child.try_wait()?.is_some() {
-            return Err(Error::process("测试内核启动失败，请检查节点配置与内核版本"));
+            diagnostics.finish().await;
+            let reason = diagnostics.latest.lock().clone();
+            let message = match reason {
+                Some(detail) => format!("测试内核启动失败：{detail}"),
+                None => "测试内核启动失败，请检查节点配置与内核版本".into(),
+            };
+            return Err(Error::process(message));
         }
         if tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, ready_port))
             .await
             .is_ok()
         {
-            return Ok((child, directory));
+            return Ok((child, directory, diagnostics));
         }
         if Instant::now() >= deadline {
             let _ = child.kill().await;
@@ -139,18 +277,29 @@ pub(crate) async fn spawn_isolated_probe_core(
 }
 
 impl Probe {
+    #[allow(dead_code)]
     pub(crate) async fn start_target(
         binary: &Path,
         core: CoreKind,
         node: Option<&Node>,
         bypass_tun: bool,
     ) -> Result<Self> {
+        Self::start_route(binary, core, &ProbeRoute::from_node(node), bypass_tun).await
+    }
+
+    pub(crate) async fn start_route(
+        binary: &Path,
+        core: CoreKind,
+        route: &ProbeRoute,
+        bypass_tun: bool,
+    ) -> Result<Self> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
-        let (target, interface) = resolve_probe_node(core, node, bypass_tun).await?;
-        let mut config = match target.as_ref() {
-            Some(node) => crate::adapters::compile_probe(core, node, port)?,
-            None => crate::adapters::compile_direct_probe(core, port),
+        let (target, interface) = resolve_probe_route(core, route, bypass_tun).await?;
+        let is_direct = target.is_direct();
+        let mut config = match &target {
+            ProbeRoute::Hops(hops) => crate::adapters::compile_probe_hops(core, hops, port)?,
+            ProbeRoute::Direct => crate::adapters::compile_direct_probe(core, port),
         };
         if let Some(interface) = interface {
             match core {
@@ -161,25 +310,135 @@ impl Probe {
                     crate::adapters::singbox::bind_probe_interface(
                         &mut config,
                         &interface,
-                        target.is_none(),
+                        is_direct,
                     );
                 }
             }
         }
         drop(listener);
-        let client = probe_client(port)?;
-        let (child, _directory) = spawn_isolated_probe_core(binary, core, &config, port).await?;
+        let client = probe_client_with_timeout(port, route.latency_timeout())?;
+        let (child, _directory, diagnostics) =
+            spawn_isolated_probe_core(binary, core, &config, port).await?;
         Ok(Self {
             child,
             _directory,
+            diagnostics,
             client,
             port,
         })
     }
 
-    pub(crate) async fn stop(&mut self) {
+    pub(crate) async fn stop(mut self) -> Option<String> {
         let _ = self.child.kill().await;
         let _ = self.child.wait().await;
+        self.diagnostics.finish().await;
+        self.diagnostics.latest.lock().clone()
+    }
+}
+
+/// Classifies raw `sing-box` / `Xray` probe output into a concise, privacy-safe
+/// Chinese failure cause without ever exposing server IPs, domains, or secrets.
+fn summarize_probe_log(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let cause = classify_probe_log_text(&lower)?;
+    Some(match extract_hop_prefix(&lower) {
+        Some(prefix) => format!("{prefix}{cause}"),
+        None => cause.to_owned(),
+    })
+}
+
+fn extract_hop_prefix(lower: &str) -> Option<String> {
+    let idx = lower.find("probe-hop-")?;
+    let rest = &lower[idx + "probe-hop-".len()..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let hop_num = digits.parse::<usize>().ok()?;
+    Some(format!("第 {} 跳：", hop_num.checked_add(1)?))
+}
+
+fn classify_probe_log_text(lower: &str) -> Option<&'static str> {
+    if lower.contains("allowinsecure") {
+        Some("当前 Xray 版本已移除 allowInsecure，请关闭“跳过证书校验”或切换 sing-box")
+    } else if lower.contains("outbound detour not found")
+        || (lower.contains("detour") && lower.contains("not found"))
+    {
+        Some("找不到前置跳点出站")
+    } else if lower.contains("decode config")
+        || lower.contains("failed to load config")
+        || lower.contains("failed to parse")
+        || lower.contains("unmarshal")
+        || lower.contains("invalid config")
+        || lower.contains("unknown field")
+    {
+        Some("测试配置无效，请检查节点参数与内核版本")
+    } else if lower.contains("address already in use") {
+        Some("本地测速端口被占用")
+    } else if lower.contains("bind_interface")
+        || (lower.contains("interface")
+            && (lower.contains("not found") || lower.contains("no such")))
+    {
+        Some("网络接口绑定失败")
+    } else if lower.contains("reality") {
+        Some("Reality 握手失败，请检查公钥、ShortId 或 SNI")
+    } else if lower.contains("x509")
+        || lower.contains("certificate")
+        || lower.contains("unknown authority")
+        || lower.contains("bad certificate")
+    {
+        Some("TLS 证书校验失败")
+    } else if (lower.contains("quic") || lower.contains("udp") || lower.contains("packet"))
+        && (lower.contains("not supported")
+            || lower.contains("unsupported")
+            || lower.contains("disabled")
+            || lower.contains("closed")
+            || lower.contains("refused")
+            || lower.contains("timeout")
+            || lower.contains("eof"))
+    {
+        Some(UDP_FAILURE)
+    } else if lower.contains("no such host")
+        || lower.contains("nxdomain")
+        || lower.contains("lookup ")
+        || (lower.contains("dns")
+            && (lower.contains("failed")
+                || lower.contains("timeout")
+                || lower.contains("loopback")))
+    {
+        Some("节点或目标域名解析失败")
+    } else if lower.contains("network is unreachable")
+        || lower.contains("no route to host")
+        || lower.contains("address family")
+        || lower.contains("cannot assign requested address")
+    {
+        Some("网络不可达（请检查前序跳点是否支持目标 IP/IPv6）")
+    } else if lower.contains("connection refused") {
+        Some("节点或目标拒绝连接")
+    } else if lower.contains("connection reset") || lower.contains("broken pipe") {
+        Some("连接被远端重置")
+    } else if lower.contains("i/o timeout")
+        || lower.contains("context deadline exceeded")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+    {
+        Some(OUTBOUND_TIMEOUT)
+    } else if lower.contains("authentication")
+        || lower.contains("unauthorized")
+        || lower.contains("invalid user")
+        || lower.contains("bad password")
+        || lower.contains("rejects request")
+    {
+        Some("节点认证或握手被拒绝")
+    } else if lower.contains("tls")
+        || lower.contains("handshake")
+        || lower.contains("wrong version number")
+        || lower.contains("record header")
+    {
+        Some("TLS 握手失败")
+    } else if lower.contains("quic") {
+        Some(QUIC_FAILURE)
+    } else if lower.contains("eof") {
+        Some("连接意外中断 (EOF)，请检查跳点协议与凭据")
+    } else {
+        None
     }
 }
 
@@ -242,7 +501,18 @@ async fn default_uplink() -> Result<String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn probe_client(port: u16) -> Result<reqwest::Client> {
+    probe_client_with_timeout(port, LATENCY_TIMEOUT)
+}
+
+pub(crate) fn probe_client_with_timeout(
+    port: u16,
+    connect_timeout: Duration,
+) -> Result<reqwest::Client> {
+    let total_timeout = connect_timeout
+        .saturating_add(Duration::from_secs(10))
+        .max(Duration::from_secs(15));
     Ok(reqwest::Client::builder()
         .no_proxy()
         .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))?)
@@ -251,8 +521,8 @@ pub(crate) fn probe_client(port: u16) -> Result<reqwest::Client> {
         .no_gzip()
         .no_brotli()
         .no_deflate()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
+        .connect_timeout(connect_timeout)
+        .timeout(total_timeout)
         .build()?)
 }
 
@@ -275,22 +545,56 @@ pub async fn http_target_latency(
     bypass_tun: bool,
     mode: HttpLatencyMode,
 ) -> Result<u32> {
-    let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
-    let result = measure_http_latency(&probe.client, url, mode).await;
-    probe.stop().await;
-    result
+    http_route_latency(
+        binary,
+        core,
+        &ProbeRoute::from_node(node),
+        url,
+        bypass_tun,
+        mode,
+    )
+    .await
+}
+
+pub(crate) async fn http_route_latency(
+    binary: &Path,
+    core: CoreKind,
+    route: &ProbeRoute,
+    url: &str,
+    bypass_tun: bool,
+    mode: HttpLatencyMode,
+) -> Result<u32> {
+    let probe = Probe::start_route(binary, core, route, bypass_tun).await?;
+    let timeout = route.latency_timeout();
+    let result = measure_http_latency_inner(&probe.client, url, mode, timeout).await;
+    let diagnostic = probe.stop().await;
+    result.map_err(|err| {
+        err.into_error(
+            route.failure_diagnostic(diagnostic).as_deref(),
+            route.hop_count() > 1,
+        )
+    })
 }
 
 enum LatencyRequestError {
+    Timeout,
     Transport,
     BadStatus(reqwest::StatusCode),
 }
 
 impl LatencyRequestError {
-    fn into_error(self) -> Error {
+    fn into_error(self, core_diagnostic: Option<&str>, is_chain: bool) -> Error {
         match self {
-            Self::Transport => Error::other("HTTP 测速失败，请检查出口连接或测试地址"),
             Self::BadStatus(status) => Error::other(format!("测速地址返回 HTTP {status}")),
+            Self::Timeout => match core_diagnostic {
+                Some(reason) => Error::other(format!("测速超时（{reason}）")),
+                None if is_chain => Error::other("代理链握手或响应超时，请检查跳点连通性"),
+                None => Error::other("HTTP 测速超时，请检查出口连接或测试地址"),
+            },
+            Self::Transport => match core_diagnostic {
+                Some(reason) => Error::other(reason.to_owned()),
+                None => Error::other("HTTP 测速失败，请检查出口连接或测试地址"),
+            },
         }
     }
 }
@@ -302,13 +606,20 @@ fn elapsed_ms(started: Instant) -> u32 {
 async fn send_latency_request(
     client: &reqwest::Client,
     url: &str,
+    timeout: Duration,
 ) -> std::result::Result<reqwest::Response, LatencyRequestError> {
     let response = client
         .get(url)
-        .timeout(LATENCY_TIMEOUT)
+        .timeout(timeout)
         .send()
         .await
-        .map_err(|_| LatencyRequestError::Transport)?;
+        .map_err(|err| {
+            if err.is_timeout() {
+                LatencyRequestError::Timeout
+            } else {
+                LatencyRequestError::Transport
+            }
+        })?;
     if !response.status().is_success() {
         return Err(LatencyRequestError::BadStatus(response.status()));
     }
@@ -335,8 +646,8 @@ fn response_requests_close(response: &reqwest::Response) -> bool {
 
 /// Drain a small warm-up response body so HTTP/1.1 keep-alive connections are
 /// returned cleanly to the client pool before the timed follow-up request.
-async fn drain_response_body(mut response: reqwest::Response) {
-    let deadline = tokio::time::Instant::now() + LATENCY_TIMEOUT;
+async fn drain_response_body(mut response: reqwest::Response, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
     let mut total = 0usize;
     while total < MAX_WARMUP_DRAIN_BYTES {
         match tokio::time::timeout_at(deadline, response.chunk()).await {
@@ -346,15 +657,34 @@ async fn drain_response_body(mut response: reqwest::Response) {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn measure_http_latency(
     client: &reqwest::Client,
     url: &str,
     mode: HttpLatencyMode,
 ) -> Result<u32> {
-    let first_started = Instant::now();
-    let first = send_latency_request(client, url)
+    measure_http_latency_with_timeout(client, url, mode, LATENCY_TIMEOUT).await
+}
+
+pub(crate) async fn measure_http_latency_with_timeout(
+    client: &reqwest::Client,
+    url: &str,
+    mode: HttpLatencyMode,
+    timeout: Duration,
+) -> Result<u32> {
+    measure_http_latency_inner(client, url, mode, timeout)
         .await
-        .map_err(LatencyRequestError::into_error)?;
+        .map_err(|err| err.into_error(None, false))
+}
+
+async fn measure_http_latency_inner(
+    client: &reqwest::Client,
+    url: &str,
+    mode: HttpLatencyMode,
+    timeout: Duration,
+) -> std::result::Result<u32, LatencyRequestError> {
+    let first_started = Instant::now();
+    let first = send_latency_request(client, url, timeout).await?;
     let first_ms = elapsed_ms(first_started);
     if mode == HttpLatencyMode::FullHandshake {
         return Ok(first_ms);
@@ -363,17 +693,17 @@ pub(crate) async fn measure_http_latency(
     if response_requests_close(&first) {
         drop(first);
     } else {
-        drain_response_body(first).await;
+        drain_response_body(first, timeout).await;
     }
     // Yield once so hyper's background connection task returns the idle
     // socket to the keep-alive pool before starting the timed request.
     tokio::task::yield_now().await;
 
     let second_started = Instant::now();
-    match send_latency_request(client, url).await {
+    match send_latency_request(client, url, timeout).await {
         Ok(_) => Ok(elapsed_ms(second_started)),
-        Err(err @ LatencyRequestError::BadStatus(_)) => Err(err.into_error()),
-        Err(LatencyRequestError::Transport) => Ok(first_ms),
+        Err(err @ LatencyRequestError::BadStatus(_)) => Err(err),
+        Err(LatencyRequestError::Transport | LatencyRequestError::Timeout) => Ok(first_ms),
     }
 }
 
@@ -393,17 +723,6 @@ pub async fn download_target(
     bypass_tun: bool,
 ) -> Result<DownloadResult> {
     download_target_sample(binary, core, node, bypass_tun, false).await
-}
-
-/// Automatic rounds use a small response at the source, not a truncated 50 MiB request.
-pub(crate) async fn download_sample(
-    binary: &Path,
-    core: CoreKind,
-    node: &Node,
-    bypass_tun: bool,
-    automatic: bool,
-) -> Result<DownloadResult> {
-    download_target_sample(binary, core, Some(node), bypass_tun, automatic).await
 }
 
 fn download_sample_spec(is_direct: bool, automatic: bool) -> (&'static str, Duration, u64) {
@@ -446,6 +765,32 @@ fn compute_steady_bps(
     (total_bytes as f64 / elapsed.as_secs_f64().max(0.001)) as u64
 }
 
+pub(crate) async fn download_route(
+    binary: &Path,
+    core: CoreKind,
+    route: &ProbeRoute,
+    bypass_tun: bool,
+) -> Result<DownloadResult> {
+    download_route_sample(binary, core, route, bypass_tun, false).await
+}
+
+pub(crate) async fn download_route_sample(
+    binary: &Path,
+    core: CoreKind,
+    route: &ProbeRoute,
+    bypass_tun: bool,
+    automatic: bool,
+) -> Result<DownloadResult> {
+    let probe = Probe::start_route(binary, core, route, bypass_tun).await?;
+    let (url, duration, limit) = download_sample_spec(route.is_direct(), automatic);
+    let result = measure_download(&probe.client, url, duration, limit).await;
+    let diagnostic = probe.stop().await;
+    result.map_err(|err| match diagnostic {
+        Some(reason) => Error::other(format!("下载测试失败：{reason}")),
+        None => err,
+    })
+}
+
 async fn download_target_sample(
     binary: &Path,
     core: CoreKind,
@@ -453,11 +798,14 @@ async fn download_target_sample(
     bypass_tun: bool,
     automatic: bool,
 ) -> Result<DownloadResult> {
-    let mut probe = Probe::start_target(binary, core, node, bypass_tun).await?;
-    let (url, duration, limit) = download_sample_spec(node.is_none(), automatic);
-    let result = measure_download(&probe.client, url, duration, limit).await;
-    probe.stop().await;
-    result
+    download_route_sample(
+        binary,
+        core,
+        &ProbeRoute::from_node(node),
+        bypass_tun,
+        automatic,
+    )
+    .await
 }
 
 async fn measure_download(
@@ -860,5 +1208,85 @@ mod tests {
             Some((Duration::from_secs(2), 3 * 1024 * 1024)),
         );
         assert_eq!(short_bps, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn multi_hop_routes_scale_probe_timeouts_without_slowing_single_hop() {
+        let hop = Node::new("Edge", crate::model::Protocol::Socks, "203.0.113.10", 1080);
+        assert_eq!(ProbeRoute::Direct.latency_timeout(), Duration::from_secs(5));
+        assert_eq!(
+            ProbeRoute::Hops(vec![hop.clone()]).latency_timeout(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            ProbeRoute::Hops(vec![hop.clone(), hop.clone()]).latency_timeout(),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            ProbeRoute::Hops(vec![hop.clone(), hop.clone(), hop.clone()]).latency_timeout(),
+            Duration::from_secs(12)
+        );
+        assert_eq!(
+            ProbeRoute::Hops(vec![hop; 8]).latency_timeout(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn timeout_names_the_udp_link_and_keeps_specific_core_errors() {
+        use crate::model::Protocol;
+        let vision = Node::new("Entry", Protocol::Vless, "entry.test", 443);
+        let tuic = Node::new("Exit", Protocol::Tuic, "exit.test", 8443);
+        let http = Node::new("HTTP", Protocol::Http, "proxy.test", 8080);
+        let reason = Some("出站连接超时".to_owned());
+        let forward = ProbeRoute::Hops(vec![vision.clone(), tuic.clone()]);
+        let reverse = ProbeRoute::Hops(vec![tuic.clone(), vision.clone()]);
+        assert_eq!(reverse.failure_diagnostic(reason.clone()), reason);
+        let expected = "请检查第 1 跳到第 2 跳 TUIC 的 UDP/8443 是否可达";
+        assert_eq!(forward.failure_diagnostic(None).as_deref(), Some(expected));
+        assert_eq!(
+            forward.failure_diagnostic(reason).unwrap(),
+            format!("出站连接超时。{expected}")
+        );
+        let cert = Some("TLS 证书校验失败".to_owned());
+        assert_eq!(forward.failure_diagnostic(cert.clone()), cert);
+
+        let three_hops = ProbeRoute::Hops(vec![http.clone(), vision.clone(), tuic]);
+        assert!(three_hops.udp_enabled());
+        assert!(
+            three_hops
+                .failure_diagnostic(None)
+                .unwrap()
+                .contains("第 2 跳到第 3 跳")
+        );
+        assert!(!ProbeRoute::Hops(vec![vision, http]).udp_enabled());
+    }
+
+    #[test]
+    fn probe_log_summary_classifies_errors_without_leaking_addresses() {
+        let quic_log = "ERROR[0000] [1 15ms] connection: open connection to www.gstatic.com:443 using outbound/tuic[node-exit]: open connection: quic: transport closed: EOF";
+        let quic_summary = summarize_probe_log(quic_log).unwrap();
+        assert!(quic_summary.contains("UDP/QUIC"));
+        assert!(!quic_summary.contains("gstatic"));
+        assert_eq!(
+            summarize_probe_log("QUIC handshake timeout").as_deref(),
+            Some(UDP_FAILURE)
+        );
+
+        let hop0_log =
+            "ERROR[0000] outbound/vless[probe-hop-0]: dial tcp 203.0.113.10:443: i/o timeout";
+        let hop0_summary = summarize_probe_log(hop0_log).unwrap();
+        assert!(hop0_summary.starts_with("第 1 跳："));
+        assert!(hop0_summary.contains("超时"));
+        assert!(!hop0_summary.contains("203.0.113.10"));
+
+        let xray_log = "Failed to start: The feature \"allowInsecure\" has been removed";
+        let xray_summary = summarize_probe_log(xray_log).unwrap();
+        assert!(xray_summary.contains("allowInsecure"));
+
+        let v6_log = "ERROR[0000] dial tcp [2001:db8::1]:443: connect: network is unreachable";
+        let v6_summary = summarize_probe_log(v6_log).unwrap();
+        assert!(v6_summary.contains("IPv6"));
+        assert!(!v6_summary.contains("2001:db8"));
     }
 }

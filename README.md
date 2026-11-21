@@ -61,7 +61,7 @@ Xrose 提供三种独立工作模式，切换时完整保留原有节点、出�
 ### 代理与双内核编排
 
 - **双内核编译与热重载**：统一配置模型自动编译为 sing-box（1.12+，采用新式规则集与类型化 DNS）或 Xray（1.8+，TUN 需 26.6.27+）配置；应用变更前执行内核校验，默认启用热重载，替换失败自动恢复原配置。
-- **主流代理与 VPN 协议**：支持 VLESS（XTLS Vision / Reality）、VMess、Trojan、AnyTLS、Shadowsocks、Hysteria2、TUIC、SOCKS、HTTP，以及 WireGuard、OpenVPN 与 OpenConnect（OpenVPN / OpenConnect 需 sing-box 1.14+）。
+- **主流代理、代理链与 VPN 协议**：支持 VLESS（XTLS Vision / Reality）、VMess、Trojan、AnyTLS、Shadowsocks、Hysteria2、TUIC、SOCKS、HTTP、多跳代理链（首跳支持出站组或组网网关，后续 TUIC、Hysteria2 等 UDP 节点需前一跳能向其服务端口转发 UDP），以及 WireGuard、OpenVPN 与 OpenConnect（OpenVPN / OpenConnect 需 sing-box 1.14+）。
 - **快捷导入与拖拽编排**：支持 Base64、分享链接、Clash YAML、SIP008 与 sing-box JSON 导入及二维码分享；自动识别剪贴板内容，支持文件/图片拖放与跨屏框选扫描二维码（`Ctrl+Shift+S` / `⇧⌘S`）；支持 SwitchyOmega / AutoProxy 规则导入，以及节点、路由规则与自定义规则分组拖拽排序。
 - **网络接入与保护**：支持系统代理、PAC、TUN 模式、局域网独立端口与账号认证，具备异常退出后的系统代理自动恢复机制。
 

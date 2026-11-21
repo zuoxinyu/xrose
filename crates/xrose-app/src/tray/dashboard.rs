@@ -222,7 +222,7 @@ pub fn build(service: &AppService) -> Dashboard {
             .nodes
             .iter()
             .filter(|node| {
-                node.usable_with(snapshot.settings.core)
+                model.node_usable_with(node, snapshot.settings.core)
                     && (!node.is_mesh_gateway() || !represented_gateways.contains(&node.id))
                     && (node.is_mesh_gateway() || members.contains(&node.id))
             })
