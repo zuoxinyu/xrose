@@ -7,8 +7,9 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::*;
 use xrose_core::core::logs::LogPrivacy;
 use xrose_core::diagnostics::{DiagnosticRuleKind, DiagnosticTarget};
+use xrose_core::failed_connections::FailedConnectionRecord;
 use xrose_core::mesh::{ForwardRule, MeshPeer, MeshProvider, PortForward, ServiceForward};
-use xrose_core::model::{ChainHop, SwitchMode, WorkMode};
+use xrose_core::model::{ChainHop, RouteAction, SwitchMode, WorkMode};
 use xrose_core::route::transfer::ExportScope;
 use xrose_core::service::{HttpTestTarget, ShareTarget, ToastLevel};
 
@@ -24,6 +25,7 @@ pub(super) enum MenuTarget {
     RuleSetSources,
     RuleOutbound,
     DiagnosticOutbound,
+    FailedBatchOutbound,
     OutboundGroup(String),
     GroupSwitchPolicy(String),
     ChainHop(usize),
@@ -40,6 +42,7 @@ pub(super) enum MenuTarget {
     RecordedConnections,
     TrafficStatistics,
     ConnectionRules(DiagnosticTarget),
+    FailedConnectionRow(FailedConnectionRecord),
 }
 
 #[derive(Clone)]
@@ -59,6 +62,7 @@ pub(super) enum Command {
     SetDefaultOutbound(String),
     SelectRuleOutbound(Option<String>),
     SelectDiagnosticOutbound(Option<String>),
+    SelectFailedBatchOutbound(Option<String>),
     EditOutboundGroup(String),
     DeleteOutboundGroup(String),
     SetGroupSwitchMode(String, SwitchMode),
@@ -98,6 +102,11 @@ pub(super) enum Command {
     DeleteDns(String),
     DeleteHost(String),
     BlockConnection(DiagnosticTarget, DiagnosticRuleKind),
+    AddFailedSuffixRule(u64, RouteAction),
+    AddFailedKindRule(u64, DiagnosticRuleKind, RouteAction),
+    CopyFailedHost(String),
+    TestFailedTarget(String),
+    DismissFailedConnection(u64),
     CloseConnections,
     UninstallHelper,
     OpenRecordingDir,
@@ -209,6 +218,9 @@ impl AppView {
                         | Command::OpenRecordingDir
                         | Command::ClearRecording
                         | Command::ClearTrafficStatistics
+                        | Command::CopyFailedHost(_)
+                        | Command::DismissFailedConnection(_)
+                        | Command::SelectFailedBatchOutbound(_)
                 );
             item(&view, tr(lang, zh, en), enabled && available, command)
         };
@@ -377,19 +389,18 @@ impl AppView {
                     Command::AddPeerForward(profile_id, peer_id),
                 ));
             }
-            MenuTarget::RuleOutbound | MenuTarget::DiagnosticOutbound => {
-                let diagnostic = matches!(target, MenuTarget::DiagnosticOutbound);
-                let selected = if diagnostic {
-                    &self.diagnostic_rule_group
-                } else {
-                    &self.rule_outbound_group
+            MenuTarget::RuleOutbound
+            | MenuTarget::DiagnosticOutbound
+            | MenuTarget::FailedBatchOutbound => {
+                let selected = match target {
+                    MenuTarget::DiagnosticOutbound => &self.diagnostic_rule_group,
+                    MenuTarget::FailedBatchOutbound => &self.failed_batch_group,
+                    _ => &self.rule_outbound_group,
                 };
-                let select = |id| {
-                    if diagnostic {
-                        Command::SelectDiagnosticOutbound(id)
-                    } else {
-                        Command::SelectRuleOutbound(id)
-                    }
+                let select = |id| match target {
+                    MenuTarget::DiagnosticOutbound => Command::SelectDiagnosticOutbound(id),
+                    MenuTarget::FailedBatchOutbound => Command::SelectFailedBatchOutbound(id),
+                    _ => Command::SelectRuleOutbound(id),
                 };
                 menu = menu.item(
                     item(
@@ -1106,6 +1117,166 @@ impl AppView {
                     ));
                 }
             }
+            MenuTarget::FailedConnectionRow(record) => {
+                let can_rule = !busy("failed-rule") && !busy("core");
+                let id = record.id;
+                let proxy_action = RouteAction {
+                    kind: xrose_core::model::RouteActionKind::Proxy,
+                    group: self.failed_batch_group.clone(),
+                };
+                if let Some(root) = &record.root_domain {
+                    let expr = if self.hide_ips {
+                        xrose_core::privacy::mask_magic_dns_name(
+                            &format!("*.{root}"),
+                            &self.snapshot.mesh.magic_dns_suffixes(),
+                        )
+                    } else {
+                        format!("*.{root}")
+                    };
+                    menu = menu.label(SharedString::from(match lang {
+                        xrose_core::settings::Language::Zh => format!("主域名后缀 · {expr}"),
+                        xrose_core::settings::Language::En => format!("Root suffix · {expr}"),
+                    }));
+                    menu = menu
+                        .item(item(
+                            &view,
+                            tr(lang, "按主域名走代理", "Proxy root domain"),
+                            can_rule,
+                            Command::AddFailedSuffixRule(id, proxy_action.clone()),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按主域名走直连", "Direct root domain"),
+                            can_rule,
+                            Command::AddFailedSuffixRule(id, RouteAction::direct()),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按主域名阻止", "Block root domain"),
+                            can_rule,
+                            Command::AddFailedSuffixRule(id, RouteAction::block()),
+                        ));
+                }
+                if !record.domain.is_empty() {
+                    if record.root_domain.is_some() {
+                        menu = menu.separator();
+                    }
+                    menu = menu
+                        .item(item(
+                            &view,
+                            tr(lang, "按精确域名走代理", "Proxy exact domain"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Domain,
+                                proxy_action.clone(),
+                            ),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按精确域名走直连", "Direct exact domain"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Domain,
+                                RouteAction::direct(),
+                            ),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按精确域名阻止", "Block exact domain"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Domain,
+                                RouteAction::block(),
+                            ),
+                        ));
+                }
+                if !record.destination_ip.is_empty() || !record.process_name.is_empty() {
+                    menu = menu.separator();
+                }
+                if !record.destination_ip.is_empty() {
+                    menu = menu
+                        .item(item(
+                            &view,
+                            tr(lang, "按目标 IP 走代理", "Proxy destination IP"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Ip,
+                                proxy_action.clone(),
+                            ),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按目标 IP 走直连", "Direct destination IP"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Ip,
+                                RouteAction::direct(),
+                            ),
+                        ));
+                }
+                if !record.process_name.is_empty() {
+                    let protected = xrose_core::flow::is_protected_process(&record.process_name);
+                    menu = menu
+                        .item(item(
+                            &view,
+                            tr(lang, "按进程走代理", "Proxy process"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Process,
+                                proxy_action,
+                            ),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "按进程走直连", "Direct process"),
+                            can_rule,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Process,
+                                RouteAction::direct(),
+                            ),
+                        ))
+                        .item(item(
+                            &view,
+                            tr(lang, "阻止此进程联网", "Block process"),
+                            can_rule && !protected,
+                            Command::AddFailedKindRule(
+                                id,
+                                DiagnosticRuleKind::Process,
+                                RouteAction::block(),
+                            ),
+                        ));
+                }
+                let host = record.host().to_owned();
+                menu = menu.separator();
+                if let Some(target) = record.test_target() {
+                    menu = menu.item(item(
+                        &view,
+                        tr(lang, "链路测试", "Link trace"),
+                        true,
+                        Command::TestFailedTarget(target),
+                    ));
+                }
+                menu = menu
+                    .item(item(
+                        &view,
+                        tr(lang, "复制目标", "Copy target"),
+                        !host.is_empty(),
+                        Command::CopyFailedHost(host),
+                    ))
+                    .item(item(
+                        &view,
+                        tr(lang, "忽略此条", "Dismiss"),
+                        true,
+                        Command::DismissFailedConnection(id),
+                    ));
+            }
             MenuTarget::LiveConnections => {
                 let available = self.snapshot.process.phase.is_alive()
                     && self
@@ -1493,6 +1664,16 @@ impl AppView {
                     self.diagnostic_rule_group = id;
                 }
             }
+            Command::SelectFailedBatchOutbound(id) => {
+                if id.as_ref().is_none_or(|id| {
+                    self.snapshot
+                        .model
+                        .group(id)
+                        .is_some_and(|group| group.enabled)
+                }) {
+                    self.failed_batch_group = id;
+                }
+            }
             Command::SetDefaultOutbound(id) => {
                 if let Err(err) = self.service.set_default_outbound_group(&id) {
                     self.service.toast(ToastLevel::Error, err.to_string());
@@ -1774,6 +1955,27 @@ impl AppView {
             }
             Command::BlockConnection(target, kind) => {
                 self.service.block_connection_target(target, kind)
+            }
+            Command::AddFailedSuffixRule(id, action) => {
+                self.service.add_failed_connection_suffix_rule(id, action);
+            }
+            Command::AddFailedKindRule(id, kind, action) => {
+                self.service.add_failed_connection_rule(id, kind, action);
+            }
+            Command::CopyFailedHost(host) => {
+                cx.write_to_clipboard(ClipboardItem::new_string(host));
+                self.service.toast(
+                    ToastLevel::Success,
+                    self.tr("目标地址已复制", "Target copied").to_string(),
+                );
+            }
+            Command::TestFailedTarget(target) => {
+                self.page = super::Page::Diagnostics;
+                self.replay_connection(&target, window, cx);
+            }
+            Command::DismissFailedConnection(id) => {
+                self.failed_selected.remove(&id);
+                self.service.dismiss_failed_connection(id);
             }
             Command::UninstallHelper => self.service.uninstall_helper(),
             Command::CloseConnections => {

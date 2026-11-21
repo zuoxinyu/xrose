@@ -390,10 +390,15 @@ pub struct AppView {
     pub(crate) connections_tab: connections::ConnectionsTab,
     connections_stats_scroll: ScrollHandle,
     connections_tab_scroll: ScrollHandle,
-    connections_tab_focus: [FocusHandle; 4],
+    connections_tab_focus: [FocusHandle; 5],
     process_icons: Option<process_icons::ProcessIcons>,
     connection_sort: xrose_core::flow::ConnectionSort,
     exact_process_filter: Option<String>,
+    pub(crate) failed_filter: connections::FailedFilter,
+    pub(crate) failed_selected: std::collections::HashSet<u64>,
+    pub(crate) failed_granularity: xrose_core::failed_connections::DomainMatchGranularity,
+    pub(crate) failed_batch_action: RouteActionKind,
+    pub(crate) failed_batch_group: Option<String>,
     pub(crate) connections_limit: usize,
     pub(crate) selected_connection: Option<xrose_core::runtime::ClashConnection>,
     pub(crate) diagnostic_rule_kind: DiagnosticRuleKind,
@@ -694,6 +699,12 @@ impl AppView {
             process_icons: None,
             connection_sort: Default::default(),
             exact_process_filter: None,
+            failed_filter: connections::FailedFilter::default(),
+            failed_selected: std::collections::HashSet::new(),
+            failed_granularity:
+                xrose_core::failed_connections::DomainMatchGranularity::RootDomainSuffix,
+            failed_batch_action: RouteActionKind::Proxy,
+            failed_batch_group: None,
             connections_limit: 50,
             selected_connection: None,
             diagnostic_rule_kind: DiagnosticRuleKind::Domain,
@@ -917,6 +928,11 @@ impl AppView {
         cx.notify();
     }
 
+    pub(crate) fn open_failed_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate(Page::Connections, cx);
+        self.select_connections_tab(connections::ConnectionsTab::Failed, window, cx);
+    }
+
     /// Poll state without starving live connections while a trace is active.
     pub(crate) fn tick(&mut self, cx: &mut Context<Self>) {
         if self.page == Page::Connections
@@ -1065,6 +1081,12 @@ impl AppView {
                     let active = self.page == page;
                     let has_update =
                         page == Page::Settings && self.snapshot.settings_update_available();
+                    let failed_count = if page == Page::Connections {
+                        self.snapshot.failed_connections.unfixed_count
+                    } else {
+                        0
+                    };
+                    let failed_only_stalled = self.snapshot.failed_connections.unfixed_only_stalled;
                     div().child(
                         Button::new(SharedString::from(format!("nav-{page:?}")))
                             .ghost()
@@ -1074,6 +1096,15 @@ impl AppView {
                             .justify_start()
                             .accessibility_label(if has_update {
                                 tr(lang, "设置，有更新", "Settings, update available")
+                            } else if failed_count > 0 {
+                                SharedString::from(match lang {
+                                    Language::Zh => {
+                                        format!("连接，{failed_count} 条近期失败")
+                                    }
+                                    Language::En => {
+                                        format!("Connections, {failed_count} recent failed")
+                                    }
+                                })
                             } else {
                                 tr(lang, page.zh(), page.en())
                             })
@@ -1091,6 +1122,13 @@ impl AppView {
                                             p.info,
                                             p.info.opacity(0.1),
                                         ))
+                                    })
+                                    .when(failed_count > 0, |d| {
+                                        d.child(div().flex_1()).child(dot(if failed_only_stalled {
+                                            p.warning
+                                        } else {
+                                            p.danger
+                                        }))
                                     }),
                             )
                             .text_color(if active { p.primary } else { p.muted_fg })

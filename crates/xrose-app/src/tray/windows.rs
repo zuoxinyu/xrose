@@ -55,6 +55,13 @@ static POPUP_OPS: Mutex<Vec<PopupOp>> = Mutex::new(Vec::new());
 
 enum PopupOp {
     Hide(usize),
+    Resize {
+        hwnd: usize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    },
     Show {
         hwnd: usize,
         x: i32,
@@ -445,6 +452,35 @@ unsafe extern "system" fn wnd_proc(
                     PopupOp::Hide(target) if IsWindow(target as HWND) != 0 => {
                         animate_hide(hwnd, target)
                     }
+                    PopupOp::Resize {
+                        hwnd: target,
+                        x,
+                        y,
+                        width,
+                        height,
+                    } if IsWindow(target as HWND) != 0 => {
+                        use windows_sys::Win32::UI::WindowsAndMessaging::{
+                            SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+                        };
+                        SetWindowPos(
+                            target as HWND,
+                            std::ptr::null_mut(),
+                            x,
+                            y,
+                            width,
+                            height,
+                            SWP_NOZORDER | SWP_NOACTIVATE,
+                        );
+                        if let Some(flyout) = FLYOUT
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_mut()
+                            .filter(|f| f.hwnd == target)
+                        {
+                            flyout.placement.origin = [x, y];
+                            flyout.placement.size = [width, height];
+                        }
+                    }
                     PopupOp::Show {
                         hwnd: target,
                         x,
@@ -738,6 +774,40 @@ pub fn show_popup(
                     shown,
                 });
             }
+        }
+    }
+}
+
+pub fn resize_popup(window: &mut Window, bounds: Bounds<gpui_kit::Pixels>) {
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(raw) = handle.as_raw()
+    {
+        let hwnd = raw.hwnd.get() as HWND;
+        unsafe {
+            let mut outer: RECT = std::mem::zeroed();
+            let mut client: RECT = std::mem::zeroed();
+            let mut origin = POINT { x: 0, y: 0 };
+            let scale = window.scale_factor();
+            let (left, top, extra_width, extra_height) = if GetWindowRect(hwnd, &mut outer) != 0
+                && GetClientRect(hwnd, &mut client) != 0
+                && ClientToScreen(hwnd, &mut origin) != 0
+            {
+                (
+                    origin.x - outer.left,
+                    origin.y - outer.top,
+                    outer.right - outer.left - client.right,
+                    outer.bottom - outer.top - client.bottom,
+                )
+            } else {
+                (0, 0, 0, 0)
+            };
+            post_popup(PopupOp::Resize {
+                hwnd: hwnd as usize,
+                x: (f32::from(bounds.origin.x) * scale).round() as i32 - left,
+                y: (f32::from(bounds.origin.y) * scale).round() as i32 - top,
+                width: (f32::from(bounds.size.width) * scale).round() as i32 + extra_width,
+                height: (f32::from(bounds.size.height) * scale).round() as i32 + extra_height,
+            });
         }
     }
 }

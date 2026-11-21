@@ -63,6 +63,7 @@ pub struct TrayStatus {
     pub up_speed: u64,
     pub down_speed: u64,
     pub total_bytes: u64,
+    pub unfixed_failed_connections: usize,
 }
 
 /// Probe results belong to the node and run that were active when the measurement began.
@@ -142,6 +143,7 @@ impl AppService {
             up_speed,
             down_speed,
             total_bytes: up.saturating_add(down),
+            unfixed_failed_connections: self.inner.failed_connections_view.read().unfixed_count,
         }
     }
 }

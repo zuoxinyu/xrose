@@ -50,3 +50,7 @@ pub fn show_popup(
     window.activate_window();
     let _ = shown.send(());
 }
+
+pub fn resize_popup(window: &mut gpui_kit::Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+    window.resize(bounds.size);
+}

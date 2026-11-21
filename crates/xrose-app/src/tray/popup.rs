@@ -4,13 +4,14 @@ use gpui_base::{Disableable, Scrollbar, ScrollbarMode};
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::select::{Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::AppService;
+use xrose_core::failed_connections::FailureKind;
 use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
 use xrose_core::settings::{Language, ThemeMode};
 use xrose_core::util::format_speed;
@@ -20,10 +21,29 @@ use super::dashboard::{self, Dashboard, TrayAction};
 use crate::i18n::tr;
 use crate::ui::theme::palette;
 use crate::ui::traffic_label;
-use crate::ui::widgets::{danger_button_style, icon_button_style, start_ghost_button_style};
+use crate::ui::widgets::{
+    danger_button_style, dot, icon_button_style, pill, start_ghost_button_style,
+};
 
 const NODE_ROW_HEIGHT: f32 = 38.;
+const FAILED_HEADER_EXTRA: f32 = 52.;
+const FAILED_ROW_HEIGHT: f32 = 54.;
+const FAILED_FOOTER_EXTRA: f32 = 52.;
 const NODE_SCROLL_HINT_DELAY: Duration = Duration::from_millis(150);
+
+fn popup_desired_height(dashboard: &Dashboard, failures_expanded: bool) -> f32 {
+    let base = 408. + (dashboard.nodes.len().min(4) as f32 * NODE_ROW_HEIGHT).max(76.);
+    if dashboard.failed_count == 0 {
+        return base;
+    }
+    if !failures_expanded || dashboard.recent_failures.is_empty() {
+        base + FAILED_HEADER_EXTRA
+    } else {
+        base + FAILED_HEADER_EXTRA
+            + (dashboard.recent_failures.len() as f32 * FAILED_ROW_HEIGHT)
+            + FAILED_FOOTER_EXTRA
+    }
+}
 
 #[derive(Default)]
 pub struct PopupManager {
@@ -75,8 +95,7 @@ impl PopupManager {
                 point(px(0.), px(0.)),
                 size(px(1280.), px(800.)),
             ));
-        let desired_height =
-            408. + (dashboard.nodes.len().min(4) as f32 * NODE_ROW_HEIGHT).max(76.);
+        let desired_height = popup_desired_height(&dashboard, false);
         let bounds = popup_bounds(
             anchor.map(|a| a.position),
             work_area,
@@ -85,6 +104,10 @@ impl PopupManager {
         if let (Some(handle), Some(view)) = (self.window, self.view.as_ref()) {
             let reused = handle.update(cx, |_, window, cx| {
                 view.update(cx, |view, cx| {
+                    view.anchor = anchor;
+                    view.work_area = work_area;
+                    view.failures_expanded = false;
+                    view.last_height = desired_height;
                     view.refresh_dashboard(dashboard.clone(), window, cx);
                     view.visible = true;
                     view.selected = view
@@ -133,7 +156,17 @@ impl PopupManager {
             move |window, cx| {
                 window.set_window_title("Xrose · Tray");
                 crate::window_effects::apply(window, cx);
-                cx.new(|cx| PopupView::new(service, dashboard, window, cx))
+                cx.new(|cx| {
+                    PopupView::new(
+                        service,
+                        dashboard,
+                        anchor,
+                        work_area,
+                        desired_height,
+                        window,
+                        cx,
+                    )
+                })
             },
         ) {
             Ok((handle, view)) => {
@@ -471,6 +504,10 @@ pub struct PopupView {
     selected: usize,
     visible: bool,
     deactivated_at: Option<Instant>,
+    anchor: Option<PopupAnchor>,
+    work_area: Bounds<Pixels>,
+    failures_expanded: bool,
+    last_height: f32,
     scroll: ScrollHandle,
     scroll_hint: NodeScrollHint,
     route_select: Entity<SelectState<Vec<RouteOption>>>,
@@ -481,6 +518,9 @@ impl PopupView {
     fn new(
         service: AppService,
         dashboard: Dashboard,
+        anchor: Option<PopupAnchor>,
+        work_area: Bounds<Pixels>,
+        last_height: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -527,11 +567,40 @@ impl PopupView {
             selected,
             visible: true,
             deactivated_at: None,
+            anchor,
+            work_area,
+            failures_expanded: false,
+            last_height,
             scroll: ScrollHandle::new(),
             scroll_hint: NodeScrollHint::Idle,
             route_select,
             _subscriptions: vec![activation, appearance, route_selection],
         }
+    }
+
+    fn sync_popup_height(&mut self, window: &mut Window) {
+        if self.dashboard.failed_count == 0 {
+            self.failures_expanded = false;
+        }
+        let desired = popup_desired_height(&self.dashboard, self.failures_expanded);
+        if (desired - self.last_height).abs() <= 0.5 {
+            return;
+        }
+        self.last_height = desired;
+        if self.visible {
+            let bounds = popup_bounds(
+                self.anchor.map(|a| a.position),
+                self.work_area,
+                size(px(400.), px(desired)),
+            );
+            super::backend::resize_popup(window, bounds);
+        }
+    }
+
+    fn toggle_failures_expanded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.failures_expanded = !self.failures_expanded;
+        self.sync_popup_height(window);
+        cx.notify();
     }
 
     fn refresh_dashboard(
@@ -552,6 +621,7 @@ impl PopupView {
             });
         }
         self.dashboard = dashboard;
+        self.sync_popup_height(window);
     }
 
     fn show(&mut self, window: &mut Window, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
@@ -1096,6 +1166,290 @@ impl Render for PopupView {
                         card.child(Scrollbar::vertical(&self.scroll).mode(ScrollbarMode::Always))
                     }),
             )
+            .when(d.failed_count > 0, |root| {
+                let expanded = self.failures_expanded;
+                let failed_count = d.failed_count;
+                let only_stalled = d.failed_only_stalled;
+                let (dot_color, badge_fg, badge_bg) = if only_stalled {
+                    (p.warning, p.warn_text, p.warning.opacity(0.14))
+                } else {
+                    (p.danger, p.danger_text, p.danger.opacity(0.14))
+                };
+                let quick_btn_style = ButtonCustomVariant::new(cx)
+                    .color(p.accent)
+                    .foreground(p.primary)
+                    .hover(p.primary.opacity(0.18))
+                    .active(p.primary.opacity(0.24))
+                    .shadow(false);
+                let row_bg = if translucent {
+                    p.panel.opacity(if p.is_dark { 0.45 } else { 0.72 })
+                } else {
+                    p.panel
+                };
+                let busy_fix = d.busy_failed_rule || d.busy_core;
+                let view_all_label: SharedString = match lang {
+                    Language::Zh if failed_count > 3 => {
+                        format!("查看全部 ({failed_count}) 与批量配置 →").into()
+                    }
+                    Language::Zh => "在主窗口批量配置 →".into(),
+                    Language::En if failed_count > 3 => {
+                        format!("View all ({failed_count}) & batch →").into()
+                    }
+                    Language::En => "Batch configure in window →".into(),
+                };
+                let failure_rows: Vec<_> = d
+                    .recent_failures
+                    .iter()
+                    .map(|item| {
+                        let id = item.id;
+                        let item_dot = if item.kind == FailureKind::Stalled {
+                            p.warning
+                        } else {
+                            p.danger
+                        };
+                        let (tag_fg, tag_bg) = if item.kind == FailureKind::Stalled {
+                            (p.warn_text, p.warning.opacity(0.14))
+                        } else {
+                            (p.danger_text, p.danger.opacity(0.14))
+                        };
+                        div()
+                            .id(("tray-failed-row", id))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .bg(row_bg)
+                            .border_1()
+                            .border_color(p.border)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .min_w(px(0.))
+                                            .child(
+                                                div()
+                                                    .size(px(6.))
+                                                    .rounded_full()
+                                                    .flex_shrink_0()
+                                                    .bg(item_dot),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .truncate()
+                                                    .text_xs()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(p.fg)
+                                                    .child(item.host_label.clone()),
+                                            )
+                                            .when(item.count > 1, |d| {
+                                                d.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .px_1()
+                                                        .rounded_sm()
+                                                        .bg(p.panel_alt)
+                                                        .text_size(px(10.5))
+                                                        .font_family(
+                                                            cx.theme().mono_font_family.clone(),
+                                                        )
+                                                        .text_color(p.muted_fg)
+                                                        .child(format!("×{}", item.count)),
+                                                )
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .min_w(px(0.))
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .px_1p5()
+                                                    .rounded_sm()
+                                                    .bg(tag_bg)
+                                                    .text_size(px(10.5))
+                                                    .text_color(tag_fg)
+                                                    .child(item.reason_label.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .truncate()
+                                                    .text_size(px(10.5))
+                                                    .text_color(p.muted_fg)
+                                                    .child(match lang {
+                                                        Language::Zh => format!(
+                                                            "经 {} · {}",
+                                                            item.outbound_label, item.age_label
+                                                        ),
+                                                        Language::En => format!(
+                                                            "via {} · {}",
+                                                            item.outbound_label, item.age_label
+                                                        ),
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("tray-fix-{id}")))
+                                    .xsmall()
+                                    .compact()
+                                    .h(px(24.))
+                                    .px_2()
+                                    .flex_shrink_0()
+                                    .custom(quick_btn_style.clone())
+                                    .label(item.fix_label.clone())
+                                    .tooltip(item.fix_tooltip.clone())
+                                    .disabled(!item.can_fix || busy_fix)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.action(TrayAction::QuickFixFailed(id), window, cx)
+                                    })),
+                            )
+                    })
+                    .collect();
+
+                root.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_shrink_0()
+                        .rounded_lg()
+                        .bg(card)
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .id("tray-failed-header")
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .px_3()
+                                .h(px(38.))
+                                .cursor_pointer()
+                                .hover(|s| s.bg(p.panel_alt.opacity(0.5)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_failures_expanded(window, cx);
+                                }))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .min_w(px(0.))
+                                        .child(dot(dot_color))
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(p.fg)
+                                                .truncate()
+                                                .child(tr(lang, "近期失败连接", "Recent failures")),
+                                        )
+                                        .child(pill(failed_count.to_string(), badge_fg, badge_bg)),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .flex_shrink_0()
+                                        .text_xs()
+                                        .text_color(p.muted_fg)
+                                        .child(if expanded {
+                                            tr(lang, "收起", "Hide")
+                                        } else {
+                                            tr(lang, "展开", "Show")
+                                        })
+                                        .child(
+                                            Icon::new(if expanded {
+                                                IconName::ChevronUp
+                                            } else {
+                                                IconName::ChevronDown
+                                            })
+                                            .size(px(14.)),
+                                        ),
+                                ),
+                        )
+                        .when(expanded, |section| {
+                            section.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1p5()
+                                    .px_2p5()
+                                    .pb_2p5()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(p.border)
+                                    .children(failure_rows)
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .justify_between()
+                                            .gap_2()
+                                            .pt_1p5()
+                                            .border_t_1()
+                                            .border_color(p.border)
+                                            .child(
+                                                Button::new("tray-failed-clear")
+                                                    .xsmall()
+                                                    .compact()
+                                                    .ghost()
+                                                    .label(tr(lang, "清空", "Clear"))
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.action(
+                                                                TrayAction::ClearFailed,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            )
+                                            .child(
+                                                Button::new("tray-failed-open-main")
+                                                    .xsmall()
+                                                    .compact()
+                                                    .ghost()
+                                                    .custom(
+                                                        ButtonCustomVariant::new(cx)
+                                                            .foreground(p.primary)
+                                                            .hover(p.neutral_hover())
+                                                            .active(p.neutral_active()),
+                                                    )
+                                                    .label(view_all_label)
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.action(
+                                                                TrayAction::ShowFailedConnections,
+                                                                window,
+                                                                cx,
+                                                            )
+                                                        },
+                                                    )),
+                                            ),
+                                    ),
+                            )
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex()
@@ -1234,8 +1588,86 @@ impl Render for PopupView {
 
 #[cfg(test)]
 mod tests {
-    use super::popup_bounds;
-    use gpui_kit::{Bounds, point, px, size};
+    use super::{popup_bounds, popup_desired_height};
+    use crate::tray::dashboard::{Dashboard, DashboardFailedConnection, DashboardMeshStatus};
+    use gpui_kit::{Bounds, SharedString, point, px, size};
+    use xrose_core::failed_connections::FailureKind;
+    use xrose_core::mesh::{MeshPhase, MeshProvider};
+    use xrose_core::model::RoutePreset;
+    use xrose_core::settings::Language;
+
+    fn sample_dashboard(failed_count: usize, recent_len: usize) -> Dashboard {
+        let mesh = |provider| DashboardMeshStatus {
+            provider,
+            phase: MeshPhase::Disconnected,
+            profile_id: None,
+            profile_name: None,
+            ip: None,
+            retrying: false,
+        };
+        Dashboard {
+            language: Language::Zh,
+            direct: false,
+            mesh: false,
+            mesh_supported: true,
+            automatic_group: false,
+            group_name: "代理".into(),
+            nodes: Vec::new(),
+            running: true,
+            easytier: mesh(MeshProvider::EasyTier),
+            tailscale: mesh(MeshProvider::Tailscale),
+            proxy_address: "127.0.0.1:7890".into(),
+            system_proxy: true,
+            system_proxy_status: None,
+            tun_enabled: false,
+            tun_supported: true,
+            route_preset: RoutePreset::BypassMainland,
+            down_speed: 0,
+            up_speed: 0,
+            total: "0 B".into(),
+            core_name: "sing-box".into(),
+            busy_core: false,
+            busy_mesh: false,
+            busy_power: false,
+            busy_proxy: false,
+            busy_latency: false,
+            busy_failed_rule: false,
+            failed_count,
+            failed_only_stalled: false,
+            recent_failures: (0..recent_len)
+                .map(|i| DashboardFailedConnection {
+                    id: (i + 1) as u64,
+                    host_label: format!("sub{i}.example.org"),
+                    count: 1,
+                    kind: FailureKind::Timeout,
+                    reason_label: "超时".into(),
+                    outbound_label: "直连".into(),
+                    age_label: "刚刚".into(),
+                    fix_label: SharedString::from("走代理"),
+                    fix_tooltip: SharedString::from("添加 *.example.org → 走代理"),
+                    can_fix: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn desired_height_grows_for_collapsed_and_expanded_failures_and_clamps_to_work_area() {
+        let none = popup_desired_height(&sample_dashboard(0, 0), false);
+        let collapsed = popup_desired_height(&sample_dashboard(5, 3), false);
+        let expanded = popup_desired_height(&sample_dashboard(5, 3), true);
+        assert!(collapsed > none);
+        assert!(expanded > collapsed);
+
+        let work = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(620.)));
+        let b = popup_bounds(
+            Some(point(px(1100.), px(20.))),
+            work,
+            size(px(400.), px(expanded)),
+        );
+        assert!(b.top() >= work.top() && b.bottom() <= work.bottom());
+    }
+
     #[test]
     fn placement_stays_inside_work_area_at_every_edge() {
         let work = Bounds::new(point(px(-1600.), px(-200.)), size(px(1600.), px(860.)));

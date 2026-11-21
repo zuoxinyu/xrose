@@ -3,6 +3,7 @@
 
 mod chains;
 mod config_import;
+mod failed_connections;
 mod http_tests;
 mod mesh_discovery;
 mod mesh_exit;
@@ -296,6 +297,8 @@ pub struct UiSnapshot {
     pub trace: Option<TraceSession>,
     #[serde(default)]
     pub recording: DiagnosticRecording,
+    #[serde(default)]
+    pub failed_connections: Arc<crate::failed_connections::FailedConnectionsView>,
 }
 
 impl UiSnapshot {
@@ -484,6 +487,8 @@ struct Inner {
     trace: RwLock<Option<TraceSession>>,
     trace_generation: AtomicU64,
     recording: Mutex<DiagnosticRecording>,
+    failed_connections: Mutex<crate::failed_connections::FailedConnectionTracker>,
+    failed_connections_view: RwLock<Arc<crate::failed_connections::FailedConnectionsView>>,
     toast_seq: AtomicU64,
     startup_started: AtomicBool,
     last_start_failed: AtomicBool,
@@ -646,6 +651,12 @@ impl AppService {
             trace: RwLock::new(None),
             trace_generation: AtomicU64::new(0),
             recording: Mutex::new(DiagnosticRecording::default()),
+            failed_connections: Mutex::new(
+                crate::failed_connections::FailedConnectionTracker::new(),
+            ),
+            failed_connections_view: RwLock::new(Arc::new(
+                crate::failed_connections::FailedConnectionsView::default(),
+            )),
             toast_seq: AtomicU64::new(1),
             startup_started: AtomicBool::new(false),
             last_start_failed: AtomicBool::new(false),
@@ -661,6 +672,7 @@ impl AppService {
         if std::env::var_os("XROSE_DEBUG").is_some() {
             eprintln!("[debug] runtime ready");
         }
+        service.install_failed_connection_log_observer();
         service.refresh_doctor();
         if std::env::var_os("XROSE_DEBUG").is_some() {
             eprintln!("[debug] doctor done");
@@ -885,6 +897,7 @@ impl AppService {
                 .map(config_import::PendingConfigImport::view),
             trace: self.inner.trace.read().clone(),
             recording: self.inner.recording.lock().clone(),
+            failed_connections: self.inner.failed_connections_view.read().clone(),
         }
     }
 
@@ -5056,6 +5069,9 @@ impl AppService {
             if !changed.is_empty() {
                 self.refresh_health_targets(&changed);
             }
+            self.observe_failed_clash_connections(epoch_changed, &connections, &model);
+        } else if epoch_changed {
+            self.observe_failed_clash_connections(true, &[], &self.model());
         }
         let mut current = self.inner.connections.write();
         self.inner
@@ -5822,6 +5838,9 @@ impl AppService {
                             }
                         }
                     }
+                }
+                if tick.is_multiple_of(15) {
+                    service.publish_failed_connections();
                 }
                 tick += 1;
             }

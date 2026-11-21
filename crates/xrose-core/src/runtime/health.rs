@@ -842,6 +842,10 @@ impl HealthEngine {
         entry.reachability = Some(report);
     }
 
+    pub fn is_host_offline(&self, now: i64) -> bool {
+        self.attribution.is_host_offline(now)
+    }
+
     pub fn set_mesh_peer_loss(&mut self, target_key: &str, loss_rate: f32, now: i64) {
         let entry = self.targets.entry(target_key.to_owned()).or_default();
         entry.is_mesh_exit = true;

@@ -12,6 +12,7 @@ pub mod core;
 pub mod diagnostics;
 pub mod dns;
 pub mod error;
+pub mod failed_connections;
 pub mod flow;
 pub mod mesh;
 pub mod model;

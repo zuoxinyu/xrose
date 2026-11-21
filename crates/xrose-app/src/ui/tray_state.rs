@@ -11,6 +11,7 @@ pub(crate) struct TrayWindowState {
     node_sort: super::NodeSort,
     node_view: super::NodeView,
     exact_process_filter: Option<String>,
+    failed_filter: connections::FailedFilter,
     connection_sort: xrose_core::flow::ConnectionSort,
     connections_tab: connections::ConnectionsTab,
     content_offset: Point<Pixels>,
@@ -59,6 +60,7 @@ impl AppView {
             connections_stats_offset: self.connections_stats_scroll.offset(),
             settings_offset: self.settings_scroll.offset(),
             exact_process_filter: self.exact_process_filter.clone(),
+            failed_filter: self.failed_filter,
             hide_ips: self.hide_ips,
             hide_traffic_chart: self.hide_traffic_chart,
             node_sort: self.node_sort,
@@ -98,6 +100,7 @@ impl AppView {
         self.content_scroll.set_offset(state.content_offset);
         self.settings_scroll.set_offset(state.settings_offset);
         self.exact_process_filter = state.exact_process_filter;
+        self.failed_filter = state.failed_filter;
         self.hide_ips = state.hide_ips;
         self.hide_traffic_chart = state.hide_traffic_chart;
         self.node_sort = state.node_sort;

@@ -80,13 +80,13 @@ Xrose provides three independent work modes and preserves your existing nodes, o
 
 ### Live Observation & Visual Diagnostics
 
-- **Live Connections & Active Processes**: Inspects active connections, per-process live bandwidth and connection counts with application icons, and session recording/replay. Supports closing connections at any time and creating top-priority block rules by domain, process, or IP in one click.
+- **Live Connections, Failed Requests & Active Processes**: Inspects active connections, captures failed, stalled, and rule-rejected connections, aggregates per-process bandwidth with application icons, and records sessions for replay. Supports closing connections, one-click root-domain or exact-target rule fixes, and batch rule creation.
 - **Multi-Dimensional Traffic Statistics**: Optional local traffic attribution by node, process, or main domain across session, daily, weekly, and monthly windows in bar chart or table views.
 - **6-Stage Visual Link Trace**: Probes HTTPS, TCP, UDP, or ICMP targets and visualizes each stage — **Request Source → Inbound → DNS Resolution → Routing / Rules → Outbound Node → Target Service** — with expandable stage details and inline top-priority rule creation. Includes concurrent DNS A/AAAA comparison, UDP / NAT probing, environment checks, and redacted diagnostic report export.
 
 ### Tray Flyout & Privacy Mode
 
-- **Cross-Platform Tray Flyout**: Displays proxy core, EasyTier, and Tailscale status alongside live throughput, quick node switching, routing presets, and System Proxy / TUN toggles, with minimize- or close-to-tray support.
+- **Cross-Platform Tray Flyout**: Displays proxy core, EasyTier, and Tailscale status alongside live throughput, quick node switching, an expandable recent failed-connection counter with one-click fixes, routing presets, and System Proxy / TUN toggles, with minimize- or close-to-tray support.
 - **Global Privacy Mode**: Toggles instant masking of node addresses, domains, mesh identifiers, and traffic attribution names across the UI, clipboard exports, and diagnostic reports.
 
 ### Screenshots

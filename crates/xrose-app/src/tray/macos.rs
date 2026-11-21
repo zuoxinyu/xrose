@@ -22,6 +22,7 @@ static POPUP_OPS: parking_lot::Mutex<Vec<PopupOp>> = parking_lot::Mutex::new(Vec
 
 enum PopupOp {
     Hide(usize),
+    Resize(usize, gpui_kit::Bounds<gpui_kit::Pixels>),
     Show(
         usize,
         gpui_kit::Bounds<gpui_kit::Pixels>,
@@ -54,6 +55,22 @@ extern "C" fn flush_popup(_this: &Object, _sel: Sel, _sender: id) {
             match operation {
                 PopupOp::Hide(native) => {
                     let _: () = msg_send![native as id, orderOut: nil];
+                }
+                PopupOp::Resize(native, bounds) => {
+                    let native = native as id;
+                    let screens: id = msg_send![class!(NSScreen), screens];
+                    let primary: id = msg_send![screens, objectAtIndex: 0usize];
+                    let screen: NSRect = msg_send![primary, frame];
+                    let content_size = NSSize::new(
+                        f32::from(bounds.size.width) as f64,
+                        f32::from(bounds.size.height) as f64,
+                    );
+                    let _: () = msg_send![native, setContentSize: content_size];
+                    let origin = NSPoint::new(
+                        f32::from(bounds.origin.x) as f64,
+                        screen.size.height - f32::from(bounds.bottom()) as f64,
+                    );
+                    let _: () = msg_send![native, setFrameOrigin: origin];
                 }
                 PopupOp::Show(native, bounds, shown) => {
                     let native = native as id;
@@ -559,6 +576,12 @@ pub fn show_popup(
 ) {
     if let Some(native) = native_window(window) {
         post_popup(PopupOp::Show(native as usize, bounds, shown));
+    }
+}
+
+pub fn resize_popup(window: &mut Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+    if let Some(native) = native_window(window) {
+        post_popup(PopupOp::Resize(native as usize, bounds));
     }
 }
 

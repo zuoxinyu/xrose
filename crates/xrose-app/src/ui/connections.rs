@@ -5,11 +5,16 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::diagnostics::{
     DiagnosticRuleKind, DiagnosticTarget, connection_matches_query, connection_test_target,
+};
+use xrose_core::failed_connections::{
+    DomainMatchGranularity, FailedConnectionRecord, FailedRuleDraft, FailureCategory, FailureKind,
+    OutboundDirection, count_unique_batch_rules,
 };
 use xrose_core::flow::{
     ConnectionMetrics, ConnectionSort, ProcessLiveTraffic, is_protected_process,
@@ -17,11 +22,11 @@ use xrose_core::flow::{
 use xrose_core::model::{CoreKind, RouteAction, RouteActionKind, WorkMode};
 use xrose_core::runtime::ClashConnection;
 use xrose_core::service::ToastLevel;
-use xrose_core::settings::Language;
+use xrose_core::settings::{Language, LogLevel};
 use xrose_core::trace::{
     TracePhase, TraceProtocol, TraceSession, TraceStatus, TraceStepKind, parse_target,
 };
-use xrose_core::util::format_bytes;
+use xrose_core::util::{format_bytes, now_unix};
 
 use super::menus::{self, MenuTarget};
 use super::theme::{Palette, palette};
@@ -35,14 +40,38 @@ const CONNECTIONS_PAGE_STEP: usize = 50;
 pub(crate) enum ConnectionsTab {
     #[default]
     Live,
+    Failed,
     Processes,
     Recorded,
     Statistics,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum FailedFilter {
+    #[default]
+    All,
+    Failed,
+    Stalled,
+    Rejected,
+}
+
+impl FailedFilter {
+    const ALL: [Self; 4] = [Self::All, Self::Failed, Self::Stalled, Self::Rejected];
+
+    fn matches(self, kind: FailureKind) -> bool {
+        match self {
+            Self::All => true,
+            Self::Failed => kind.category() == FailureCategory::Failed,
+            Self::Stalled => kind.category() == FailureCategory::Stalled,
+            Self::Rejected => kind.category() == FailureCategory::Rejected,
+        }
+    }
+}
+
 impl ConnectionsTab {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Live,
+        Self::Failed,
         Self::Processes,
         Self::Recorded,
         Self::Statistics,
@@ -51,6 +80,7 @@ impl ConnectionsTab {
     fn label(self, lang: Language) -> SharedString {
         match self {
             Self::Live => super::tr(lang, "实时连接", "Live"),
+            Self::Failed => super::tr(lang, "失败记录", "Failed"),
             Self::Processes => super::tr(lang, "活跃进程", "Active processes"),
             Self::Recorded => super::tr(lang, "录制回放", "Recorded"),
             Self::Statistics => super::tr(lang, "流量统计", "Traffic stats"),
@@ -66,7 +96,7 @@ impl ConnectionsTab {
             Self::Live => Some(MenuTarget::LiveConnections),
             Self::Recorded => Some(MenuTarget::RecordedConnections),
             Self::Statistics => Some(MenuTarget::TrafficStatistics),
-            Self::Processes => None,
+            Self::Failed | Self::Processes => None,
         }
     }
 
@@ -84,6 +114,7 @@ impl ConnectionsTab {
 
 enum MonitorRow<'a> {
     Connection(&'a ClashConnection, bool, Option<ConnectionMetrics>),
+    Failed(&'a FailedConnectionRecord),
     Process(&'a ProcessLiveTraffic),
 }
 
@@ -91,6 +122,7 @@ impl MonitorRow<'_> {
     fn icon_key<'a>(&'a self, connections: &'a [ClashConnection]) -> &'a str {
         let (path, name) = match self {
             Self::Connection(c, ..) => (c.process_path(), c.process_basename()),
+            Self::Failed(r) => (r.process_path.as_str(), r.process_name.as_str()),
             Self::Process(p) => (
                 p.connection_with_path
                     .and_then(|i| connections.get(i))
@@ -106,6 +138,11 @@ impl AppView {
     pub(super) fn connection_search_placeholder(&self) -> SharedString {
         if self.connections_tab == ConnectionsTab::Processes {
             self.tr("搜索进程名…", "Search processes…")
+        } else if self.connections_tab == ConnectionsTab::Failed {
+            self.tr(
+                "搜索域名、IP、进程、出站或失败原因…",
+                "Search domain, IP, process, outbound, or reason…",
+            )
         } else {
             self.tr(
                 "搜索域名、IP、端口、进程或规则…",
@@ -114,7 +151,7 @@ impl AppView {
         }
     }
 
-    fn select_connections_tab(
+    pub(super) fn select_connections_tab(
         &mut self,
         tab: ConnectionsTab,
         window: &mut Window,
@@ -144,6 +181,9 @@ impl AppView {
         self.connection_search
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.exact_process_filter = None;
+        if self.connections_tab == ConnectionsTab::Failed {
+            self.failed_filter = FailedFilter::All;
+        }
         self.connections_limit = CONNECTIONS_PAGE_STEP;
         cx.notify();
     }
@@ -163,6 +203,8 @@ impl AppView {
         let tab = self.connections_tab;
         let focus_bg = p.accent;
         let active_conn_len = self.snapshot.runtime.connections.len();
+        let failed_unfixed_len = self.snapshot.failed_connections.unfixed_count;
+        let failed_only_stalled = self.snapshot.failed_connections.unfixed_only_stalled;
         let active_process_len = self
             .snapshot
             .runtime
@@ -186,6 +228,7 @@ impl AppView {
                 let label = item.label(lang);
                 let badge = match item {
                     ConnectionsTab::Live => active_conn_len.to_string(),
+                    ConnectionsTab::Failed => failed_unfixed_len.to_string(),
                     ConnectionsTab::Processes => active_process_len.to_string(),
                     ConnectionsTab::Recorded => recorded_conn_len.to_string(),
                     ConnectionsTab::Statistics => self.traffic_statistics_badge(),
@@ -211,6 +254,16 @@ impl AppView {
                                 d.child(Icon::new(IconName::ChartColumn).size(px(14.)))
                             })
                             .child(label)
+                            .when(
+                                item == ConnectionsTab::Failed && failed_unfixed_len > 0,
+                                |d| {
+                                    d.child(dot(if failed_only_stalled {
+                                        p.warning
+                                    } else {
+                                        p.danger
+                                    }))
+                                },
+                            )
                             .when(item == ConnectionsTab::Recorded && recording_active, |d| {
                                 d.child(dot(p.danger))
                             })
@@ -287,6 +340,17 @@ impl AppView {
             // when it measures or paints them, including variable-height wrapped rows.
             let (visible, count): (Vec<usize>, usize) = match tab {
                 ConnectionsTab::Statistics => unreachable!(),
+                ConnectionsTab::Failed => {
+                    let all = &self.snapshot.failed_connections.records;
+                    let filter = self.failed_filter;
+                    let mut rows = (0..all.len()).filter(|&i| {
+                        let r = &all[i];
+                        filter.matches(r.failure_kind) && r.matches_query(&query)
+                    });
+                    let visible: Vec<_> = rows.by_ref().take(limit).collect();
+                    let count = visible.len() + rows.count();
+                    (visible, count)
+                }
                 ConnectionsTab::Recorded => {
                     let all = &self.snapshot.recording.connections;
                     let mut rows = (0..all.len())
@@ -345,7 +409,22 @@ impl AppView {
                     item_count.saturating_sub(old_count),
                 );
             }
-            let filtered = !query.is_empty();
+            let filtered = !query.is_empty()
+                || (tab == ConnectionsTab::Failed && self.failed_filter != FailedFilter::All);
+            let failed_visible_ids: Vec<u64> = if tab == ConnectionsTab::Failed {
+                visible
+                    .iter()
+                    .filter_map(|&i| {
+                        self.snapshot
+                            .failed_connections
+                            .records
+                            .get(i)
+                            .map(|r| r.id)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
             let body = if has_hint {
                 div()
                     .flex_1()
@@ -367,6 +446,9 @@ impl AppView {
                         }
                         let i = visible[index];
                         let row = match tab {
+                            ConnectionsTab::Failed => {
+                                MonitorRow::Failed(&this.snapshot.failed_connections.records[i])
+                            }
                             ConnectionsTab::Recorded => {
                                 let r = &this.snapshot.recording.connections[i];
                                 MonitorRow::Connection(&r.connection, r.closed_at.is_some(), None)
@@ -389,6 +471,9 @@ impl AppView {
                             MonitorRow::Connection(connection, closed, metrics) => this
                                 .connection_row(connection.clone(), closed, metrics, icon, &p, cx)
                                 .into_any_element(),
+                            MonitorRow::Failed(record) => this
+                                .failed_connection_row(record.clone(), icon, &p, cx)
+                                .into_any_element(),
                             MonitorRow::Process(process) => this
                                 .live_process_row(process, icon, &p, cx)
                                 .into_any_element(),
@@ -408,11 +493,12 @@ impl AppView {
                 .flex_1()
                 .min_h(px(0.))
                 .overflow_hidden()
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .child(self.connection_header(supported, running, cx)),
-                )
+                .child(div().flex_shrink_0().child(self.connection_header(
+                    supported,
+                    running,
+                    &failed_visible_ids,
+                    cx,
+                )))
                 .child(body)
                 .into_any_element()
         };
@@ -432,6 +518,7 @@ impl AppView {
         &self,
         supported: bool,
         running: bool,
+        failed_visible_ids: &[u64],
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let p = palette(cx);
@@ -445,6 +532,7 @@ impl AppView {
             .busy
             .iter()
             .any(|key| key == "recording-export");
+        let failed_total = self.snapshot.failed_connections.records.len();
 
         let sort_choice = ChoiceGroup::new(
             "connection-sort",
@@ -468,6 +556,27 @@ impl AppView {
             this.connections_limit = CONNECTIONS_PAGE_STEP;
             cx.notify();
         }));
+        let failed_filter_choice = ChoiceGroup::new(
+            "failed-connection-filter",
+            vec![
+                self.tr("全部", "All"),
+                self.tr("连接失败", "Failed"),
+                self.tr("无响应", "Stalled"),
+                self.tr("规则拦截", "Blocked"),
+            ],
+            FailedFilter::ALL
+                .iter()
+                .position(|&f| f == self.failed_filter)
+                .unwrap_or(0),
+        )
+        .on_change(cx.listener(|this, index, _, cx| {
+            if let Some(&next) = FailedFilter::ALL.get(*index) {
+                this.failed_filter = next;
+                this.connections_limit = CONNECTIONS_PAGE_STEP;
+                this.connection_list.reset(0);
+                cx.notify();
+            }
+        }));
         let limited_capture = matches!(tab, ConnectionsTab::Live | ConnectionsTab::Processes)
             && running
             && self.snapshot.model.work_mode == WorkMode::Direct
@@ -478,6 +587,13 @@ impl AppView {
                 self.tr(
                     "查看当前活动连接的域名、进程、命中规则与实时速率",
                     "Inspect active domains, processes, matched rules, and live throughput",
+                ),
+            ),
+            ConnectionsTab::Failed => (
+                self.tr("失败记录", "Failed connections"),
+                self.tr(
+                    "捕获近期连接失败、无响应挂起与规则拦截记录，支持勾选批量生成路由规则（仅存内存，不落盘）",
+                    "Captures recent failed, stalled, and blocked connections for quick rule creation (kept in memory only)",
                 ),
             ),
             ConnectionsTab::Processes => (
@@ -588,6 +704,19 @@ impl AppView {
                         .dropdown_menu(menus::builder(cx.entity().downgrade(), target)),
                 )
             })
+            .when(tab == ConnectionsTab::Failed, |d| {
+                d.child(
+                    Button::new("clear-failed-connections")
+                        .ghost()
+                        .label(self.tr("清空", "Clear"))
+                        .disabled(failed_total == 0)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.failed_selected.clear();
+                            this.service.clear_failed_connections();
+                            this.sync(cx);
+                        })),
+                )
+            })
             .when(tab == ConnectionsTab::Recorded, |d| {
                 d.child(
                     Button::new("export-recording")
@@ -624,6 +753,51 @@ impl AppView {
                         .child(search_input)
                         .child(toolbar_controls),
                 );
+            }
+            ConnectionsTab::Failed => {
+                let toolbar_controls = build_toolbar_controls(false, cx);
+                let host_offline = self.snapshot.failed_connections.host_offline;
+                let active_core = self
+                    .snapshot
+                    .process
+                    .core
+                    .unwrap_or(self.snapshot.settings.core);
+                let low_log_level = self.snapshot.settings.log_level >= LogLevel::Warn;
+                header = header
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(failed_filter_choice)
+                            .child(search_input)
+                            .child(toolbar_controls),
+                    )
+                    .when(host_offline, |d| {
+                        d.child(div().text_xs().text_color(p.warn_text).child(self.tr(
+                            "本机网络可能已断开，已暂停新增普通失败记录。",
+                            "Host network appears offline; new failure records are paused.",
+                        )))
+                    })
+                    .when(!host_offline && active_core == CoreKind::Xray, |d| {
+                        d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                            "Xray 仅从错误日志捕获拨号与 DNS 失败，暂不支持无响应挂起、规则拦截与进程归因。",
+                            "Xray captures dial and DNS errors from logs only; stalled, blocked, and process metadata require sing-box.",
+                        )))
+                    })
+                    .when(
+                        !host_offline && active_core == CoreKind::SingBox && low_log_level,
+                        |d| {
+                            d.child(div().text_xs().text_color(p.muted_fg).child(self.tr(
+                                "当前内核日志级别为 Warn/Error，域名嗅探与规则拦截记录可能不完整；设为 Info 可获取完整上下文。",
+                                "Core log level is Warn/Error; sniffed domains and blocked requests may be incomplete.",
+                            )))
+                        },
+                    );
+                if let Some(batch_bar) = self.failed_batch_bar(failed_visible_ids, &p, cx) {
+                    header = header.child(batch_bar);
+                }
             }
             ConnectionsTab::Processes => {
                 let toolbar_controls = build_toolbar_controls(true, cx);
@@ -765,9 +939,13 @@ impl AppView {
                     if filtered {
                         if tab == ConnectionsTab::Processes {
                             self.tr("没有符合条件的进程", "No matching processes")
+                        } else if tab == ConnectionsTab::Failed {
+                            self.tr("没有符合条件的失败记录", "No matching failed connections")
                         } else {
                             self.tr("没有符合条件的连接", "No matching connections")
                         }
+                    } else if tab == ConnectionsTab::Failed {
+                        self.tr("暂无近期失败记录", "No recent failed connections")
                     } else if tab == ConnectionsTab::Processes {
                         self.tr("暂无活跃进程", "No active processes yet")
                     } else if tab == ConnectionsTab::Recorded {
@@ -777,6 +955,11 @@ impl AppView {
                     },
                     if filtered {
                         self.tr("尝试清除筛选条件", "Try clearing the filters")
+                    } else if tab == ConnectionsTab::Failed {
+                        self.tr(
+                            "连接超时、重置、无响应挂起或被规则拦截后会自动记录在此，供快速勾选生成规则",
+                            "Timeouts, resets, stalled streams, and blocked requests appear here automatically for quick rule fixes",
+                        )
                     } else if tab == ConnectionsTab::Recorded {
                         self.tr(
                             "点击右上角「开始录制」可捕获瞬时短连接与已结束连接的历史记录",
@@ -1364,6 +1547,564 @@ impl AppView {
             )
     }
 
+    fn failed_batch_bar(
+        &self,
+        visible_ids: &[u64],
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
+        let records = &self.snapshot.failed_connections.records;
+        let selected_records: Vec<&FailedConnectionRecord> = records
+            .iter()
+            .filter(|r| self.failed_selected.contains(&r.id))
+            .collect();
+        let selected_count = selected_records.len();
+        if selected_count == 0 {
+            return None;
+        }
+        let lang = self.lang();
+        let granularity = self.failed_granularity;
+        let action_kind = self.failed_batch_action;
+        let unique_rules = count_unique_batch_rules(selected_records.iter().copied(), granularity);
+        let selected_ids: Vec<u64> = selected_records.iter().map(|r| r.id).collect();
+        let all_visible_selected = !visible_ids.is_empty()
+            && visible_ids
+                .iter()
+                .all(|id| self.failed_selected.contains(id));
+        let all_visible: Vec<u64> = visible_ids.to_vec();
+        let busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|k| k == "failed-rule" || k == "core");
+        let outbound_label = self
+            .failed_batch_group
+            .as_deref()
+            .map(|id| {
+                self.snapshot
+                    .model
+                    .group(id)
+                    .map(|group| self.outbound_group_label(group))
+                    .unwrap_or_else(|| self.tr("出站组已删除", "Outbound group removed"))
+            })
+            .unwrap_or_else(|| self.tr("默认出站组", "Default outbound group"));
+        let gran_options = [
+            (
+                DomainMatchGranularity::RootDomainSuffix,
+                self.tr("主域名后缀", "Root suffix"),
+            ),
+            (
+                DomainMatchGranularity::Exact,
+                self.tr("精确域名", "Exact domain"),
+            ),
+        ];
+        let action_options = [
+            (RouteActionKind::Proxy, self.tr("代理", "Proxy")),
+            (RouteActionKind::Direct, self.tr("直连", "Direct")),
+            (RouteActionKind::Block, self.tr("阻止", "Block")),
+        ];
+        let selected_text = match lang {
+            Language::Zh => format!("已选 {selected_count} 项"),
+            Language::En => format!("{selected_count} selected"),
+        };
+        let apply_label = match lang {
+            Language::Zh if unique_rules < selected_count && unique_rules > 0 => {
+                format!("应用所选规则 ({unique_rules} 条 · 已去重)")
+            }
+            Language::Zh => format!("应用所选规则 ({unique_rules})"),
+            Language::En if unique_rules < selected_count && unique_rules > 0 => {
+                format!("Apply rules ({unique_rules} deduped)")
+            }
+            Language::En => format!("Apply rules ({unique_rules})"),
+        };
+
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .flex_wrap()
+                .p_2p5()
+                .rounded_lg()
+                .bg(p.primary.opacity(0.06))
+                .border_1()
+                .border_color(p.primary.opacity(0.25))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .flex_wrap()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(p.primary)
+                                .child(selected_text),
+                        )
+                        .child(
+                            Button::new("failed-select-all")
+                                .xsmall()
+                                .compact()
+                                .ghost()
+                                .label(if all_visible_selected {
+                                    self.tr("取消全选", "Deselect all")
+                                } else {
+                                    self.tr("全选当前", "Select visible")
+                                })
+                                .disabled(all_visible.is_empty())
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if all_visible_selected {
+                                        for id in &all_visible {
+                                            this.failed_selected.remove(id);
+                                        }
+                                    } else {
+                                        for id in &all_visible {
+                                            this.failed_selected.insert(*id);
+                                        }
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            Button::new("failed-clear-selection")
+                                .xsmall()
+                                .compact()
+                                .ghost()
+                                .label(self.tr("取消", "Clear"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.failed_selected.clear();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(
+                            ChoiceGroup::new(
+                                "failed-batch-granularity",
+                                gran_options.iter().map(|(_, l)| l.clone()).collect(),
+                                gran_options.iter().position(|(g, _)| *g == granularity),
+                            )
+                            .small()
+                            .on_change(cx.listener(
+                                move |this, index: &usize, _, cx| {
+                                    this.failed_granularity = gran_options[*index].0;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .child(
+                            ChoiceGroup::new(
+                                "failed-batch-action",
+                                action_options.iter().map(|(_, l)| l.clone()).collect(),
+                                action_options.iter().position(|(a, _)| *a == action_kind),
+                            )
+                            .small()
+                            .on_change(cx.listener(
+                                move |this, index: &usize, _, cx| {
+                                    this.failed_batch_action = action_options[*index].0;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                        .when(action_kind == RouteActionKind::Proxy, |d| {
+                            d.child(
+                                Button::new("failed-batch-outbound")
+                                    .compact()
+                                    .h(px(super::theme::CONTROL_HEIGHT))
+                                    .tooltip(outbound_label.clone())
+                                    .child(prefixed_dropdown_content(
+                                        self.tr("出站目标", "Outbound"),
+                                        outbound_label,
+                                        p,
+                                    ))
+                                    .dropdown_menu(menus::builder(
+                                        cx.entity().downgrade(),
+                                        MenuTarget::FailedBatchOutbound,
+                                    )),
+                            )
+                        })
+                        .child(
+                            Button::new("failed-batch-apply")
+                                .compact()
+                                .h(px(super::theme::CONTROL_HEIGHT))
+                                .primary()
+                                .label(apply_label)
+                                .loading(self.snapshot.busy.iter().any(|k| k == "failed-rule"))
+                                .disabled(unique_rules == 0 || busy)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let drafts: Vec<FailedRuleDraft> = selected_ids
+                                        .iter()
+                                        .copied()
+                                        .map(|record_id| FailedRuleDraft {
+                                            record_id,
+                                            granularity: this.failed_granularity,
+                                        })
+                                        .collect();
+                                    let action = RouteAction {
+                                        kind: this.failed_batch_action,
+                                        group: if this.failed_batch_action == RouteActionKind::Proxy
+                                        {
+                                            this.failed_batch_group.clone()
+                                        } else {
+                                            None
+                                        },
+                                    };
+                                    this.service.apply_failed_connection_rules(drafts, action);
+                                    this.failed_selected.clear();
+                                    this.sync(cx);
+                                })),
+                        ),
+                ),
+        )
+    }
+
+    fn failed_connection_row(
+        &self,
+        record: FailedConnectionRecord,
+        icon: Option<AnyElement>,
+        p: &Palette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let lang = self.lang();
+        let id = record.id;
+        let checked = self.failed_selected.contains(&id);
+        let applied = record.applied_rule.clone();
+        let is_applied = applied.is_some();
+        let hover_group = SharedString::from(format!("failed-row-{id}"));
+        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let raw_host = record.host().to_owned();
+        let host_label = if self.hide_ips {
+            xrose_core::privacy::mask_magic_dns_name(&raw_host, &suffixes)
+        } else {
+            raw_host
+        };
+        let endpoint = xrose_core::privacy::format_ip_port(
+            &record.destination_ip,
+            &record.destination_port,
+            self.hide_ips,
+        );
+        let dot_color = if is_applied {
+            p.success
+        } else if record.failure_kind == FailureKind::Stalled {
+            p.warning
+        } else {
+            p.danger
+        };
+        let (reason_fg, reason_bg) = if is_applied {
+            (p.muted_fg, p.panel_alt)
+        } else if record.failure_kind == FailureKind::Stalled {
+            (p.warn_text, p.warning.opacity(0.14))
+        } else {
+            (p.danger_text, p.danger.opacity(0.14))
+        };
+        let reason_badge: SharedString =
+            if record.failure_kind == FailureKind::Stalled && record.is_stalled_live {
+                match lang {
+                    Language::Zh => format!("无响应 · {}s", record.stalled_secs).into(),
+                    Language::En => format!("Stalled · {}s", record.stalled_secs).into(),
+                }
+            } else {
+                match lang {
+                    Language::Zh => record.failure_kind.label_zh().into(),
+                    Language::En => record.failure_kind.label_en().into(),
+                }
+            };
+        let age = crate::i18n::relative_time(lang, now_unix().saturating_sub(record.last_seen));
+        let suggested = record.suggested_action(self.snapshot.model.work_mode);
+        let quick_label = match (record.outbound_direction, suggested.kind) {
+            (OutboundDirection::Reject, _) => self.tr("直连放行", "Allow"),
+            (_, RouteActionKind::Proxy) => self.tr("走代理", "Proxy"),
+            (_, RouteActionKind::Direct) => self.tr("走直连", "Direct"),
+            (_, RouteActionKind::Block) => self.tr("阻止", "Block"),
+        };
+        let quick_expr = record
+            .rule_expression(DomainMatchGranularity::RootDomainSuffix)
+            .map(|expr| {
+                if self.hide_ips {
+                    xrose_core::privacy::mask_magic_dns_name(&expr, &suffixes)
+                } else {
+                    expr
+                }
+            });
+        let quick_tip: SharedString = match (&quick_expr, lang) {
+            (Some(expr), Language::Zh) => format!("一键添加 {expr} → {quick_label}").into(),
+            (Some(expr), Language::En) => format!("Add {expr} → {quick_label}").into(),
+            (None, _) => quick_label.clone(),
+        };
+        let busy = self
+            .snapshot
+            .busy
+            .iter()
+            .any(|k| k == "failed-rule" || k == "core");
+        let test_target = record.test_target();
+        let test_tip = self.tr("链路测试", "Link trace");
+        let row_menu = MenuTarget::FailedConnectionRow(record.clone());
+        let suggested_kind = suggested.kind;
+        let outbound_text = if record.outbound_label.is_empty() {
+            self.tr("未知出站", "Unknown outbound").to_string()
+        } else {
+            record.outbound_label.clone()
+        };
+        let detail_text = if self.hide_ips || record.raw_detail.is_empty() {
+            record.reason_summary.clone()
+        } else {
+            record.raw_detail.clone()
+        };
+        let detail_tip = detail_text.clone();
+        let process_text = if record.process_name.is_empty() {
+            self.tr("进程未提供", "Process unavailable").to_string()
+        } else {
+            record.process_name.clone()
+        };
+        let proto_text = if record.inbound.is_empty() {
+            record.network.clone()
+        } else {
+            format!("{} / {}", record.network, record.inbound)
+        };
+        let quick_btn_style = ButtonCustomVariant::new(cx)
+            .color(p.accent)
+            .foreground(p.primary)
+            .hover(p.primary.opacity(0.18))
+            .active(p.primary.opacity(0.24))
+            .shadow(false);
+
+        div()
+            .id(SharedString::from(format!("failed-conn-{id}")))
+            .group(hover_group.clone())
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .p_3()
+            .rounded_lg()
+            .bg(if checked {
+                p.accent.opacity(0.45)
+            } else {
+                p.bg
+            })
+            .border_1()
+            .border_color(if checked { p.primary } else { p.border })
+            .when(is_applied && !checked, |d| d.opacity(0.72))
+            .hover(move |s| s.bg(row_hover_bg))
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.failed_selected.contains(&id) {
+                    this.failed_selected.remove(&id);
+                } else {
+                    if this.failed_selected.is_empty() {
+                        this.failed_batch_action = suggested_kind;
+                    }
+                    this.failed_selected.insert(id);
+                }
+                cx.notify();
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .h(px(20.))
+                            .flex_shrink_0()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if checked { p.primary } else { p.muted_fg })
+                            .bg(if checked { p.primary } else { p.bg })
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_color(p.primary_fg)
+                            .when(checked, |d| {
+                                d.child(Icon::new(IconName::Check).size(px(14.)))
+                            }),
+                    )
+                    .child(dot(dot_color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .flex_wrap()
+                                    .min_w(px(0.))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(p.fg)
+                                            .truncate()
+                                            .child(host_label),
+                                    )
+                                    .when(record.count > 1, |d| {
+                                        d.child(pill(
+                                            format!("×{}", record.count),
+                                            p.muted_fg,
+                                            p.panel_alt,
+                                        ))
+                                    })
+                                    .child(pill(reason_badge, reason_fg, reason_bg))
+                                    .when_some(applied, |d, summary| {
+                                        let expr = if self.hide_ips {
+                                            xrose_core::privacy::mask_magic_dns_name(
+                                                &summary.expression,
+                                                &suffixes,
+                                            )
+                                        } else {
+                                            summary.expression
+                                        };
+                                        let label = match lang {
+                                            Language::Zh => {
+                                                format!(
+                                                    "✓ 已添加 · {expr} → {}",
+                                                    summary.outbound_label
+                                                )
+                                            }
+                                            Language::En => {
+                                                format!(
+                                                    "✓ Added · {expr} → {}",
+                                                    summary.outbound_label
+                                                )
+                                            }
+                                        };
+                                        d.child(pill(label, p.ok_text, p.success.opacity(0.14)))
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .min_w(px(0.))
+                                    .children(icon)
+                                    .child(
+                                        div().text_xs().text_color(p.muted_fg).truncate().child(
+                                            format!("{process_text} · {proto_text} · {endpoint}"),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .flex_shrink_0()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .opacity(0.)
+                                    .group_hover(hover_group, |s| s.opacity(1.))
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "failed-test-{id}"
+                                        )))
+                                        .compact()
+                                        .custom(icon_button_style(p, false, cx))
+                                        .icon(IconName::Radar)
+                                        .tooltip(test_tip.clone())
+                                        .accessibility_label(test_tip)
+                                        .disabled(test_target.is_none())
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                if let Some(target) = &test_target {
+                                                    this.page = Page::Diagnostics;
+                                                    this.replay_connection(target, window, cx);
+                                                }
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .when(!is_applied, |d| {
+                                d.child(
+                                    Button::new(SharedString::from(format!("failed-fix-{id}")))
+                                        .xsmall()
+                                        .compact()
+                                        .h(px(26.))
+                                        .px_2p5()
+                                        .custom(quick_btn_style)
+                                        .label(quick_label)
+                                        .tooltip(quick_tip)
+                                        .disabled(busy || quick_expr.is_none())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.failed_selected.remove(&id);
+                                            this.service.quick_fix_failed_connection(id);
+                                            this.sync(cx);
+                                        })),
+                                )
+                            })
+                            .child(
+                                more_button(
+                                    SharedString::from(format!("failed-more-{id}")),
+                                    self.tr("规则操作", "Rule actions"),
+                                    cx,
+                                )
+                                .dropdown_menu(menus::builder(
+                                    cx.entity().downgrade(),
+                                    row_menu.clone(),
+                                )),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl(px(30.))
+                    .min_w(px(0.))
+                    .child(pill(
+                        match lang {
+                            Language::Zh => format!("经 {outbound_text}"),
+                            Language::En => format!("via {outbound_text}"),
+                        },
+                        p.muted_fg,
+                        p.panel_alt,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(p.muted_fg)
+                            .flex_shrink_0()
+                            .child(age),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("failed-detail-{id}")))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_color(p.muted_fg)
+                            .truncate()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(detail_tip.clone()).build(window, cx)
+                            })
+                            .child(detail_text),
+                    ),
+            )
+            .context_menu(menus::builder(cx.entity().downgrade(), row_menu))
+    }
+
     fn connection_chain(&self, connection: &ClashConnection) -> String {
         if connection.chains.is_empty() {
             return self
@@ -1714,7 +2455,12 @@ impl AppView {
         cx.notify();
     }
 
-    fn replay_connection(&mut self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn replay_connection(
+        &mut self,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.trace_input.update(cx, |input, cx| {
             input.set_value(target.to_owned(), window, cx)
         });
@@ -2188,7 +2934,9 @@ fn rule_label(c: &ClashConnection, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::ConnectionsTab;
+    use super::FailedFilter;
     use super::MenuTarget;
+    use xrose_core::failed_connections::FailureKind;
 
     #[test]
     fn default_connections_tab_is_live() {
@@ -2196,10 +2944,33 @@ mod tests {
     }
 
     #[test]
+    fn failed_filter_categorizes_failed_stalled_and_rejected() {
+        assert!(FailedFilter::All.matches(FailureKind::Timeout));
+        assert!(FailedFilter::All.matches(FailureKind::Stalled));
+        assert!(FailedFilter::All.matches(FailureKind::Rejected));
+
+        assert!(FailedFilter::Failed.matches(FailureKind::Timeout));
+        assert!(FailedFilter::Failed.matches(FailureKind::Reset));
+        assert!(FailedFilter::Failed.matches(FailureKind::DnsFailed));
+        assert!(!FailedFilter::Failed.matches(FailureKind::Stalled));
+        assert!(!FailedFilter::Failed.matches(FailureKind::Rejected));
+
+        assert!(FailedFilter::Stalled.matches(FailureKind::Stalled));
+        assert!(!FailedFilter::Stalled.matches(FailureKind::Timeout));
+
+        assert!(FailedFilter::Rejected.matches(FailureKind::Rejected));
+        assert!(!FailedFilter::Rejected.matches(FailureKind::Reset));
+    }
+
+    #[test]
     fn connections_tab_keyboard_navigation_wraps_and_supports_endpoints() {
         assert_eq!(
             ConnectionsTab::Live.keyboard_target("left"),
             Some(ConnectionsTab::Statistics)
+        );
+        assert_eq!(
+            ConnectionsTab::Live.keyboard_target("right"),
+            Some(ConnectionsTab::Failed)
         );
         assert_eq!(
             ConnectionsTab::Statistics.keyboard_target("right"),
@@ -2226,6 +2997,7 @@ mod tests {
             ConnectionsTab::Live.menu_target(),
             Some(MenuTarget::LiveConnections)
         ));
+        assert!(ConnectionsTab::Failed.menu_target().is_none());
         assert!(matches!(
             ConnectionsTab::Recorded.menu_target(),
             Some(MenuTarget::RecordedConnections)
@@ -2237,6 +3009,8 @@ mod tests {
         assert!(ConnectionsTab::Processes.menu_target().is_none());
 
         assert!(ConnectionsTab::Live.shows_record_action(false));
+        assert!(!ConnectionsTab::Failed.shows_record_action(false));
+        assert!(ConnectionsTab::Failed.shows_record_action(true));
         assert!(ConnectionsTab::Recorded.shows_record_action(false));
         assert!(!ConnectionsTab::Processes.shows_record_action(false));
         assert!(ConnectionsTab::Processes.shows_record_action(true));

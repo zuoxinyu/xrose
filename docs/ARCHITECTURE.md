@@ -61,6 +61,7 @@
 | fake-ip | 不支持 | 原生（1.12+ typed DNS） | Xray 跳过 DNS `fakeip` server |
 | DNS schema | `servers[].address` | 1.12+ typed server + `domain_resolver` | 只生成 1.12+ 新式 DNS 格式 |
 | 连接列表与断开 | 无 | Clash API | 支持断开单条或确认断开全部连接 |
+| 失败连接记录 | 错误日志拨号与 DNS 失败 | 日志关联 + 挂起检测 + 规则拦截 | 纯内存聚合环形缓冲，支持主窗口多选批量修复与托盘最近 3 条一键修复 |
 | 实时进程视图 | 无 | 活跃连接按进程聚合 | 支持按进程查看连接与创建阻止规则 |
 | 连接进程归因 | 无连接列表 | `route.find_process` | Linux/Windows/macOS 开启进程查找；权限或远端请求缺失时明确提示 |
 | 实时统计 | `StatsService`（gRPC） | Clash API | Xray 通过 `xray api statsquery` 查询 |
@@ -129,6 +130,7 @@
 ## 8. 连接诊断与流量统计
 
 - **实时速率与进程视图**（`flow::FlowRateTracker`）：后台监控按 ~1.2 秒采样活跃连接并结合单调时钟计算瞬时上下行速率，聚合生成进程实时流量排行 `ProcessLiveTraffic` 写入 `RuntimeView`；支持按连接或活跃进程查看、按需加载进程图标缓存、断开单条/全部连接，以及一键生成精确域名、单 IP 或进程阻止规则（去重后置顶保存）。
+- **失败连接记录与快速修复**（`failed_connections::FailedConnectionTracker`）：通过 `LogBus` 旁路实时解析 `sing-box`（按连接上下文 ID 关联嗅探域名、出站、拨号/中断/DNS 报错与规则拦截）与 `Xray` 错误日志，并融合 Clash API `/connections` 的活跃 TCP 无响应挂起检测（`upload > 0 && download == 0` 持续 4 秒标记为无响应，恢复自动撤销、断开自动升级）与元数据交叉补全；采用纯内存有界聚合（15 分钟 TTL、上限 300 条、绝不落盘），在主窗口「连接 → 失败记录」支持按失败类型筛选、勾选后按 PSL 主域名后缀或精确域名去重合并并单次热重载提交，并在托盘浮窗提供可展开的最近 3 条未修复记录一键修复与跳转入口。
 - **会话录制与链路测试**：录制维护最多 2000 条连接元数据与 100 次测试结果（不采集内容正文，停止即冻结）。链路测试（`trace.rs`）结合工作模式预览命中规则（含直连 `Block` 规则解释），并与 DNS A/AAAA 并发对比（`dns/probe.rs`）、STUN UDP/NAT 探测及免内核系统网络体检（`system/net_diag.rs`）共同服务于诊断页与 `xrose-cli doctor`。组网模式使用已应用配置，先检查出口连接与 TUN 接管，再通过 TUN 查询当前 DNS 策略并将结果用于 HTTP/TCP/UDP 请求；不要求代理入站、不执行本地代理分流，远端策略只提示需在出口设备查看，ICMP 明确拒绝。组网 DNS 对比查询系统解析器、TUN DNS 和经组网访问的加密解析器；STUN 反映出口路径。诊断规则保存指定出站组，组网模式下仍只修改本机规则。
 - **历史流量统计**（`traffic_statistics`）：默认关闭，开启后在 `service/traffic_statistics` 中串行采样、保存与查询。按会话与采集时本地自然日归档，使用离线 PSL 归并主域名并脱敏程序路径；实体身份与名称经 `SecretBox` 加密存入 `traffic_sessions` / `traffic_entities` / `traffic_daily`，每 10 秒增量覆盖写入脏记录（运行中清零或切换内核通过代次隔离防错账）。前端共享 `UiSnapshot.traffic_statistics` 缓存，渲染与 tick 零磁盘读取。
 

@@ -222,6 +222,10 @@ pub fn show_popup(
     let _ = shown.send(());
 }
 
+pub fn resize_popup(window: &mut gpui_kit::Window, bounds: gpui_kit::Bounds<gpui_kit::Pixels>) {
+    window.resize(bounds.size);
+}
+
 /// The compositor places a zero-exclusive-zone layer inside the usable area,
 /// so its near edge clears the panel even when it floats or changes thickness.
 pub fn popup_layer(

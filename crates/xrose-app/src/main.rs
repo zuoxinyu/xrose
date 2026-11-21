@@ -184,6 +184,7 @@ fn main() {
                                     cx.update(|cx| main.restore_if_hidden(cx));
                                 }
                                 tray::TrayCommand::ShowWindow
+                                | tray::TrayCommand::ShowFailedConnections
                                 | tray::TrayCommand::TogglePopup => {}
                                 #[cfg(target_os = "macos")]
                                 tray::TrayCommand::ShowAbout | tray::TrayCommand::ShowUpdates => {}
@@ -217,6 +218,9 @@ fn main() {
 fn show_target(command: tray::TrayCommand) -> Option<main_window::ShowTarget> {
     match command {
         tray::TrayCommand::ShowWindow => Some(main_window::ShowTarget::Current),
+        tray::TrayCommand::ShowFailedConnections => {
+            Some(main_window::ShowTarget::FailedConnections)
+        }
         #[cfg(target_os = "macos")]
         tray::TrayCommand::ShowAbout => Some(main_window::ShowTarget::About),
         #[cfg(target_os = "macos")]

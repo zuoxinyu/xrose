@@ -1,12 +1,28 @@
 //! Content and service actions shared by every platform's GPUI tray flyout.
 
+use gpui_kit::SharedString;
 use xrose_core::AppService;
-use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RoutePreset, WorkMode};
+use xrose_core::failed_connections::{DomainMatchGranularity, FailureKind, OutboundDirection};
+use xrose_core::model::{DIRECT_VIRTUAL_NODE_ID, RouteActionKind, RoutePreset, WorkMode};
 use xrose_core::service::{APP_VERSION, HttpTestTarget, TrayIndicator, TrayStatus};
 use xrose_core::settings::Language;
-use xrose_core::util::{format_bytes, format_speed};
+use xrose_core::util::{format_bytes, format_speed, now_unix};
 
-use crate::i18n::tr;
+use crate::i18n::{relative_time, tr};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DashboardFailedConnection {
+    pub id: u64,
+    pub host_label: String,
+    pub count: u32,
+    pub kind: FailureKind,
+    pub reason_label: String,
+    pub outbound_label: String,
+    pub age_label: String,
+    pub fix_label: SharedString,
+    pub fix_tooltip: SharedString,
+    pub can_fix: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DashboardNode {
@@ -77,6 +93,10 @@ pub struct Dashboard {
     pub busy_power: bool,
     pub busy_proxy: bool,
     pub busy_latency: bool,
+    pub busy_failed_rule: bool,
+    pub failed_count: usize,
+    pub failed_only_stalled: bool,
+    pub recent_failures: Vec<DashboardFailedConnection>,
 }
 
 impl Dashboard {
@@ -138,6 +158,12 @@ pub(super) fn status_lines(status: &TrayStatus) -> (String, Option<String>) {
             " · Tailscale: {}",
             mesh_phase_label(status.tailscale, language)
         ));
+    }
+    if status.unfixed_failed_connections > 0 {
+        status_line.push_str(&match language {
+            Language::Zh => format!(" · 近期失败 {}", status.unfixed_failed_connections),
+            Language::En => format!(" · {} failed", status.unfixed_failed_connections),
+        });
     }
     let traffic_line = status.phase.is_alive().then(|| {
         format!(
@@ -335,6 +361,70 @@ pub fn build(service: &AppService) -> Dashboard {
         .iter()
         .any(|key| key == "mesh" || key == "mesh-exit");
     let busy_power = busy_core || busy_mesh || snapshot.busy.iter().any(|key| key == "power");
+    let busy_failed_rule = snapshot.busy.iter().any(|key| key == "failed-rule");
+    let now = now_unix();
+    let failed_view = &snapshot.failed_connections;
+    let recent_failures: Vec<DashboardFailedConnection> = failed_view
+        .recent_unfixed(3)
+        .map(|record| {
+            let raw_host = record.host();
+            let host_label = if hide_ips {
+                xrose_core::privacy::mask_magic_dns_name(raw_host, &suffixes)
+            } else {
+                raw_host.to_owned()
+            };
+            let reason_label =
+                if record.failure_kind == FailureKind::Stalled && record.is_stalled_live {
+                    match language {
+                        Language::Zh => format!("无响应 {}s", record.stalled_secs),
+                        Language::En => format!("Stalled {}s", record.stalled_secs),
+                    }
+                } else {
+                    match language {
+                        Language::Zh => record.failure_kind.short_label_zh().to_owned(),
+                        Language::En => record.failure_kind.short_label_en().to_owned(),
+                    }
+                };
+            let suggested = record.suggested_action(model.work_mode);
+            let fix_label = match (record.outbound_direction, suggested.kind) {
+                (OutboundDirection::Reject, _) => tr(language, "放行", "Allow"),
+                (_, RouteActionKind::Proxy) => tr(language, "走代理", "Proxy"),
+                (_, RouteActionKind::Direct) => tr(language, "走直连", "Direct"),
+                (_, RouteActionKind::Block) => tr(language, "阻止", "Block"),
+            };
+            let expr = record
+                .rule_expression(DomainMatchGranularity::RootDomainSuffix)
+                .map(|expr| {
+                    if hide_ips {
+                        xrose_core::privacy::mask_magic_dns_name(&expr, &suffixes)
+                    } else {
+                        expr
+                    }
+                });
+            let can_fix = expr.is_some();
+            let fix_tooltip: SharedString = match (&expr, language) {
+                (Some(expr), Language::Zh) => format!("一键添加 {expr} → {fix_label}").into(),
+                (Some(expr), Language::En) => format!("Add {expr} → {fix_label}").into(),
+                (None, _) => fix_label.clone(),
+            };
+            DashboardFailedConnection {
+                id: record.id,
+                host_label,
+                count: record.count,
+                kind: record.failure_kind,
+                reason_label,
+                outbound_label: if record.outbound_label.is_empty() {
+                    tr(language, "未知", "Unknown").to_string()
+                } else {
+                    record.outbound_label.clone()
+                },
+                age_label: relative_time(language, now.saturating_sub(record.last_seen)),
+                fix_label,
+                fix_tooltip,
+                can_fix,
+            }
+        })
+        .collect();
 
     Dashboard {
         language,
@@ -377,6 +467,10 @@ pub fn build(service: &AppService) -> Dashboard {
             .busy
             .iter()
             .any(|key| matches!(key.as_str(), "latency" | "download" | "auto-probe")),
+        busy_failed_rule,
+        failed_count: failed_view.unfixed_count,
+        failed_only_stalled: failed_view.unfixed_only_stalled,
+        recent_failures,
     }
 }
 
@@ -460,6 +554,9 @@ pub enum TrayAction {
     SetSystemProxy(bool),
     ToggleTun,
     SetRoutePreset(RoutePreset),
+    QuickFixFailed(u64),
+    ClearFailed,
+    ShowFailedConnections,
     ShowWindow,
     Quit,
 }
@@ -474,6 +571,7 @@ pub enum TrayCommand {
     TrayUnavailable,
     TogglePopup,
     ShowWindow,
+    ShowFailedConnections,
     #[cfg(target_os = "macos")]
     ShowAbout,
     #[cfg(target_os = "macos")]
@@ -484,7 +582,7 @@ pub enum TrayCommand {
 #[cfg(target_os = "linux")]
 impl TrayCommand {
     pub(super) fn shows_main_window(self) -> bool {
-        matches!(self, Self::ShowWindow)
+        matches!(self, Self::ShowWindow | Self::ShowFailedConnections)
     }
 }
 
@@ -518,6 +616,9 @@ pub fn dispatch(action: TrayAction, service: &AppService) -> Option<TrayCommand>
         TrayAction::SetSystemProxy(enabled) => service.set_system_proxy(enabled),
         TrayAction::ToggleTun => service.set_tun_enabled(!service.settings().effective_tun()),
         TrayAction::SetRoutePreset(preset) => service.switch_route_preset(preset),
+        TrayAction::QuickFixFailed(id) => service.quick_fix_failed_connection(id),
+        TrayAction::ClearFailed => service.clear_failed_connections(),
+        TrayAction::ShowFailedConnections => return Some(TrayCommand::ShowFailedConnections),
         TrayAction::ShowWindow => return Some(TrayCommand::ShowWindow),
         TrayAction::Quit => return Some(TrayCommand::Quit),
     }
@@ -569,6 +670,10 @@ mod tests {
             busy_power: false,
             busy_proxy: false,
             busy_latency: false,
+            busy_failed_rule: false,
+            failed_count: 0,
+            failed_only_stalled: false,
+            recent_failures: Vec::new(),
         }
     }
 

@@ -101,10 +101,13 @@ impl LogFilter {
 /// In-memory ring buffer. The UI polls a snapshot; core processes append from
 /// reader tasks. No lossy broadcast channel means a slow UI never stalls the
 /// core's stdout pipe.
+type CoreLineObserver = Arc<dyn Fn(LogStream, &str) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct LogBus {
     inner: Arc<Mutex<LogInner>>,
     file: Arc<Mutex<Option<RollingFile>>>,
+    observer: Arc<Mutex<Option<CoreLineObserver>>>,
     max_entries: usize,
 }
 
@@ -123,8 +126,16 @@ impl LogBus {
                 dropped: 0,
             })),
             file: Arc::new(Mutex::new(None)),
+            observer: Arc::new(Mutex::new(None)),
             max_entries,
         }
+    }
+
+    pub fn set_core_line_observer<F>(&self, observer: F)
+    where
+        F: Fn(LogStream, &str) + Send + Sync + 'static,
+    {
+        *self.observer.lock() = Some(Arc::new(observer));
     }
 
     /// Disk logging is best-effort: a read-only or otherwise unwritable data
@@ -185,6 +196,15 @@ impl LogBus {
     pub fn core_line(&self, stream: LogStream, line: &str) {
         let level = infer_level(line);
         self.push(stream, level, line);
+        if matches!(
+            stream,
+            LogStream::Core | LogStream::Stdout | LogStream::Stderr
+        ) {
+            let observer = self.observer.lock().clone();
+            if let Some(observer) = observer {
+                observer(stream, line);
+            }
+        }
     }
 
     pub fn recent(&self, limit: usize, min_level: LogLevel, query: &str) -> Vec<LogEntry> {
