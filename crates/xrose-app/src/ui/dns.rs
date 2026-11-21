@@ -4,6 +4,7 @@ use gpui_kit::component::input::Input;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::dns::{self, DnsPreset};
+use xrose_core::mesh::{MeshPhase, MeshSnapshot};
 use xrose_core::model::{DnsServer, DnsServerType, MeshDnsMode, WorkMode};
 use xrose_core::settings::Language;
 
@@ -25,6 +26,56 @@ fn dns_rules_summary(domains: &[String], lang: Language) -> String {
     } else {
         domains.join(", ")
     }
+}
+
+fn active_magic_dns_suffixes(mesh: &MeshSnapshot, privacy_mode: bool) -> Vec<String> {
+    let mut suffixes: Vec<&str> = mesh
+        .networks
+        .iter()
+        .filter(|n| n.phase == MeshPhase::Connected)
+        .filter_map(|n| {
+            let suffix = n.dns_suffix.as_deref()?;
+            let address = n.dns_address.as_deref()?;
+            (xrose_core::mesh::coexist::valid_suffix(suffix)
+                && address
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback()))
+            .then_some(suffix)
+        })
+        .collect();
+    suffixes.sort_unstable();
+    suffixes.dedup();
+    suffixes
+        .into_iter()
+        .map(|suffix| {
+            let pattern = format!("*.{suffix}");
+            if privacy_mode {
+                xrose_core::privacy::mask_magic_dns_suffix(&pattern)
+            } else {
+                pattern
+            }
+        })
+        .collect()
+}
+
+fn mesh_magic_dns_notice(
+    mesh: &MeshSnapshot,
+    privacy_mode: bool,
+    lang: Language,
+) -> Option<String> {
+    let suffixes = active_magic_dns_suffixes(mesh, privacy_mode);
+    if suffixes.is_empty() {
+        return None;
+    }
+    let list = suffixes.join(", ");
+    Some(match lang {
+        Language::Zh => format!(
+            "组网 MagicDNS 已启用：{list} 的域名解析优先由组网处理，不经过 Fake-IP 与下方服务器，其余域名不受影响。"
+        ),
+        Language::En => format!(
+            "Mesh MagicDNS is active: {list} queries are resolved by the mesh first, bypassing Fake-IP and the servers below; other domains are unaffected."
+        ),
+    })
 }
 
 impl AppView {
@@ -55,6 +106,11 @@ impl AppView {
         };
         let current_preset = self.snapshot.dns_preset();
         let final_tag = dns_config.final_server.clone().unwrap_or_default();
+        let magic_dns_notice = mesh_magic_dns_notice(
+            &self.snapshot.mesh,
+            self.snapshot.settings.privacy_mode,
+            lang,
+        );
 
         let mut body = div().flex().flex_col().gap_4().w_full();
 
@@ -98,6 +154,9 @@ impl AppView {
                     } else {
                         self.tr("组网模式使用下方自定义 DNS，查询经组网出口发送。本地 Fake-IP 已暂停。", "Mesh mode uses the custom DNS below through the exit. Local Fake-IP is paused.")
                     }))
+                })
+                .when_some(magic_dns_notice, |card, notice| {
+                    card.child(div().text_sm().text_color(p.muted_fg).child(notice))
                 })
                 .child({
                     let mut labels = vec![self.tr("分流 + Fake-IP", "Split + Fake-IP"), self.tr("分流 DNS", "Split DNS"), self.tr("加密 DNS", "Encrypted DNS"), self.tr("系统 DNS", "System DNS")];
@@ -699,8 +758,9 @@ impl AppView {
 
 #[cfg(test)]
 mod tests {
-    use super::{dns_rules_summary, visible_dns_servers};
+    use super::{dns_rules_summary, mesh_magic_dns_notice, visible_dns_servers};
     use xrose_core::dns::{DnsPreset, apply_preset};
+    use xrose_core::mesh::{MeshPhase, MeshRuntimeView, MeshSnapshot};
     use xrose_core::model::DnsConfig;
     use xrose_core::settings::Language;
 
@@ -725,5 +785,99 @@ mod tests {
             dns_rules_summary(&domains, Language::Zh),
             "geosite:cn, example.com"
         );
+    }
+
+    #[test]
+    fn magic_dns_notice_requires_connected_network_with_valid_loopback_dns() {
+        let empty = MeshSnapshot::default();
+        assert_eq!(mesh_magic_dns_notice(&empty, false, Language::Zh), None);
+
+        let inactive = MeshSnapshot {
+            networks: vec![
+                MeshRuntimeView {
+                    phase: MeshPhase::Starting,
+                    dns_suffix: Some("alpha-bravo.ts.net".into()),
+                    dns_address: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: None,
+                    dns_address: None,
+                    ..Default::default()
+                },
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: Some("ts.net".into()),
+                    dns_address: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: Some("alpha-bravo.ts.net".into()),
+                    dns_address: Some("192.0.2.53".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(mesh_magic_dns_notice(&inactive, false, Language::Zh), None);
+        assert_eq!(mesh_magic_dns_notice(&inactive, false, Language::En), None);
+    }
+
+    #[test]
+    fn magic_dns_notice_formats_bilingual_and_respects_privacy_mode() {
+        let mesh = MeshSnapshot {
+            networks: vec![
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: Some("charlie-delta.ts.net".into()),
+                    dns_address: Some("127.0.0.153".into()),
+                    ..Default::default()
+                },
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: Some("alpha-bravo.ts.net".into()),
+                    dns_address: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+                MeshRuntimeView {
+                    phase: MeshPhase::Connected,
+                    dns_suffix: Some("alpha-bravo.ts.net".into()),
+                    dns_address: Some("127.0.0.1".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let zh = mesh_magic_dns_notice(&mesh, false, Language::Zh).unwrap();
+        assert_eq!(
+            zh,
+            "组网 MagicDNS 已启用：*.alpha-bravo.ts.net, *.charlie-delta.ts.net 的域名解析优先由组网处理，不经过 Fake-IP 与下方服务器，其余域名不受影响。"
+        );
+
+        let en = mesh_magic_dns_notice(&mesh, false, Language::En).unwrap();
+        assert_eq!(
+            en,
+            "Mesh MagicDNS is active: *.alpha-bravo.ts.net, *.charlie-delta.ts.net queries are resolved by the mesh first, bypassing Fake-IP and the servers below; other domains are unaffected."
+        );
+
+        let single = MeshSnapshot {
+            networks: vec![MeshRuntimeView {
+                phase: MeshPhase::Connected,
+                dns_suffix: Some("alpha-bravo.ts.net".into()),
+                dns_address: Some("127.0.0.1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let zh_private = mesh_magic_dns_notice(&single, true, Language::Zh).unwrap();
+        assert!(zh_private.contains("*.***.ts.net"));
+        assert!(!zh_private.contains("alpha-bravo"));
+
+        let en_private = mesh_magic_dns_notice(&single, true, Language::En).unwrap();
+        assert!(en_private.contains("*.***.ts.net"));
+        assert!(!en_private.contains("alpha-bravo"));
     }
 }
