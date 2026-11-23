@@ -27,6 +27,9 @@ pub struct Palette {
     pub warn_text: Hsla,
     pub danger_text: Hsla,
     pub is_dark: bool,
+    /// True in light mode when Windows Mica / Mica Alt is active, allowing subtle
+    /// translucent layering across the main content chrome.
+    pub light_mica: bool,
 }
 
 /// HSL from degrees (GPUI's `hsla` expects the hue as a 0..1 fraction).
@@ -107,21 +110,92 @@ impl Palette {
         }
     }
 
-    /// Neutral gray hover background for icon buttons in both light and dark themes.
+    /// Neutral hover background for icon buttons in both light and dark themes.
     pub fn neutral_hover(&self) -> Hsla {
         if self.is_dark {
             hsl(0., 0., 0.32).opacity(0.65)
         } else {
-            hsl(210., 0.16, 0.91).opacity(0.85)
+            hsl(200., 0.30, 0.915).opacity(0.85)
         }
     }
 
-    /// Slightly stronger neutral gray fill when pressing an inactive icon button or holding its menu open.
+    /// Slightly stronger neutral fill when pressing an inactive icon button or holding its menu open.
     pub fn neutral_active(&self) -> Hsla {
         if self.is_dark {
             hsl(0., 0., 0.36).opacity(0.78)
         } else {
-            hsl(210., 0.16, 0.87).opacity(0.92)
+            hsl(200., 0.30, 0.875).opacity(0.92)
+        }
+    }
+
+    /// Main content column backdrop: gently lets Windows Mica bleed through in light mode
+    /// while remaining opaque on dark mode, solid materials, and non-Mica blur backends.
+    pub fn content_bg(&self) -> Hsla {
+        if self.light_mica {
+            hsl(0., 0., 1.0).opacity(0.62)
+        } else {
+            self.bg
+        }
+    }
+
+    /// Top titlebar background over the content column.
+    /// Stays opaque in light Mica mode so DWM's native non-client caption buttons
+    /// never bleed through behind the custom `WindowControls`.
+    pub fn header_bg(&self) -> Hsla {
+        if self.is_dark { self.bg } else { self.panel }
+    }
+
+    /// Surface fill for top-level page cards. Dialogs, menus, and toasts keep opaque `panel`.
+    pub fn card_bg(&self) -> Hsla {
+        if self.light_mica {
+            hsl(0., 0., 1.0).opacity(0.68)
+        } else {
+            self.panel
+        }
+    }
+
+    /// Surface fill for the floating header status capsule.
+    pub fn header_pill_bg(&self) -> Hsla {
+        self.panel
+    }
+
+    /// Subtle structural divider (e.g. header bottom hairline) that harmonizes with Mica tint.
+    pub fn hairline_border(&self) -> Hsla {
+        if self.light_mica {
+            hsl(200., 0.30, 0.22).opacity(0.08)
+        } else {
+            self.border
+        }
+    }
+
+    /// Subtle control border for frosted capsules and segmented tracks on light Mica.
+    pub fn control_border(&self) -> Hsla {
+        if self.light_mica {
+            hsl(200., 0.30, 0.22).opacity(0.12)
+        } else {
+            self.border
+        }
+    }
+
+    /// Borderless recessed surface for list cards and inset rows nested inside `card` / `panel`.
+    pub fn row_bg(&self) -> Hsla {
+        if self.is_dark {
+            self.bg
+        } else if self.light_mica {
+            hsl(198., 0.62, 0.50).opacity(0.06)
+        } else {
+            hsl(200., 0.48, 0.965)
+        }
+    }
+
+    /// Hover surface for borderless list cards and inset rows.
+    pub fn row_hover(&self) -> Hsla {
+        if self.is_dark {
+            self.panel_alt.opacity(0.5)
+        } else if self.light_mica {
+            hsl(196., 0.68, 0.48).opacity(0.115)
+        } else {
+            hsl(196., 0.56, 0.942)
         }
     }
 }
@@ -129,6 +203,7 @@ impl Palette {
 pub fn palette(cx: &App) -> Palette {
     let theme = cx.theme();
     let is_dark = theme.mode.is_dark();
+    let light_mica = !is_dark && crate::window_effects::uses_mica();
     let (primary, primary_fg) = interaction(is_dark);
     if is_dark {
         Palette {
@@ -151,15 +226,16 @@ pub fn palette(cx: &App) -> Palette {
             warn_text: hsl(43., 0.96, 0.56),
             danger_text: hsl(0., 0.91, 0.71),
             is_dark,
+            light_mica,
         }
     } else {
         Palette {
-            bg: hsl(210., 0.40, 0.975),
+            bg: hsl(200., 0.44, 0.958),
             panel: hsl(0., 0., 1.0),
-            panel_alt: hsl(210., 0.30, 0.94),
+            panel_alt: hsl(200., 0.34, 0.932),
             fg: theme.foreground,
             muted_fg: theme.muted_foreground,
-            border: hsl(210., 0.25, 0.88),
+            border: hsl(202., 0.26, 0.895),
             accent: interaction_tint(false),
             primary,
             primary_fg,
@@ -173,6 +249,7 @@ pub fn palette(cx: &App) -> Palette {
             warn_text: hsl(26., 0.90, 0.37),
             danger_text: hsl(0., 0.74, 0.42),
             is_dark,
+            light_mica,
         }
     }
 }
@@ -328,6 +405,7 @@ mod tests {
             warn_text: gpui_kit::hsla(0.4, 0., 0., 1.),
             danger_text: gpui_kit::hsla(0.5, 0., 0., 1.),
             is_dark: false,
+            light_mica: false,
         }
     }
 
@@ -382,5 +460,51 @@ mod tests {
         p.panel = hsl(0., 0., 0.15);
         p.is_dark = true;
         assert_eq!(p.solid_backdrop(), p.panel);
+    }
+
+    #[test]
+    fn test_row_surfaces_stay_distinct_from_panel_and_accent() {
+        let mut p = dummy_palette();
+        p.bg = hsl(200., 0.44, 0.958);
+        p.panel = hsl(0., 0., 1.0);
+        p.panel_alt = hsl(200., 0.34, 0.932);
+        p.accent = interaction_tint(false);
+        p.is_dark = false;
+        assert_ne!(p.row_bg(), p.panel);
+        assert_ne!(p.row_bg(), p.accent);
+        assert_ne!(p.row_bg(), p.row_hover());
+        assert_ne!(p.row_hover(), p.accent);
+
+        p.bg = hsl(220., 0.10, 0.09);
+        p.panel = hsl(0., 0., 0.15);
+        p.panel_alt = hsl(0., 0., 0.15);
+        p.accent = interaction_tint(true);
+        p.is_dark = true;
+        p.light_mica = false;
+        assert_eq!(p.row_bg(), p.bg);
+        assert_ne!(p.row_bg(), p.panel);
+        assert_ne!(p.row_bg(), p.row_hover());
+    }
+
+    #[test]
+    fn test_light_mica_surfaces_use_translucent_layers_and_keep_panel_opaque() {
+        let mut p = dummy_palette();
+        p.bg = hsl(200., 0.44, 0.958);
+        p.panel = hsl(0., 0., 1.0);
+        p.border = hsl(202., 0.26, 0.895);
+        p.is_dark = false;
+        p.light_mica = false;
+        assert_eq!(p.content_bg(), p.bg);
+        assert_eq!(p.header_bg(), p.panel);
+        assert_eq!(p.card_bg(), p.panel);
+        assert_eq!(p.row_bg().a, 1.0);
+
+        p.light_mica = true;
+        assert!(p.content_bg().a < 1.0 && p.content_bg().a > 0.5);
+        assert_eq!(p.header_bg(), p.panel);
+        assert_eq!(p.header_bg().a, 1.0);
+        assert!(p.card_bg().a < 1.0 && p.card_bg().a > 0.5);
+        assert!(p.row_bg().a < p.row_hover().a);
+        assert_eq!(p.panel.a, 1.0);
     }
 }

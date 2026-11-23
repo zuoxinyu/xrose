@@ -1025,9 +1025,7 @@ impl AppView {
             .gap_3()
             .p_3()
             .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+            .bg(p.row_bg())
             .child(
                 div()
                     .flex()
@@ -1314,7 +1312,7 @@ impl AppView {
         let menu_target = MenuTarget::Rule(id.clone(), group_id.clone());
         let summary = rule.matchers.summary().replace(',', ", ");
         let mono = cx.theme().mono_font_family.clone();
-        let hover_bg = p.neutral_hover();
+        let hover_bg = p.row_hover();
         let (fg, bg) = match rule.action.kind {
             RouteActionKind::Proxy => (p.primary, p.accent),
             RouteActionKind::Direct => (p.muted_fg, p.panel_alt),
@@ -1344,9 +1342,7 @@ impl AppView {
             .w_full()
             .min_w(px(0.))
             .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+            .bg(p.row_bg())
             .hover(move |s| s.bg(hover_bg))
             .when(allow_reorder, |d| {
                 d.child(route_drag::handle(
@@ -1517,7 +1513,7 @@ impl AppView {
             .gap_1()
             .p_2()
             .rounded_md()
-            .bg(p.bg)
+            .bg(p.row_bg())
             .child(
                 div()
                     .flex()

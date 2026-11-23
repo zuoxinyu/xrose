@@ -501,9 +501,7 @@ impl AppView {
             .w_full()
             .overflow_hidden()
             .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+            .bg(p.row_bg())
             .font_family(mono);
 
         if rows.is_empty() {

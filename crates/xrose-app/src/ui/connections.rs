@@ -1179,7 +1179,7 @@ impl AppView {
         let test = connection.clone();
         let test_target = connection_test_target(&connection);
         let process = connection.process_name();
-        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let row_hover_bg = p.row_hover();
         let hover_group = SharedString::from(format!("conn-row-{id}-{}", connection.start));
         let inspect_tip = self.tr("连接透视", "Inspect connection");
         let test_tip = self.tr("测试目标", "Test target");
@@ -1204,9 +1204,13 @@ impl AppView {
             .gap_2()
             .p_3()
             .rounded_lg()
-            .bg(p.bg)
+            .bg(p.row_bg())
             .border_1()
-            .border_color(if selected { p.primary } else { p.border })
+            .border_color(if selected {
+                p.primary
+            } else {
+                p.border.opacity(0.)
+            })
             .hover(move |s| s.bg(row_hover_bg))
             .child(
                 div()
@@ -1428,7 +1432,7 @@ impl AppView {
                 self.tr("个活动连接", "active connections")
             }
         );
-        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let row_hover_bg = p.row_hover();
         let hover_group = SharedString::from(format!("process-row-{name}"));
         let count_button_style = ButtonCustomVariant::new(cx)
             .foreground(p.muted_fg)
@@ -1442,9 +1446,7 @@ impl AppView {
             .gap_3()
             .p_3()
             .rounded_lg()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+            .bg(p.row_bg())
             .hover(move |s| s.bg(row_hover_bg))
             .child(
                 div()
@@ -1779,7 +1781,7 @@ impl AppView {
         let applied = record.applied_rule.clone();
         let is_applied = applied.is_some();
         let hover_group = SharedString::from(format!("failed-row-{id}"));
-        let row_hover_bg = p.panel_alt.opacity(0.45);
+        let row_hover_bg = p.row_hover();
         let suffixes = self.snapshot.mesh.magic_dns_suffixes();
         let raw_host = record.host().to_owned();
         let host_label = if self.hide_ips {
@@ -1906,10 +1908,14 @@ impl AppView {
             .bg(if checked {
                 p.accent.opacity(0.45)
             } else {
-                p.bg
+                p.row_bg()
             })
             .border_1()
-            .border_color(if checked { p.primary } else { p.border })
+            .border_color(if checked {
+                p.primary
+            } else {
+                p.border.opacity(0.)
+            })
             .when(is_applied && !checked, |d| d.opacity(0.72))
             .hover(move |s| s.bg(row_hover_bg))
             .cursor_pointer()
@@ -2313,9 +2319,7 @@ impl AppView {
                             .min_w(px(220.))
                             .p_3()
                             .rounded_lg()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
+                            .bg(p.row_bg())
                             .child(div().text_xs().text_color(p.primary).child(label))
                             .child(div().mt_2().text_sm().text_color(p.fg).child(value))
                     })),

@@ -21,7 +21,10 @@ pub(super) struct RouteDrag {
 }
 impl Render for RouteDrag {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        card(&palette(cx))
+        let p = palette(cx);
+        card(&p)
+            .bg(p.panel)
+            .border_color(p.primary)
             .max_w(px(theme::FORM_FIELD_WIDTH))
             .text_sm()
             .child(self.name.clone())

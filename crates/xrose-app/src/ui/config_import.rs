@@ -410,9 +410,7 @@ impl AppView {
                     .gap_2()
                     .p_4()
                     .rounded_md()
-                    .bg(p.bg)
-                    .border_1()
-                    .border_color(p.border)
+                    .bg(p.row_bg())
                     .child(
                         div()
                             .text_sm()
@@ -519,9 +517,7 @@ impl AppView {
                 .gap_2()
                 .p_3()
                 .rounded_md()
-                .bg(p.bg)
-                .border_1()
-                .border_color(p.border)
+                .bg(p.row_bg())
                 .child(source_meta)
                 .child(
                     Button::new("cfg-change-file")
@@ -659,9 +655,7 @@ impl AppView {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(p.bg)
-                    .border_1()
-                    .border_color(p.border)
+                    .bg(p.row_bg())
                     .when(!available, |d| d.opacity(DISABLED_OPACITY))
                     .child(
                         toggle(

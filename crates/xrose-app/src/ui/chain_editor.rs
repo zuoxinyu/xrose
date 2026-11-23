@@ -190,12 +190,12 @@ impl AppView {
                     .gap_2()
                     .p_2()
                     .rounded_md()
-                    .bg(p.bg)
+                    .bg(p.row_bg())
                     .border_1()
                     .border_color(if is_warn {
                         p.warn_text.opacity(0.6)
                     } else {
-                        p.border
+                        p.border.opacity(0.)
                     })
                     .child(
                         div()

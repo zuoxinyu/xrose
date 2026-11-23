@@ -1391,8 +1391,8 @@ impl AppView {
             .flex()
             .items_center()
             .border_b_1()
-            .border_color(p.border)
-            .bg(if p.is_dark { p.bg } else { p.panel })
+            .border_color(p.hairline_border())
+            .bg(p.header_bg())
             .child(drag_region("header-drag-left"))
             .child(
                 div()
@@ -1403,9 +1403,9 @@ impl AppView {
                     .h(px(theme::STATUS_HEIGHT))
                     .rounded_full()
                     .overflow_hidden()
-                    .bg(p.panel)
+                    .bg(p.header_pill_bg())
                     .border_1()
-                    .border_color(p.border)
+                    .border_color(p.control_border())
                     .child(
                         self.node_selector_popover(
                             Button::new("header-node-selector")
@@ -1500,9 +1500,21 @@ impl AppView {
                             cx,
                         ),
                     )
-                    .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(p.control_border()),
+                    )
                     .child(self.traffic_mode_popover(cx))
-                    .child(div().w(px(1.)).h_full().flex_shrink_0().bg(p.border))
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .bg(p.control_border()),
+                    )
                     .child(
                         Button::new("toggle-core")
                             .h_full()
@@ -1947,7 +1959,7 @@ impl Render for AppView {
                     .flex_1()
                     .h_full()
                     .min_w(px(0.))
-                    .bg(p.bg)
+                    .bg(p.content_bg())
                     .overflow_hidden()
                     .child(chrome(
                         &self.header_view,

@@ -260,9 +260,7 @@ impl AppView {
                             .gap_3()
                             .p_3()
                             .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
+                            .bg(p.row_bg())
                             .child(
                                 div()
                                     .flex()
@@ -414,7 +412,7 @@ impl AppView {
                     let action_tag = tag.clone();
                     let address = server.display_address();
                     let rules = dns_rules_summary(&server.domains, lang);
-                    let hover_bg = p.neutral_hover();
+                    let hover_bg = p.row_hover();
                     let hover_group = SharedString::from(format!("dns-group-{tag}"));
                     div()
                         .id(SharedString::from(format!("dns-row-{tag}")))
@@ -426,9 +424,7 @@ impl AppView {
                         .px_3()
                         .py_2()
                         .rounded_lg()
-                        .border_1()
-                        .border_color(p.border)
-                        .bg(p.bg)
+                        .bg(p.row_bg())
                         .hover(move |s| s.bg(hover_bg))
                         .child(
                             div()
@@ -575,9 +571,7 @@ impl AppView {
                             .gap_3()
                             .p_3()
                             .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
+                            .bg(p.row_bg())
                             .child(
                                 div()
                                     .flex()
@@ -699,7 +693,7 @@ impl AppView {
                         .gap_3()
                         .p_2()
                         .rounded_md()
-                        .bg(p.bg)
+                        .bg(p.row_bg())
                         .child(
                             div()
                                 .flex_1()

@@ -46,9 +46,20 @@ pub fn card(p: &Palette) -> Div {
         .gap_3()
         .p_4()
         .rounded_lg()
-        .bg(p.panel)
+        .bg(p.card_bg())
         .border_1()
-        .border_color(p.border)
+        .border_color(p.border.opacity(0.))
+}
+
+/// Borderless recessed section card for nesting inside `panel`-colored surfaces such as dialogs.
+pub fn inset_card(p: &Palette) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .p_4()
+        .rounded_lg()
+        .bg(p.row_bg())
 }
 
 pub fn section_title(
@@ -151,7 +162,7 @@ pub(super) fn radio_row_surface(
     enabled: bool,
     p: &Palette,
 ) -> Stateful<Div> {
-    let accent = p.accent;
+    let hover_bg = if checked { p.accent } else { p.row_hover() };
     div()
         .id(id)
         .relative()
@@ -160,11 +171,13 @@ pub(super) fn radio_row_surface(
         .gap_3()
         .p_3()
         .rounded_md()
-        .bg(if checked { p.accent } else { p.bg })
+        .bg(if checked { p.accent } else { p.row_bg() })
         .border_1()
         .border_color(p.border.opacity(0.))
         .when(checked, |row| row.child(selection_bar(p.primary)))
-        .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(accent)))
+        .when(enabled, |d| {
+            d.cursor_pointer().hover(move |s| s.bg(hover_bg))
+        })
 }
 
 pub(super) fn row_radio(
@@ -619,9 +632,9 @@ fn sliding_track_shell(
         .gap_1()
         .p_0p5()
         .rounded_md()
-        .bg(p.bg)
+        .bg(p.row_bg())
         .border_1()
-        .border_color(p.border)
+        .border_color(p.control_border())
         .track_scroll(&layout)
         .child(sliding_indicator_canvas_at_child(
             id,
@@ -880,8 +893,8 @@ impl gpui_kit::RenderOnce for ChoiceGroup {
             .p_0p5()
             .rounded_md()
             .border_1()
-            .border_color(p.border)
-            .bg(p.bg)
+            .border_color(p.control_border())
+            .bg(p.row_bg())
             .opacity(if disabled { DISABLED_OPACITY } else { 1. })
             .track_scroll(&layout)
             .when_some(self.scroll.as_ref(), |group, (_, height)| {
@@ -1002,6 +1015,7 @@ mod tests {
             warn_text: hsl(40., 0.9, 0.4),
             danger_text: hsl(0., 0.8, 0.5),
             is_dark,
+            light_mica: false,
         }
     }
 

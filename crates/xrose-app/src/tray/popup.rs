@@ -1222,8 +1222,6 @@ impl Render for PopupView {
                             .py_1p5()
                             .rounded_md()
                             .bg(row_bg)
-                            .border_1()
-                            .border_color(p.border)
                             .child(
                                 div()
                                     .flex_1()

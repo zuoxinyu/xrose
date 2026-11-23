@@ -45,11 +45,13 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 
 ```css
 :root {
-  /* surface —— Palette.bg / panel / panel_alt / border */
-  --bg-app:    hsl(210 40% 97.5%);  /* #f6f9fb 页面底 */
-  --surface:   #ffffff;             /* 卡片、标题栏（浅色） */
-  --surface-2: hsl(210 30% 94%);    /* #ebf0f4 Segmented 轨道、hover 底 */
-  --border:    hsl(210 25% 88%);    /* #d9e0e8 1px 描边 */
+  /* surface —— Palette.bg / panel / panel_alt / border / row_bg() / row_hover() */
+  --bg-app:    hsl(200 44% 95.8%);  /* #eff6fa 页面底（清透冷冰雾） */
+  --surface:   #ffffff;             /* 卡片、标题栏（浅色，无边框） */
+  --surface-2: hsl(200 34% 93.2%);  /* #e8f1f5 中性徽标、进度轨道 */
+  --row-bg:    hsl(200 48% 96.5%);  /* #f2f8fb 卡片内无边框列表行 / 嵌套卡片 */
+  --row-hover: hsl(196 56% 94.2%);  /* #e8f5fa 列表行 hover 底 */
+  --border:    hsl(202 26% 89.5%);  /* #dde7ed 1px 结构分割线与控件描边 */
   --text:      #0a0a0a;             /* neutral-950（gpui-kit foreground） */
   --text-2:    hsl(0 0% 42%);       /* #6b6b6b muted_foreground（覆盖值） */
   --input-border: hsl(0 0% 58%);    /* #949494 输入框描边（覆盖值） */
@@ -166,7 +168,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 | 卡片圆角 | 8 | `card()`：`rounded_lg` = `theme.radius_lg`（8） |
 | 控件圆角 | 6 | `rounded_md` = `theme.radius`（6）；`rounded_sm` = 3；`rounded_full` 用于徽标 / 状态点 |
 | 分段选择器内框 | 3 | `ChoiceGroup` 外框圆角 6，减去 1px 描边与 2px 内边距；内外圆弧同心 |
-| 卡片样式 | 1px `--border`，无阴影 | `card()` |
+| 卡片样式 | 无边框（`card()` 与列表项 `row_bg()` 均以浅暗色阶区分，无阴影；仅警告 / 错误 / 拖拽高亮显示描边） | `card()` / `inset_card()` |
 | 按钮高度 | 32（gpui-kit `Medium` / `Large`） | `Small` = 24；`XSmall` = 20；应用内按钮几乎都用 `.compact()` |
 | 工具按钮 | 至少 28 | `more_button` / `danger_icon_button` 28×28 |
 | 输入框高度 | 32 | 设置页行 `h(px(32))` |
@@ -185,7 +187,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 
 ### 3.4 层级与动效
 
-- 卡片：1px `--border`，**无阴影**。浮层（菜单、popover、toast）才用阴影。
+- 卡片与列表行：浅色与暗色模式均采用无边框色阶分层（`--bg-app` → `--surface` → `--row-bg`），**无阴影**；弹窗内子区块使用 `inset_card()`（`--row-bg`）。仅焦点环、拖拽落点及告警状态保留 1px 语义描边。浮层（菜单、popover、toast）才用阴影。
 - 动效 120–180ms `ease-out`；侧栏宽度 180ms。
 - 必须尊重 `prefers-reduced-motion`。
 - 超过 300ms 的等待要有可见反馈（spinner + 文字）。
@@ -207,7 +209,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 
 ### 4.1 侧栏
 
-- 展开宽 220，全高；启用模糊窗口材质时侧栏使用半透明模糊材质（macOS vibrancy、Windows Mica / Acrylic、Linux Wayland 毛玻璃），内容区用实色。
+- 展开宽 220，全高；启用模糊窗口材质时侧栏使用半透明模糊材质（macOS vibrancy、Windows Mica / Acrylic、Linux Wayland 毛玻璃）。Windows 浅色模式启用 Mica / Mica Alt 时，内容区与页面卡片叠加轻度半透明白雾层（`content_bg` / `card_bg`）使桌面色调柔和透出，列表项采用极轻冷青透色（`row_bg`）；顶部标题栏（遮挡 DWM 原生标题栏按钮）、弹窗、菜单与 Toast 保持实色 `panel`。暗色模式及其他模糊后端内容区保持实色。
 - 项高 40，图标 18px，**统一图标集（gpui-kit `IconName`）**；选中 = `--accent-soft` 底 + accent 图标与文字。
 - 导航保持左对齐，不显示分割线；侧栏与内容区也不增加描边。
 - 导航顺序为节点、组网、订阅、路由、DNS、连接、诊断、日志、设置；数字快捷键遵循相同顺序。「诊断」的英文为 Diagnostics。

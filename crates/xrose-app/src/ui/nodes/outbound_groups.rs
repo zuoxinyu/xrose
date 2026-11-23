@@ -240,9 +240,7 @@ impl AppView {
             div()
                 .p_2()
                 .rounded_md()
-                .bg(p.bg)
-                .border_1()
-                .border_color(p.border)
+                .bg(p.row_bg())
                 .child(if nodes.is_empty() {
                     empty_hint(&p, self.tr("没有匹配的节点", "No matching nodes"))
                         .into_any_element()
@@ -430,9 +428,7 @@ impl AppView {
                             .gap_1()
                             .p_2()
                             .rounded_md()
-                            .bg(p.bg)
-                            .border_1()
-                            .border_color(p.border)
+                            .bg(p.row_bg())
                             .children(this.snapshot.model.groups.iter().map(|group| {
                                 let id = group.id.clone();
                                 let editor = editor.clone();

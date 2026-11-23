@@ -1029,7 +1029,7 @@ impl AppView {
                 cx.entity().downgrade(),
                 MenuTarget::MeshPeer(profile_id.to_owned(), peer.id.clone()),
             );
-            let hover_bg = p.panel_alt.opacity(0.45);
+            let hover_bg = p.row_hover();
             members = members.child(
                 div()
                     .id(SharedString::from(peer_id.clone()))
@@ -1038,9 +1038,7 @@ impl AppView {
                     .gap_3()
                     .p_3()
                     .rounded_lg()
-                    .bg(p.bg)
-                    .border_1()
-                    .border_color(p.border)
+                    .bg(p.row_bg())
                     .hover(move |d| d.bg(hover_bg))
                     .child(dot(if peer.online { p.success } else { p.muted_fg }))
                     .child(

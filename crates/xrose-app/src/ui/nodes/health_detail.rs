@@ -22,7 +22,7 @@ use crate::ui::theme::{
     HEALTH_DETAIL_LABEL_WIDTH, HEALTH_HOURLY_BAR_HEIGHT, Palette, SEMANTIC_ALPHA, STATS_BAR_HEIGHT,
     health_grade_colors, latency_color_ms, palette,
 };
-use crate::ui::widgets::{card, pill};
+use crate::ui::widgets::{inset_card, pill};
 use crate::ui::{AppView, tr};
 
 pub(in crate::ui) fn open_node_health_dialog(
@@ -164,7 +164,7 @@ fn health_detail_body(
     let Some(view) = view else {
         if http_busy || download_busy || reach_busy {
             return col.child(
-                card(p).child(
+                inset_card(p).child(
                     div()
                         .flex()
                         .items_center()
@@ -181,7 +181,7 @@ fn health_detail_body(
             );
         }
         return col.child(
-            card(p).child(div().text_sm().text_color(p.muted_fg).child(tr(
+            inset_card(p).child(div().text_sm().text_color(p.muted_fg).child(tr(
                 lang,
                 "暂无健康样本。可点击下方按钮执行 HTTP 测速、吞吐测速或可达性检测。",
                 "No health samples yet. Run an HTTP, throughput, or reachability check below.",
@@ -287,7 +287,7 @@ fn overview_card(
         None => tr(lang, "尚未完成评分", "Not yet scored"),
     };
 
-    card(p)
+    inset_card(p)
         .flex()
         .items_center()
         .justify_between()
@@ -324,16 +324,13 @@ fn dimensions_card(
     cx: &App,
 ) -> Div {
     let (http_busy, download_busy, reach_busy) = probe_busy;
-    let mut box_div =
-        card(p)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(div().text_xs().text_color(p.muted_fg).child(tr(
-                lang,
-                "五维健康指标",
-                "Five-dimension breakdown",
-            )));
+    let mut box_div = inset_card(p).flex().flex_col().gap_2().child(
+        div().text_xs().text_color(p.muted_fg).child(tr(
+            lang,
+            "五维健康指标",
+            "Five-dimension breakdown",
+        )),
+    );
     for dim in &eval.dims {
         let label = match dim.dim {
             HealthDim::Availability => tr(lang, "可用性 A", "Avail A"),
@@ -489,16 +486,13 @@ fn deductions_and_peak_card(
     lang: Language,
     p: &Palette,
 ) -> Div {
-    let mut box_div =
-        card(p)
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().text_xs().text_color(p.muted_fg).child(tr(
-                lang,
-                "扣分说明与时段特征",
-                "Deductions & peak alerts",
-            )));
+    let mut box_div = inset_card(p).flex().flex_col().gap_1().child(
+        div().text_xs().text_color(p.muted_fg).child(tr(
+            lang,
+            "扣分说明与时段特征",
+            "Deductions & peak alerts",
+        )),
+    );
     for d in &eval.deductions {
         let msg = match lang {
             Language::Zh => &d.zh,
@@ -605,7 +599,12 @@ fn reachability_card(
         )),
     };
 
-    card(p).flex().flex_col().gap_2().child(header).child(grid)
+    inset_card(p)
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(header)
+        .child(grid)
 }
 
 fn reachability_group<'a>(
@@ -712,7 +711,7 @@ fn hourly_card(
         .child("18:00")
         .child("23:00");
 
-    card(p)
+    inset_card(p)
         .flex()
         .flex_col()
         .gap_2()

@@ -327,9 +327,7 @@ impl AppView {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(p.bg)
-                    .border_1()
-                    .border_color(p.border)
+                    .bg(p.row_bg())
                     .child(
                         div()
                             .text_xs()
@@ -504,9 +502,7 @@ impl AppView {
                 .px_3()
                 .py_2()
                 .rounded_lg()
-                .bg(p.bg)
-                .border_1()
-                .border_color(p.border)
+                .bg(p.row_bg())
                 .child(
                     div()
                         .flex()
@@ -705,7 +701,7 @@ impl AppView {
         let peak = view.rows.iter().map(|r| r.bytes.total()).max().unwrap_or(0);
         let share_denom = self.share_denominator();
         let mono = cx.theme().mono_font_family.clone();
-        let hover_bg = p.panel_alt.opacity(0.45);
+        let hover_bg = p.row_hover();
 
         let mut list = div().flex().flex_col().gap_2().w_full();
         for (index, row) in rows.iter().enumerate() {
@@ -731,8 +727,8 @@ impl AppView {
                         d.border_color(p.primary).bg(p.accent.opacity(0.4))
                     })
                     .when(!focused, |d| {
-                        d.border_color(p.border)
-                            .bg(p.bg)
+                        d.border_color(p.border.opacity(0.))
+                            .bg(p.row_bg())
                             .hover(move |s| s.bg(hover_bg))
                     })
                     .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
@@ -895,7 +891,7 @@ impl AppView {
         let view = &self.snapshot.traffic_statistics;
         let share_denom = self.share_denominator();
         let mono = cx.theme().mono_font_family.clone();
-        let hover_bg = p.panel_alt.opacity(0.45);
+        let hover_bg = p.row_hover();
         let mut table = div().flex().flex_col().gap_1().w_full().child(
             div()
                 .flex()

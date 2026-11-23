@@ -922,9 +922,10 @@ impl AppView {
                                     .px_3()
                                     .py_2()
                                     .rounded_md()
-                                    .bg(p.panel)
-                                    .border_1()
-                                    .border_color(p.border)
+                                    .hover({
+                                        let hover_bg = p.row_bg();
+                                        move |s| s.bg(hover_bg)
+                                    })
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if this.collapsed_subs.contains(&key_for_click) {
@@ -1272,9 +1273,10 @@ impl AppView {
                                         .px_3()
                                         .py_2()
                                         .rounded_md()
-                                        .bg(p.panel)
-                                        .border_1()
-                                        .border_color(p.border)
+                                        .hover({
+                                            let hover_bg = p.row_bg();
+                                            move |s| s.bg(hover_bg)
+                                        })
                                         .cursor_pointer()
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if this.collapsed_subs.contains(&key_for_click) {
@@ -2519,7 +2521,7 @@ fn render_node_row(
     let drop_target = node.id.clone();
     let drag_primary = p.primary;
     let drag_accent = p.accent;
-    let hover_bg = p.panel_alt.opacity(0.5);
+    let hover_bg = p.row_hover();
     let hover_group = SharedString::from(format!("node-group-{row_key}"));
 
     let location_label = location.filter(|_| !hide_ips).map(|entry| {
@@ -2551,12 +2553,8 @@ fn render_node_row(
         .flex_col()
         .rounded_lg()
         .border_1()
-        .border_color(if selected {
-            p.border.opacity(0.)
-        } else {
-            p.border
-        })
-        .bg(if selected { p.accent } else { p.bg })
+        .border_color(p.border.opacity(0.))
+        .bg(if selected { p.accent } else { p.row_bg() })
         .overflow_hidden()
         .when(!selected, |d| d.hover(move |s| s.bg(hover_bg)))
         .when(drag_enabled, |d| {

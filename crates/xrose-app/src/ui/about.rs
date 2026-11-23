@@ -381,9 +381,7 @@ impl AppView {
             .gap_3()
             .p_3()
             .rounded_md()
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.border)
+            .bg(p.row_bg())
             .child(
                 div()
                     .flex()
