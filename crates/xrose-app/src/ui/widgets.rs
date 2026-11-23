@@ -1004,7 +1004,7 @@ mod tests {
             warn_text: hsl(40., 0.9, 0.4),
             danger_text: hsl(0., 0.8, 0.5),
             is_dark,
-            light_mica: false,
+            mica: false,
         }
     }
 

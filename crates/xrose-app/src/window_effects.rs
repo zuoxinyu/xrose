@@ -276,6 +276,10 @@ mod windows {
     };
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_SYSMENU,
+    };
 
     #[repr(C)]
     struct AccentPolicy {
@@ -318,6 +322,42 @@ mod windows {
         }
     }
 
+    /// Toggle DWM's native non-client caption buttons on captioned top-level windows.
+    ///
+    /// With `DwmExtendFrameIntoClientArea(-1)` and a translucent titlebar, DWM still
+    /// composites native minimize/maximize/close glyphs whenever `WS_SYSMENU` is set,
+    /// causing them to overlap Xrose's custom `WindowControls`. Clearing `WS_SYSMENU`
+    /// while keeping `WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
+    /// removes the DWM buttons (`DWMWA_CAPTION_BUTTON_BOUNDS` width becomes 0) while
+    /// preserving borders, rounded corners, maximized work-area bounds, double-click
+    /// maximize, `Alt+F4`, and `SC_*` commands. Popup and fullscreen windows lack
+    /// `WS_CAPTION` and are left untouched.
+    unsafe fn set_native_caption_buttons(hwnd: HWND, visible: bool) {
+        unsafe {
+            let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+            if (style & WS_CAPTION) != WS_CAPTION {
+                return;
+            }
+            let desired = if visible {
+                style | WS_SYSMENU
+            } else {
+                style & !WS_SYSMENU
+            };
+            if desired != style {
+                SetWindowLongW(hwnd, GWL_STYLE, desired as i32);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                );
+            }
+        }
+    }
+
     pub fn apply(window: &mut Window, appearance: WindowBackgroundAppearance, dark: bool) -> bool {
         let Ok(handle) = HasWindowHandle::window_handle(window) else {
             return false;
@@ -346,6 +386,8 @@ mod windows {
             DwmSetWindowAttribute(hwnd, 20, &dark as *const _ as _, 4);
             let round = 2_i32;
             DwmSetWindowAttribute(hwnd, 33, &round as *const _ as _, 4);
+            let translucent_header = matches!(material, 2 | 4);
+            set_native_caption_buttons(hwnd, !translucent_header);
             let margin = if material != 1 { -1 } else { 0 };
             let margins = MARGINS {
                 cxLeftWidth: margin,
@@ -371,6 +413,14 @@ mod windows {
                     || actual != material)
             {
                 DwmSetWindowAttribute(hwnd, 38, &none as *const _ as _, 4);
+                let zero_margins = MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 0,
+                    cyBottomHeight: 0,
+                };
+                DwmExtendFrameIntoClientArea(hwnd, &zero_margins);
+                set_native_caption_buttons(hwnd, true);
                 window.set_background_appearance(WindowBackgroundAppearance::Opaque);
                 clear_accent(hwnd);
                 return false;

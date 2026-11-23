@@ -86,13 +86,21 @@ impl RenderOnce for WindowControls {
             .flex_shrink_0()
             .children(controls.into_iter().map(|control| {
                 let is_close = matches!(control, Control::Close);
-                let hover_bg = if is_close { p.danger } else { p.panel_alt };
+                let hover_bg = if is_close {
+                    p.danger
+                } else {
+                    p.neutral_hover()
+                };
                 let hover_fg = if is_close {
                     gpui_kit::hsla(0., 0., 1., 1.)
                 } else {
                     p.fg
                 };
-                let pressed_bg = if is_close { p.danger } else { p.accent };
+                let pressed_bg = if is_close {
+                    p.danger
+                } else {
+                    p.neutral_active()
+                };
 
                 div()
                     .id(control.id())

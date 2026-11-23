@@ -108,7 +108,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 }
 ```
 
-- 页面底色 `--bg-app` 位于内容列；标题栏浅色用 `--surface`，深色用 `--bg-app`。
+- 页面底色 `--bg-app` 位于内容列；标题栏浅色用 `--surface`，深色用 `--bg-app`（Windows 启用 Mica / Mica Alt 时改为轻微半透明罩层）。
 - 页面主按钮使用 `button_primary`：浅色为正文近黑色配白字，暗色为浅色配深字；`primary` 仍为蓝绿色交互色。启动按钮单独使用交互色。
 - 当前没有 `--*-soft` 语义浅底 token；徽标浅底由语义色 + alpha 叠加（如 `danger.opacity(.14)`）得到。
 - 关闭态 Switch 轨道使用 `switch_off()`：`hsl(0 0% 50%)`，两种主题共用中性灰。
@@ -209,7 +209,7 @@ GPUI 间距为 Tailwind 刻度：`gap_1`=4、`gap_2`=8、`gap_3`=12、`gap_4`=16
 
 ### 4.1 侧栏
 
-- 展开宽 220，全高；启用模糊窗口材质时侧栏使用半透明模糊材质（macOS vibrancy、Windows Mica / Acrylic、Linux Wayland 毛玻璃）。Windows 浅色模式启用 Mica / Mica Alt 时，内容区与页面卡片叠加轻度半透明白雾层（`content_bg` / `card_bg`）使桌面色调柔和透出，列表项采用极轻冷青透色（`row_bg`）；顶部标题栏（遮挡 DWM 原生标题栏按钮）、弹窗、菜单与 Toast 保持实色 `panel`。暗色模式及其他模糊后端内容区保持实色。
+- 展开宽 220，全高；启用模糊窗口材质时侧栏使用半透明模糊材质（macOS vibrancy、Windows Mica / Acrylic、Linux Wayland 毛玻璃）。Windows 启用 Mica / Mica Alt 时，顶部标题栏在浅色与暗色模式下均叠加轻度半透明罩层（`header_bg`，并在 Windows 原生窗口样式中关闭 `WS_SYSMENU` 以隐藏 DWM 原生标题栏按钮、避免与自绘 `WindowControls` 重叠）；浅色模式下内容区与页面卡片叠加轻度半透明白雾层（`content_bg` / `card_bg`）使桌面色调柔和透出，列表项采用极轻冷青透色（`row_bg`）；标题栏状态胶囊、弹窗、菜单与 Toast 保持实色 `panel`。暗色模式及其他模糊后端内容区保持实色。
 - 项高 40，图标 18px，**统一图标集（gpui-kit `IconName`）**；选中 = `--accent-soft` 底 + accent 图标与文字。
 - 导航保持左对齐，不显示分割线；侧栏与内容区也不增加描边。
 - 导航顺序为节点、组网、订阅、路由、DNS、连接、诊断、日志、设置；数字快捷键遵循相同顺序。「诊断」的英文为 Diagnostics。

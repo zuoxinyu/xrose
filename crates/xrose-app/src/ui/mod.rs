@@ -1965,7 +1965,6 @@ impl Render for AppView {
                     .flex_1()
                     .h_full()
                     .min_w(px(0.))
-                    .bg(p.content_bg())
                     .overflow_hidden()
                     .child(chrome(
                         &self.header_view,
@@ -1974,14 +1973,24 @@ impl Render for AppView {
                             .flex_shrink_0()
                             .w_full(),
                     ))
-                    .when(
-                        self.snapshot.config_dirty
-                            && !(self.snapshot.settings.hot_reload
-                                && (self.snapshot.auto_reload_pending
-                                    || self.snapshot.busy.iter().any(|key| key == "core"))),
-                        |d| d.child(self.config_dirty_banner(cx)),
-                    )
-                    .child(self.content_view.clone()),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .min_w(px(0.))
+                            .bg(p.content_bg())
+                            .overflow_hidden()
+                            .when(
+                                self.snapshot.config_dirty
+                                    && !(self.snapshot.settings.hot_reload
+                                        && (self.snapshot.auto_reload_pending
+                                            || self.snapshot.busy.iter().any(|key| key == "core"))),
+                                |d| d.child(self.config_dirty_banner(cx)),
+                            )
+                            .child(self.content_view.clone()),
+                    ),
             )
             .child(self.toasts(cx))
     }
