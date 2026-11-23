@@ -476,9 +476,6 @@ impl AppView {
                                 .items_center()
                                 .justify_end()
                                 .gap_2()
-                                .when(show_toolbar, |d| {
-                                    d.children(self.nodes_policy_popover(core_busy, cx))
-                                })
                                 .child(
                                     more_button(
                                         "toolbar-more",
@@ -489,6 +486,9 @@ impl AppView {
                                         menus::builder(cx.entity().downgrade(), MenuTarget::Nodes),
                                     ),
                                 )
+                                .when(show_toolbar, |d| {
+                                    d.children(self.nodes_policy_popover(core_busy, cx))
+                                })
                                 .child(
                                     Button::new("toggle-add-drawer")
                                         .compact()

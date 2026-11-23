@@ -4,7 +4,7 @@
 
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Sizable};
@@ -469,12 +469,6 @@ pub(super) fn render_node_detail_panel(
     let target_dl = props.target.clone();
     let target_reach = props.target.clone();
     let disabled = props.any_probe_busy || props.probe_disabled || props.offline_exit;
-    let reach_btn_style = ButtonCustomVariant::new(cx)
-        .color(p.accent)
-        .foreground(p.primary)
-        .hover(p.primary.opacity(SEMANTIC_ALPHA + 0.06))
-        .active(p.primary.opacity(SEMANTIC_ALPHA + 0.12))
-        .shadow(false);
 
     detail = detail.child(
         div()
@@ -528,7 +522,6 @@ pub(super) fn render_node_detail_panel(
                         Button::new(SharedString::from(format!("detail-reach-{row_key}")))
                             .compact()
                             .h(px(28.))
-                            .custom(reach_btn_style)
                             .icon(IconName::HeartPulse)
                             .label(tr(lang, "检测可达性", "Check reachability"))
                             .loading(reach_busy)

@@ -96,6 +96,28 @@ pub fn window_background() -> WindowBackgroundAppearance {
     }
 }
 
+/// Normal, hover, and active backgrounds for bordered default/secondary buttons.
+/// Normal fill stays fully transparent so buttons inherit their host card, tinted
+/// selection row, or translucent window surface.
+pub(crate) fn secondary_button_surfaces(
+    dark: bool,
+) -> (gpui_kit::Hsla, gpui_kit::Hsla, gpui_kit::Hsla) {
+    let clear = gpui_kit::hsla(0., 0., 0., 0.);
+    if dark {
+        (
+            clear,
+            gpui_kit::hsla(0., 0., 1., 0.08),
+            gpui_kit::hsla(0., 0., 1., 0.14),
+        )
+    } else {
+        (
+            clear,
+            gpui_kit::hsla(0., 0., 0., 0.05),
+            gpui_kit::hsla(0., 0., 0., 0.09),
+        )
+    }
+}
+
 /// Root surfaces stay clear; each view supplies its own opaque fallback fill.
 /// Also configures high-contrast input borders and readable muted foreground
 /// across both dark and light modes.
@@ -133,6 +155,19 @@ pub fn make_surface_translucent(cx: &mut App) {
         theme.colors.primary_active = active;
         theme.tokens.primary_active = active.into();
         // Button tokens are independent from the interaction tokens in GPUI Kit.
+        let (btn_bg, btn_hover, btn_active) = secondary_button_surfaces(dark);
+        theme.colors.button = btn_bg;
+        theme.tokens.button = btn_bg.into();
+        theme.colors.button_hover = btn_hover;
+        theme.tokens.button_hover = btn_hover.into();
+        theme.colors.button_active = btn_active;
+        theme.tokens.button_active = btn_active.into();
+        theme.colors.button_secondary = btn_bg;
+        theme.tokens.button_secondary = btn_bg.into();
+        theme.colors.button_secondary_hover = btn_hover;
+        theme.tokens.button_secondary_hover = btn_hover.into();
+        theme.colors.button_secondary_active = btn_active;
+        theme.tokens.button_secondary_active = btn_active.into();
         theme.colors.button_primary = theme.colors.foreground;
         theme.tokens.button_primary = theme.colors.button_primary.into();
         theme.colors.button_primary_foreground = if dark {
@@ -445,5 +480,14 @@ mod tests {
         assert_eq!(resolve_style(Auto, false, false, false, false), Opaque);
         assert_eq!(resolve_style(Opaque, true, false, true, true), Opaque);
         assert_eq!(resolve_style(Auto, true, false, false, false), Opaque);
+    }
+
+    #[test]
+    fn secondary_buttons_use_transparent_normal_fill() {
+        for dark in [false, true] {
+            let (normal, hover, active) = secondary_button_surfaces(dark);
+            assert_eq!(normal.a, 0.0);
+            assert!(hover.a > 0.0 && hover.a < active.a);
+        }
     }
 }

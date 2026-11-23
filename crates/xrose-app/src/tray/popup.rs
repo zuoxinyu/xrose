@@ -1487,6 +1487,7 @@ impl Render for PopupView {
                                     .xsmall()
                                     .w_full()
                                     .h_full()
+                                    .bg(cx.theme().transparent)
                                     .menu_width(px(160.))
                                     .menu_max_h(px(190.))
                                     .disabled(d.busy_core || d.direct || d.mesh)
