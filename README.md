@@ -35,7 +35,7 @@
 
 > **Xrose** 是 [Project Xristina](docs/MILESTONE.M1.PROJECT-XRISTINA.md) 旗下的开源跨平台桌面客户端，正式读作 **k'rose**（`/k'ɹəʊz/`），口语也可读作 **ex-rose**（`/ɛks-ɹəʊz/`）。
 
-![Xrose 节点页面](docs/screenshots/nodes.png)
+![Xrose 节点页面](docs/screenshots/nodes.webp)
 
 ## 核心特性
 
@@ -93,48 +93,48 @@ Xrose 提供三种独立工作模式，切换时完整保留原有节点、出�
 
 | 五维健康详情与可达性检测 | 六阶段可视化链路诊断 |
 | :---: | :---: |
-| ![节点健康详情](docs/screenshots/node-health.png) | ![链路诊断](docs/screenshots/diagnostics.png) |
+| ![节点健康详情](docs/screenshots/node-health.webp) | ![链路诊断](docs/screenshots/diagnostics.webp) |
 
 | EasyTier / Tailscale 异地组网 | 实时连接、活跃进程与流量统计 |
 | :---: | :---: |
-| ![异地组网](docs/screenshots/mesh.png) | ![实时连接](docs/screenshots/connections.png) |
+| ![异地组网](docs/screenshots/mesh.webp) | ![实时连接](docs/screenshots/connections.webp) |
 
 <details>
 <summary>展开查看其余页面截图（直连、订阅、路由、DNS、日志、设置、托盘浮窗、关于）</summary>
 
 **本机直连**
 
-![本机直连](docs/screenshots/direct.png)
+![本机直连](docs/screenshots/direct.webp)
 
 **订阅**
 
-![订阅](docs/screenshots/subscriptions.png)
+![订阅](docs/screenshots/subscriptions.webp)
 
 **路由**
 
-![路由](docs/screenshots/routing.png)
+![路由](docs/screenshots/routing.webp)
 
 **DNS**
 
-![DNS](docs/screenshots/dns.png)
+![DNS](docs/screenshots/dns.webp)
 
 **日志**
 
-![日志](docs/screenshots/logs.png)
+![日志](docs/screenshots/logs.webp)
 
 **设置**
 
-![设置](docs/screenshots/settings.png)
+![设置](docs/screenshots/settings.webp)
 
 **托盘浮窗**
 
 <p align="center">
-  <img src="docs/screenshots/tray.png" width="320" alt="托盘浮窗" />
+  <img src="docs/screenshots/tray.webp" width="320" alt="托盘浮窗" />
 </p>
 
 **关于**
 
-![关于](docs/screenshots/about.png)
+![关于](docs/screenshots/about.webp)
 
 </details>
 

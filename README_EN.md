@@ -35,7 +35,7 @@
 
 > **Xrose** is an open-source cross-platform desktop client from [Project Xristina](docs/MILESTONE.M1.PROJECT-XRISTINA.md). It is officially pronounced **k'rose** (`/k'ɹəʊz/`), and can also be pronounced **ex-rose** (`/ɛks-ɹəʊz/`).
 
-![Xrose Nodes View](docs/screenshots/nodes.png)
+![Xrose Nodes View](docs/screenshots/nodes.webp)
 
 ## Highlights
 
@@ -93,48 +93,48 @@ Xrose provides three independent work modes and preserves your existing nodes, o
 
 | Five-Dimension Node Health & Reachability | 6-Stage Visual Link Diagnostics |
 | :---: | :---: |
-| ![Node Health Details](docs/screenshots/node-health.png) | ![Link Diagnostics](docs/screenshots/diagnostics.png) |
+| ![Node Health Details](docs/screenshots/node-health.webp) | ![Link Diagnostics](docs/screenshots/diagnostics.webp) |
 
 | EasyTier & Tailscale Mesh Networking | Live Connections, Processes & Traffic Stats |
 | :---: | :---: |
-| ![Mesh Networks](docs/screenshots/mesh.png) | ![Live Connections](docs/screenshots/connections.png) |
+| ![Mesh Networks](docs/screenshots/mesh.webp) | ![Live Connections](docs/screenshots/connections.webp) |
 
 <details>
 <summary>Show all additional screenshots (Direct, Subscriptions, Routing, DNS, Logs, Settings, Tray Flyout, About)</summary>
 
 **Direct Mode**
 
-![Direct Mode](docs/screenshots/direct.png)
+![Direct Mode](docs/screenshots/direct.webp)
 
 **Subscriptions**
 
-![Subscriptions](docs/screenshots/subscriptions.png)
+![Subscriptions](docs/screenshots/subscriptions.webp)
 
 **Routing**
 
-![Routing](docs/screenshots/routing.png)
+![Routing](docs/screenshots/routing.webp)
 
 **DNS**
 
-![DNS](docs/screenshots/dns.png)
+![DNS](docs/screenshots/dns.webp)
 
 **Logs**
 
-![Logs](docs/screenshots/logs.png)
+![Logs](docs/screenshots/logs.webp)
 
 **Settings**
 
-![Settings](docs/screenshots/settings.png)
+![Settings](docs/screenshots/settings.webp)
 
 **Tray Flyout**
 
 <p align="center">
-  <img src="docs/screenshots/tray.png" width="320" alt="Tray Flyout" />
+  <img src="docs/screenshots/tray.webp" width="320" alt="Tray Flyout" />
 </p>
 
 **About**
 
-![About](docs/screenshots/about.png)
+![About](docs/screenshots/about.webp)
 
 </details>
 
