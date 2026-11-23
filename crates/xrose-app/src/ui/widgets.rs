@@ -51,17 +51,6 @@ pub fn card(p: &Palette) -> Div {
         .border_color(p.border.opacity(0.))
 }
 
-/// Borderless recessed section card for nesting inside `panel`-colored surfaces such as dialogs.
-pub fn inset_card(p: &Palette) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .p_4()
-        .rounded_lg()
-        .bg(p.row_bg())
-}
-
 pub fn section_title(
     p: &Palette,
     title: impl Into<SharedString>,

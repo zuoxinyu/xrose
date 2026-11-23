@@ -264,21 +264,41 @@ impl AppView {
             .collect();
         let shown_exits = exits.len();
         let shown = display_nodes.len() + shown_exits;
+        let row_height = px(super::theme::NODE_ROW_HEIGHT + 2.);
+        let expanded_key = self.expanded_node.clone();
         let mut exit_rows = (shown_exits != 0).then(|| {
             let busy = core_busy || this_busy(&self.snapshot.busy, "mesh") || batch_mode;
-            node_rows(
+            let expanded_idx = expanded_key
+                .as_deref()
+                .and_then(|key| exits.iter().position(|exit| exit.row_key() == key));
+            let expanded_elem = expanded_idx.map(|idx| {
+                exits[idx]
+                    .row(busy, hide_ips, lang, &p, self, window, cx)
+                    .into_any_element()
+            });
+            let exits = std::rc::Rc::new(exits);
+            let render_exits = {
+                let exits = exits.clone();
+                let view = cx.entity();
+                move |range: std::ops::Range<usize>, window: &mut Window, cx: &mut App| {
+                    view.update(cx, |this, cx| {
+                        exits[range]
+                            .iter()
+                            .map(|exit| {
+                                exit.row(busy, hide_ips, lang, &p, this, window, cx)
+                                    .into_any_element()
+                            })
+                            .collect()
+                    })
+                }
+            };
+            split_node_rows(
                 shown_exits,
-                px(super::theme::NODE_ROW_HEIGHT),
+                row_height,
                 row_gap,
-                cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
-                    exits[range]
-                        .iter()
-                        .map(|exit| {
-                            exit.row(busy, hide_ips, lang, &p, this, window, cx)
-                                .into_any_element()
-                        })
-                        .collect()
-                }),
+                expanded_idx,
+                expanded_elem,
+                render_exits,
             )
         });
 
@@ -292,11 +312,51 @@ impl AppView {
         let offline_exits_for_groups = offline_exits.clone();
         let fastest_for_groups = fastest_node_id.clone();
         let row_group = active_group.clone();
+        let render_one_flat =
+            |this: &AppView, index: usize, window: &mut Window, cx: &mut Context<AppView>| {
+                let node = &this.snapshot.model.nodes[index];
+                let usable = this
+                    .snapshot
+                    .model
+                    .node_usable_with(node, this.snapshot.settings.core);
+                let selected = active_node.as_deref() == Some(node.id.as_str())
+                    && (!node.is_mesh_gateway() || this.snapshot.model.work_mode == WorkMode::Mesh);
+                let group_id = row_group
+                    .as_ref()
+                    .filter(|_| selectable_members.contains(&node.id) && usable)
+                    .cloned();
+                this.render_configured_node_row(
+                    ConfiguredRowContext {
+                        index,
+                        row_key: node.id.clone(),
+                        selected,
+                        fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
+                        auto_mode,
+                        group_context: false,
+                        offline_exit: offline_exits.contains(&node.id),
+                        group_id,
+                        menu_group_id: None,
+                        core_busy,
+                        tests_busy,
+                        drag_enabled: !sort_active
+                            && node_view == NodeView::Flat
+                            && !node.is_mesh_gateway(),
+                    },
+                    &p,
+                    window,
+                    cx,
+                )
+            };
         let view = cx.entity();
+        let active_node_rc = active_node.clone();
+        let fastest_rc = fastest_node_id.clone();
+        let offline_rc = offline_exits.clone();
+        let row_group_rc = row_group.clone();
+        let selectable_rc = std::rc::Rc::new(selectable_members.clone());
         let render_rows = std::rc::Rc::new(
             move |indices: &[usize], window: &mut Window, cx: &mut App| {
+                let selectable = selectable_rc.clone();
                 view.update(cx, |this, cx| {
-                    let suffixes = this.snapshot.mesh.magic_dns_suffixes();
                     indices
                         .iter()
                         .map(|&index| {
@@ -305,69 +365,26 @@ impl AppView {
                                 .snapshot
                                 .model
                                 .node_usable_with(node, this.snapshot.settings.core);
-                            let chain_subtitle = chain_row_subtitle(
-                                node,
-                                &this.snapshot.model,
-                                hide_ips,
-                                &suffixes,
-                                lang,
-                            );
-                            render_node_row(
-                                RowProps {
-                                    node,
+                            let selected = active_node_rc.as_deref() == Some(node.id.as_str())
+                                && (!node.is_mesh_gateway()
+                                    || this.snapshot.model.work_mode == WorkMode::Mesh);
+                            let group_id = row_group_rc
+                                .as_ref()
+                                .filter(|_| selectable.contains(&node.id) && usable)
+                                .cloned();
+                            this.render_configured_node_row(
+                                ConfiguredRowContext {
+                                    index,
                                     row_key: node.id.clone(),
-                                    lang,
-                                    selected: active_node.as_deref() == Some(node.id.as_str())
-                                        && (!node.is_mesh_gateway()
-                                            || this.snapshot.model.work_mode == WorkMode::Mesh),
-                                    virtual_exit: None,
-                                    chain_subtitle,
-                                    fastest: fastest_node_id.as_deref() == Some(node.id.as_str()),
-                                    latency: this
-                                        .snapshot
-                                        .latency
-                                        .get(&node.id)
-                                        .filter(|entry| entry.is_http()),
-                                    location: this.snapshot.node_location(node),
-                                    download: this.snapshot.downloads.get(&node.id),
-                                    downloading: this_busy(
-                                        &this.snapshot.busy,
-                                        &format!("download:{}", node.id),
-                                    ),
-                                    health: this.snapshot.node_health.get(&node.id),
-                                    checking_reachability: this_busy(
-                                        &this.snapshot.busy,
-                                        &format!("reachability:{}", node.id),
-                                    ),
-                                    hide_ips,
-                                    magic_dns_suffixes: &suffixes,
-                                    usable,
+                                    selected,
+                                    fastest: fastest_rc.as_deref() == Some(node.id.as_str()),
                                     auto_mode,
                                     group_context: false,
-                                    offline_exit: offline_exits.contains(&node.id),
-                                    mesh_provider: node
-                                        .id
-                                        .strip_prefix("mesh-exit-")
-                                        .and_then(|id| {
-                                            this.snapshot
-                                                .mesh
-                                                .profiles
-                                                .iter()
-                                                .find(|profile| profile.id == id)
-                                        })
-                                        .map(|profile| profile.provider),
-                                    group_id: row_group
-                                        .as_ref()
-                                        .filter(|_| selectable_members.contains(&node.id) && usable)
-                                        .cloned(),
+                                    offline_exit: offline_rc.contains(&node.id),
+                                    group_id,
+                                    menu_group_id: None,
                                     core_busy,
-                                    latency_busy: tests_busy,
-                                    testing: this_busy(
-                                        &this.snapshot.busy,
-                                        &format!("latency:{}", node.id),
-                                    ),
-                                    batch_mode,
-                                    batch_checked: this.batch_selected.contains(&node.id),
+                                    tests_busy,
                                     drag_enabled: !sort_active
                                         && node_view == NodeView::Flat
                                         && !node.is_mesh_gateway(),
@@ -376,20 +393,29 @@ impl AppView {
                                 window,
                                 cx,
                             )
-                            .into_any_element()
                         })
                         .collect::<Vec<_>>()
                 })
             },
         );
 
-        let configured_rows = |indices: Vec<usize>| {
+        let configured_rows = |indices: Vec<usize>, window: &mut Window, cx: &mut Context<Self>| {
+            let expanded_idx = expanded_key.as_deref().and_then(|key| {
+                indices
+                    .iter()
+                    .position(|&index| self.snapshot.model.nodes[index].id == key)
+            });
+            let expanded_elem =
+                expanded_idx.map(|pos| render_one_flat(self, indices[pos], window, cx));
             let render_rows = render_rows.clone();
-            // The outer border adds one pixel on either side of the row.
-            node_rows(
-                indices.len(),
-                px(super::theme::NODE_ROW_HEIGHT + 2.),
+            let indices = std::rc::Rc::new(indices);
+            let count = indices.len();
+            split_node_rows(
+                count,
+                row_height,
                 row_gap,
+                expanded_idx,
+                expanded_elem,
                 move |range, window, cx| render_rows(&indices[range], window, cx),
             )
         };
@@ -845,10 +871,10 @@ impl AppView {
                     container
                         .children(exit_rows.take())
                         .when(!mesh_nodes.is_empty(), |d| {
-                            d.child(configured_rows(mesh_nodes))
+                            d.child(configured_rows(mesh_nodes, window, cx))
                         })
                         .when(!proxy_nodes.is_empty(), |d| {
-                            d.child(configured_rows(proxy_nodes))
+                            d.child(configured_rows(proxy_nodes, window, cx))
                         })
                 })
                 .when(node_view == NodeView::Source, |container| {
@@ -1000,7 +1026,7 @@ impl AppView {
                             )
                             .when(!is_collapsed, |d| {
                                 d.when(!group_nodes.is_empty(), |d| {
-                                    d.child(configured_rows(group_nodes))
+                                    d.child(configured_rows(group_nodes, window, cx))
                                 })
                                 .when(mesh, |d| d.children(exit_rows.take()))
                             })
@@ -1085,116 +1111,100 @@ impl AppView {
                                 let offline_exits = offline_exits_for_groups.clone();
                                 let fastest_id = fastest_for_groups.clone();
                                 let group_id_for_rows = group_id_str.clone();
-                                node_rows(
+                                let expanded_idx = expanded_key.as_deref().and_then(|key| {
+                                    member_indices.iter().position(|&index| {
+                                        let node = &self.snapshot.model.nodes[index];
+                                        format!("grp-{}-{}", group_id_for_rows, node.id) == key
+                                    })
+                                });
+                                let expanded_elem = expanded_idx.map(|pos| {
+                                    let index = member_indices[pos];
+                                    let node = &self.snapshot.model.nodes[index];
+                                    let usable = self
+                                        .snapshot
+                                        .model
+                                        .node_usable_with(node, self.snapshot.settings.core);
+                                    self.render_configured_node_row(
+                                        ConfiguredRowContext {
+                                            index,
+                                            row_key: format!(
+                                                "grp-{}-{}",
+                                                group_id_for_rows, node.id
+                                            ),
+                                            selected: group_active_node.as_deref()
+                                                == Some(node.id.as_str()),
+                                            fastest: fastest_id.as_deref()
+                                                == Some(node.id.as_str()),
+                                            auto_mode: group_auto,
+                                            group_context: true,
+                                            offline_exit: offline_exits.contains(&node.id),
+                                            group_id: (group_enabled && !group_auto && usable)
+                                                .then(|| group_id_for_rows.clone()),
+                                            menu_group_id: Some(group_id_for_rows.clone()),
+                                            core_busy,
+                                            tests_busy,
+                                            drag_enabled: false,
+                                        },
+                                        &p,
+                                        window,
+                                        cx,
+                                    )
+                                });
+                                let member_indices = std::rc::Rc::new(member_indices);
+                                split_node_rows(
                                     member_count,
-                                    px(super::theme::NODE_ROW_HEIGHT + 2.),
+                                    row_height,
                                     row_gap,
+                                    expanded_idx,
+                                    expanded_elem,
                                     move |range, window, cx| {
                                         groups_view.update(cx, |this, cx| {
-                                            let suffixes = this.snapshot.mesh.magic_dns_suffixes();
                                             member_indices[range]
                                                 .iter()
                                                 .map(|&index| {
                                                     let node = &this.snapshot.model.nodes[index];
-                                                    let usable = this.snapshot.model.node_usable_with(
-                                                        node,
-                                                        this.snapshot.settings.core,
-                                                    );
-                                                    let chain_subtitle = chain_row_subtitle(
-                                                        node,
-                                                        &this.snapshot.model,
-                                                        hide_ips,
-                                                        &suffixes,
-                                                        lang,
-                                                    );
-                                                    render_node_row(
-                                                        RowProps {
+                                                    let usable = this
+                                                        .snapshot
+                                                        .model
+                                                        .node_usable_with(
                                                             node,
+                                                            this.snapshot.settings.core,
+                                                        );
+                                                    this.render_configured_node_row(
+                                                        ConfiguredRowContext {
+                                                            index,
                                                             row_key: format!(
                                                                 "grp-{}-{}",
                                                                 group_id_for_rows, node.id
                                                             ),
-                                                            lang,
                                                             selected: group_active_node.as_deref()
                                                                 == Some(node.id.as_str()),
-                                                            virtual_exit: None,
-                                                            chain_subtitle,
                                                             fastest: fastest_id.as_deref()
                                                                 == Some(node.id.as_str()),
-                                                            latency: this
-                                                                .snapshot
-                                                                .latency
-                                                                .get(&node.id)
-                                                                .filter(|entry| entry.is_http()),
-                                                            location: this
-                                                                .snapshot
-                                                                .node_location(node),
-                                                            download: this
-                                                                .snapshot
-                                                                .downloads
-                                                                .get(&node.id),
-                                                            downloading: this_busy(
-                                                                &this.snapshot.busy,
-                                                                &format!("download:{}", node.id),
-                                                            ),
-                                                            health: this
-                                                                .snapshot
-                                                                .node_health
-                                                                .get(&node.id),
-                                                            checking_reachability: this_busy(
-                                                                &this.snapshot.busy,
-                                                                &format!(
-                                                                    "reachability:{}",
-                                                                    node.id
-                                                                ),
-                                                            ),
-                                                            hide_ips,
-                                                            magic_dns_suffixes: &suffixes,
-                                                            usable,
                                                             auto_mode: group_auto,
                                                             group_context: true,
                                                             offline_exit: offline_exits
                                                                 .contains(&node.id),
-                                                            mesh_provider: node
-                                                                .id
-                                                                .strip_prefix("mesh-exit-")
-                                                                .and_then(|id| {
-                                                                    this.snapshot
-                                                                        .mesh
-                                                                        .profiles
-                                                                        .iter()
-                                                                        .find(|profile| {
-                                                                            profile.id == id
-                                                                        })
-                                                                })
-                                                                .map(|profile| profile.provider),
                                                             group_id: (group_enabled
                                                                 && !group_auto
                                                                 && usable)
                                                                 .then(|| group_id_for_rows.clone()),
-                                                            core_busy,
-                                                            latency_busy: tests_busy,
-                                                            testing: this_busy(
-                                                                &this.snapshot.busy,
-                                                                &format!("latency:{}", node.id),
+                                                            menu_group_id: Some(
+                                                                group_id_for_rows.clone(),
                                                             ),
-                                                            batch_mode,
-                                                            batch_checked: this
-                                                                .batch_selected
-                                                                .contains(&node.id),
+                                                            core_busy,
+                                                            tests_busy,
                                                             drag_enabled: false,
                                                         },
                                                         &p,
                                                         window,
                                                         cx,
                                                     )
-                                                    .into_any_element()
                                                 })
                                                 .collect::<Vec<_>>()
                                         })
                                     },
                                 )
-                                .into_any_element()
                             }
                         });
 
@@ -1482,6 +1492,295 @@ impl AppView {
     }
 }
 
+struct ConfiguredRowContext {
+    index: usize,
+    row_key: String,
+    selected: bool,
+    fastest: bool,
+    auto_mode: bool,
+    group_context: bool,
+    offline_exit: bool,
+    group_id: Option<String>,
+    menu_group_id: Option<String>,
+    core_busy: bool,
+    tests_busy: bool,
+    drag_enabled: bool,
+}
+
+impl AppView {
+    pub(super) fn toggle_expanded_node(&mut self, row_key: String, cx: &mut Context<Self>) {
+        self.node_click_seq = self.node_click_seq.wrapping_add(1);
+        self.pre_click_expanded = None;
+        toggle_accordion(&mut self.expanded_node, row_key);
+        cx.notify();
+    }
+
+    pub(super) fn schedule_row_expand(
+        &mut self,
+        row_key: String,
+        immediate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.node_click_seq = self.node_click_seq.wrapping_add(1);
+        self.pre_click_expanded = None;
+        if immediate {
+            toggle_accordion(&mut self.expanded_node, row_key);
+            cx.notify();
+            return;
+        }
+        let seq = self.node_click_seq;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                if this.node_click_seq != seq {
+                    return;
+                }
+                this.pre_click_expanded = Some((row_key.clone(), this.expanded_node.clone()));
+                toggle_accordion(&mut this.expanded_node, row_key);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn cancel_row_expand_for_double_click(
+        &mut self,
+        row_key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.node_click_seq = self.node_click_seq.wrapping_add(1);
+        if restore_pre_double_click_expand(
+            &mut self.expanded_node,
+            &mut self.pre_click_expanded,
+            row_key,
+        ) {
+            cx.notify();
+        }
+    }
+
+    pub(in crate::ui) fn toggle_node_details_for_target(
+        &mut self,
+        target: &HttpTestTarget,
+        row_key: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let key = if !row_key.is_empty() {
+            row_key.to_string()
+        } else {
+            target.key()
+        };
+        self.node_click_seq = self.node_click_seq.wrapping_add(1);
+        self.pre_click_expanded = None;
+        toggle_accordion(&mut self.expanded_node, key);
+        self.page = Page::Nodes;
+        cx.notify();
+    }
+
+    fn node_source_and_groups(
+        &self,
+        node: &Node,
+        virtual_exit: Option<&VirtualExit>,
+    ) -> (SharedString, SharedString) {
+        let lang = self.lang();
+        let source = if matches!(virtual_exit, Some(VirtualExit::Direct { .. })) {
+            super::tr(lang, "本机直连", "Direct")
+        } else if matches!(virtual_exit, Some(VirtualExit::Mesh { .. })) || node.is_mesh_gateway() {
+            super::tr(lang, "组网出口", "Mesh exit")
+        } else if node.is_chain() {
+            super::tr(lang, "代理链", "Proxy chain")
+        } else if let Some(sub_id) = node.subscription_id.as_deref() {
+            self.snapshot
+                .subscriptions
+                .iter()
+                .find(|s| s.id == sub_id)
+                .map(|s| SharedString::from(s.name.clone()))
+                .unwrap_or_else(|| super::tr(lang, "节点订阅", "Subscription"))
+        } else {
+            match node.source {
+                xrose_core::model::NodeSource::Import => super::tr(lang, "导入节点", "Imported"),
+                xrose_core::model::NodeSource::Subscription => {
+                    super::tr(lang, "节点订阅", "Subscription")
+                }
+                xrose_core::model::NodeSource::Manual => super::tr(lang, "手动节点", "Manual"),
+            }
+        };
+
+        let group_names: Vec<String> = self
+            .snapshot
+            .model
+            .groups
+            .iter()
+            .filter(|g| g.members.iter().any(|id| id == &node.id))
+            .map(|g| self.outbound_group_label(g).to_string())
+            .collect();
+        let groups: SharedString = if group_names.is_empty() {
+            super::tr(lang, "未加入出站组", "No outbound group")
+        } else {
+            group_names.join("、").into()
+        };
+        (source, groups)
+    }
+
+    fn direct_takeover_summary(&self) -> SharedString {
+        let lang = self.lang();
+        let settings = &self.snapshot.settings;
+        let mut parts = Vec::new();
+        if settings.effective_tun() {
+            parts.push(super::tr(lang, "TUN 全局", "TUN").to_string());
+        }
+        if settings.system_proxy {
+            parts.push(super::tr(lang, "系统代理", "System proxy").to_string());
+        }
+        parts.push(format!("Mixed :{}", settings.mixed_port));
+        parts.join(" · ").into()
+    }
+
+    fn render_configured_node_row(
+        &self,
+        ctx: ConfiguredRowContext,
+        p: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let lang = self.lang();
+        let hide_ips = self.hide_ips;
+        let suffixes = self.snapshot.mesh.magic_dns_suffixes();
+        let node = &self.snapshot.model.nodes[ctx.index];
+        let usable = self
+            .snapshot
+            .model
+            .node_usable_with(node, self.snapshot.settings.core);
+        let chain_subtitle =
+            chain_row_subtitle(node, &self.snapshot.model, hide_ips, &suffixes, lang);
+        let (source_summary, group_summary) = self.node_source_and_groups(node, None);
+        let expanded = self.expanded_node.as_deref() == Some(ctx.row_key.as_str());
+        render_node_row(
+            RowProps {
+                node,
+                row_key: ctx.row_key,
+                lang,
+                selected: ctx.selected,
+                expanded,
+                virtual_exit: None,
+                chain_subtitle,
+                fastest: ctx.fastest,
+                latency: self
+                    .snapshot
+                    .latency
+                    .get(&node.id)
+                    .filter(|entry| entry.is_http()),
+                location: self.snapshot.node_location(node),
+                download: self.snapshot.downloads.get(&node.id),
+                downloading: this_busy(&self.snapshot.busy, &format!("download:{}", node.id)),
+                health: self.snapshot.node_health.get(&node.id),
+                checking_reachability: this_busy(
+                    &self.snapshot.busy,
+                    &format!("reachability:{}", node.id),
+                ),
+                hide_ips,
+                magic_dns_suffixes: &suffixes,
+                usable,
+                auto_mode: ctx.auto_mode,
+                group_context: ctx.group_context,
+                offline_exit: ctx.offline_exit,
+                mesh_provider: node
+                    .id
+                    .strip_prefix("mesh-exit-")
+                    .and_then(|id| {
+                        self.snapshot
+                            .mesh
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == id)
+                    })
+                    .map(|profile| profile.provider),
+                group_id: ctx.group_id,
+                menu_group_id: ctx.menu_group_id,
+                source_summary,
+                group_summary,
+                direct_takeover_summary: self.direct_takeover_summary(),
+                probe_budget_used_bytes: self.snapshot.probe_budget_used_bytes,
+                daily_probe_budget_mb: self.snapshot.settings.daily_probe_budget_mb,
+                core_busy: ctx.core_busy,
+                latency_busy: ctx.tests_busy,
+                testing: this_busy(&self.snapshot.busy, &format!("latency:{}", node.id)),
+                batch_mode: self.batch_mode,
+                batch_checked: self.batch_selected.contains(&node.id),
+                drag_enabled: ctx.drag_enabled,
+            },
+            p,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+}
+
+fn toggle_accordion(current: &mut Option<String>, key: String) {
+    if current.as_deref() == Some(key.as_str()) {
+        *current = None;
+    } else {
+        *current = Some(key);
+    }
+}
+
+fn restore_pre_double_click_expand(
+    expanded: &mut Option<String>,
+    pre_click: &mut Option<(String, Option<String>)>,
+    row_key: &str,
+) -> bool {
+    if let Some((key, previous)) = pre_click.take()
+        && key == row_key
+    {
+        *expanded = previous;
+        true
+    } else {
+        false
+    }
+}
+
+/// Keep collapsed rows virtualized while letting the single expanded card lay
+/// out in normal flex flow at its intrinsic height.
+fn split_node_rows(
+    count: usize,
+    height: Pixels,
+    gap: Pixels,
+    expanded_index: Option<usize>,
+    expanded_element: Option<AnyElement>,
+    render_collapsed: impl Fn(std::ops::Range<usize>, &mut Window, &mut App) -> Vec<AnyElement>
+    + Clone
+    + 'static,
+) -> AnyElement {
+    let Some(idx) = expanded_index.filter(|&i| i < count) else {
+        return node_rows(count, height, gap, render_collapsed).into_any_element();
+    };
+    let mut stack = div().flex().flex_col().gap(gap).w_full();
+    if idx > 0 {
+        let prefix_render = render_collapsed.clone();
+        stack = stack.child(node_rows(idx, height, gap, move |range, window, cx| {
+            prefix_render(range, window, cx)
+        }));
+    }
+    if let Some(elem) = expanded_element {
+        stack = stack.child(elem);
+    }
+    if idx + 1 < count {
+        let suffix_count = count - idx - 1;
+        let offset = idx + 1;
+        stack = stack.child(node_rows(
+            suffix_count,
+            height,
+            gap,
+            move |range, window, cx| {
+                render_collapsed((range.start + offset)..(range.end + offset), window, cx)
+            },
+        ));
+    }
+    stack.into_any_element()
+}
+
 /// The page owns the scroll offset. Lay out only the rows intersecting its clip,
 /// using the same row and gap dimensions for hit testing and scroll extent.
 fn node_rows(
@@ -1698,6 +1997,7 @@ struct RowProps<'a> {
     row_key: String,
     lang: Language,
     selected: bool,
+    expanded: bool,
     virtual_exit: Option<VirtualExit>,
     chain_subtitle: Option<String>,
     fastest: bool,
@@ -1715,6 +2015,12 @@ struct RowProps<'a> {
     offline_exit: bool,
     mesh_provider: Option<xrose_core::mesh::MeshProvider>,
     group_id: Option<String>,
+    menu_group_id: Option<String>,
+    source_summary: SharedString,
+    group_summary: SharedString,
+    direct_takeover_summary: SharedString,
+    probe_budget_used_bytes: u64,
+    daily_probe_budget_mb: u32,
     core_busy: bool,
     latency_busy: bool,
     testing: bool,
@@ -1799,12 +2105,15 @@ fn render_virtual_node_row(
         VirtualExit::Direct { .. } => None,
     };
     let magic_dns_suffixes = view.snapshot.mesh.magic_dns_suffixes();
+    let (source_summary, group_summary) = view.node_source_and_groups(node, Some(&exit));
+    let expanded = view.expanded_node.as_deref() == Some(key.as_str());
     render_node_row(
         RowProps {
             node,
             row_key: key.clone(),
             lang: view.lang(),
             selected,
+            expanded,
             virtual_exit: Some(exit),
             chain_subtitle: None,
             fastest: false,
@@ -1826,6 +2135,12 @@ fn render_virtual_node_row(
             offline_exit: offline,
             mesh_provider,
             group_id: None,
+            menu_group_id: None,
+            source_summary,
+            group_summary,
+            direct_takeover_summary: view.direct_takeover_summary(),
+            probe_budget_used_bytes: view.snapshot.probe_budget_used_bytes,
+            daily_probe_budget_mb: view.snapshot.settings.daily_probe_budget_mb,
             core_busy: busy,
             latency_busy: [
                 "latency",
@@ -1886,14 +2201,14 @@ fn row_tooltip(
         return if selected {
             super::tr(
                 lang,
-                "当前处于本机直连模式；右键查看更多操作",
-                "Direct mode active; right-click for more actions",
+                "当前处于本机直连模式；单击展开详情，右键查看更多操作",
+                "Direct mode active; click for details, right-click for more actions",
             )
         } else {
             super::tr(
                 lang,
-                "点击切换为本机直连；右键查看更多操作",
-                "Click to switch to Direct mode; right-click for more actions",
+                "单击展开详情，双击切换为本机直连；右键查看更多操作",
+                "Click for details, double-click to switch to Direct; right-click for more actions",
             )
         };
     }
@@ -1913,8 +2228,8 @@ fn row_tooltip(
         } else if auto_mode {
             super::tr(
                 lang,
-                "此出站组为自动选择模式；右键管理节点",
-                "This outbound group selects nodes automatically; right-click to manage",
+                "此出站组为自动选择模式；单击展开详情，右键管理节点",
+                "This outbound group selects nodes automatically; click for details, right-click to manage",
             )
         } else if !in_selectable_group {
             super::tr(
@@ -1925,14 +2240,14 @@ fn row_tooltip(
         } else if selected {
             super::tr(
                 lang,
-                "当前出站组已选用此组网分流网关；右键查看更多操作",
-                "Selected mesh gateway in this outbound group; right-click for more actions",
+                "当前出站组已选用此组网分流网关；单击展开详情，右键查看更多操作",
+                "Selected mesh gateway in this outbound group; click for details, right-click for more actions",
             )
         } else {
             super::tr(
                 lang,
-                "点击设为该出站组的分流出口（保持代理规则生效）",
-                "Click to use this mesh gateway for this outbound group (keeps proxy rules active)",
+                "单击展开详情，双击设为该出站组的分流出口（保持代理规则生效）",
+                "Click for details, double-click to use this mesh gateway for this outbound group",
             )
         };
     }
@@ -1959,20 +2274,20 @@ fn row_tooltip(
         } else if selected {
             super::tr(
                 lang,
-                "当前由该组网出口接管系统流量；右键查看更多操作",
-                "This mesh exit is handling system traffic; right-click for more actions",
+                "当前由该组网出口接管系统流量；单击展开详情，右键查看更多操作",
+                "This mesh exit is handling system traffic; click for details, right-click for more actions",
             )
         } else if offline_exit {
             super::tr(
                 lang,
-                "点击重连所属组网，由此出口接管系统流量",
-                "Click to reconnect its mesh network and use this exit for system traffic",
+                "单击展开详情，双击重连所属组网并由此出口接管系统流量",
+                "Click for details, double-click to reconnect its mesh network and use this exit",
             )
         } else {
             super::tr(
                 lang,
-                "进入组网模式，由此出口接管系统流量",
-                "Use this exit for system traffic in Mesh mode",
+                "单击展开详情，双击进入组网模式并由此出口接管系统流量",
+                "Click for details, double-click to use this exit in Mesh mode",
             )
         };
     }
@@ -2000,14 +2315,14 @@ fn row_tooltip(
         if group_context {
             super::tr(
                 lang,
-                "此出站组为自动选择模式；右键管理节点",
-                "This outbound group selects nodes automatically; right-click to manage",
+                "此出站组为自动选择模式；单击展开详情，右键管理节点",
+                "This outbound group selects nodes automatically; click for details, right-click to manage",
             )
         } else {
             super::tr(
                 lang,
-                "默认出站组为自动选择模式；右键管理节点",
-                "Default outbound group selects nodes automatically; right-click to manage",
+                "默认出站组为自动选择模式；单击展开详情，右键管理节点",
+                "Default outbound group selects nodes automatically; click for details, right-click to manage",
             )
         }
     } else if !in_selectable_group {
@@ -2028,27 +2343,27 @@ fn row_tooltip(
         if group_context {
             super::tr(
                 lang,
-                "当前出站组选中的代理节点；右键查看更多操作",
-                "Selected proxy node in this outbound group; right-click for more actions",
+                "当前出站组选中的代理节点；单击展开详情，右键查看更多操作",
+                "Selected proxy node in this outbound group; click for details, right-click for more actions",
             )
         } else {
             super::tr(
                 lang,
-                "当前选中的代理节点；右键查看更多操作",
-                "Currently selected proxy node; right-click for more actions",
+                "当前选中的代理节点；单击展开详情，右键查看更多操作",
+                "Currently selected proxy node; click for details, right-click for more actions",
             )
         }
     } else if group_context {
         super::tr(
             lang,
-            "点击设为该出站组的选用节点；右键查看更多操作",
-            "Click to select this node for this outbound group; right-click for more actions",
+            "单击展开详情，双击设为该出站组的选用节点；右键查看更多操作",
+            "Click for details, double-click to select for this outbound group; right-click for more actions",
         )
     } else {
         super::tr(
             lang,
-            "点击切换至此代理节点；右键查看更多操作",
-            "Click to switch to this proxy node; right-click for more actions",
+            "单击展开详情，双击激活此节点；右键查看更多操作",
+            "Click for details, double-click to activate this node; right-click for more actions",
         )
     }
 }
@@ -2226,66 +2541,23 @@ fn age_text(lang: Language, secs: i64) -> String {
     }
 }
 
-impl AppView {
-    pub(in crate::ui) fn open_health_detail(
-        &self,
-        target: HttpTestTarget,
-        title: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        health_detail::open_node_health_dialog(target, title, window, cx);
-    }
-}
-
-fn health_subtitle_tag(
-    health: Option<&xrose_core::runtime::health::NodeHealthView>,
-    lang: Language,
-) -> Option<String> {
-    use xrose_core::runtime::health::ReachabilityCheckStatus as S;
-    let h = health?;
-    let mut parts = Vec::new();
-    if let Some(r) = &h.reachability {
-        if let Some((pass, total)) = r.ai_counts() {
-            parts.push(format!("AI {pass}/{total}"));
-        }
-        let media_sym = |code: &str, status: S| match status {
-            S::Pass => Some(format!("{code}✓")),
-            S::Limited => Some(format!("{code}△")),
-            S::Blocked => Some(format!("{code}✕")),
-            S::Untested => None,
-        };
-        let mut media = Vec::new();
-        if let Some(s) = media_sym("NF", r.netflix.status) {
-            media.push(s);
-        }
-        if let Some(s) = media_sym("YT", r.youtube.status) {
-            media.push(s);
-        }
-        if !media.is_empty() {
-            parts.push(media.join(" "));
-        }
-    }
-    if let Some(peak) = &h.peak_degradation {
-        parts.push(match lang {
-            Language::Zh => format!("晚高峰 +{}%", peak.increase_pct),
-            Language::En => format!("Peak +{}%", peak.increase_pct),
-        });
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
-}
-
 fn health_tooltip_text(
     health: Option<&xrose_core::runtime::health::NodeHealthView>,
+    expanded: bool,
     lang: Language,
 ) -> SharedString {
     use xrose_core::runtime::health::HealthDim;
+    let action_hint = if expanded {
+        super::tr(lang, "点击收起详情", "Click to collapse")
+    } else {
+        super::tr(lang, "点击展开详情", "Click to expand")
+    };
     let Some(h) = health else {
-        return super::tr(
-            lang,
-            "暂无健康样本 · 点击查看详情或检测",
-            "No health samples · Click for details or probe",
-        );
+        return format!(
+            "{} · {action_hint}",
+            super::tr(lang, "暂无健康样本", "No health samples")
+        )
+        .into();
     };
     let mut parts = Vec::new();
     if let Some(eval) = &h.general {
@@ -2338,22 +2610,20 @@ fn health_tooltip_text(
             media.round() as u32
         ));
     }
-    parts.push(super::tr(lang, "点击查看详情", "Click for details").to_string());
+    parts.push(action_hint.to_string());
     parts.join(" · ").into()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_health_capsule(
     health: Option<&xrose_core::runtime::health::NodeHealthView>,
     checking: bool,
-    target: HttpTestTarget,
-    title: String,
-    node_id: &str,
+    row_key: &str,
+    expanded: bool,
     lang: Language,
     p: &Palette,
     cx: &mut Context<AppView>,
 ) -> Div {
-    let tip = health_tooltip_text(health, lang);
+    let tip = health_tooltip_text(health, expanded, lang);
     let inner = if checking {
         div()
             .px_2()
@@ -2395,6 +2665,7 @@ fn render_health_capsule(
             .into_any_element()
     };
 
+    let toggle_key = row_key.to_string();
     div()
         .w(px(super::theme::NODE_HEALTH_WIDTH))
         .flex_shrink_0()
@@ -2403,13 +2674,13 @@ fn render_health_capsule(
         .justify_end()
         .child(
             div()
-                .id(SharedString::from(format!("node-health-{node_id}")))
+                .id(SharedString::from(format!("node-health-{row_key}")))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
-                    this.open_health_detail(target.clone(), title.clone(), window, cx);
+                    this.toggle_expanded_node(toggle_key.clone(), cx);
                 }))
                 .child(inner),
         )
@@ -2428,6 +2699,7 @@ fn render_node_row(
         row_key,
         lang,
         selected,
+        expanded,
         virtual_exit,
         chain_subtitle,
         fastest: is_fastest,
@@ -2445,6 +2717,12 @@ fn render_node_row(
         offline_exit,
         mesh_provider,
         group_id,
+        menu_group_id,
+        source_summary,
+        group_summary,
+        direct_takeover_summary,
+        probe_budget_used_bytes,
+        daily_probe_budget_mb,
         core_busy: is_core_busy,
         latency_busy: is_latency_busy,
         testing,
@@ -2452,7 +2730,6 @@ fn render_node_row(
         batch_checked: is_batch_checked,
         drag_enabled,
     } = props;
-    let node_id_select = node.id.clone();
     let node_id_batch = node.id.clone();
     let mesh_gateway = node.is_mesh_gateway();
     let http_target = virtual_exit
@@ -2462,26 +2739,28 @@ fn render_node_row(
     let row_menu = if virtual_exit.is_some() {
         MenuTarget::Exit(http_target.clone())
     } else {
-        MenuTarget::Node(node.id.clone())
+        MenuTarget::Node {
+            id: node.id.clone(),
+            group_id: menu_group_id,
+            row_key: row_key.clone(),
+        }
     };
     let name = display_node_name(node, hide_ips, magic_dns_suffixes);
-    let health_subtitle = health_subtitle_tag(health, lang);
     let health_capsule = render_health_capsule(
         health,
         checking_reachability,
-        http_target.clone(),
-        name.clone(),
         &row_key,
+        expanded,
         lang,
         p,
         cx,
     );
-    let virtual_select = virtual_exit.clone();
-    let radio_target = virtual_exit.clone();
-    let radio_group = group_id.clone();
-    let radio_node = node.id.clone();
-    let radio_name = name.clone();
+    let select_target = virtual_exit.clone();
+    let select_group = group_id.clone();
+    let select_node = node.id.clone();
     let drag_name = name.clone();
+    let expand_key = row_key.clone();
+    let chevron_key = row_key.clone();
     let can_select = if group_context {
         group_id.is_some() && node.enabled && !is_core_busy && !offline_exit
     } else {
@@ -2514,7 +2793,50 @@ fn render_node_row(
         batch_mode,
         lang,
     );
+    let detail_panel = expanded.then(|| {
+        health_detail::render_node_detail_panel(
+            health_detail::DetailPanelProps {
+                node,
+                row_key: &row_key,
+                target: http_target.clone(),
+                virtual_exit: virtual_exit.as_ref(),
+                chain_subtitle: chain_subtitle.as_deref(),
+                location,
+                health,
+                selected,
+                hide_ips,
+                offline_exit,
+                mesh_provider,
+                source_summary,
+                group_summary,
+                direct_takeover_summary,
+                probe_busy: (testing, downloading, checking_reachability),
+                any_probe_busy: is_latency_busy || is_core_busy,
+                probe_disabled: !node.enabled,
+                probe_budget_used_bytes,
+                daily_probe_budget_mb,
+                lang,
+            },
+            p,
+            cx,
+        )
+    });
     let drag_tip = super::tr(lang, "拖拽调整节点顺序", "Drag to reorder");
+    let pin_tip = super::tr(
+        lang,
+        "固定位置，不支持拖拽排序",
+        "Pinned in place; cannot be reordered",
+    );
+    let sort_order_tip = super::tr(
+        lang,
+        "切换回「平铺 · 顺序」可拖拽排序",
+        "Switch to Flat · Order to reorder by dragging",
+    );
+    let chevron_tip = if expanded {
+        super::tr(lang, "收起节点详情", "Collapse node details")
+    } else {
+        super::tr(lang, "展开节点详情", "Expand node details")
+    };
     let primary_badge = primary_badge_label(node, virtual_exit.as_ref(), lang);
     let endpoint_display = format_endpoint(&node.endpoint(), hide_ips);
     let is_node_busy = is_core_busy && selected;
@@ -2522,7 +2844,9 @@ fn render_node_row(
     let drag_primary = p.primary;
     let drag_accent = p.accent;
     let hover_bg = p.row_hover();
+    let chevron_hover = p.panel_alt;
     let hover_group = SharedString::from(format!("node-group-{row_key}"));
+    let is_pinned_exit = virtual_exit.is_some() || mesh_gateway;
 
     let location_label = location.filter(|_| !hide_ips).map(|entry| {
         if entry.pending {
@@ -2534,16 +2858,6 @@ fn render_node_row(
                 .unwrap_or_else(|| super::tr(lang, "归属地未知", "Location unknown").to_string())
         }
     });
-    let radio_border = if auto_mode && selected {
-        p.muted_fg
-    } else if !can_select {
-        p.border
-    } else if selected {
-        p.primary
-    } else {
-        p.muted_fg
-    };
-    let radio_dot = if auto_mode { p.muted_fg } else { p.primary };
 
     div()
         .id(SharedString::from(format!("node-{row_key}")))
@@ -2556,7 +2870,7 @@ fn render_node_row(
         .border_color(p.border.opacity(0.))
         .bg(if selected { p.accent } else { p.row_bg() })
         .overflow_hidden()
-        .when(!selected, |d| d.hover(move |s| s.bg(hover_bg)))
+        .when(!selected && !expanded, |d| d.hover(move |s| s.bg(hover_bg)))
         .when(drag_enabled, |d| {
             d.drag_over::<DraggedNode>(move |style, _, _, _| {
                 style.border_color(drag_primary).bg(drag_accent)
@@ -2569,7 +2883,6 @@ fn render_node_row(
                 }
             }))
         })
-        .when(!node.enabled || offline_exit, |d| d.opacity(0.45))
         .when(selected, |row| row.child(selection_bar(p.primary)))
         .child(
             div()
@@ -2579,11 +2892,11 @@ fn render_node_row(
                 .gap_3()
                 .pl_4()
                 .pr_3()
-                .min_h(px(super::theme::NODE_ROW_HEIGHT))
-                .py_2()
+                .h(px(super::theme::NODE_ROW_HEIGHT))
+                .when(!node.enabled || offline_exit, |d| d.opacity(0.45))
                 .tooltip(move |window, cx| Tooltip::new(row_tip.clone()).build(window, cx))
-                .when(batch_mode || can_select, |d| d.cursor_pointer())
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                     if batch_mode {
                         if this.batch_selected.contains(&node_id_batch) {
                             this.batch_selected.remove(&node_id_batch);
@@ -2593,23 +2906,33 @@ fn render_node_row(
                         cx.notify();
                         return;
                     }
-                    if !can_select || selected {
+                    if event.click_count() >= 2 {
+                        this.cancel_row_expand_for_double_click(&expand_key, cx);
+                        if can_select && !auto_mode && !selected {
+                            select_row_exit(
+                                this,
+                                select_target.as_ref(),
+                                select_group.as_deref(),
+                                &select_node,
+                                window,
+                                cx,
+                            );
+                        }
                         return;
                     }
-                    select_row_exit(
-                        this,
-                        virtual_select.as_ref(),
-                        group_id.as_deref(),
-                        &node_id_select,
-                        window,
-                        cx,
-                    );
+                    let immediate = !matches!(event, ClickEvent::Mouse(_));
+                    this.schedule_row_expand(expand_key.clone(), immediate, cx);
                 }))
-                // Drag handle: dimmed until hover, absent while a sort is applied.
+                // Leading slot: drag handle for reorderable nodes, pin icon for fixed
+                // system exits, or subtle dot when order is governed by sort/group view.
                 .child(if drag_enabled {
                     div()
                         .id(SharedString::from(format!("drag-node-{row_key}")))
+                        .size(px(14.))
                         .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
                         .opacity(0.35)
                         .group_hover(hover_group.clone(), |s| s.opacity(1.))
@@ -2628,8 +2951,40 @@ fn render_node_row(
                                 .text_color(p.muted_fg),
                         )
                         .into_any_element()
+                } else if is_pinned_exit {
+                    div()
+                        .id(SharedString::from(format!("pin-node-{row_key}")))
+                        .size(px(14.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(0.35)
+                        .tooltip(move |window, cx| Tooltip::new(pin_tip.clone()).build(window, cx))
+                        .child(
+                            Icon::new(IconName::Pin)
+                                .size(px(13.))
+                                .text_color(p.muted_fg),
+                        )
+                        .into_any_element()
                 } else {
-                    div().w(px(14.)).flex_shrink_0().into_any_element()
+                    div()
+                        .id(SharedString::from(format!("fixed-node-{row_key}")))
+                        .size(px(14.))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(sort_order_tip.clone()).build(window, cx)
+                        })
+                        .child(
+                            div()
+                                .size(px(4.))
+                                .rounded_full()
+                                .bg(p.muted_fg.opacity(0.35)),
+                        )
+                        .into_any_element()
                 })
                 // Batch checkbox (when batch mode is active).
                 .when(batch_mode, |d| {
@@ -2655,31 +3010,6 @@ fn render_node_row(
                                 d.child(Icon::new(IconName::Check).size(px(14.)))
                             }),
                     )
-                })
-                // Radio: disabled in automatic groups, where the chosen node is only marked.
-                .child({
-                    let select = cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        if !can_select || selected || auto_mode {
-                            return;
-                        }
-                        select_row_exit(
-                            this,
-                            radio_target.as_ref(),
-                            radio_group.as_deref(),
-                            &radio_node,
-                            window,
-                            cx,
-                        );
-                    });
-                    gpui_base::Radio::new(SharedString::from(format!("exit-choice-{row_key}")))
-                        .checked(selected)
-                        .disabled(!can_select || auto_mode)
-                        .accessibility_label(radio_name)
-                        .on_change(move |_, event, window, cx| {
-                            cx.stop_propagation();
-                            select(event, window, cx)
-                        })
-                        .child(radio_indicator(selected, radio_border, radio_dot))
                 })
                 // Node metadata
                 .child(
@@ -2778,111 +3108,91 @@ fn render_node_row(
                                     ))
                                 }),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .min_w(px(0.))
-                                .child(if let Some(exit) = &virtual_exit {
-                                    div()
-                                        .min_w(px(0.))
-                                        .truncate()
-                                        .text_xs()
-                                        .text_color(p.muted_fg)
-                                        .child(exit.detail().to_owned())
-                                        .into_any_element()
-                                } else if let Some(chain_flow) = chain_subtitle {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_xs()
-                                        .min_w(px(0.))
+                        .child(div().flex().items_center().gap_2().min_w(px(0.)).child(
+                            if let Some(exit) = &virtual_exit {
+                                div()
+                                    .min_w(px(0.))
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(p.muted_fg)
+                                    .child(exit.detail().to_owned())
+                                    .into_any_element()
+                            } else if let Some(chain_flow) = chain_subtitle {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .min_w(px(0.))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_color(p.muted_fg)
+                                            .child(chain_flow),
+                                    )
+                                    .when_some(location_label, |d, label| {
+                                        let tip = label.clone();
+                                        d.child(
+                                            div().text_color(p.muted_fg.opacity(0.6)).child("·"),
+                                        )
                                         .child(
                                             div()
+                                                .id(SharedString::from(format!(
+                                                    "node-location-{row_key}"
+                                                )))
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .text_color(p.muted_fg)
-                                                .child(chain_flow),
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(tip.clone()).build(window, cx)
+                                                })
+                                                .child(label),
                                         )
-                                        .when_some(location_label, |d, label| {
-                                            let tip = label.clone();
-                                            d.child(
-                                                div()
-                                                    .text_color(p.muted_fg.opacity(0.6))
-                                                    .child("·"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "node-location-{row_key}"
-                                                    )))
-                                                    .min_w(px(0.))
-                                                    .truncate()
-                                                    .text_color(p.muted_fg)
-                                                    .tooltip(move |window, cx| {
-                                                        Tooltip::new(tip.clone()).build(window, cx)
-                                                    })
-                                                    .child(label),
-                                            )
-                                        })
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap_2()
-                                        .text_xs()
-                                        .min_w(px(0.))
+                                    })
+                                    .into_any_element()
+                            } else {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_xs()
+                                    .min_w(px(0.))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .truncate()
+                                            .text_color(p.muted_fg)
+                                            .child(endpoint_display),
+                                    )
+                                    .child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
+                                    .child(
+                                        div()
+                                            .text_color(p.muted_fg)
+                                            .child(node.transport_label().to_uppercase()),
+                                    )
+                                    .when_some(location_label, |d, label| {
+                                        let tip = label.clone();
+                                        d.child(
+                                            div().text_color(p.muted_fg.opacity(0.6)).child("·"),
+                                        )
                                         .child(
                                             div()
+                                                .id(SharedString::from(format!(
+                                                    "node-location-{row_key}"
+                                                )))
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .text_color(p.muted_fg)
-                                                .child(endpoint_display),
+                                                .tooltip(move |window, cx| {
+                                                    Tooltip::new(tip.clone()).build(window, cx)
+                                                })
+                                                .child(label),
                                         )
-                                        .child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
-                                        .child(
-                                            div()
-                                                .text_color(p.muted_fg)
-                                                .child(node.transport_label().to_uppercase()),
-                                        )
-                                        .when_some(location_label, |d, label| {
-                                            let tip = label.clone();
-                                            d.child(
-                                                div()
-                                                    .text_color(p.muted_fg.opacity(0.6))
-                                                    .child("·"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "node-location-{row_key}"
-                                                    )))
-                                                    .min_w(px(0.))
-                                                    .truncate()
-                                                    .text_color(p.muted_fg)
-                                                    .tooltip(move |window, cx| {
-                                                        Tooltip::new(tip.clone()).build(window, cx)
-                                                    })
-                                                    .child(label),
-                                            )
-                                        })
-                                        .into_any_element()
-                                })
-                                .when_some(health_subtitle, |d, tag| {
-                                    d.child(div().text_color(p.muted_fg.opacity(0.6)).child("·"))
-                                        .child(
-                                            div()
-                                                .min_w(px(0.))
-                                                .truncate()
-                                                .text_xs()
-                                                .text_color(p.muted_fg)
-                                                .child(tag),
-                                        )
-                                }),
-                        ),
+                                    })
+                                    .into_any_element()
+                            },
+                        )),
                 )
                 // Download speed column: fixed width, right-aligned, mono. Placed to the left of health/latency.
                 .child(
@@ -2929,8 +3239,38 @@ fn render_node_row(
                     lang,
                     p,
                     cx,
-                )),
+                ))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("node-chevron-{row_key}")))
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w(px(24.))
+                        .h(px(24.))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(chevron_hover))
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(chevron_tip.clone()).build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_expanded_node(chevron_key.clone(), cx);
+                        }))
+                        .text_color(if expanded { p.primary } else { p.muted_fg })
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(px(14.)),
+                        ),
+                ),
         )
+        .children(detail_panel)
         .context_menu(menus::builder(cx.entity().downgrade(), row_menu))
 }
 
@@ -3073,7 +3413,7 @@ mod tests {
                 false,
                 Language::Zh
             ),
-            "点击切换至此代理节点；右键查看更多操作"
+            "单击展开详情，双击激活此节点；右键查看更多操作"
         );
         assert_eq!(
             row_tooltip(
@@ -3088,7 +3428,7 @@ mod tests {
                 false,
                 Language::Zh
             ),
-            "当前选中的代理节点；右键查看更多操作"
+            "当前选中的代理节点；单击展开详情，右键查看更多操作"
         );
         assert_eq!(
             row_tooltip(
@@ -3118,7 +3458,7 @@ mod tests {
                 false,
                 Language::Zh
             ),
-            "默认出站组为自动选择模式；右键管理节点"
+            "默认出站组为自动选择模式；单击展开详情，右键管理节点"
         );
         assert_eq!(
             row_tooltip(
@@ -3163,7 +3503,7 @@ mod tests {
                 false,
                 Language::Zh
             ),
-            "点击设为该出站组的选用节点；右键查看更多操作"
+            "单击展开详情，双击设为该出站组的选用节点；右键查看更多操作"
         );
 
         let mut gateway = Node::new("HomeNet · 出口", Protocol::Socks, "127.0.0.1", 19081);
@@ -3182,7 +3522,7 @@ mod tests {
                 false,
                 Language::Zh
             ),
-            "点击设为该出站组的分流出口（保持代理规则生效）"
+            "单击展开详情，双击设为该出站组的分流出口（保持代理规则生效）"
         );
 
         let mesh_online = VirtualExit::Mesh {
@@ -3206,7 +3546,7 @@ mod tests {
                 false,
                 Language::Zh,
             ),
-            "进入组网模式，由此出口接管系统流量"
+            "单击展开详情，双击进入组网模式并由此出口接管系统流量"
         );
         assert_eq!(
             row_tooltip(
@@ -3245,7 +3585,7 @@ mod tests {
                 false,
                 Language::Zh,
             ),
-            "点击重连所属组网，由此出口接管系统流量"
+            "单击展开详情，双击重连所属组网并由此出口接管系统流量"
         );
     }
 
@@ -3317,5 +3657,41 @@ mod tests {
             ),
             "代理链存在已禁用、缺失或当前内核不支持的跳点，请编辑后使用"
         );
+    }
+
+    #[test]
+    fn accordion_toggle_expands_switches_and_collapses_single_card() {
+        let mut expanded: Option<String> = None;
+        super::toggle_accordion(&mut expanded, "node-a".into());
+        assert_eq!(expanded.as_deref(), Some("node-a"));
+
+        super::toggle_accordion(&mut expanded, "node-b".into());
+        assert_eq!(expanded.as_deref(), Some("node-b"));
+
+        super::toggle_accordion(&mut expanded, "node-b".into());
+        assert_eq!(expanded, None);
+    }
+
+    #[test]
+    fn double_click_restores_expanded_state_only_for_matching_row() {
+        let mut expanded = Some("node-b".to_string());
+        let mut pre_click = Some(("node-b".to_string(), Some("node-a".to_string())));
+        assert!(super::restore_pre_double_click_expand(
+            &mut expanded,
+            &mut pre_click,
+            "node-b",
+        ));
+        assert_eq!(expanded.as_deref(), Some("node-a"));
+        assert_eq!(pre_click, None);
+
+        let mut expanded = Some("node-b".to_string());
+        let mut pre_click = Some(("node-b".to_string(), None));
+        assert!(!super::restore_pre_double_click_expand(
+            &mut expanded,
+            &mut pre_click,
+            "node-c",
+        ));
+        assert_eq!(expanded.as_deref(), Some("node-b"));
+        assert_eq!(pre_click, None);
     }
 }

@@ -18,6 +18,14 @@ pub(super) struct Choice {
 }
 
 impl Choice {
+    pub(super) fn row_key(&self) -> String {
+        xrose_core::service::HttpTestTarget::MeshExit {
+            profile: self.profile.clone(),
+            peer: self.peer.clone(),
+        }
+        .key()
+    }
+
     pub(super) fn matches(&self, query: &str, hide_ips: bool) -> bool {
         self.name.to_lowercase().contains(query)
             || self.network.to_lowercase().contains(query)

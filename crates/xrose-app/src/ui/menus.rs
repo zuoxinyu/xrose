@@ -29,7 +29,11 @@ pub(super) enum MenuTarget {
     OutboundGroup(String),
     GroupSwitchPolicy(String),
     ChainHop(usize),
-    Node(String),
+    Node {
+        id: String,
+        group_id: Option<String>,
+        row_key: String,
+    },
     Exit(HttpTestTarget),
     Nodes,
     Rule(String, Option<String>),
@@ -613,24 +617,60 @@ impl AppView {
                     || busy("auto-probe")
                     || busy("core")
                     || busy("mesh");
-                let exit_title = match &target {
-                    HttpTestTarget::Direct => tr(lang, "本机直连", "Direct").to_string(),
-                    HttpTestTarget::MeshExit { peer, .. } => self
-                        .snapshot
-                        .mesh
-                        .networks
-                        .iter()
-                        .flat_map(|net| net.peers.iter())
-                        .find(|p| &p.id == peer)
-                        .map(|p| p.name.clone())
-                        .unwrap_or_else(|| tr(lang, "组网出口", "Mesh exit").to_string()),
-                    HttpTestTarget::Node(id) => self
-                        .snapshot
-                        .model
-                        .node(id)
-                        .map(|n| n.name.clone())
-                        .unwrap_or_else(|| id.clone()),
-                };
+                let exit_key = target.key();
+                let is_expanded = self.expanded_node.as_deref() == Some(exit_key.as_str());
+                match &target {
+                    HttpTestTarget::Direct => {
+                        let selected = self.snapshot.model.work_mode == WorkMode::Direct;
+                        menu = menu
+                            .item(
+                                add(
+                                    "切换为本机直连",
+                                    "Switch to Direct",
+                                    !selected && !busy("core"),
+                                    Command::SelectWorkMode(WorkMode::Direct),
+                                )
+                                .checked(selected),
+                            )
+                            .separator();
+                    }
+                    HttpTestTarget::MeshExit { profile, peer } => {
+                        let target_matches = self
+                            .snapshot
+                            .model
+                            .mesh_mode
+                            .target
+                            .as_ref()
+                            .is_some_and(|t| t.profile_id == *profile && t.peer_id == *peer);
+                        let selected =
+                            self.snapshot.model.work_mode == WorkMode::Mesh && target_matches;
+                        let online = self
+                            .snapshot
+                            .mesh
+                            .networks
+                            .iter()
+                            .find(|net| net.profile_id == *profile)
+                            .and_then(|net| net.peers.iter().find(|p| p.id == *peer))
+                            .is_some_and(|p| p.online);
+                        let can_activate = !selected
+                            && (online || target_matches)
+                            && !busy("core")
+                            && !busy("mesh")
+                            && !busy("mesh-exit");
+                        menu = menu
+                            .item(
+                                add(
+                                    "激活此出口",
+                                    "Activate exit",
+                                    can_activate,
+                                    Command::SelectMeshExit(profile.clone(), peer.clone()),
+                                )
+                                .checked(selected),
+                            )
+                            .separator();
+                    }
+                    HttpTestTarget::Node(_) => {}
+                }
                 menu = menu
                     .item(add(
                         "HTTP 测速",
@@ -651,10 +691,18 @@ impl AppView {
                         Command::TestReachability(target.clone()),
                     ))
                     .item(add(
-                        "健康详情…",
-                        "Health details…",
+                        if is_expanded {
+                            "收起节点详情"
+                        } else {
+                            "展开节点详情"
+                        },
+                        if is_expanded {
+                            "Collapse node details"
+                        } else {
+                            "Expand node details"
+                        },
                         true,
-                        Command::HealthDetails(target.clone(), exit_title),
+                        Command::HealthDetails(target.clone(), exit_key),
                     ))
                     .item(add(
                         "查看详情",
@@ -676,7 +724,11 @@ impl AppView {
                     ));
                 }
             }
-            MenuTarget::Node(id) => {
+            MenuTarget::Node {
+                id,
+                group_id,
+                row_key,
+            } => {
                 let Some(node) = self.snapshot.model.node(&id) else {
                     return menu;
                 };
@@ -691,7 +743,84 @@ impl AppView {
                     .node_usable_with(node, self.snapshot.settings.core);
                 let chain_refs = self.snapshot.model.node_chain_references(&id);
                 let is_chain = node.is_chain();
+                let is_expanded = self.expanded_node.as_deref() == Some(row_key.as_str());
+                let offline_exit = self.snapshot.mesh.exits().any(|(profile, peer, _)| {
+                    peer.exit_selected && !peer.online && format!("mesh-exit-{}", profile.id) == id
+                });
+                let (activate_zh, activate_en, selected, can_activate, activate_group) =
+                    if let Some(gid) = group_id.as_deref() {
+                        let group = self.snapshot.model.group(gid);
+                        let selected = self.snapshot.model.work_mode == WorkMode::Proxy
+                            && self
+                                .snapshot
+                                .selected_node(Some(gid))
+                                .is_some_and(|n| n.id == id);
+                        let can_activate = !selected
+                            && node.enabled
+                            && usable
+                            && !offline_exit
+                            && group.is_some_and(|g| g.enabled && g.manually_selectable())
+                            && !busy("core");
+                        (
+                            "设为本组选用节点",
+                            "Use in this group",
+                            selected,
+                            can_activate,
+                            gid.to_string(),
+                        )
+                    } else if node.is_mesh_gateway() {
+                        let active_group = self.snapshot.model.default_group_id();
+                        let selected = self.snapshot.model.work_mode == WorkMode::Mesh
+                            && self
+                                .snapshot
+                                .selected_node(active_group.as_deref())
+                                .is_some_and(|n| n.id == id);
+                        let can_activate =
+                            !selected && node.enabled && !offline_exit && !busy("core");
+                        (
+                            "激活此出口",
+                            "Activate exit",
+                            selected,
+                            can_activate,
+                            String::new(),
+                        )
+                    } else {
+                        let active_group = self.snapshot.model.default_group_id();
+                        let group = active_group
+                            .as_deref()
+                            .and_then(|gid| self.snapshot.model.group(gid));
+                        let selected = self
+                            .snapshot
+                            .selected_node(active_group.as_deref())
+                            .is_some_and(|n| n.id == id);
+                        let can_activate = !selected
+                            && node.enabled
+                            && usable
+                            && group.is_some_and(|g| {
+                                g.enabled
+                                    && g.manually_selectable()
+                                    && g.members.iter().any(|m| m == &id)
+                            })
+                            && !busy("core");
+                        (
+                            "激活此节点",
+                            "Activate node",
+                            selected,
+                            can_activate,
+                            active_group.unwrap_or_default(),
+                        )
+                    };
                 menu = menu
+                    .item(
+                        add(
+                            activate_zh,
+                            activate_en,
+                            can_activate,
+                            Command::SelectNode(activate_group, id.clone()),
+                        )
+                        .checked(selected),
+                    )
+                    .separator()
                     .item(add(
                         "编辑",
                         "Edit",
@@ -732,10 +861,18 @@ impl AppView {
                         Command::TestReachability(HttpTestTarget::Node(id.clone())),
                     ))
                     .item(add(
-                        "健康详情…",
-                        "Health details…",
+                        if is_expanded {
+                            "收起节点详情"
+                        } else {
+                            "展开节点详情"
+                        },
+                        if is_expanded {
+                            "Collapse node details"
+                        } else {
+                            "Expand node details"
+                        },
                         true,
-                        Command::HealthDetails(HttpTestTarget::Node(id.clone()), node.name.clone()),
+                        Command::HealthDetails(HttpTestTarget::Node(id.clone()), row_key),
                     ));
                 let running =
                     self.snapshot.runtime.running_proxy_node.as_deref() == Some(id.as_str());
@@ -1830,8 +1967,8 @@ impl AppView {
             Command::TestReachability(target) => {
                 self.service.test_reachability_target(target, true);
             }
-            Command::HealthDetails(target, title) => {
-                self.open_health_detail(target, title, window, cx);
+            Command::HealthDetails(target, row_key) => {
+                self.toggle_node_details_for_target(&target, &row_key, cx);
             }
             Command::BatchReachability(ids) => {
                 self.service.test_reachability_nodes(ids, true);

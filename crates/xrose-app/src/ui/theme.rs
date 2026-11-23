@@ -198,6 +198,21 @@ impl Palette {
             hsl(196., 0.56, 0.942)
         }
     }
+
+    /// Subtle inner surface for detail sections nested inside an expanded node card.
+    pub fn detail_surface(&self, selected: bool) -> Hsla {
+        if self.is_dark {
+            if selected {
+                self.bg.opacity(0.55)
+            } else {
+                self.panel
+            }
+        } else if selected {
+            hsl(0., 0., 1.0).opacity(0.74)
+        } else {
+            hsl(0., 0., 1.0).opacity(0.78)
+        }
+    }
 }
 
 pub fn palette(cx: &App) -> Palette {
@@ -505,6 +520,15 @@ mod tests {
         assert_eq!(p.header_bg().a, 1.0);
         assert!(p.card_bg().a < 1.0 && p.card_bg().a > 0.5);
         assert!(p.row_bg().a < p.row_hover().a);
+        assert_ne!(p.detail_surface(false), p.row_bg());
+        assert_ne!(p.detail_surface(true), interaction_tint(false));
         assert_eq!(p.panel.a, 1.0);
+
+        p.is_dark = true;
+        p.light_mica = false;
+        p.panel = hsl(0., 0., 0.15);
+        p.bg = hsl(220., 0.10, 0.09);
+        assert_eq!(p.detail_surface(false), p.panel);
+        assert_ne!(p.detail_surface(true), interaction_tint(true));
     }
 }
