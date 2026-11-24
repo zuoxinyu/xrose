@@ -1,23 +1,26 @@
 //! State and controls shared by the node creation and editing dialogs.
 //!
-//! The form only collects text; [`xrose_core::model::NodeDraft`] owns the
-//! validation rules so the CLI and the UI cannot drift apart.
+//! The form collects user input; [`xrose_core::model::NodeDraft`] validates it.
 
 use gpui_base::Disableable;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{InputState, Textarea, TextareaState};
+use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::{Node, NodeDraft, Protocol, TransportKind};
 
+mod controls;
 mod vpn;
 
 use super::AppView;
 use super::theme::{Palette, palette};
 use super::widgets::*;
+use controls::{Presets, fixed_choice, integer_input, preset_field, secret_field};
 
 pub(crate) struct ManualNodeForm {
+    protocol_select: Entity<SelectState<SearchableVec<ProtocolOption>>>,
     vpn: vpn::VpnForm,
     pub name: Entity<InputState>,
     pub server: Entity<InputState>,
@@ -26,7 +29,7 @@ pub(crate) struct ManualNodeForm {
     pub password: Entity<InputState>,
     pub username: Entity<InputState>,
     pub method: Entity<InputState>,
-    pub flow: Entity<InputState>,
+    flow: String,
     pub sni: Entity<InputState>,
     pub alpn: Entity<InputState>,
     pub fingerprint: Entity<InputState>,
@@ -51,16 +54,45 @@ pub(crate) struct ManualNodeForm {
     pub udp: bool,
 }
 
+#[derive(Clone)]
+struct ProtocolOption(Protocol);
+
+impl SelectItem for ProtocolOption {
+    type Value = Protocol;
+    fn title(&self) -> SharedString {
+        self.0.display_name().into()
+    }
+    fn value(&self) -> &Protocol {
+        &self.0
+    }
+    fn matches(&self, query: &str) -> bool {
+        self.0
+            .display_name()
+            .to_ascii_lowercase()
+            .contains(&query.trim().to_ascii_lowercase())
+            || Protocol::parse(query) == Some(self.0)
+    }
+}
+
 impl ManualNodeForm {
     pub fn new(window: &mut Window, cx: &mut Context<AppView>) -> Self {
         let text = |window: &mut Window, cx: &mut Context<AppView>, placeholder: &'static str| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()))
         };
-        let port = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("443")
-                .default_value("443")
+        let protocol_select = cx.new(|cx| {
+            let options = SearchableVec::new(Protocol::manual().map(ProtocolOption).to_vec());
+            let mut state = SelectState::new(options, None, window, cx).searchable(true);
+            state.set_selected_value(&Protocol::Vless, window, cx);
+            state
         });
+        cx.subscribe_in(&protocol_select, window, |this, _, event, window, cx| {
+            if let SelectEvent::Confirm(Some(protocol)) = event {
+                this.manual_form.change_protocol(*protocol, window, cx);
+                this.manual_error = None;
+                cx.notify();
+            }
+        })
+        .detach();
         let path = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("/ws")
@@ -70,12 +102,13 @@ impl ManualNodeForm {
             vpn: vpn::VpnForm::new(window, cx),
             name: text(window, cx, "留空自动使用 地址:端口"),
             server: text(window, cx, "example.com 或 1.2.3.4"),
-            port,
+            protocol_select,
+            port: integer_input(443, window, cx),
             uuid: text(window, cx, "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"),
-            password: text(window, cx, "输入节点密码或密钥"),
+            password: cx.new(|cx| InputState::new(window, cx).masked(true)),
             username: text(window, cx, "可选，例如 user"),
             method: text(window, cx, "aes-256-gcm"),
-            flow: text(window, cx, "xtls-rprx-vision"),
+            flow: String::new(),
             sni: text(window, cx, "留空默认使用服务器地址"),
             alpn: text(window, cx, "h2,http/1.1"),
             fingerprint: text(window, cx, "chrome"),
@@ -85,12 +118,12 @@ impl ManualNodeForm {
             host: text(window, cx, "cdn.example.com"),
             service_name: text(window, cx, "grpc-service"),
             tags: text(window, cx, "hk, relay（逗号分隔）"),
-            wireguard_private_key: text(window, cx, "Base64 私钥"),
+            wireguard_private_key: cx.new(|cx| InputState::new(window, cx).masked(true)),
             wireguard_public_key: text(window, cx, "Base64 对端公钥"),
-            wireguard_pre_shared_key: text(window, cx, "Base64 预共享密钥（可选）"),
+            wireguard_pre_shared_key: cx.new(|cx| InputState::new(window, cx).masked(true)),
             wireguard_addresses: text(window, cx, "10.0.0.2/32, fd00::2/128"),
             wireguard_allowed_ips: text(window, cx, "0.0.0.0/0, ::/0"),
-            wireguard_mtu: text(window, cx, "1408"),
+            wireguard_mtu: integer_input(1408, window, cx),
             wireguard_reserved: text(window, cx, "0,0,0"),
             protocol: Protocol::Vless,
             transport: TransportKind::Tcp,
@@ -100,8 +133,48 @@ impl ManualNodeForm {
         }
     }
 
-    /// Builds the draft. Only the port needs parsing here; every other rule
-    /// (credentials, Reality, transport combinations) lives in the core.
+    fn change_protocol(
+        &mut self,
+        protocol: Protocol,
+        window: &mut Window,
+        cx: &mut Context<AppView>,
+    ) {
+        if protocol == self.protocol {
+            return;
+        }
+        if self.port.read(cx).value().as_ref() == self.protocol.default_port().to_string() {
+            self.port.update(cx, |state, cx| {
+                state.set_value(protocol.default_port().to_string(), window, cx)
+            });
+        }
+        self.protocol = protocol;
+        if protocol.is_vpn() || protocol == Protocol::Wireguard {
+            self.insecure = false;
+        }
+        if protocol.is_vpn() {
+            for input in [
+                &self.alpn,
+                &self.fingerprint,
+                &self.reality_public_key,
+                &self.reality_short_id,
+            ] {
+                input.update(cx, |s, cx| s.set_value("", window, cx));
+            }
+        }
+        if protocol.is_vpn()
+            || matches!(
+                protocol,
+                Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
+            )
+        {
+            self.tls = true;
+            self.transport = TransportKind::Tcp;
+        } else if protocol == Protocol::Wireguard {
+            self.transport = TransportKind::Tcp;
+        }
+    }
+
+    /// Builds the draft for core validation.
     pub fn draft(
         &self,
         lang: xrose_core::settings::Language,
@@ -124,7 +197,7 @@ impl ManualNodeForm {
             password: self.password.read(cx).value().to_string(),
             username: self.username.read(cx).value().to_string(),
             method: self.method.read(cx).value().to_string(),
-            flow: self.flow.read(cx).value().to_string(),
+            flow: self.flow.clone(),
             tls_enabled: self.tls,
             sni: self.sni.read(cx).value().to_string(),
             alpn: self.alpn.read(cx).value().to_string(),
@@ -181,7 +254,6 @@ impl ManualNodeForm {
             ),
             (&self.username, tr("可选，例如 user", "Optional, e.g. user")),
             (&self.method, tr("aes-256-gcm", "aes-256-gcm")),
-            (&self.flow, tr("xtls-rprx-vision", "xtls-rprx-vision")),
             (
                 &self.sni,
                 tr("留空默认使用服务器地址", "Blank uses server address"),
@@ -233,13 +305,23 @@ impl ManualNodeForm {
     }
 
     pub fn reset(&mut self, window: &mut Window, cx: &mut Context<AppView>) {
+        for input in [
+            &self.password,
+            &self.wireguard_private_key,
+            &self.wireguard_pre_shared_key,
+        ] {
+            input.update(cx, |s, cx| s.set_masked(true, window, cx));
+        }
         self.vpn.load(&NodeDraft::default(), window, cx);
         self.protocol = Protocol::Vless;
+        self.protocol_select
+            .update(cx, |s, cx| s.set_selected_value(&self.protocol, window, cx));
+        self.flow.clear();
         self.transport = TransportKind::Tcp;
         self.tls = true;
         self.insecure = false;
         self.udp = true;
-        let inputs: [(&Entity<InputState>, &str); 24] = [
+        let inputs = [
             (&self.name, ""),
             (&self.server, ""),
             (&self.port, "443"),
@@ -247,7 +329,6 @@ impl ManualNodeForm {
             (&self.password, ""),
             (&self.username, ""),
             (&self.method, ""),
-            (&self.flow, ""),
             (&self.sni, ""),
             (&self.alpn, ""),
             (&self.fingerprint, ""),
@@ -276,6 +357,9 @@ impl ManualNodeForm {
         let draft = NodeDraft::from(node);
         self.vpn.load(&draft, window, cx);
         self.protocol = draft.protocol;
+        self.protocol_select
+            .update(cx, |s, cx| s.set_selected_value(&self.protocol, window, cx));
+        self.flow = draft.flow;
         self.transport = draft.transport;
         self.tls = draft.tls_enabled;
         self.insecure = draft.insecure;
@@ -288,7 +372,6 @@ impl ManualNodeForm {
             (&self.password, draft.password),
             (&self.username, draft.username),
             (&self.method, draft.method),
-            (&self.flow, draft.flow),
             (&self.sni, draft.sni),
             (&self.alpn, draft.alpn),
             (&self.fingerprint, draft.fingerprint),
@@ -388,19 +471,38 @@ impl AppView {
             ));
         }
         if protocol == Protocol::Vless {
-            credentials = credentials.child(dialog_field(
+            credentials = credentials.child(dialog_control_row(
                 &p,
                 self.tr("Flow（可选）", "Flow (optional)"),
-                &form.flow,
-                FieldWidth::Medium,
+                "",
+                fixed_choice(
+                    "node-flow",
+                    NodeDraft::VLESS_FLOWS,
+                    &form.flow,
+                    self.tr("不使用", "None"),
+                    cx,
+                    |this, flow| {
+                        this.manual_form.flow = flow.into();
+                    },
+                ),
             ));
         }
         if protocol == Protocol::Shadowsocks {
-            credentials = credentials.child(dialog_field(
+            credentials = credentials.child(preset_field(
                 &p,
+                self.lang(),
                 self.tr("加密方式", "Cipher"),
                 &form.method,
-                FieldWidth::Medium,
+                Presets::Single(&[
+                    "aes-256-gcm",
+                    "aes-128-gcm",
+                    "aes-192-gcm",
+                    "chacha20-ietf-poly1305",
+                    "xchacha20-ietf-poly1305",
+                    "2022-blake3-aes-128-gcm",
+                    "2022-blake3-aes-256-gcm",
+                    "2022-blake3-chacha20-poly1305",
+                ]),
             ));
         }
         if needs_username {
@@ -412,7 +514,7 @@ impl AppView {
             ));
         }
         if needs_password {
-            credentials = credentials.child(dialog_field(
+            credentials = credentials.child(secret_field(
                 &p,
                 if needs_username {
                     self.tr("密码", "Password")
@@ -420,7 +522,6 @@ impl AppView {
                     self.tr("密码 / 密钥", "Password")
                 },
                 &form.password,
-                FieldWidth::Full,
             ));
         }
 
@@ -472,11 +573,10 @@ impl AppView {
             form.reality_public_key.read(cx).value().as_ref(),
             form.reality_short_id.read(cx).value().as_ref(),
         );
-        let protocols = Protocol::manual();
-        let selected_protocol = protocols
-            .iter()
-            .position(|candidate| *candidate == protocol);
-        let transports = TransportKind::all();
+        let mut transports = TransportKind::all().to_vec();
+        if !transports.contains(&transport) {
+            transports.push(transport);
+        }
         let selected_transport = transports
             .iter()
             .position(|candidate| *candidate == transport);
@@ -487,58 +587,15 @@ impl AppView {
             .gap_2()
             .min_w(px(0.))
             .pb_1()
-            .child(dialog_control_row(
+            .child(dialog_form_row(
                 &p,
                 self.tr("协议", "Protocol"),
                 "",
-                ChoiceGroup::new(
-                    "manual-protocol",
-                    protocols
-                        .into_iter()
-                        .map(|candidate| SharedString::from(candidate.display_name()))
-                        .collect(),
-                    selected_protocol,
-                )
-                .small()
-                .on_change(cx.listener(|this, index: &usize, window, cx| {
-                    let Some(candidate) = Protocol::manual().into_iter().nth(*index) else {
-                        return;
-                    };
-                    if candidate == this.manual_form.protocol {
-                        return;
-                    }
-                    let old_port = this.manual_form.protocol.default_port().to_string();
-                    if this.manual_form.port.read(cx).value().as_ref() == old_port.as_str() {
-                        this.manual_form.port.update(cx, |s, cx| {
-                            s.set_value(candidate.default_port().to_string(), window, cx)
-                        });
-                    }
-                    this.manual_form.protocol = candidate;
-                    if candidate == Protocol::Wireguard || candidate.is_vpn() {
-                        this.manual_form.transport = TransportKind::Tcp;
-                        this.manual_form.insecure = false;
-                    }
-                    if candidate.is_vpn() {
-                        this.manual_form.tls = true;
-                        for input in [
-                            &this.manual_form.alpn,
-                            &this.manual_form.fingerprint,
-                            &this.manual_form.reality_public_key,
-                            &this.manual_form.reality_short_id,
-                        ] {
-                            input.update(cx, |s, cx| s.set_value("", window, cx));
-                        }
-                    }
-                    if matches!(
-                        candidate,
-                        Protocol::Hysteria2 | Protocol::Tuic | Protocol::Anytls
-                    ) {
-                        this.manual_form.tls = true;
-                        this.manual_form.transport = TransportKind::Tcp;
-                    }
-                    this.manual_error = None;
-                    cx.notify();
-                })),
+                Select::new(&form.protocol_select)
+                    .w_full()
+                    .accessibility_label(self.tr("协议", "Protocol"))
+                    .search_placeholder(self.tr("搜索协议", "Search protocols")),
+                FieldWidth::Medium.into(),
             ))
             .child(divider(&p))
             .child(dialog_section_heading(&p, self.tr("基础", "Basics")))
@@ -579,11 +636,10 @@ impl AppView {
                             .flex()
                             .flex_col()
                             .gap_2()
-                            .child(dialog_field(
+                            .child(secret_field(
                                 &p,
                                 self.tr("私钥", "Private key"),
                                 &form.wireguard_private_key,
-                                FieldWidth::Full,
                             ))
                             .child(dialog_field(
                                 &p,
@@ -591,11 +647,10 @@ impl AppView {
                                 &form.wireguard_public_key,
                                 FieldWidth::Full,
                             ))
-                            .child(dialog_field(
+                            .child(secret_field(
                                 &p,
                                 self.tr("预共享密钥（可选）", "Pre-shared key (optional)"),
                                 &form.wireguard_pre_shared_key,
-                                FieldWidth::Full,
                             ))
                             .child(dialog_field(
                                 &p,
@@ -603,11 +658,12 @@ impl AppView {
                                 &form.wireguard_addresses,
                                 FieldWidth::Full,
                             ))
-                            .child(dialog_field(
+                            .child(preset_field(
                                 &p,
+                                self.lang(),
                                 self.tr("允许网段", "Allowed networks"),
                                 &form.wireguard_allowed_ips,
-                                FieldWidth::Full,
+                                Presets::Ordered(&["0.0.0.0/0", "::/0"], &[',', ' ', ';']),
                             ))
                             .child(dialog_field(
                                 &p,
@@ -626,7 +682,7 @@ impl AppView {
             .when(protocol.is_vpn(), |d| {
                 d.child(divider(&p))
                     .child(dialog_section_heading(&p, self.tr("VPN 参数", "VPN settings")))
-                    .child(form.vpn.fields(protocol, &p, |zh, en| self.tr(zh, en)))
+                    .child(form.vpn.fields(protocol, &p, self.lang(), cx))
                     .child(dialog_control_row(
                         &p,
                         self.tr("分域 DNS", "Split DNS"),
@@ -748,17 +804,19 @@ impl AppView {
                                 &form.sni,
                                 FieldWidth::Full,
                             ))
-                            .child(dialog_field(
+                            .child(preset_field(
                                 &p,
+                                self.lang(),
                                 self.tr("ALPN（可选）", "ALPN (optional)"),
                                 &form.alpn,
-                                FieldWidth::Medium,
+                                Presets::Ordered(&["h2", "http/1.1", "h3"], &[',', ' ', ';']),
                             ))
-                            .child(dialog_field(
+                            .child(preset_field(
                                 &p,
+                                self.lang(),
                                 self.tr("uTLS 指纹（可选）", "uTLS fingerprint"),
                                 &form.fingerprint,
-                                FieldWidth::Medium,
+                                Presets::Single(&["chrome", "firefox", "safari", "edge", "ios", "android", "360", "qq", "random", "randomized"]),
                             ))
                             .when(show_reality, |d| {
                                 d.child(dialog_field(
@@ -795,7 +853,7 @@ impl AppView {
                                 ChoiceGroup::new(
                                     "manual-transport",
                                     transports
-                                        .into_iter()
+                                        .iter()
                                         .map(|candidate| {
                                             SharedString::from(candidate.display_name())
                                         })
@@ -803,9 +861,8 @@ impl AppView {
                                     selected_transport,
                                 )
                                 .small()
-                                .on_change(cx.listener(|this, index: &usize, _, cx| {
-                                    if let Some(candidate) = TransportKind::all().into_iter().nth(*index)
-                                    {
+                                .on_change(cx.listener(move |this, index: &usize, _, cx| {
+                                    if let Some(&candidate) = transports.get(*index) {
                                         this.manual_form.transport = candidate;
                                         cx.notify();
                                     }
@@ -900,8 +957,16 @@ impl AppView {
 #[cfg(test)]
 mod tests {
     use super::super::theme::{FORM_FIELD_WIDTH, SETTING_LABEL_WIDTH};
-    use super::{FieldWidth, Protocol, show_reality_fields};
+    use super::{FieldWidth, Protocol, ProtocolOption, SelectItem, show_reality_fields};
     use gpui_kit::px;
+
+    #[test]
+    fn protocol_search_accepts_names_and_share_link_aliases() {
+        assert!(ProtocolOption(Protocol::Openconnect).matches("CONN"));
+        assert!(ProtocolOption(Protocol::Wireguard).matches("wg"));
+        assert!(ProtocolOption(Protocol::Hysteria2).matches("hy2"));
+        assert!(!ProtocolOption(Protocol::Vmess).matches("vless"));
+    }
 
     #[test]
     fn reality_fields_scope_to_vless_unless_already_populated() {

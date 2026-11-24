@@ -1,10 +1,21 @@
 //! Client VPN form controls. Hidden advanced imported options survive normal edits.
 
-use super::super::widgets::{FieldWidth, dialog_field, dialog_field_with_desc};
+use super::super::widgets::{FieldWidth, dialog_control_row, dialog_field};
+use super::controls::{Presets, fixed_choice, integer_input, preset_field, secret_field};
 use super::{AppView, Palette, textarea_field};
 use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::*;
 use xrose_core::model::{NodeDraft, OpenConnectOptions, OpenVpnOptions, Protocol, VpnCertificates};
+use xrose_core::settings::Language;
+
+const DATA_CIPHERS: &[&str] = &[
+    "AES-256-GCM",
+    "AES-128-GCM",
+    "CHACHA20-POLY1305",
+    "AES-192-GCM",
+    "AES-256-CBC",
+    "AES-128-CBC",
+];
 
 pub(super) struct VpnForm {
     ca: Entity<TextareaState>,
@@ -14,14 +25,9 @@ pub(super) struct VpnForm {
     key_password: Entity<InputState>,
     fingerprints: Entity<InputState>,
     mtu: Entity<InputState>,
-    network: Entity<InputState>,
     ciphers: Entity<InputState>,
     fallback_cipher: Entity<InputState>,
     auth: Entity<InputState>,
-    control_mode: Entity<InputState>,
-    control_direction: Entity<InputState>,
-    name_match: Entity<InputState>,
-    flavor: Entity<InputState>,
     path: Entity<InputState>,
     group: Entity<InputState>,
     cookie: Entity<InputState>,
@@ -46,20 +52,15 @@ impl VpnForm {
             certificate: pem(window, cx),
             key: pem(window, cx),
             control_key: pem(window, cx),
-            key_password: text(window, cx, ""),
+            key_password: cx.new(|cx| InputState::new(window, cx).masked(true)),
             fingerprints: text(window, cx, ""),
-            mtu: text(window, cx, "0"),
-            network: text(window, cx, "udp"),
+            mtu: integer_input(0, window, cx),
             ciphers: text(window, cx, ""),
             fallback_cipher: text(window, cx, ""),
             auth: text(window, cx, ""),
-            control_mode: text(window, cx, ""),
-            control_direction: text(window, cx, ""),
-            name_match: text(window, cx, ""),
-            flavor: text(window, cx, "anyconnect"),
             path: text(window, cx, "/"),
             group: text(window, cx, ""),
-            cookie: text(window, cx, ""),
+            cookie: cx.new(|cx| InputState::new(window, cx).masked(true)),
             user_agent: text(window, cx, ""),
             reported_os: text(window, cx, ""),
             disable_udp: false,
@@ -70,6 +71,9 @@ impl VpnForm {
     }
 
     pub fn load(&mut self, draft: &NodeDraft, window: &mut Window, cx: &mut Context<AppView>) {
+        for input in [&self.cookie, &self.key_password] {
+            input.update(cx, |s, cx| s.set_masked(true, window, cx));
+        }
         self.openvpn = draft.openvpn.clone();
         self.openconnect = draft.openconnect.clone();
         self.disable_udp = draft.openconnect.disable_udp;
@@ -100,20 +104,9 @@ impl VpnForm {
             (&self.key_password, cert.private_key_password.clone()),
             (&self.fingerprints, cert.peer_fingerprints.join(", ")),
             (&self.mtu, mtu.to_string()),
-            (&self.network, draft.openvpn.transport.clone()),
             (&self.ciphers, draft.openvpn.data_ciphers.join(", ")),
             (&self.fallback_cipher, draft.openvpn.fallback_cipher.clone()),
             (&self.auth, draft.openvpn.auth_digest.clone()),
-            (&self.control_mode, draft.openvpn.control_mode.clone()),
-            (
-                &self.control_direction,
-                draft.openvpn.control_direction.clone(),
-            ),
-            (
-                &self.name_match,
-                draft.openvpn.certificate_name_match.clone(),
-            ),
-            (&self.flavor, draft.openconnect.flavor.clone()),
             (&self.path, draft.openconnect.path.clone()),
             (&self.group, draft.openconnect.auth_group.clone()),
             (&self.cookie, draft.openconnect.cookie.clone()),
@@ -162,21 +155,20 @@ impl VpnForm {
             o.certificates = certificates;
             o.use_pushed_dns = self.use_pushed_dns;
             o.mtu = mtu;
-            o.transport = text(&self.network).trim().into();
             o.data_ciphers = list(&self.ciphers);
             o.fallback_cipher = text(&self.fallback_cipher);
             o.auth_digest = text(&self.auth);
-            o.control_mode = text(&self.control_mode).trim().into();
-            o.control_key = self.control_key.read(cx).value().to_string();
-            o.control_direction = text(&self.control_direction).trim().into();
-            o.certificate_name_match = text(&self.name_match).trim().into();
+            o.control_key = if o.control_mode.is_empty() {
+                String::new()
+            } else {
+                self.control_key.read(cx).value().to_string()
+            };
             draft.openvpn = o;
         } else {
             let mut o = self.openconnect.clone();
             o.certificates = certificates;
             o.use_pushed_dns = self.use_pushed_dns;
             o.mtu = mtu;
-            o.flavor = text(&self.flavor).trim().into();
             o.path = text(&self.path).trim().into();
             o.auth_group = text(&self.group);
             o.cookie = text(&self.cookie);
@@ -192,88 +184,154 @@ impl VpnForm {
         &self,
         protocol: Protocol,
         p: &Palette,
-        tr: impl Fn(&'static str, &'static str) -> SharedString,
+        lang: Language,
+        cx: &Context<AppView>,
     ) -> impl IntoElement {
+        let tr = |zh, en| crate::i18n::tr(lang, zh, en);
         let mut form = div().flex().flex_col().gap_2();
-        let fields = if protocol == Protocol::Openvpn {
-            vec![
-                (
-                    tr("传输（udp / tcp）", "Transport (udp / tcp)"),
-                    self.network.clone(),
-                    FieldWidth::Compact,
-                ),
-                (
-                    tr("数据加密（逗号分隔）", "Data ciphers (comma separated)"),
-                    self.ciphers.clone(),
-                    FieldWidth::Full,
-                ),
-                (
+        if protocol == Protocol::Openvpn {
+            form = form
+                .child(dialog_control_row(
+                    p,
+                    tr("传输", "Transport"),
+                    "",
+                    fixed_choice(
+                        "vpn-network",
+                        OpenVpnOptions::TRANSPORTS,
+                        &self.openvpn.transport,
+                        "".into(),
+                        cx,
+                        |this, v| this.manual_form.vpn.openvpn.transport = v.into(),
+                    ),
+                ))
+                .child(preset_field(
+                    p,
+                    lang,
+                    tr("数据加密（优先顺序）", "Data ciphers (in order)"),
+                    &self.ciphers,
+                    Presets::Ordered(DATA_CIPHERS, &[',']),
+                ))
+                .child(preset_field(
+                    p,
+                    lang,
                     tr("兼容加密（可选）", "Fallback cipher (optional)"),
-                    self.fallback_cipher.clone(),
-                    FieldWidth::Medium,
-                ),
-                (
+                    &self.fallback_cipher,
+                    Presets::Single(DATA_CIPHERS),
+                ))
+                .child(preset_field(
+                    p,
+                    lang,
                     tr("认证摘要（可选）", "Auth digest (optional)"),
-                    self.auth.clone(),
-                    FieldWidth::Medium,
-                ),
-                (
-                    tr("证书匹配方式（可选）", "Certificate match (optional)"),
-                    self.name_match.clone(),
-                    FieldWidth::Medium,
-                ),
-                (
-                    tr("控制通道模式（可选）", "Control channel mode (optional)"),
-                    self.control_mode.clone(),
-                    FieldWidth::Medium,
-                ),
-                (
-                    tr("密钥方向（可选）", "Key direction (optional)"),
-                    self.control_direction.clone(),
-                    FieldWidth::Compact,
-                ),
-            ]
+                    &self.auth,
+                    Presets::Single(&["SHA256", "SHA384", "SHA512", "SHA1"]),
+                ))
+                .child(dialog_control_row(
+                    p,
+                    tr("证书匹配方式", "Certificate match"),
+                    "",
+                    fixed_choice(
+                        "vpn-cert-match",
+                        OpenVpnOptions::NAME_MATCHES,
+                        &self.openvpn.certificate_name_match,
+                        tr("默认", "Default"),
+                        cx,
+                        |this, v| this.manual_form.vpn.openvpn.certificate_name_match = v.into(),
+                    ),
+                ))
+                .child(dialog_control_row(
+                    p,
+                    tr("控制通道模式", "Control channel mode"),
+                    "",
+                    fixed_choice(
+                        "vpn-control-mode",
+                        OpenVpnOptions::CONTROL_MODES,
+                        &self.openvpn.control_mode,
+                        tr("不使用", "None"),
+                        cx,
+                        |this, v| {
+                            let options = &mut this.manual_form.vpn.openvpn;
+                            if options.control_mode != v && v != "tls_auth" {
+                                options.control_direction.clear();
+                            }
+                            options.control_mode = v.into();
+                        },
+                    ),
+                ));
+            if self.openvpn.control_mode == "tls_auth" {
+                form = form.child(dialog_control_row(
+                    p,
+                    tr("密钥方向", "Key direction"),
+                    "",
+                    fixed_choice(
+                        "vpn-key-direction",
+                        OpenVpnOptions::KEY_DIRECTIONS,
+                        &self.openvpn.control_direction,
+                        tr("双向", "Bidirectional"),
+                        cx,
+                        |this, v| this.manual_form.vpn.openvpn.control_direction = v.into(),
+                    ),
+                ));
+            }
+            if !self.openvpn.control_mode.is_empty() {
+                form = form.child(textarea_field(
+                    p,
+                    tr("控制通道密钥", "Control channel key"),
+                    "",
+                    &self.control_key,
+                ));
+            }
         } else {
-            form = form.child(dialog_field_with_desc(
-                p,
-                tr("类型", "Flavor"),
-                tr(
-                    "支持 anyconnect / gp / fortinet / f5 / pulse / nc。",
-                    "Supports anyconnect / gp / fortinet / f5 / pulse / nc.",
-                ),
-                &self.flavor,
-                FieldWidth::Medium,
-            ));
-            vec![
-                (
+            form = form
+                .child(dialog_control_row(
+                    p,
+                    tr("类型", "Flavor"),
+                    "",
+                    fixed_choice(
+                        "vpn-flavor",
+                        OpenConnectOptions::FLAVORS,
+                        &self.openconnect.flavor,
+                        "".into(),
+                        cx,
+                        |this, v| this.manual_form.vpn.openconnect.flavor = v.into(),
+                    ),
+                ))
+                .child(dialog_field(
+                    p,
                     tr("服务器路径", "Server path"),
-                    self.path.clone(),
+                    &self.path,
                     FieldWidth::Full,
-                ),
-                (
+                ))
+                .child(dialog_field(
+                    p,
                     tr("认证组（可选）", "Auth group (optional)"),
-                    self.group.clone(),
+                    &self.group,
                     FieldWidth::Medium,
-                ),
-                (
+                ))
+                .child(secret_field(
+                    p,
                     tr("认证会话（可选）", "Session cookie (optional)"),
-                    self.cookie.clone(),
-                    FieldWidth::Full,
-                ),
-                (
+                    &self.cookie,
+                ))
+                .child(dialog_field(
+                    p,
                     tr("客户端标识（可选）", "User agent (optional)"),
-                    self.user_agent.clone(),
+                    &self.user_agent,
                     FieldWidth::Full,
-                ),
-                (
+                ))
+                .child(preset_field(
+                    p,
+                    lang,
                     tr("系统标识（可选）", "Reported OS (optional)"),
-                    self.reported_os.clone(),
-                    FieldWidth::Medium,
-                ),
-            ]
-        };
-        for (label, input, width) in fields {
-            form = form.child(dialog_field(p, label, &input, width));
+                    &self.reported_os,
+                    Presets::Single(&[
+                        "win",
+                        "mac-intel",
+                        "linux-64",
+                        "linux",
+                        "android",
+                        "apple-ios",
+                    ]),
+                ));
         }
         form = form
             .child(dialog_field(
@@ -310,22 +368,11 @@ impl VpnForm {
         ] {
             form = form.child(textarea_field(p, label, "", input));
         }
-        if protocol == Protocol::Openvpn {
-            form = form.child(textarea_field(
-                p,
-                tr("控制通道密钥（可选）", "Control channel key (optional)"),
-                tr(
-                    "控制通道支持 tls_auth / tls_crypt / tls_crypt_v2；密钥方向可填 client / server。",
-                    "Supports tls_auth / tls_crypt / tls_crypt_v2; key direction: client / server.",
-                ),
-                &self.control_key,
-            ));
-        } else {
-            form = form.child(dialog_field(
+        if protocol == Protocol::Openconnect {
+            form = form.child(secret_field(
                 p,
                 tr("私钥密码（可选）", "Private key password (optional)"),
                 &self.key_password,
-                FieldWidth::Full,
             ));
         }
         form

@@ -79,38 +79,37 @@ impl Default for OpenVpnOptions {
 }
 
 impl OpenVpnOptions {
+    pub const TRANSPORTS: &[&str] = &["udp", "udp4", "udp6", "tcp", "tcp4", "tcp6"];
+    pub const CONTROL_MODES: &[&str] = &["", "tls_auth", "tls_crypt", "tls_crypt_v2"];
+    pub const KEY_DIRECTIONS: &[&str] = &["", "client", "server"];
+    pub const NAME_MATCHES: &[&str] = &["", "name", "subject", "name-prefix"];
+
     pub fn validate(&self) -> Result<()> {
         self.certificates.validate()?;
         validate_mtu(self.mtu)?;
-        if !matches!(
-            self.transport.as_str(),
-            "udp" | "udp4" | "udp6" | "tcp" | "tcp4" | "tcp6"
-        ) {
+        if !Self::TRANSPORTS.contains(&self.transport.as_str()) {
             return Err(Error::config(
                 "OpenVPN 传输必须为 UDP 或 TCP（可指定 IPv4 / IPv6）",
             ));
         }
-        if !matches!(
-            self.control_mode.as_str(),
-            "" | "tls_auth" | "tls_crypt" | "tls_crypt_v2"
-        ) || self.control_mode.is_empty() != self.control_key.is_empty()
+        if !Self::CONTROL_MODES.contains(&self.control_mode.as_str())
+            || self.control_mode.is_empty() != self.control_key.is_empty()
         {
             return Err(Error::config(
                 "OpenVPN 控制通道模式和密钥需同时填写，支持 tls_auth / tls_crypt / tls_crypt_v2",
             ));
         }
-        if !matches!(self.control_direction.as_str(), "" | "client" | "server") {
+        if !Self::KEY_DIRECTIONS.contains(&self.control_direction.as_str()) {
             return Err(Error::config(
                 "OpenVPN 密钥方向必须为 client、server 或留空",
             ));
         }
-        if !matches!(
-            self.certificate_name_match.as_str(),
-            "" | "name" | "subject" | "name-prefix"
-        ) || !matches!(
-            self.certificate_purpose.as_str(),
-            "server" | "client" | "none"
-        ) {
+        if !Self::NAME_MATCHES.contains(&self.certificate_name_match.as_str())
+            || !matches!(
+                self.certificate_purpose.as_str(),
+                "server" | "client" | "none"
+            )
+        {
             return Err(Error::config("OpenVPN 证书匹配方式或用途无效"));
         }
         if !self.certificates.private_key_password.is_empty()
@@ -157,13 +156,12 @@ impl Default for OpenConnectOptions {
 }
 
 impl OpenConnectOptions {
+    pub const FLAVORS: &[&str] = &["anyconnect", "gp", "fortinet", "f5", "pulse", "nc"];
+
     pub fn validate(&self) -> Result<()> {
         self.certificates.validate()?;
         validate_mtu(self.mtu)?;
-        if !matches!(
-            self.flavor.as_str(),
-            "anyconnect" | "gp" | "fortinet" | "f5" | "pulse" | "nc"
-        ) {
+        if !Self::FLAVORS.contains(&self.flavor.as_str()) {
             return Err(Error::config(
                 "OpenConnect 类型必须为 anyconnect / gp / fortinet / f5 / pulse / nc",
             ));

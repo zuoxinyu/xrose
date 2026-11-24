@@ -758,6 +758,8 @@ impl From<&Node> for NodeDraft {
 }
 
 impl NodeDraft {
+    pub const VLESS_FLOWS: &[&str] = &["", "xtls-rprx-vision", "xtls-rprx-vision-udp443"];
+
     /// Updates editable parameters while retaining identity and fields absent from the form.
     pub fn apply_to(&self, original: &Node, core: crate::model::CoreKind) -> crate::Result<Node> {
         let mut node = self.into_node(core)?;
@@ -854,9 +856,9 @@ impl NodeDraft {
                 if protocol == Protocol::Vless {
                     let flow = self.flow.trim();
                     if !flow.is_empty() {
-                        if !matches!(flow, "xtls-rprx-vision" | "xtls-rprx-vision-udp443") {
+                        if !Self::VLESS_FLOWS.contains(&flow) {
                             return Err(crate::error::Error::other(
-                                "VLESS flow 只支持 xtls-rprx-vision，留空表示不使用",
+                                "VLESS flow 支持 xtls-rprx-vision 和 xtls-rprx-vision-udp443，留空表示不使用",
                             ));
                         }
                         credentials.flow = Some(flow.to_string());
