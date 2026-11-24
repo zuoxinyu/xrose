@@ -17,6 +17,8 @@
 
 协议字段名（如 `outbounds`、`protocol`、`route`）仅允许出现在 `adapters::xray` 与 `adapters::singbox` 中。UI 层只能通过 `AppService` 同步发起操作，并从 `UiSnapshot` 读取状态，不在 `render` / `tick` 路径中执行磁盘或网络访问。
 
+面向本机 Agent 的接口拟复用桌面实例持有的 `AppService`。组件读取、配置审查、变更提交与运行结果的契约见 [MCP 服务设计提案](MCP.md)。
+
 ## 2. 本机直连模式
 
 新配置默认采用 `CoreKind::SingBox`、`WorkMode::Direct` 与系统 DNS，确保零订阅、零节点即可启动实时监控与诊断；默认广告拦截规则由用户按需启用，避免首次直连启动时因拉取外部规则集失败而阻塞。

@@ -254,6 +254,7 @@ xrose-cli mesh --help                         # 异地组网子命令
 
 - [异地组网与构建说明](docs/MESH.md)
 - [架构与编译约定](docs/ARCHITECTURE.md)
+- [MCP 服务设计提案](docs/MCP.md)
 - [节点健康评分机制](docs/NODE-HEALTH.md)
 - [桌面发布与打包说明](docs/RELEASE.md)
 - [UI 规范](docs/DESIGN.md)

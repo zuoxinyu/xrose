@@ -256,6 +256,7 @@ The technical documentation below is currently maintained in Chinese:
 
 - [Mesh Networking & Build Guide](docs/MESH.md)
 - [Architecture & Compilation Conventions](docs/ARCHITECTURE.md)
+- [MCP Service Design Proposal](docs/MCP.md)
 - [Node Health Scoring Model](docs/NODE-HEALTH.md)
 - [Desktop Releases & Packaging](docs/RELEASE.md)
 - [UI Design Specification](docs/DESIGN.md)

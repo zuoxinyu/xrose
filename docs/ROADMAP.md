@@ -21,13 +21,21 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 
 - [x] 节点健康度分析（详见 [NODE-HEALTH.md](NODE-HEALTH.md)）
 - [x] 配置导入
-- [ ] 链式代理
-- [ ] 完善策略组
+- [x] 链式代理
+- [x] 完善策略组
 - [x] 配置测速地址
+- [ ] 集成 [ProxyBridge](https://github.com/InterceptSuite/ProxyBridge) 实现非 TUN 模式下的分应用代理
+- [ ] 跟进上游协议更新
+
+### 组网
+- [ ] 设备信息完善（P2P/Relay/NAT)
+- [ ] DERP 支持
 
 ### 系统集成
 
 - [ ] 卸载与重置清理：回收提权助手计划任务 / 系统服务等残留副作用。
+- [ ] 内置 MCP 支持
+- [ ] 应用升级
 
 ### UI 与文案
 
@@ -36,12 +44,12 @@ Xrose 正按阶段演进至自研 Rust 统一数据面内核 **Project Xristina*
 
 ### 验证
 
-- [ ] macOS / Linux 实机全量验收：托盘交互、窗口材质、系统代理、提权助手、TUN 与组网端到端路径。
-- [ ] Windows / Linux 的系统通知展示与登录启动实机验收。
+- [x] macOS / Linux 实机全量验收：托盘交互、窗口材质、系统代理、提权助手、TUN 与组网端到端路径。
+- [x] Windows / Linux 的系统通知展示与登录启动实机验收。
 
 ### 构建与发布
 
-- [ ] CI：GitHub Actions 在 Windows / macOS / Linux 上构建、运行 `cargo test -p xrose-core`、检查格式与 clippy。
+- [x] CI：GitHub Actions 在 Windows / macOS / Linux 上构建、运行 `cargo test -p xrose-core`、检查格式与 clippy。
 
 ---
 

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "xrose_plan",
+  "description": "Xrose MCP 首批操作的计划输入，用于构建和审查配置编辑或运行动作。",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "编辑活动配置",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "base_revision", "changes"],
+      "properties": {
+        "kind": {"const": "config"},
+        "target": {
+          "type": "string",
+          "format": "uri",
+          "pattern": "^xrose://local/profiles/[A-Za-z0-9_-]{1,128}$",
+          "not": {"pattern": "\\s"},
+          "description": "由目录返回的活动配置档 URI。"
+        },
+        "base_revision": {"$ref": "#/$defs/token"},
+        "changes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "oneOf": [
+              {"$ref": "#/$defs/set_node_enabled"},
+              {"$ref": "#/$defs/set_group_members"},
+              {"$ref": "#/$defs/set_rule_enabled"},
+              {"$ref": "#/$defs/set_final_dns"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "对当前内核执行操作",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target", "expected_state", "action"],
+      "properties": {
+        "kind": {"const": "action"},
+        "target": {"const": "xrose://local/runtime/core"},
+        "expected_state": {"$ref": "#/$defs/token"},
+        "action": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["op"],
+          "properties": {
+            "op": {"const": "core.apply"}
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "object_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "not": {"pattern": "[^A-Za-z0-9_-]"},
+      "description": "资源返回的不透明对象标识。"
+    },
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {"pattern": "\\s"},
+      "description": "从目标资源取得的修订或状态标记，原样传回。"
+    },
+    "set_node_enabled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "node_id", "enabled"],
+      "properties": {
+        "op": {"const": "nodes.set_enabled"},
+        "node_id": {"$ref": "#/$defs/object_id"},
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "set_group_members": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "group_id", "members"],
+      "properties": {
+        "op": {"const": "groups.set_members"},
+        "group_id": {"$ref": "#/$defs/object_id"},
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/object_id"},
+          "description": "按期望顺序列出的节点标识。"
+        }
+      }
+    },
+    "set_rule_enabled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "rule_id", "enabled"],
+      "properties": {
+        "op": {"const": "routing.set_rule_enabled"},
+        "rule_id": {"$ref": "#/$defs/object_id"},
+        "enabled": {"type": "boolean"}
+      }
+    },
+    "set_final_dns": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "server_id"],
+      "properties": {
+        "op": {"const": "dns.set_final"},
+        "server_id": {"$ref": "#/$defs/object_id"}
+      }
+    }
+  }
+}
