@@ -1,7 +1,7 @@
 //! The status capsule's middle traffic-takeover summary and Popover controls.
 use gpui_base::Disableable;
 use gpui_kit::assets::IconName;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::popover::Popover;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::switch::Switch;
@@ -408,8 +408,9 @@ fn trigger_variant(tone: TrafficTriggerTone, p: &theme::Palette, cx: &App) -> Bu
             .hover(p.warning.opacity(theme::SEMANTIC_ALPHA + 0.08))
             .active(p.warning.opacity(theme::SEMANTIC_ALPHA + 0.14)),
         TrafficTriggerTone::Neutral => ButtonCustomVariant::new(cx)
+            .color(p.header_control_bg())
             .foreground(p.muted_fg)
-            .hover(p.neutral_hover())
+            .hover(p.header_control_hover())
             .active(p.neutral_active()),
     }
 }
@@ -426,10 +427,9 @@ impl AppView {
 
         let trigger = Button::new("header-traffic-mode")
             .compact()
-            .h(px(theme::STATUS_HEIGHT - 2.))
+            .h(px(theme::CONTROL_HEIGHT))
             .px_2p5()
             .flex_shrink_0()
-            .rounded(ButtonRounded::None)
             .custom(trigger_variant(summary.tone, &p, cx))
             .accessibility_label(format!(
                 "{}: {}",
@@ -465,7 +465,7 @@ impl AppView {
             );
 
         Popover::new("header-traffic-menu")
-            .anchor(Anchor::TopCenter)
+            .anchor(Anchor::TopLeft)
             .open(open)
             .trigger(trigger)
             .on_open_change(cx.listener(|this, next_open, _, cx| {

@@ -168,9 +168,22 @@ impl Palette {
         }
     }
 
-    /// Surface fill for the floating header status capsule.
-    pub fn header_pill_bg(&self) -> Hsla {
-        self.panel
+    /// Borderless tonal surface for interactive controls placed directly on the titlebar.
+    pub fn header_control_bg(&self) -> Hsla {
+        if self.is_dark {
+            self.panel
+        } else {
+            self.row_bg()
+        }
+    }
+
+    /// Hover fill for borderless tonal controls placed directly on the titlebar.
+    pub fn header_control_hover(&self) -> Hsla {
+        if self.is_dark {
+            self.neutral_hover()
+        } else {
+            self.row_hover()
+        }
     }
 
     /// Subtle structural divider (e.g. header bottom hairline) that harmonizes with Mica tint.
@@ -360,11 +373,12 @@ pub const CONTROL_HEIGHT: f32 = 32.;
 pub const SIDEBAR_WIDTH: f32 = 220.;
 pub const HEADER_HEIGHT: f32 = 54.;
 pub const HEADER_DRAG_GAP: f32 = 24.;
-pub const STATUS_HEIGHT: f32 = 28.;
-pub const STATUS_END_RADIUS: f32 = STATUS_HEIGHT / 2. - 1.;
-pub const STATUS_NODE_WIDTH: f32 = 220.;
+pub const HEADER_COMPACT_WINDOW_WIDTH: f32 = 1080.;
+pub const HEADER_NODE_WIDTH: f32 = 208.;
+pub const HEADER_NODE_COMPACT_WIDTH: f32 = 172.;
 pub const HEADER_TRAFFIC_POPOVER_WIDTH: f32 = 308.;
-pub const HEADER_PRIVACY_EDGE_GAP: f32 = if cfg!(target_os = "macos") { 12. } else { 8. };
+pub const HEADER_MESH_POPOVER_WIDTH: f32 = 312.;
+pub const HEADER_PRIVACY_EDGE_GAP: f32 = if cfg!(target_os = "macos") { 16. } else { 8. };
 pub const ICON_BUTTON_SIZE: f32 = 28.;
 pub const ICON_SIZE: f32 = 16.;
 pub const NODE_ROW_HEIGHT: f32 = 64.;
@@ -528,11 +542,15 @@ mod tests {
         assert_eq!(p.card_bg(), p.panel);
         assert_eq!(p.row_bg().a, 1.0);
 
+        assert_ne!(p.header_control_bg(), p.header_bg());
+        assert_ne!(p.header_control_bg(), p.header_control_hover());
+
         p.mica = true;
         assert!(p.content_bg().a < 1.0 && p.content_bg().a > 0.5);
         assert!(p.header_bg().a < 1.0 && p.header_bg().a >= 0.75);
         assert!(p.header_bg().a > p.content_bg().a);
-        assert_eq!(p.header_pill_bg().a, 1.0);
+        assert_ne!(p.header_control_bg(), p.header_bg());
+        assert_ne!(p.header_control_bg(), p.header_control_hover());
         assert!(p.card_bg().a < 1.0 && p.card_bg().a > 0.5);
         assert!(p.row_bg().a < p.row_hover().a);
         assert_ne!(p.detail_surface(false), p.row_bg());
@@ -545,6 +563,8 @@ mod tests {
         p.bg = hsl(220., 0.10, 0.09);
         assert_eq!(p.header_bg(), p.bg);
         assert_eq!(p.header_bg().a, 1.0);
+        assert_ne!(p.header_control_bg(), p.header_bg());
+        assert_ne!(p.header_control_bg(), p.header_control_hover());
         assert_eq!(p.detail_surface(false), p.panel);
         assert_ne!(p.detail_surface(true), interaction_tint(true));
 
@@ -552,6 +572,7 @@ mod tests {
         assert!(p.header_bg().a < 1.0 && p.header_bg().a >= 0.7);
         assert_eq!(p.content_bg(), p.bg);
         assert_eq!(p.card_bg(), p.panel);
-        assert_eq!(p.header_pill_bg().a, 1.0);
+        assert_ne!(p.header_control_bg(), p.header_bg());
+        assert_ne!(p.header_control_bg(), p.header_control_hover());
     }
 }

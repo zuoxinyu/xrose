@@ -8,6 +8,7 @@ mod logs;
 mod manual_node;
 mod menus;
 mod mesh;
+mod mesh_popover;
 mod mesh_sync;
 mod network_diagnostics;
 mod node_selector;
@@ -272,7 +273,7 @@ impl Render for WindowRegion {
         self.app
             .update(cx, |app, cx| match self.region {
                 Region::Sidebar => app.sidebar(cx).into_any_element(),
-                Region::Header => app.header(cx).into_any_element(),
+                Region::Header => app.header(window, cx).into_any_element(),
                 Region::Content => app.scroll_content(window, cx).into_any_element(),
             })
             .unwrap_or_else(|_| div().into_any_element())
@@ -360,6 +361,9 @@ pub struct AppView {
     route_scroll_running: bool,
     node_selector: Option<Entity<node_selector::NodeSelector>>,
     pub(crate) traffic_popover_open: bool,
+    pub(crate) header_mesh_popover: Option<xrose_core::mesh::MeshProvider>,
+    pub(crate) header_mesh_selected:
+        std::collections::BTreeMap<xrose_core::mesh::MeshProvider, String>,
     pub(crate) nodes_policy_popover_open: bool,
     action_menu: Option<WeakEntity<gpui_kit::component::menu::PopupMenu>>,
     active_route_drag: Option<route_drag::RouteDrag>,
@@ -669,6 +673,8 @@ impl AppView {
             action_menu: None,
             node_selector: None,
             traffic_popover_open: false,
+            header_mesh_popover: None,
+            header_mesh_selected: std::collections::BTreeMap::new(),
             nodes_policy_popover_open: false,
             about_note_hovered: false,
             active_route_drag: None,
@@ -1276,17 +1282,45 @@ impl AppView {
             )
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let running = self.snapshot.process.phase.is_alive();
         let core_busy = self.snapshot.busy.iter().any(|b| b == "core");
         let failed = self.snapshot.process.phase == xrose_core::core::ProcessPhase::Failed;
+        let compact = window.viewport_size().width < px(theme::HEADER_COMPACT_WINDOW_WIDTH);
+        let node_width = if compact {
+            theme::HEADER_NODE_COMPACT_WIDTH
+        } else {
+            theme::HEADER_NODE_WIDTH
+        };
         let (action_icon, action_label) = if running {
             (IconName::Square, self.tr("停止", "Stop"))
         } else if failed {
             (IconName::RotateCw, self.tr("重试", "Retry"))
         } else {
             (IconName::Play, self.tr("启动", "Start"))
+        };
+        let status_bar_color = if failed {
+            p.danger
+        } else if running {
+            p.success
+        } else {
+            p.muted_fg.opacity(theme::DISABLED_OPACITY)
+        };
+        let core_toggle_style = if running {
+            danger_button_style(&p, cx)
+        } else if failed {
+            ButtonCustomVariant::new(cx)
+                .color(p.danger.opacity(theme::SEMANTIC_ALPHA))
+                .foreground(p.danger_text)
+                .hover(p.danger.opacity(theme::SEMANTIC_ALPHA + 0.08))
+                .active(p.danger.opacity(theme::SEMANTIC_ALPHA + 0.14))
+        } else {
+            ButtonCustomVariant::new(cx)
+                .color(p.accent)
+                .foreground(p.primary)
+                .hover(p.primary.opacity(theme::SEMANTIC_ALPHA + 0.06))
+                .active(p.primary.opacity(theme::SEMANTIC_ALPHA + 0.12))
         };
         let node = self.snapshot.selected_node(None);
         let direct = self.snapshot.model.work_mode == xrose_core::model::WorkMode::Direct;
@@ -1389,6 +1423,13 @@ impl AppView {
                     }
                 })
         };
+        let mesh_popovers: Vec<gpui_kit::component::popover::Popover> = [
+            xrose_core::mesh::MeshProvider::EasyTier,
+            xrose_core::mesh::MeshProvider::Tailscale,
+        ]
+        .into_iter()
+        .filter_map(|provider| self.header_mesh_popover(provider, compact, cx))
+        .collect();
         div()
             .id("header-bar")
             .w_full()
@@ -1399,31 +1440,27 @@ impl AppView {
             .border_b_1()
             .border_color(p.hairline_border())
             .bg(p.header_bg())
-            .child(drag_region("header-drag-left"))
             .child(
                 div()
-                    .id("header-status")
                     .flex()
                     .items_center()
+                    .gap_1p5()
+                    .pl(px(if compact { 16. } else { theme::PAGE_PAD }))
                     .flex_shrink_0()
-                    .h(px(theme::STATUS_HEIGHT))
-                    .rounded_full()
-                    .overflow_hidden()
-                    .bg(p.header_pill_bg())
-                    .border_1()
-                    .border_color(p.control_border())
                     .child(
                         self.node_selector_popover(
                             Button::new("header-node-selector")
                                 .compact()
-                                .ghost()
-                                // The dropdown wrapper sizes to its trigger, so give
-                                // the button the capsule's full inner height explicitly.
-                                .h(px(theme::STATUS_HEIGHT - 2.))
-                                .w(px(theme::STATUS_NODE_WIDTH))
-                                .rounded(gpui_kit::component::button::ButtonRounded::None)
-                                .rounded_tl(px(theme::STATUS_END_RADIUS))
-                                .rounded_bl(px(theme::STATUS_END_RADIUS))
+                                .h(px(theme::CONTROL_HEIGHT))
+                                .w(px(node_width))
+                                .p_0()
+                                .custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(p.header_control_bg())
+                                        .foreground(p.fg)
+                                        .hover(p.header_control_hover())
+                                        .active(p.neutral_active()),
+                                )
                                 .disabled(core_busy)
                                 .accessibility_label(if direct {
                                     node_name.clone()
@@ -1436,22 +1473,27 @@ impl AppView {
                                 .tooltip(node_tip)
                                 .child(
                                     div()
+                                        .relative()
                                         .flex()
                                         .items_center()
                                         .gap_2()
                                         .w_full()
+                                        .h_full()
+                                        .pl_3p5()
+                                        .pr_2p5()
                                         .min_w(px(0.))
-                                        .child(if core_busy {
-                                            Spinner::new().into_any_element()
-                                        } else {
-                                            dot(if failed {
-                                                p.danger_text
-                                            } else if running {
-                                                p.ok_text
-                                            } else {
-                                                p.muted_fg
-                                            })
-                                            .into_any_element()
+                                        .child(
+                                            div()
+                                                .absolute()
+                                                .left(px(2.))
+                                                .top(px(6.))
+                                                .bottom(px(6.))
+                                                .w(px(3.))
+                                                .rounded_full()
+                                                .bg(status_bar_color),
+                                        )
+                                        .when(core_busy, |d| {
+                                            d.child(Spinner::new().small().color(p.muted_fg))
                                         })
                                         .child(
                                             div()
@@ -1459,6 +1501,7 @@ impl AppView {
                                                 .min_w(px(0.))
                                                 .truncate()
                                                 .text_xs()
+                                                .font_weight(FontWeight::MEDIUM)
                                                 .child(node_name),
                                         )
                                         .when(
@@ -1499,42 +1542,23 @@ impl AppView {
                                         )
                                         .child(
                                             Icon::new(IconName::ChevronDown)
-                                                .size(px(theme::ICON_SIZE))
-                                                .flex_shrink_0(),
+                                                .size(px(14.))
+                                                .flex_shrink_0()
+                                                .opacity(0.75),
                                         ),
                                 ),
                             cx,
                         ),
                     )
-                    .child(
-                        div()
-                            .w(px(1.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .bg(p.control_border()),
-                    )
                     .child(self.traffic_mode_popover(cx))
                     .child(
-                        div()
-                            .w(px(1.))
-                            .h_full()
-                            .flex_shrink_0()
-                            .bg(p.control_border()),
-                    )
-                    .child(
                         Button::new("toggle-core")
-                            .h_full()
+                            .compact()
+                            .h(px(theme::CONTROL_HEIGHT))
                             .w(px(theme::CONTROL_HEIGHT))
                             .p_0()
                             .flex_shrink_0()
-                            .rounded(gpui_kit::component::button::ButtonRounded::None)
-                            .rounded_tr(px(theme::STATUS_END_RADIUS))
-                            .rounded_br(px(theme::STATUS_END_RADIUS))
-                            .custom(if running {
-                                danger_button_style(&p, cx)
-                            } else {
-                                start_ghost_button_style(&p, cx)
-                            })
+                            .custom(core_toggle_style)
                             .icon(action_icon)
                             .tooltip(action_label.clone())
                             .accessibility_label(action_label)
@@ -1542,16 +1566,33 @@ impl AppView {
                             .on_click(cx.listener(|this, _, _, _| this.service.toggle_core())),
                     ),
             )
+            .child(drag_region("header-drag-main"))
             .child(
-                // Keep both halves equal so the pill stays centered. Windows
-                // uses the first matching control hitbox, so the drag region
-                // and caption buttons must occupy separate layout space.
+                // Windows uses the first matching control hitbox, so the drag region
+                // and right-hand status / caption buttons must occupy separate layout space.
                 div()
                     .flex()
-                    .flex_1()
-                    .h_full()
                     .items_center()
-                    .child(drag_region("header-drag-right"))
+                    .h_full()
+                    .flex_shrink_0()
+                    .when(!mesh_popovers.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .flex_shrink_0()
+                                .children(mesh_popovers),
+                        )
+                        .child(
+                            div()
+                                .w(px(1.))
+                                .h(px(16.))
+                                .mx_1p5()
+                                .flex_shrink_0()
+                                .bg(p.hairline_border()),
+                        )
+                    })
                     .child(self.header_privacy_toggle(cx))
                     .child(WindowControls::new(p)),
             )

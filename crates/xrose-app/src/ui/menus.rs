@@ -191,6 +191,9 @@ impl AppView {
         if std::mem::take(&mut self.traffic_popover_open) {
             cx.notify();
         }
+        if self.header_mesh_popover.take().is_some() {
+            cx.notify();
+        }
         if std::mem::take(&mut self.nodes_policy_popover_open) {
             cx.notify();
         }
