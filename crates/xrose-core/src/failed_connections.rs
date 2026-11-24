@@ -462,13 +462,7 @@ pub fn extract_root_domain(host: &str) -> Option<String> {
     if lower.is_empty() || lower.parse::<IpAddr>().is_ok() || !lower.contains('.') {
         return None;
     }
-    if lower == "localhost"
-        || lower.ends_with(".local")
-        || lower.ends_with(".localhost")
-        || lower.ends_with(".internal")
-        || lower.ends_with(".lan")
-        || lower.ends_with(".home.arpa")
-    {
+    if is_local_domain(&lower) {
         return None;
     }
     if psl::suffix(lower.as_bytes()).is_some_and(|suffix| suffix.is_known()) {
@@ -913,6 +907,18 @@ impl FailedConnectionTracker {
         model: &AppModel,
         now: i64,
     ) -> Option<u64> {
+        let host = conn.host();
+        let outbound_tag = conn.chains.first().cloned().unwrap_or_default();
+        let (direction, outbound_label) = resolve_outbound(&outbound_tag, "", &conn.chains, model);
+        if direction == OutboundDirection::Direct
+            && is_lan_target(&host, &conn.metadata.destination_ip, model)
+        {
+            // A later snapshot can identify the route of an already stalled flow.
+            if let Some(id) = existing_id {
+                self.resolve_recovered_stalled(id, flow_key);
+            }
+            return None;
+        }
         if let Some(id) = existing_id
             && let Some(entry) = self.records.iter_mut().find(|e| e.record.id == id)
         {
@@ -929,12 +935,9 @@ impl FailedConnectionTracker {
             return Some(id);
         }
 
-        let host = conn.host();
         if host.is_empty() || is_local_or_loopback(&host) {
             return None;
         }
-        let outbound_tag = conn.chains.first().cloned().unwrap_or_default();
-        let (direction, outbound_label) = resolve_outbound(&outbound_tag, "", &conn.chains, model);
         if direction == OutboundDirection::Reject {
             return None;
         }
@@ -1089,11 +1092,7 @@ impl FailedConnectionTracker {
                         source_addr: ctx.source_addr,
                         process_name: ctx.process_name,
                         process_path: ctx.process_path,
-                        outbound_tag: if ctx.outbound_tag.is_empty() {
-                            "direct".into()
-                        } else {
-                            ctx.outbound_tag
-                        },
+                        outbound_tag: ctx.outbound_tag,
                         outbound_type: ctx.outbound_type,
                         matched_rule: ctx.matched_rule,
                         failure_kind: FailureKind::DnsFailed,
@@ -1389,8 +1388,8 @@ impl FailedConnectionTracker {
                         source_addr: String::new(),
                         process_name: String::new(),
                         process_path: String::new(),
-                        outbound_tag: "direct".into(),
-                        outbound_type: "dns".into(),
+                        outbound_tag: String::new(),
+                        outbound_type: String::new(),
                         matched_rule: None,
                         failure_kind: FailureKind::DnsFailed,
                         reason_summary: human_failure_summary(FailureKind::DnsFailed, line),
@@ -1429,7 +1428,10 @@ impl FailedConnectionTracker {
         let (domain, destination_ip) = if host.parse::<IpAddr>().is_ok() {
             (String::new(), host.trim_matches(['[', ']']).to_owned())
         } else {
-            (normalize_domain(host), String::new())
+            let ip = line
+                .rsplit_once(" > ")
+                .and_then(|(_, err)| direct_dial_ip(&outbound_type, err, port));
+            (normalize_domain(host), ip.unwrap_or_default())
         };
 
         self.record_failure(
@@ -1496,7 +1498,7 @@ impl FailedConnectionTracker {
         } else if ctx.target_host.parse::<IpAddr>().is_ok() {
             ctx.target_host.clone()
         } else {
-            String::new()
+            direct_dial_ip(&ctx.outbound_type, err, &ctx.destination_port).unwrap_or_default()
         };
         let domain_is_sniffed = !ctx.sniff_domain.is_empty()
             && (ctx.target_host.is_empty() || ctx.target_host.parse::<IpAddr>().is_ok());
@@ -1530,7 +1532,7 @@ impl FailedConnectionTracker {
     fn record_failure(&mut self, mut event: FailureEvent, model: &AppModel, now: i64) {
         // Enrich from recent Clash API connection metadata when log lacks process/rule/domain.
         let enrich = self.lookup_enrichment(&event, now);
-        if let Some(meta) = enrich {
+        if let Some((meta, same_source)) = enrich {
             if event.process_name.is_empty() && !meta.process_name.is_empty() {
                 event.process_name = meta.process_name;
             }
@@ -1540,7 +1542,8 @@ impl FailedConnectionTracker {
             if event.matched_rule.is_none() && meta.matched_rule.is_some() {
                 event.matched_rule = meta.matched_rule;
             }
-            if event.outbound_tag.is_empty() && !meta.outbound_tag.is_empty() {
+            // Different connections to the same destination can use different outbounds.
+            if same_source && event.outbound_tag.is_empty() && event.outbound_type.is_empty() {
                 event.outbound_tag = meta.outbound_tag;
             }
             if event.inbound.is_empty() && !meta.inbound.is_empty() {
@@ -1579,6 +1582,11 @@ impl FailedConnectionTracker {
             resolve_outbound(&event.outbound_tag, &event.outbound_type, &[], model)
         };
 
+        if direction == OutboundDirection::Direct
+            && is_lan_target(&event.domain, &event.destination_ip, model)
+        {
+            return;
+        }
         // Host offline burst guard (only suppresses non-Rejected network errors when both
         // Direct and Proxy outbounds fail simultaneously without recent success).
         if event.failure_kind != FailureKind::Rejected {
@@ -1664,12 +1672,16 @@ impl FailedConnectionTracker {
         self.prune(now);
     }
 
-    fn lookup_enrichment(&self, event: &FailureEvent, now: i64) -> Option<ClashMetaSnapshot> {
+    fn lookup_enrichment(
+        &self,
+        event: &FailureEvent,
+        now: i64,
+    ) -> Option<(ClashMetaSnapshot, bool)> {
         if !event.source_addr.is_empty()
             && let Some(meta) = self.enrich_by_source.get(&event.source_addr)
             && now.saturating_sub(meta.updated_at) <= ENRICH_TTL_SECS
         {
-            return Some(meta.clone());
+            return Some((meta.clone(), true));
         }
         let host = if !event.domain.is_empty() {
             event.domain.as_str()
@@ -1681,7 +1693,7 @@ impl FailedConnectionTracker {
             if let Some(meta) = self.enrich_by_dest.get(&key)
                 && now.saturating_sub(meta.updated_at) <= ENRICH_TTL_SECS
             {
-                return Some(meta.clone());
+                return Some((meta.clone(), false));
             }
         }
         None
@@ -1808,9 +1820,6 @@ fn resolve_outbound(
     if lower_tag == "direct" || lower_type == "direct" {
         return (OutboundDirection::Direct, "直连".into());
     }
-    if lower_type == "dns" {
-        return (OutboundDirection::Direct, "DNS".into());
-    }
     if let Some(node) = model.nodes.iter().find(|n| n.outbound_tag() == tag) {
         return (OutboundDirection::Proxy, format!("代理 · {}", node.name));
     }
@@ -1861,6 +1870,59 @@ fn format_clash_rule(rule: &str, payload: &str) -> Option<String> {
     } else {
         Some(format!("{rule} · {payload}"))
     }
+}
+
+fn is_local_domain(normalized: &str) -> bool {
+    normalized == "localhost"
+        || normalized == "home.arpa"
+        || [".local", ".localhost", ".internal", ".lan", ".home.arpa"]
+            .iter()
+            .any(|suffix| normalized.ends_with(suffix))
+}
+
+// A direct dial can report the resolved destination only in the socket error.
+fn direct_dial_ip(outbound_type: &str, err: &str, port: &str) -> Option<String> {
+    if outbound_type != "direct" {
+        return None;
+    }
+    let endpoint = err
+        .strip_prefix("dial tcp ")
+        .or_else(|| err.strip_prefix("dial udp "))?;
+    let (endpoint, _) = endpoint.split_once(": ")?;
+    let (host, dial_port) = split_host_port(endpoint);
+    if dial_port != port {
+        return None;
+    }
+    host.parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+fn is_lan_target(host: &str, destination_ip: &str, model: &AppModel) -> bool {
+    let host = normalize_domain(host);
+    if is_local_domain(&host) {
+        return true;
+    }
+    [destination_ip, &host].into_iter().any(|address| {
+        let address = address.trim_matches(['[', ']']);
+        // Link-local IPv6 literals may carry an interface zone.
+        let address = address
+            .split_once('%')
+            .filter(|(ip, _)| ip.contains(':'))
+            .map_or(address, |(ip, _)| ip);
+        let Ok(ip) = address.parse::<IpAddr>() else {
+            return false;
+        };
+        let ip = ip.to_canonical();
+        let local = match ip {
+            IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_broadcast(),
+            IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+        };
+        if !local || !model.dns.enabled || !model.dns.fake_ip {
+            return local;
+        }
+        let configured_fake_ip = model.dns.fake_ip_range.trim().parse::<ipnet::Ipv4Net>();
+        !is_fake_ip(ip)
+            && !matches!(ip, IpAddr::V4(v4) if configured_fake_ip.is_ok_and(|range| range.contains(&v4)))
+    })
 }
 
 fn is_local_or_loopback(host: &str) -> bool {
@@ -2288,6 +2350,172 @@ mod tests {
         c.download = down;
         c.chains = vec![chain.into()];
         c
+    }
+
+    #[test]
+    fn lan_targets_require_a_local_name_or_real_destination_address() {
+        let mut model = demo_model();
+        model.dns.fake_ip = true;
+        model.dns.fake_ip_range = "10.250.0.0/16".into();
+        for target in [
+            "10.1.2.3",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.1.2",
+            "fd12::1",
+            "[fe80::1%7]",
+            "::ffff:192.168.1.2",
+            "Printer.LOCAL.",
+            "router.lan",
+            "service.internal",
+            "printer.home.arpa",
+        ] {
+            assert!(is_lan_target(target, "", &model), "{target}");
+        }
+        for target in [
+            "172.32.0.1",
+            "100.64.1.1",
+            "10.250.0.1",
+            "198.18.0.1",
+            "fc00::1",
+            "local.example.org",
+            "publiclan",
+            "example.org",
+        ] {
+            assert!(!is_lan_target(target, target, &model), "{target}");
+        }
+        model.dns.fake_ip = false;
+        assert!(is_lan_target("", "10.250.0.1", &model));
+    }
+
+    #[test]
+    fn log_filters_direct_lan_before_offline_detection_and_preserves_other_routes() {
+        let model = demo_model();
+        let mut tracker = FailedConnectionTracker::new();
+        for (core, line) in [
+            (
+                CoreKind::SingBox,
+                "ERROR [1 5s] connection: open connection to router.lan:443 using outbound/direct[direct]: i/o timeout",
+            ),
+            (
+                CoreKind::Xray,
+                "proxy/freedom: failed to open connection to tcp:service.example.org:443 > dial tcp 192.168.1.2:443: connection refused",
+            ),
+            (
+                CoreKind::SingBox,
+                "ERROR [2 5s] connection: open connection to [fd12::1]:443 using outbound/vless[proxy]: i/o timeout",
+            ),
+            (
+                CoreKind::Xray,
+                "proxy/blackhole: failed to open connection to tcp:10.0.0.3:443",
+            ),
+            (
+                CoreKind::Xray,
+                "failed to open connection to tcp:172.16.0.4:443 > i/o timeout",
+            ),
+            (
+                CoreKind::SingBox,
+                "ERROR [3 5s] dns: exchange failed for printer.local. IN A: i/o timeout",
+            ),
+        ] {
+            tracker.observe_log_line(core, line, &model, 100);
+        }
+        let view = tracker.snapshot(100);
+        assert!(!view.host_offline);
+        assert_eq!(view.unfixed_count, 4);
+        for (host, direction, kind) in [
+            ("fd12::1", OutboundDirection::Proxy, FailureKind::Timeout),
+            ("10.0.0.3", OutboundDirection::Reject, FailureKind::Rejected),
+            (
+                "172.16.0.4",
+                OutboundDirection::Unknown,
+                FailureKind::Timeout,
+            ),
+            (
+                "printer.local",
+                OutboundDirection::Unknown,
+                FailureKind::DnsFailed,
+            ),
+        ] {
+            assert!(
+                view.records.iter().any(|r| r.host() == host
+                    && r.outbound_direction == direction
+                    && r.failure_kind == kind),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn log_enrichment_uses_a_matching_flow_to_identify_direct_lan() {
+        let model = demo_model();
+        let mut tracker = FailedConnectionTracker::new();
+        let mut flow = clash_tcp("a", "device.example.org", "192.168.1.2", 0, 0, "direct");
+        flow.metadata.source_ip = "192.168.1.3".into();
+        flow.metadata.source_port = "51000".into();
+        tracker.observe_clash_connections(&[flow], &model, 100);
+        for (id, port) in [(1, 51000), (2, 51001)] {
+            for body in [
+                format!("inbound connection from 192.168.1.3:{port}"),
+                "inbound connection to device.example.org:443".into(),
+                "connection closed: connection reset by peer".into(),
+            ] {
+                let line = format!("ERROR [{id} 1s] inbound/mixed[mixed-in]: {body}");
+                tracker.observe_log_line(CoreKind::SingBox, &line, &model, 101);
+            }
+        }
+        let view = tracker.snapshot(101);
+        assert_eq!(view.records.len(), 1);
+        assert_eq!(
+            view.records[0].outbound_direction,
+            OutboundDirection::Unknown
+        );
+        assert_eq!(view.records[0].count, 1);
+    }
+
+    #[test]
+    fn stalled_filter_uses_destination_and_rechecks_new_route_metadata() {
+        let mut model = demo_model();
+        model.dns.enabled = true;
+        model.dns.fake_ip = true;
+        let mut tracker = FailedConnectionTracker::new();
+        let mut flows = [
+            clash_tcp(
+                "local",
+                "device.example.org",
+                "192.168.1.2",
+                100,
+                0,
+                "direct",
+            ),
+            clash_tcp("proxy", "service.lan", "10.0.0.3", 100, 0, "proxy"),
+            clash_tcp("unknown", "device.example.org", "192.168.1.2", 100, 0, ""),
+            clash_tcp("public", "web.example.org", "fc00::123", 100, 0, "direct"),
+        ];
+        flows[2].chains.clear();
+        flows[3].metadata.source_ip = "192.168.1.3".into();
+        tracker.observe_clash_connections(&flows, &model, 100);
+        tracker.observe_clash_connections(&flows, &model, 104);
+        let view = tracker.snapshot(104);
+        assert_eq!(view.unfixed_count, 3);
+        for (host, direction) in [
+            ("service.lan", OutboundDirection::Proxy),
+            ("device.example.org", OutboundDirection::Unknown),
+            ("web.example.org", OutboundDirection::Direct),
+        ] {
+            assert!(
+                view.records.iter().any(|r| r.host() == host
+                    && r.outbound_direction == direction
+                    && r.is_stalled_live),
+                "{host}"
+            );
+        }
+        flows[2].chains.push("direct".into());
+        tracker.observe_clash_connections(&flows, &model, 105);
+        tracker.observe_clash_connections(&[], &model, 106);
+        let view = tracker.snapshot(106);
+        assert_eq!(view.unfixed_count, 2);
+        assert!(view.records.iter().all(|r| r.failure_kind == FailureKind::Timeout && r.host() != "device.example.org"));
     }
 
     #[test]
