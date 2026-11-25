@@ -289,7 +289,11 @@ impl AppView {
         }
     }
 
-    pub(crate) fn page_routing(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_routing(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
         let model = self.snapshot.model.clone();
@@ -307,7 +311,7 @@ impl AppView {
             .gap_4()
             .w_full()
             .child(self.route_strategy_card(&model, &p, lang, cx))
-            .child(self.route_rules_card(&model, &p, lang, cx))
+            .child(self.route_rules_card(&model, &p, lang, window, cx))
             .child(self.route_rule_sets_card(&rule_sets, &rule_set_updates, &p, cx));
 
         if let Some(validation) = &self.snapshot.validation {
@@ -473,6 +477,7 @@ impl AppView {
         model: &xrose_core::model::AppModel,
         p: &super::theme::Palette,
         lang: xrose_core::settings::Language,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let routing = &model.routing;
@@ -551,13 +556,21 @@ impl AppView {
             });
         }
 
+        let rule_form_sample =
+            self.expand_motion
+                .sample("routing-rule-form", self.show_rule_form, window, cx);
         let mut section = card(p)
             .child(
                 div()
                     .flex()
-                    .items_start()
-                    .flex_wrap()
-                    .gap_3()
+                    .flex_col()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .flex_wrap()
+                            .gap_3()
                     .child(
                         div()
                             .flex_1()
@@ -639,52 +652,71 @@ impl AppView {
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(self.route_group_tabs(
-                        routing,
-                        showing_all,
-                        selected_group.map(|g| g.id.as_str()),
-                        p,
-                        cx,
-                    ))
                     .child(
                         div()
-                            .w(px(196.))
-                            .max_w_full()
+                            .pt_3()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(self.route_group_tabs(
+                                routing,
+                                showing_all,
+                                selected_group.map(|g| g.id.as_str()),
+                                p,
+                                cx,
+                            ))
                             .child(
-                                Input::new(&self.rule_search)
-                                    .small()
-                                    .h(px(32.))
-                                    .bg(p.bg)
-                                    .border_color(p.border)
-                                    .text_xs()
-                                    .cleanable(true)
-                                    .prefix(
-                                        Icon::new(IconName::Search)
-                                            .size(px(13.))
-                                            .text_color(p.muted_fg),
+                                div()
+                                    .w(px(196.))
+                                    .max_w_full()
+                                    .child(
+                                        Input::new(&self.rule_search)
+                                            .small()
+                                            .h(px(32.))
+                                            .bg(p.bg)
+                                            .border_color(p.border)
+                                            .text_xs()
+                                            .cleanable(true)
+                                            .prefix(
+                                                Icon::new(IconName::Search)
+                                                    .size(px(13.))
+                                                    .text_color(p.muted_fg),
+                                            ),
                                     ),
                             ),
-                    ),
-            )
-            .when_some(
-                self.rule_group_inline_open
-                    .then_some(self.rule_group_inline_error.clone())
-                    .flatten(),
-                |d, message| d.child(div().text_xs().text_color(p.danger_text).child(message)),
-            )
-            .when_some(self.snapshot.route_import.clone(), |d, (id, report)| {
-                d.child(self.route_import_review(id, &report, cx))
-            })
-            .when(self.show_rule_form, |d| {
-                d.child(self.route_rule_composer(model, target_group_id.clone(), p, lang, cx))
-            });
+                    )
+                    .when_some(
+                        self.rule_group_inline_open
+                            .then_some(self.rule_group_inline_error.clone())
+                            .flatten(),
+                        |d, message| {
+                            d.child(
+                                div()
+                                    .pt_3()
+                                    .text_xs()
+                                    .text_color(p.danger_text)
+                                    .child(message),
+                            )
+                        },
+                    )
+                    .when_some(self.snapshot.route_import.clone(), |d, (id, report)| {
+                        d.child(div().pt_3().child(self.route_import_review(id, &report, cx)))
+                    })
+                    .when(rule_form_sample.mounted, |d| {
+                        d.child(rule_form_sample.wrap(
+                            "routing-rule-form-reveal",
+                            div().pt_3().w_full().child(self.route_rule_composer(
+                                model,
+                                target_group_id.clone(),
+                                p,
+                                lang,
+                                cx,
+                            )),
+                        ))
+                    }),
+            );
 
         if entries.is_empty() {
             let empty_msg = if is_searching {

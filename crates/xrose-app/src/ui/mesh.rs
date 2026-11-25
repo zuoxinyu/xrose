@@ -301,10 +301,27 @@ impl AppView {
         values: Vec<String>,
         kind: MeshTextKind,
         p: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let overflow = self.mesh_overflow.get(&id).copied().unwrap_or(false);
         let expanded = overflow && self.mesh_expanded.contains(&id);
+        let text_sample = overflow.then(|| {
+            self.expand_motion.sample_variant(
+                &format!("mesh-text-{id}"),
+                true,
+                u8::from(expanded),
+                window,
+                cx,
+            )
+        });
+        let chevron_progress = overflow
+            .then(|| {
+                self.expand_motion
+                    .sample(&format!("mesh-text-chevron-{id}"), expanded, window, cx)
+                    .progress
+            })
+            .unwrap_or(0.0);
         let copy_value = values.join(", ");
         let display_values: Vec<String> = if self.hide_ips {
             match kind {
@@ -371,11 +388,7 @@ impl AppView {
                 .custom(icon_button_style(p, false, cx))
                 .w(px(26.))
                 .h(px(26.))
-                .icon(if expanded {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
+                .icon(Icon::new(IconName::ChevronRight).rotate(percentage(0.25 * chevron_progress)))
                 .text_color(p.muted_fg)
                 .flex_shrink_0()
                 .accessibility_label(label.clone())
@@ -391,6 +404,35 @@ impl AppView {
         let has_label = !label.is_empty();
         let trailing_disclosure = matches!(kind, MeshTextKind::Address | MeshTextKind::Routes);
         let fill_width = expanded || (trailing_disclosure && overflow);
+        let value_body =
+            div()
+                .min_w(px(0.))
+                .py_1()
+                .when(!expanded, |d| d.truncate().child(summary))
+                .when(expanded, |d| {
+                    d.flex().flex_col().gap_1().children(
+                        display_values
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, value)| {
+                                div()
+                                    .min_w(px(0.))
+                                    .whitespace_normal()
+                                    .child(SelectableText::new(
+                                        SharedString::from(format!("{id}-value-{index}")),
+                                        value,
+                                    ))
+                            }),
+                    )
+                });
+        let value_slot = if let Some(sample) = text_sample {
+            div().min_w(px(0.)).flex_1().child(sample.wrap(
+                SharedString::from(format!("mesh-text-reveal-{id}")),
+                value_body,
+            ))
+        } else {
+            value_body.when(fill_width, |d| d.flex_1())
+        };
         let content = div()
             .id(SharedString::from(format!("{id}-content")))
             .group(group.clone())
@@ -401,28 +443,7 @@ impl AppView {
             .min_w(px(0.))
             .when(fill_width, |d| d.w_full())
             .children(disclosure.take_if(|_| !trailing_disclosure))
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .py_1()
-                    .when(fill_width, |d| d.flex_1())
-                    .when(!expanded, |d| d.truncate().child(summary))
-                    .when(expanded, |d| {
-                        d.flex().flex_col().gap_1().children(
-                            display_values
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, value)| {
-                                    div().min_w(px(0.)).whitespace_normal().child(
-                                        SelectableText::new(
-                                            SharedString::from(format!("{id}-value-{index}")),
-                                            value,
-                                        ),
-                                    )
-                                }),
-                        )
-                    }),
-            )
+            .child(value_slot)
             .children(disclosure)
             .child(
                 Button::new(SharedString::from(format!("{id}-copy")))
@@ -861,6 +882,7 @@ impl AppView {
         state: &MeshRuntimeView,
         active: bool,
         p: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let local_name = if state.local_hostname.trim().is_empty() {
@@ -896,6 +918,7 @@ impl AppView {
                             vec![local_name.to_owned()],
                             MeshTextKind::Plain,
                             p,
+                            window,
                             cx,
                         )
                         .into_any_element()
@@ -916,6 +939,7 @@ impl AppView {
                                 state.addresses.clone(),
                                 MeshTextKind::Address,
                                 p,
+                                window,
                                 cx,
                             )
                             .into_any_element()
@@ -935,6 +959,7 @@ impl AppView {
                                 state.routes.clone(),
                                 MeshTextKind::Routes,
                                 p,
+                                window,
                                 cx,
                             )
                             .into_any_element()
@@ -947,6 +972,7 @@ impl AppView {
                     vec![format!("*.{suffix}")],
                     MeshTextKind::MagicDns,
                     p,
+                    window,
                     cx,
                 )));
             }
@@ -961,6 +987,7 @@ impl AppView {
         active: bool,
         peers: &[MeshPeer],
         p: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
         let lang = self.lang();
@@ -1086,6 +1113,7 @@ impl AppView {
                                         peer.addresses.clone(),
                                         MeshTextKind::Address,
                                         p,
+                                        window,
                                         cx,
                                     ),
                                 ))
@@ -1149,6 +1177,7 @@ impl AppView {
         busy: bool,
         state: &MeshRuntimeView,
         p: &Palette,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
         let peer_count = state.peers.len();
@@ -1163,6 +1192,17 @@ impl AppView {
             .copied()
             .unwrap_or_default();
         let collapsed = self.collapsed_mesh_sections.contains(&profile.id);
+        let tab_variant = match active_tab {
+            MeshCardTab::Devices => 0,
+            MeshCardTab::Forwards => 1,
+        };
+        let section_sample = self.expand_motion.sample_variant(
+            &format!("mesh-section-{}", profile.id),
+            !collapsed,
+            tab_variant,
+            window,
+            cx,
+        );
         let profile_id = profile.id.clone();
         let selected_tab = (!collapsed).then_some(match active_tab {
             MeshCardTab::Devices => 0,
@@ -1229,12 +1269,9 @@ impl AppView {
                 .tooltip(toggle_tip)
                 .label(toggle_label)
                 .child(
-                    Icon::new(if collapsed {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronUp
-                    })
-                    .size(px(14.)),
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .rotate(percentage(0.5 * section_sample.progress)),
                 )
                 .on_click(cx.listener(move |this, _, _, cx| {
                     toggle_mesh_section(&mut this.collapsed_mesh_sections, &toggle_profile_id);
@@ -1293,19 +1330,27 @@ impl AppView {
                 );
                 cx.notify();
             }));
-        let mut section = div().flex().flex_col().gap_3().pt_1().child(tabs);
-        if !collapsed {
-            section = section.child(match active_tab {
+        let mut section = div().flex().flex_col().pt_1().child(tabs);
+        if section_sample.mounted {
+            let content = match active_tab {
                 MeshCardTab::Devices => {
-                    self.mesh_peers_list(&profile.id, provider, active, &state.peers, p, cx)
+                    self.mesh_peers_list(&profile.id, provider, active, &state.peers, p, window, cx)
                 }
                 MeshCardTab::Forwards => self.mesh_profile_forwards(profile, p, cx),
-            });
+            };
+            section = section.child(section_sample.wrap(
+                SharedString::from(format!("mesh-section-reveal-{}", profile.id)),
+                div().pt_3().w_full().child(content),
+            ));
         }
         Some(section)
     }
 
-    pub(crate) fn page_mesh(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_mesh(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
         let busy = self.snapshot.busy.iter().any(|key| key == "mesh");
@@ -1677,11 +1722,13 @@ impl AppView {
                     network = network.child(div().text_sm().text_color(p.muted_fg).child(hint));
                 }
             }
-            if let Some(info_grid) = self.mesh_basic_info_grid(&profile, &state, active, &p, cx) {
+            if let Some(info_grid) =
+                self.mesh_basic_info_grid(&profile, &state, active, &p, window, cx)
+            {
                 network = network.child(info_grid);
             }
             if let Some(subsection) =
-                self.mesh_card_subsection(&profile, provider, active, busy, &state, &p, cx)
+                self.mesh_card_subsection(&profile, provider, active, busy, &state, &p, window, cx)
             {
                 network = network.child(subsection);
             }

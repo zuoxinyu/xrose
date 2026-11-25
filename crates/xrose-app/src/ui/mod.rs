@@ -4,6 +4,7 @@ mod config_import;
 mod connections;
 mod dialogs;
 mod dns;
+pub(crate) mod expand_motion;
 mod logs;
 mod manual_node;
 mod menus;
@@ -310,6 +311,7 @@ pub struct AppView {
     mesh_card_tabs: std::collections::HashMap<String, mesh::MeshCardTab>,
     collapsed_mesh_sections: std::collections::HashSet<String>,
     mesh_overflow: std::collections::HashMap<String, bool>,
+    pub(crate) expand_motion: expand_motion::ExpandTransitions,
     pub(crate) service: AppService,
     pub(crate) snapshot: UiSnapshot,
     pub(crate) logo_badge: std::sync::Arc<gpui_kit::RenderImage>,
@@ -622,6 +624,7 @@ impl AppView {
             mesh_card_tabs: std::collections::HashMap::new(),
             collapsed_mesh_sections: std::collections::HashSet::new(),
             mesh_overflow: std::collections::HashMap::new(),
+            expand_motion: expand_motion::ExpandTransitions::default(),
             snapshot,
             logo_badge: crate::brand_assets::logo_badge(),
             logo_hero: crate::brand_assets::logo_hero(),
@@ -1705,14 +1708,14 @@ impl AppView {
         match self.page {
             Page::Nodes => self.page_nodes(window, cx).into_any_element(),
             Page::Subscriptions => self.page_subscriptions(cx).into_any_element(),
-            Page::Routing => self.page_routing(cx).into_any_element(),
-            Page::Dns => self.page_dns(cx).into_any_element(),
+            Page::Routing => self.page_routing(window, cx).into_any_element(),
+            Page::Dns => self.page_dns(window, cx).into_any_element(),
             Page::Connections => self.page_connections(cx).into_any_element(),
-            Page::Diagnostics => self.page_diagnostics(cx).into_any_element(),
+            Page::Diagnostics => self.page_diagnostics(window, cx).into_any_element(),
             Page::Logs => self.page_logs(cx).into_any_element(),
-            Page::Settings => self.page_settings(cx).into_any_element(),
+            Page::Settings => self.page_settings(window, cx).into_any_element(),
             Page::About => self.page_about(cx).into_any_element(),
-            Page::Mesh => self.page_mesh(cx).into_any_element(),
+            Page::Mesh => self.page_mesh(window, cx).into_any_element(),
         }
     }
 

@@ -265,17 +265,25 @@ impl AppView {
         let shown_exits = exits.len();
         let shown = display_nodes.len() + shown_exits;
         let row_height = px(super::theme::NODE_ROW_HEIGHT + 2.);
-        let expanded_key = self.expanded_node.clone();
+        let active_node_keys: std::collections::HashSet<String> = self
+            .expand_motion
+            .active_node_keys(self.expanded_node.as_deref(), cx)
+            .into_iter()
+            .collect();
         let mut exit_rows = (shown_exits != 0).then(|| {
             let busy = core_busy || this_busy(&self.snapshot.busy, "mesh") || batch_mode;
-            let expanded_idx = expanded_key
-                .as_deref()
-                .and_then(|key| exits.iter().position(|exit| exit.row_key() == key));
-            let expanded_elem = expanded_idx.map(|idx| {
-                exits[idx]
-                    .row(busy, hide_ips, lang, &p, self, window, cx)
-                    .into_any_element()
-            });
+            let special_rows: Vec<(usize, AnyElement)> = exits
+                .iter()
+                .enumerate()
+                .filter(|(_, exit)| active_node_keys.contains(&exit.row_key()))
+                .map(|(idx, exit)| {
+                    (
+                        idx,
+                        exit.row(busy, hide_ips, lang, &p, self, window, cx)
+                            .into_any_element(),
+                    )
+                })
+                .collect();
             let exits = std::rc::Rc::new(exits);
             let render_exits = {
                 let exits = exits.clone();
@@ -292,14 +300,7 @@ impl AppView {
                     })
                 }
             };
-            split_node_rows(
-                shown_exits,
-                row_height,
-                row_gap,
-                expanded_idx,
-                expanded_elem,
-                render_exits,
-            )
+            split_node_rows(shown_exits, row_height, row_gap, special_rows, render_exits)
         });
 
         let offline_exits: std::collections::HashSet<_> = self
@@ -400,13 +401,14 @@ impl AppView {
         );
 
         let configured_rows = |indices: Vec<usize>, window: &mut Window, cx: &mut Context<Self>| {
-            let expanded_idx = expanded_key.as_deref().and_then(|key| {
-                indices
-                    .iter()
-                    .position(|&index| self.snapshot.model.nodes[index].id == key)
-            });
-            let expanded_elem =
-                expanded_idx.map(|pos| render_one_flat(self, indices[pos], window, cx));
+            let special_rows: Vec<(usize, AnyElement)> = indices
+                .iter()
+                .enumerate()
+                .filter(|(_, index)| {
+                    active_node_keys.contains(&self.snapshot.model.nodes[**index].id)
+                })
+                .map(|(pos, &index)| (pos, render_one_flat(self, index, window, cx)))
+                .collect();
             let render_rows = render_rows.clone();
             let indices = std::rc::Rc::new(indices);
             let count = indices.len();
@@ -414,17 +416,27 @@ impl AppView {
                 count,
                 row_height,
                 row_gap,
-                expanded_idx,
-                expanded_elem,
+                special_rows,
                 move |range, window, cx| render_rows(&indices[range], window, cx),
             )
         };
+        let batch_sample = self
+            .expand_motion
+            .sample("nodes-batch-bar", batch_mode, window, cx);
+        let chart_sample =
+            self.expand_motion
+                .sample("nodes-traffic-chart", !self.hide_traffic_chart, window, cx);
         // Node list card (now the primary focal point of the page).
         body = body.child(
             card(&p)
-                // Header: title and count on the left; mode switch, privacy, test all,
-                // add node, and inline expandable actions on the right.
                 .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        // Header: title and count on the left; mode switch, privacy, test all,
+                        // add node, and inline expandable actions on the right.
+                        .child(
                     div()
                         .flex()
                         .items_center()
@@ -505,6 +517,7 @@ impl AppView {
                 .when(show_toolbar, |d| {
                     d.child(
                         div()
+                            .pt_3()
                             .flex()
                             .items_center()
                             .gap_2()
@@ -661,7 +674,7 @@ impl AppView {
                     )
                 })
                 // Batch Operation Bar (Visible when batch_mode is active).
-                .when(batch_mode, |d| {
+                .when(batch_sample.mounted, |d| {
                     let all_ids: Vec<String> = display_nodes
                         .iter()
                         .map(|&i| model.nodes[i].id.clone())
@@ -676,19 +689,21 @@ impl AppView {
                         .collect();
                     let selected_count = selected_ids.len();
 
-                    d.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .flex_wrap()
-                            .gap_2()
-                            .px_3()
-                            .py_2()
-                            .rounded_md()
-                            .bg(p.accent)
-                            .border_1()
-                            .border_color(p.primary.opacity(0.4))
+                    d.child(batch_sample.wrap(
+                        "nodes-batch-bar-reveal",
+                        div().pt_3().w_full().child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .flex_wrap()
+                                .gap_2()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(p.accent)
+                                .border_1()
+                                .border_color(p.primary.opacity(0.4))
                             .child(
                                 div()
                                     .flex()
@@ -827,12 +842,17 @@ impl AppView {
                                                 cx.notify();
                                             })),
                                     ),
-                            ),
-                    )
+                                ),
+                        ),
+                    ))
                 })
-                .when(!self.hide_traffic_chart, |d| {
-                    d.child(self.traffic_chart(&p))
-                })
+                .when(chart_sample.mounted, |d| {
+                    d.child(chart_sample.wrap(
+                        "nodes-traffic-chart-reveal",
+                        div().pt_3().w_full().child(self.traffic_chart(&p)),
+                    ))
+                }),
+                )
                 .child(self.direct_entry(
                     &p,
                     core_busy,
@@ -913,6 +933,12 @@ impl AppView {
                             NodeSection::Subscription(id) => format!("subscription-{id}"),
                         };
                         let is_collapsed = collapsed_set.contains(&group_key);
+                        let group_sample = self.expand_motion.sample(
+                            &format!("nodes-src-{group_key}"),
+                            !is_collapsed,
+                            window,
+                            cx,
+                        );
                         let sub_title = match section {
                             NodeSection::MeshExits => {
                                 self.tr("组网出口节点", "Mesh exit nodes").to_string()
@@ -937,7 +963,6 @@ impl AppView {
                         div()
                             .flex()
                             .flex_col()
-                            .gap_2()
                             .child(
                                 // Subscription Group Header
                                 div()
@@ -968,12 +993,11 @@ impl AppView {
                                             .gap_2()
                                             .child(
                                                 div().text_xs().text_color(p.muted_fg).child(
-                                                    Icon::new(if is_collapsed {
-                                                        IconName::ChevronRight
-                                                    } else {
-                                                        IconName::ChevronDown
-                                                    })
-                                                    .size(px(14.)),
+                                                    Icon::new(IconName::ChevronRight)
+                                                        .size(px(14.))
+                                                        .rotate(percentage(
+                                                            0.25 * group_sample.progress,
+                                                        )),
                                                 ),
                                             )
                                             .child(
@@ -1024,11 +1048,21 @@ impl AppView {
                                         )
                                     }),
                             )
-                            .when(!is_collapsed, |d| {
-                                d.when(!group_nodes.is_empty(), |d| {
-                                    d.child(configured_rows(group_nodes, window, cx))
-                                })
-                                .when(mesh, |d| d.children(exit_rows.take()))
+                            .when(group_sample.mounted, |d| {
+                                let content = div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .pt_2()
+                                    .w_full()
+                                    .when(!group_nodes.is_empty(), |d| {
+                                        d.child(configured_rows(group_nodes, window, cx))
+                                    })
+                                    .when(mesh, |d| d.children(exit_rows.take()));
+                                d.child(group_sample.wrap(
+                                    SharedString::from(format!("nodes-src-reveal-{group_key}")),
+                                    content,
+                                ))
                             })
                     }))
                 })
@@ -1064,6 +1098,12 @@ impl AppView {
                         }
                         let group_key = format!("outbound-group-{}", group.id);
                         let is_collapsed = collapsed_set.contains(&group_key);
+                        let group_sample = self.expand_motion.sample(
+                            &format!("nodes-grp-{group_key}"),
+                            !is_collapsed,
+                            window,
+                            cx,
+                        );
                         let group_id_str = group.id.clone();
                         let group_auto = !group.manually_selectable();
                         let group_enabled = group.enabled;
@@ -1096,8 +1136,8 @@ impl AppView {
                         let policy_group_id = group.id.clone();
                         let menu_group_id = group.id.clone();
 
-                        let rows_elem = (!is_collapsed).then(|| {
-                            if member_indices.is_empty() {
+                        let rows_elem = group_sample.mounted.then(|| {
+                            let inner = if member_indices.is_empty() {
                                 empty_hint(
                                     &p,
                                     self.tr(
@@ -1111,52 +1151,54 @@ impl AppView {
                                 let offline_exits = offline_exits_for_groups.clone();
                                 let fastest_id = fastest_for_groups.clone();
                                 let group_id_for_rows = group_id_str.clone();
-                                let expanded_idx = expanded_key.as_deref().and_then(|key| {
-                                    member_indices.iter().position(|&index| {
+                                let special_rows: Vec<(usize, AnyElement)> = member_indices
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(pos, &index)| {
                                         let node = &self.snapshot.model.nodes[index];
-                                        format!("grp-{}-{}", group_id_for_rows, node.id) == key
-                                    })
-                                });
-                                let expanded_elem = expanded_idx.map(|pos| {
-                                    let index = member_indices[pos];
-                                    let node = &self.snapshot.model.nodes[index];
-                                    let usable = self
-                                        .snapshot
-                                        .model
-                                        .node_usable_with(node, self.snapshot.settings.core);
-                                    self.render_configured_node_row(
-                                        ConfiguredRowContext {
-                                            index,
-                                            row_key: format!(
-                                                "grp-{}-{}",
-                                                group_id_for_rows, node.id
+                                        let row_key = format!("grp-{}-{}", group_id_for_rows, node.id);
+                                        if !active_node_keys.contains(&row_key) {
+                                            return None;
+                                        }
+                                        let usable = self
+                                            .snapshot
+                                            .model
+                                            .node_usable_with(node, self.snapshot.settings.core);
+                                        Some((
+                                            pos,
+                                            self.render_configured_node_row(
+                                                ConfiguredRowContext {
+                                                    index,
+                                                    row_key,
+                                                    selected: group_active_node.as_deref()
+                                                        == Some(node.id.as_str()),
+                                                    fastest: fastest_id.as_deref()
+                                                        == Some(node.id.as_str()),
+                                                    auto_mode: group_auto,
+                                                    group_context: true,
+                                                    offline_exit: offline_exits.contains(&node.id),
+                                                    group_id: (group_enabled
+                                                        && !group_auto
+                                                        && usable)
+                                                        .then(|| group_id_for_rows.clone()),
+                                                    menu_group_id: Some(group_id_for_rows.clone()),
+                                                    core_busy,
+                                                    tests_busy,
+                                                    drag_enabled: false,
+                                                },
+                                                &p,
+                                                window,
+                                                cx,
                                             ),
-                                            selected: group_active_node.as_deref()
-                                                == Some(node.id.as_str()),
-                                            fastest: fastest_id.as_deref()
-                                                == Some(node.id.as_str()),
-                                            auto_mode: group_auto,
-                                            group_context: true,
-                                            offline_exit: offline_exits.contains(&node.id),
-                                            group_id: (group_enabled && !group_auto && usable)
-                                                .then(|| group_id_for_rows.clone()),
-                                            menu_group_id: Some(group_id_for_rows.clone()),
-                                            core_busy,
-                                            tests_busy,
-                                            drag_enabled: false,
-                                        },
-                                        &p,
-                                        window,
-                                        cx,
-                                    )
-                                });
+                                        ))
+                                    })
+                                    .collect();
                                 let member_indices = std::rc::Rc::new(member_indices);
                                 split_node_rows(
                                     member_count,
                                     row_height,
                                     row_gap,
-                                    expanded_idx,
-                                    expanded_elem,
+                                    special_rows,
                                     move |range, window, cx| {
                                         groups_view.update(cx, |this, cx| {
                                             member_indices[range]
@@ -1205,7 +1247,11 @@ impl AppView {
                                         })
                                     },
                                 )
-                            }
+                            };
+                            group_sample.wrap(
+                                SharedString::from(format!("nodes-grp-reveal-{group_key}")),
+                                div().pt_2().w_full().child(inner),
+                            )
                         });
 
                         let policy_btn = {
@@ -1268,7 +1314,6 @@ impl AppView {
                             div()
                                 .flex()
                                 .flex_col()
-                                .gap_2()
                                 .child(
                                     div()
                                         .id(SharedString::from(format!(
@@ -1304,12 +1349,11 @@ impl AppView {
                                                 .gap_2()
                                                 .child(
                                                     div().text_xs().text_color(p.muted_fg).child(
-                                                        Icon::new(if is_collapsed {
-                                                            IconName::ChevronRight
-                                                        } else {
-                                                            IconName::ChevronDown
-                                                        })
-                                                        .size(px(14.)),
+                                                        Icon::new(IconName::ChevronRight)
+                                                            .size(px(14.))
+                                                            .rotate(percentage(
+                                                                0.25 * group_sample.progress,
+                                                            )),
                                                     ),
                                                 )
                                                 .child(
@@ -1508,10 +1552,24 @@ struct ConfiguredRowContext {
 }
 
 impl AppView {
+    fn sync_expanded_node_motion(&self, prev: Option<String>, cx: &App) {
+        if prev == self.expanded_node {
+            return;
+        }
+        if let Some(old) = prev.as_deref() {
+            self.expand_motion.begin_node(old, false, cx);
+        }
+        if let Some(new) = self.expanded_node.as_deref() {
+            self.expand_motion.begin_node(new, true, cx);
+        }
+    }
+
     pub(super) fn toggle_expanded_node(&mut self, row_key: String, cx: &mut Context<Self>) {
         self.node_click_seq = self.node_click_seq.wrapping_add(1);
         self.pre_click_expanded = None;
+        let prev = self.expanded_node.clone();
         toggle_accordion(&mut self.expanded_node, row_key);
+        self.sync_expanded_node_motion(prev, cx);
         cx.notify();
     }
 
@@ -1524,7 +1582,9 @@ impl AppView {
         self.node_click_seq = self.node_click_seq.wrapping_add(1);
         self.pre_click_expanded = None;
         if immediate {
+            let prev = self.expanded_node.clone();
             toggle_accordion(&mut self.expanded_node, row_key);
+            self.sync_expanded_node_motion(prev, cx);
             cx.notify();
             return;
         }
@@ -1537,8 +1597,10 @@ impl AppView {
                 if this.node_click_seq != seq {
                     return;
                 }
-                this.pre_click_expanded = Some((row_key.clone(), this.expanded_node.clone()));
+                let prev = this.expanded_node.clone();
+                this.pre_click_expanded = Some((row_key.clone(), prev.clone()));
                 toggle_accordion(&mut this.expanded_node, row_key);
+                this.sync_expanded_node_motion(prev, cx);
                 cx.notify();
             });
         })
@@ -1551,11 +1613,13 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         self.node_click_seq = self.node_click_seq.wrapping_add(1);
+        let prev = self.expanded_node.clone();
         if restore_pre_double_click_expand(
             &mut self.expanded_node,
             &mut self.pre_click_expanded,
             row_key,
         ) {
+            self.sync_expanded_node_motion(prev, cx);
             cx.notify();
         }
     }
@@ -1573,7 +1637,9 @@ impl AppView {
         };
         self.node_click_seq = self.node_click_seq.wrapping_add(1);
         self.pre_click_expanded = None;
+        let prev = self.expanded_node.clone();
         toggle_accordion(&mut self.expanded_node, key);
+        self.sync_expanded_node_motion(prev, cx);
         self.page = Page::Nodes;
         cx.notify();
     }
@@ -1656,6 +1722,9 @@ impl AppView {
             chain_row_subtitle(node, &self.snapshot.model, hide_ips, &suffixes, lang);
         let (source_summary, group_summary) = self.node_source_and_groups(node, None);
         let expanded = self.expanded_node.as_deref() == Some(ctx.row_key.as_str());
+        let expand_sample = self
+            .expand_motion
+            .sample_node(&ctx.row_key, expanded, window, cx);
         render_node_row(
             RowProps {
                 node,
@@ -1663,6 +1732,7 @@ impl AppView {
                 lang,
                 selected: ctx.selected,
                 expanded,
+                expand_sample,
                 virtual_exit: None,
                 chain_subtitle,
                 fastest: ctx.fastest,
@@ -1741,36 +1811,46 @@ fn restore_pre_double_click_expand(
     }
 }
 
-/// Keep collapsed rows virtualized while letting the single expanded card lay
-/// out in normal flex flow at its intrinsic height.
+/// Keep collapsed rows virtualized while letting expanded and transitioning cards
+/// lay out in normal flex flow at their intrinsic or animated height.
 fn split_node_rows(
     count: usize,
     height: Pixels,
     gap: Pixels,
-    expanded_index: Option<usize>,
-    expanded_element: Option<AnyElement>,
+    mut special_rows: Vec<(usize, AnyElement)>,
     render_collapsed: impl Fn(std::ops::Range<usize>, &mut Window, &mut App) -> Vec<AnyElement>
     + Clone
     + 'static,
 ) -> AnyElement {
-    let Some(idx) = expanded_index.filter(|&i| i < count) else {
+    special_rows.retain(|(idx, _)| *idx < count);
+    if special_rows.is_empty() {
         return node_rows(count, height, gap, render_collapsed).into_any_element();
-    };
+    }
+    special_rows.sort_by_key(|(idx, _)| *idx);
     let mut stack = div().flex().flex_col().gap(gap).w_full();
-    if idx > 0 {
-        let prefix_render = render_collapsed.clone();
-        stack = stack.child(node_rows(idx, height, gap, move |range, window, cx| {
-            prefix_render(range, window, cx)
-        }));
-    }
-    if let Some(elem) = expanded_element {
+    let mut cursor = 0usize;
+    for (idx, elem) in special_rows {
+        if idx > cursor {
+            let chunk_len = idx - cursor;
+            let offset = cursor;
+            let chunk_render = render_collapsed.clone();
+            stack = stack.child(node_rows(
+                chunk_len,
+                height,
+                gap,
+                move |range, window, cx| {
+                    chunk_render((range.start + offset)..(range.end + offset), window, cx)
+                },
+            ));
+        }
         stack = stack.child(elem);
+        cursor = idx + 1;
     }
-    if idx + 1 < count {
-        let suffix_count = count - idx - 1;
-        let offset = idx + 1;
+    if cursor < count {
+        let suffix_len = count - cursor;
+        let offset = cursor;
         stack = stack.child(node_rows(
-            suffix_count,
+            suffix_len,
             height,
             gap,
             move |range, window, cx| {
@@ -1998,6 +2078,7 @@ struct RowProps<'a> {
     lang: Language,
     selected: bool,
     expanded: bool,
+    expand_sample: super::expand_motion::ExpandSample,
     virtual_exit: Option<VirtualExit>,
     chain_subtitle: Option<String>,
     fastest: bool,
@@ -2107,6 +2188,7 @@ fn render_virtual_node_row(
     let magic_dns_suffixes = view.snapshot.mesh.magic_dns_suffixes();
     let (source_summary, group_summary) = view.node_source_and_groups(node, Some(&exit));
     let expanded = view.expanded_node.as_deref() == Some(key.as_str());
+    let expand_sample = view.expand_motion.sample_node(&key, expanded, window, cx);
     render_node_row(
         RowProps {
             node,
@@ -2114,6 +2196,7 @@ fn render_virtual_node_row(
             lang: view.lang(),
             selected,
             expanded,
+            expand_sample,
             virtual_exit: Some(exit),
             chain_subtitle: None,
             fastest: false,
@@ -2700,6 +2783,7 @@ fn render_node_row(
         lang,
         selected,
         expanded,
+        expand_sample,
         virtual_exit,
         chain_subtitle,
         fastest: is_fastest,
@@ -2793,8 +2877,8 @@ fn render_node_row(
         batch_mode,
         lang,
     );
-    let detail_panel = expanded.then(|| {
-        health_detail::render_node_detail_panel(
+    let detail_panel = expand_sample.mounted.then(|| {
+        let panel = health_detail::render_node_detail_panel(
             health_detail::DetailPanelProps {
                 node,
                 row_key: &row_key,
@@ -2819,6 +2903,10 @@ fn render_node_row(
             },
             p,
             cx,
+        );
+        expand_sample.wrap(
+            SharedString::from(format!("node-detail-reveal-{row_key}")),
+            panel,
         )
     });
     let drag_tip = super::tr(lang, "拖拽调整节点顺序", "Drag to reorder");
@@ -3261,12 +3349,9 @@ fn render_node_row(
                         }))
                         .text_color(if expanded { p.primary } else { p.muted_fg })
                         .child(
-                            Icon::new(if expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .size(px(14.)),
+                            Icon::new(IconName::ChevronDown)
+                                .size(px(14.))
+                                .rotate(percentage(0.5 * expand_sample.progress)),
                         ),
                 ),
         )

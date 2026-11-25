@@ -93,7 +93,11 @@ impl AppView {
         self.sync(cx);
     }
 
-    pub(crate) fn page_dns(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_dns(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let lang = self.lang();
         let model = self.snapshot.model.clone();
@@ -220,44 +224,54 @@ impl AppView {
 
         // Servers.
         let visible_servers = visible_dns_servers(&dns_config.servers);
+        let dns_form_sample =
+            self.expand_motion
+                .sample("dns-server-form", self.show_dns_form, window, cx);
         body = body.child(
             card(&p)
                 .child(
                     div()
                         .flex()
-                        .items_start()
-                        .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("DNS 服务器", "DNS servers"),
-                            self.tr("按域名条件匹配解析服务器，未命中时使用默认服务器（final）", "Match DNS servers by domain conditions; unmatched queries use the final server"),
-                        ))
+                        .flex_col()
+                        .w_full()
                         .child(
-                            Button::new("toggle-dns-form")
-                                .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .when(!self.show_dns_form, |b| b.primary())
-                                .icon(if self.show_dns_form {
-                                    IconName::X
-                                } else {
-                                    IconName::Plus
-                                })
-                                .label(if self.show_dns_form {
-                                    self.tr("收起面板", "Collapse")
-                                } else {
-                                    self.tr("添加服务器", "Add server")
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_dns_form = !this.show_dns_form;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .when(self.show_dns_form, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .child(section_title(
+                                    &p,
+                                    self.tr("DNS 服务器", "DNS servers"),
+                                    self.tr("按域名条件匹配解析服务器，未命中时使用默认服务器（final）", "Match DNS servers by domain conditions; unmatched queries use the final server"),
+                                ))
+                                .child(
+                                    Button::new("toggle-dns-form")
+                                        .compact().h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .when(!self.show_dns_form, |b| b.primary())
+                                        .icon(if self.show_dns_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
+                                        .label(if self.show_dns_form {
+                                            self.tr("收起面板", "Collapse")
+                                        } else {
+                                            self.tr("添加服务器", "Add server")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_dns_form = !this.show_dns_form;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .when(dns_form_sample.mounted, |d| {
+                            d.child(dns_form_sample.wrap(
+                                "dns-server-form-reveal",
+                                div().pt_3().w_full().child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
                             .p_3()
                             .rounded_md()
                             .bg(p.row_bg())
@@ -396,9 +410,10 @@ impl AppView {
                                                     })),
                                             ),
                                     ),
-                            ),
-                    )
-                })
+                                ),
+                            )))
+                        }),
+                )
                 .when(visible_servers.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,
@@ -527,48 +542,58 @@ impl AppView {
         );
 
         // Hosts.
+        let host_form_sample =
+            self.expand_motion
+                .sample("dns-host-form", self.show_host_form, window, cx);
         body = body.child(
             card(&p)
                 .child(
                     div()
                         .flex()
-                        .items_start()
-                        .justify_between()
-                        .child(section_title(
-                            &p,
-                            self.tr("Hosts", "Hosts"),
-                            self.tr(
-                                "配置域名到 IP 地址的静态映射",
-                                "Configure static domain-to-IP address mappings",
-                            ),
-                        ))
+                        .flex_col()
+                        .w_full()
                         .child(
-                            Button::new("toggle-host-form")
-                                .compact()
-                                .h(px(crate::ui::theme::CONTROL_HEIGHT))
-                                .when(!self.show_host_form, |b| b.primary())
-                                .icon(if self.show_host_form {
-                                    IconName::X
-                                } else {
-                                    IconName::Plus
-                                })
-                                .label(if self.show_host_form {
-                                    self.tr("收起面板", "Collapse")
-                                } else {
-                                    self.tr("添加解析", "Add host")
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.show_host_form = !this.show_host_form;
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .when(self.show_host_form, |d| {
-                    d.child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .child(section_title(
+                                    &p,
+                                    self.tr("Hosts", "Hosts"),
+                                    self.tr(
+                                        "配置域名到 IP 地址的静态映射",
+                                        "Configure static domain-to-IP address mappings",
+                                    ),
+                                ))
+                                .child(
+                                    Button::new("toggle-host-form")
+                                        .compact()
+                                        .h(px(crate::ui::theme::CONTROL_HEIGHT))
+                                        .when(!self.show_host_form, |b| b.primary())
+                                        .icon(if self.show_host_form {
+                                            IconName::X
+                                        } else {
+                                            IconName::Plus
+                                        })
+                                        .label(if self.show_host_form {
+                                            self.tr("收起面板", "Collapse")
+                                        } else {
+                                            self.tr("添加解析", "Add host")
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.show_host_form = !this.show_host_form;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .when(host_form_sample.mounted, |d| {
+                            d.child(host_form_sample.wrap(
+                                "dns-host-form-reveal",
+                                div().pt_3().w_full().child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_3()
                             .p_3()
                             .rounded_md()
                             .bg(p.row_bg())
@@ -675,9 +700,10 @@ impl AppView {
                                                     })),
                                             ),
                                     ),
-                            ),
-                    )
-                })
+                                ),
+                            )))
+                        }),
+                )
                 .when(dns_config.hosts.is_empty(), |d| {
                     d.child(empty_hint(
                         &p,

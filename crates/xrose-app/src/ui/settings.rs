@@ -4,7 +4,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Theme, ThemeMode as ComponentThemeMode};
+use gpui_kit::component::{Icon, Theme, ThemeMode as ComponentThemeMode};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use xrose_core::model::CoreKind;
@@ -275,14 +275,18 @@ impl AppView {
         cx.notify();
     }
 
-    pub(crate) fn page_settings(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_settings(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let selected = self.settings_tab;
         let lang = self.lang();
         let focus_bg = palette(cx).accent;
         let content = match selected {
             SettingsTab::Appearance => self.settings_appearance_card(cx),
             SettingsTab::Core => self.settings_core_card(cx),
-            SettingsTab::Network => self.settings_network_card(cx),
+            SettingsTab::Network => self.settings_network_card(window, cx),
             SettingsTab::Startup => self.settings_startup_card(cx),
             SettingsTab::Updates => self.settings_updates_card(cx),
             SettingsTab::Helper => self.settings_helper_card(cx),
@@ -906,7 +910,7 @@ impl AppView {
         .detach();
     }
 
-    fn settings_network_card(&self, cx: &mut Context<Self>) -> Div {
+    fn settings_network_card(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = palette(cx);
         let lang = self.lang();
         let settings = self.snapshot.settings.clone();
@@ -943,6 +947,12 @@ impl AppView {
             button.tooltip(self.tr("请先应用端口修改", "Apply the port change first"))
         })
         .on_click(cx.listener(|this, _, _, cx| this.copy_proxy_env_commands(cx)));
+        let advanced_sample = self.expand_motion.sample(
+            "settings-network-advanced",
+            self.network_advanced_open,
+            window,
+            cx,
+        );
         let advanced_toggle = Button::new("network-advanced")
             .ghost()
             .compact()
@@ -952,11 +962,10 @@ impl AppView {
             } else {
                 self.tr("展开高级设置", "Expand advanced settings")
             })
-            .icon(if self.network_advanced_open {
-                IconName::ChevronDown
-            } else {
-                IconName::ChevronRight
-            })
+            .icon(
+                Icon::new(IconName::ChevronRight)
+                    .rotate(percentage(0.25 * advanced_sample.progress)),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.network_advanced_open = !this.network_advanced_open;
                 cx.notify();
@@ -995,8 +1004,22 @@ impl AppView {
             .when(settings.core == CoreKind::Xray, |d| d.child(div().text_xs().text_color(p.muted_fg).child(self.tr("Xray：SOCKS 使用此端口，HTTP 使用下一端口", "Xray: SOCKS uses this port, HTTP uses the next port"))))
             .child(setting_row(&p, self.tr("局域网", "LAN"), with_reload_note(lang, settings.hot_reload, "允许同一局域网的设备使用本机代理", "Allow devices on your LAN to use this proxy"),
                 toggle("allow-lan", self.tr("允许局域网连接", "Allow LAN connections"), settings.allow_lan).on_change(cx.listener(|this, checked, _, cx| this.modify_settings(cx, |s| s.allow_lan = *checked)))))
-            .child(div().flex().child(advanced_toggle))
-            .when(self.network_advanced_open, |card| card.child(self.advanced_network_settings(&p, cx)))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .child(div().flex().child(advanced_toggle))
+                    .when(advanced_sample.mounted, |section| {
+                        section.child(advanced_sample.wrap(
+                            "settings-network-advanced-reveal",
+                            div()
+                                .pt_3()
+                                .w_full()
+                                .child(self.advanced_network_settings(&p, cx)),
+                        ))
+                    }),
+            )
     }
 
     fn settings_startup_card(&self, cx: &mut Context<Self>) -> Div {

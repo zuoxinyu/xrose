@@ -1041,7 +1041,11 @@ impl AppView {
             )
     }
 
-    pub(crate) fn page_diagnostics(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn page_diagnostics(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         if let Some(selected) = self
             .selected_connection
@@ -1102,7 +1106,7 @@ impl AppView {
                 div()
                     .id("trace-section")
                     .anchor_scroll(Some(self.trace_anchor.clone()))
-                    .child(self.trace_card(cx)),
+                    .child(self.trace_card(window, cx)),
             )
             .child(
                 div()
@@ -2589,7 +2593,7 @@ impl AppView {
         self.sync(cx);
     }
 
-    fn trace_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn trace_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let trace = self.snapshot.trace.clone();
         let active = trace
@@ -2694,23 +2698,35 @@ impl AppView {
                     };
                     format!("tls://{host}:{}", trace.port)
                 });
-                d.when_some(focused, |d, step| d.child(div().flex().flex_col().gap_2().p_3().rounded_lg().bg(p.bg).border_l_2().border_color(status_color(step.status, &p))
-                    .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(status_color(step.status, &p)).child(self.trace_step_label(step.kind)))
-                    .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))
-                    .when_some(tls_fallback, |d, tls_target| {
-                        d.child(div().flex().items_center().gap_2().child(
-                            Button::new("trace-switch-tls")
-                                .compact()
-                                .outline()
-                                .h(px(26.))
-                                .icon(IconName::Radar)
-                                .label(self.tr("改用 TLS 握手测试", "Switch to TLS handshake"))
-                                .disabled(active)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.replay_connection(&tls_target, window, cx);
-                                })),
-                        ))
-                    })))
+                let trace_detail_sample = self.expand_motion.sample_variant(
+                    "diag-trace-step-detail",
+                    focused.is_some(),
+                    focused.map(|step| step.kind as u8).unwrap_or(u8::MAX),
+                    window,
+                    cx,
+                );
+                d.when_some(focused.filter(|_| trace_detail_sample.mounted), |d, step| {
+                    d.child(trace_detail_sample.wrap(
+                        "diag-trace-step-detail-reveal",
+                        div().flex().flex_col().gap_2().p_3().rounded_lg().bg(p.bg).border_l_2().border_color(status_color(step.status, &p))
+                            .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(status_color(step.status, &p)).child(self.trace_step_label(step.kind)))
+                            .child(div().text_sm().text_color(p.fg).child(step.detail.clone()))
+                            .when_some(tls_fallback, |d, tls_target| {
+                                d.child(div().flex().items_center().gap_2().child(
+                                    Button::new("trace-switch-tls")
+                                        .compact()
+                                        .outline()
+                                        .h(px(26.))
+                                        .icon(IconName::Radar)
+                                        .label(self.tr("改用 TLS 握手测试", "Switch to TLS handshake"))
+                                        .disabled(active)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.replay_connection(&tls_target, window, cx);
+                                        })),
+                                ))
+                            }),
+                    ))
+                })
                     .when_some(
                         trace.error.as_ref().filter(|error| {
                             focused.is_none_or(|step| step.detail != **error)

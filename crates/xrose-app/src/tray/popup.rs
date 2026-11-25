@@ -507,6 +507,7 @@ pub struct PopupView {
     anchor: Option<PopupAnchor>,
     work_area: Bounds<Pixels>,
     failures_expanded: bool,
+    expand_motion: crate::ui::expand_motion::ExpandTransitions,
     last_height: f32,
     scroll: ScrollHandle,
     scroll_hint: NodeScrollHint,
@@ -570,6 +571,7 @@ impl PopupView {
             anchor,
             work_area,
             failures_expanded: false,
+            expand_motion: crate::ui::expand_motion::ExpandTransitions::default(),
             last_height,
             scroll: ScrollHandle::new(),
             scroll_hint: NodeScrollHint::Idle,
@@ -1168,6 +1170,9 @@ impl Render for PopupView {
             )
             .when(d.failed_count > 0, |root| {
                 let expanded = self.failures_expanded;
+                let failures_sample =
+                    self.expand_motion
+                        .sample("tray-failures", expanded, window, cx);
                 let failed_count = d.failed_count;
                 let only_stalled = d.failed_only_stalled;
                 let (dot_color, badge_fg, badge_bg) = if only_stalled {
@@ -1375,75 +1380,74 @@ impl Render for PopupView {
                                             tr(lang, "展开", "Show")
                                         })
                                         .child(
-                                            Icon::new(if expanded {
-                                                IconName::ChevronUp
-                                            } else {
-                                                IconName::ChevronDown
-                                            })
-                                            .size(px(14.)),
+                                            Icon::new(IconName::ChevronDown)
+                                                .size(px(14.))
+                                                .rotate(percentage(0.5 * failures_sample.progress)),
                                         ),
                                 ),
                         )
                         .when(expanded, |section| {
                             section.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_1p5()
-                                    .px_2p5()
-                                    .pb_2p5()
-                                    .pt_2()
-                                    .border_t_1()
-                                    .border_color(p.border)
-                                    .children(failure_rows)
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .gap_2()
-                                            .pt_1p5()
-                                            .border_t_1()
-                                            .border_color(p.border)
-                                            .child(
-                                                Button::new("tray-failed-clear")
-                                                    .xsmall()
-                                                    .compact()
-                                                    .ghost()
-                                                    .label(tr(lang, "清空", "Clear"))
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.action(
-                                                                TrayAction::ClearFailed,
-                                                                window,
-                                                                cx,
-                                                            )
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                Button::new("tray-failed-open-main")
-                                                    .xsmall()
-                                                    .compact()
-                                                    .ghost()
-                                                    .custom(
-                                                        ButtonCustomVariant::new(cx)
-                                                            .foreground(p.primary)
-                                                            .hover(p.neutral_hover())
-                                                            .active(p.neutral_active()),
-                                                    )
-                                                    .label(view_all_label)
-                                                    .on_click(cx.listener(
-                                                        |this, _, window, cx| {
-                                                            this.action(
+                                failures_sample.wrap_fade(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1p5()
+                                        .px_2p5()
+                                        .pb_2p5()
+                                        .pt_2()
+                                        .border_t_1()
+                                        .border_color(p.border)
+                                        .children(failure_rows)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .gap_2()
+                                                .pt_1p5()
+                                                .border_t_1()
+                                                .border_color(p.border)
+                                                .child(
+                                                    Button::new("tray-failed-clear")
+                                                        .xsmall()
+                                                        .compact()
+                                                        .ghost()
+                                                        .label(tr(lang, "清空", "Clear"))
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.action(
+                                                                    TrayAction::ClearFailed,
+                                                                    window,
+                                                                    cx,
+                                                                )
+                                                            },
+                                                        )),
+                                                )
+                                                .child(
+                                                    Button::new("tray-failed-open-main")
+                                                        .xsmall()
+                                                        .compact()
+                                                        .ghost()
+                                                        .custom(
+                                                            ButtonCustomVariant::new(cx)
+                                                                .foreground(p.primary)
+                                                                .hover(p.neutral_hover())
+                                                                .active(p.neutral_active()),
+                                                        )
+                                                        .label(view_all_label)
+                                                        .on_click(cx.listener(
+                                                            |this, _, window, cx| {
+                                                                this.action(
                                                                 TrayAction::ShowFailedConnections,
                                                                 window,
                                                                 cx,
                                                             )
-                                                        },
-                                                    )),
-                                            ),
-                                    ),
+                                                            },
+                                                        )),
+                                                ),
+                                        ),
+                                ),
                             )
                         }),
                 )
