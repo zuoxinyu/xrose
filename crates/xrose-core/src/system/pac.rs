@@ -33,9 +33,6 @@ impl PacServer {
     pub fn start(content: String, port: u16) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .map_err(|e| Error::other(format!("PAC 服务启动失败：{e}")))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|e| Error::other(format!("PAC 服务设置失败：{e}")))?;
         let actual_port = listener
             .local_addr()
             .map_err(|e| Error::other(format!("PAC 服务地址获取失败：{e}")))?
@@ -50,12 +47,13 @@ impl PacServer {
                 while !stop_thread.load(Ordering::SeqCst) {
                     match listener.accept() {
                         Ok((stream, _)) => {
+                            if stop_thread.load(Ordering::SeqCst) {
+                                break;
+                            }
                             let body = body.clone();
                             std::thread::spawn(move || serve(stream, &body.read()));
                         }
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(Duration::from_millis(80));
-                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(_) => break,
                     }
                 }
@@ -75,6 +73,8 @@ impl PacServer {
 
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.info.port));
+        let _ = TcpStream::connect_timeout(&addr, Duration::from_millis(50));
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -285,5 +285,18 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("FindProxyForURL"));
         assert!(server.info.url.starts_with("http://127.0.0.1:"));
+    }
+
+    #[test]
+    fn stop_wakes_immediately_without_poll_delay() {
+        let pac = build_pac("127.0.0.1", 7890, &[], &[]);
+        let mut server = PacServer::start(pac, 0).unwrap();
+        let started = std::time::Instant::now();
+        server.stop();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "PAC server stop took {elapsed:?}"
+        );
     }
 }

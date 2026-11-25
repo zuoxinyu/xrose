@@ -514,7 +514,10 @@ impl MeshController {
     pub fn shutdown(&self) {
         let previous = std::mem::replace(&mut *self.start_state.lock(), StartState::Closed);
         if previous == StartState::Started || !self.networks.read().is_empty() {
-            let _ = ipc::call(self.request(MeshCommand::StopAll));
+            let _ = ipc::call_with_timeout(
+                self.request(MeshCommand::StopAll),
+                std::time::Duration::from_secs(3),
+            );
         }
         self.networks.write().clear();
     }

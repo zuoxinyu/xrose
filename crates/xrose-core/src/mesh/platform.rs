@@ -243,6 +243,87 @@ pub fn set_dns(root: &Path, session: &str, suffix: &str, address: &str) -> Resul
     unix::set_dns(root, session, suffix, address)?;
     Ok(())
 }
+#[cfg(windows)]
+const WINDOWS_NRPT_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
+
+#[cfg(windows)]
+fn cleanup_windows_nrpt_under(parent: &winreg::RegKey, marker: &str) -> std::io::Result<usize> {
+    use winreg::enums::{KEY_READ, KEY_WOW64_64KEY};
+    let mut matches = Vec::new();
+    for entry in parent.enum_keys() {
+        let name = entry?;
+        match parent.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) {
+            Ok(subkey) => {
+                if subkey.get_value::<String, _>("DisplayName").ok().as_deref() == Some(marker) {
+                    matches.push(name);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    let mut removed = 0;
+    for name in matches {
+        match parent.delete_subkey_all(&name) {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(windows)]
+fn flush_windows_dns_cache() {
+    use windows_sys::Win32::Foundation::FreeLibrary;
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    let dll: Vec<u16> = "dnsapi.dll\0".encode_utf16().collect();
+    // SAFETY: dll and symbol name are NUL-terminated; DnsFlushResolverCache takes no args and returns BOOL.
+    unsafe {
+        let module = LoadLibraryW(dll.as_ptr());
+        if module.is_null() {
+            return;
+        }
+        if let Some(proc) = GetProcAddress(module, c"DnsFlushResolverCache".as_ptr().cast()) {
+            let flush: unsafe extern "system" fn() -> i32 = std::mem::transmute(proc);
+            let _ = flush();
+        }
+        FreeLibrary(module);
+    }
+}
+
+#[cfg(windows)]
+fn remove_windows_nrpt_rules(marker: &str) -> Result<()> {
+    use winreg::{
+        RegKey,
+        enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY, KEY_WRITE},
+    };
+    const REG_DELETE: u32 = 0x0001_0000;
+    let flags = KEY_READ | KEY_WRITE | REG_DELETE | KEY_WOW64_64KEY;
+    let fast =
+        match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(WINDOWS_NRPT_KEY, flags) {
+            Ok(parent) => cleanup_windows_nrpt_under(&parent, marker),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(err) => Err(err),
+        };
+    match fast {
+        Ok(removed) => {
+            if removed > 0 {
+                flush_windows_dns_cache();
+            }
+            Ok(())
+        }
+        Err(_) => {
+            powershell(&format!(
+                "$ErrorActionPreference='Stop'; Get-DnsClientNrptRule | Where-Object {{$_.DisplayName -eq {}}} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}",
+                quote(marker)
+            ))?;
+            Ok(())
+        }
+    }
+}
+
 pub fn cleanup_dns(root: &Path) -> Result<()> {
     let journal = root.join("dns-owner.json");
     if !journal.exists() {
@@ -259,10 +340,7 @@ pub fn cleanup_dns(root: &Path) -> Result<()> {
         return Err(Error::other("DNS 恢复记录无效"));
     }
     #[cfg(windows)]
-    powershell(&format!(
-        "$ErrorActionPreference='Stop'; Get-DnsClientNrptRule | Where-Object {{$_.DisplayName -eq {}}} | ForEach-Object {{ Remove-DnsClientNrptRule -Name $_.Name -Force }}",
-        quote(&marker)
-    ))?;
+    remove_windows_nrpt_rules(&marker)?;
     #[cfg(unix)]
     unix::cleanup_dns(root, id)?;
     std::fs::remove_file(journal).map_err(|_| Error::other("清理 DNS 恢复记录失败"))?;
@@ -495,5 +573,63 @@ mod tests {
         assert!(set_dns(root.path(), "test", "ts.net", "127.0.0.153").is_err());
         assert!(set_dns(root.path(), "test", "test.ts.net", "10.10.10.1").is_err());
         assert!(!root.path().join("dns-owner.json").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nrpt_registry_cleanup_deletes_only_matching_marker_fast() {
+        use winreg::{
+            RegKey,
+            enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WOW64_64KEY, KEY_WRITE},
+        };
+        const REG_DELETE: u32 = 0x0001_0000;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let root_path = format!(r"Software\XroseTest\NrptCleanup-{}", uuid::Uuid::new_v4());
+        struct KeyGuard(String);
+        impl Drop for KeyGuard {
+            fn drop(&mut self) {
+                let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.0);
+            }
+        }
+        let _guard = KeyGuard(root_path.clone());
+        let (parent, _) = hkcu.create_subkey(&root_path).unwrap();
+        let target_marker = format!("Xrose mesh {}", uuid::Uuid::new_v4());
+        let (mine, _) = parent
+            .create_subkey("{11111111-1111-1111-1111-111111111111}")
+            .unwrap();
+        mine.set_value("DisplayName", &target_marker).unwrap();
+        let (other, _) = parent
+            .create_subkey("{22222222-2222-2222-2222-222222222222}")
+            .unwrap();
+        other
+            .set_value("DisplayName", &"Other application rule")
+            .unwrap();
+        drop((mine, other, parent));
+
+        let parent = hkcu
+            .open_subkey_with_flags(
+                &root_path,
+                KEY_READ | KEY_WRITE | REG_DELETE | KEY_WOW64_64KEY,
+            )
+            .unwrap();
+        let started = std::time::Instant::now();
+        let removed = cleanup_windows_nrpt_under(&parent, &target_marker).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(removed, 1);
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "registry NRPT cleanup took {elapsed:?}"
+        );
+        assert!(
+            parent
+                .open_subkey("{11111111-1111-1111-1111-111111111111}")
+                .is_err()
+        );
+        assert!(
+            parent
+                .open_subkey("{22222222-2222-2222-2222-222222222222}")
+                .is_ok()
+        );
     }
 }

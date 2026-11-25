@@ -262,6 +262,15 @@ impl AppService {
         self.flush_statistics_locked().await;
     }
 
+    /// Best-effort final sample during exit; bounded so an unresponsive core or
+    /// Windows closed-port TCP retry never delays shutdown.
+    pub(super) async fn poll_traffic_statistics_for_shutdown(&self, budget: std::time::Duration) {
+        if self.inner.core.state().phase != crate::core::ProcessPhase::Running {
+            return;
+        }
+        let _ = tokio::time::timeout(budget, self.poll_traffic_statistics()).await;
+    }
+
     /// Serialize manual refreshes and monitor ticks against the same counter baselines.
     pub(super) async fn poll_traffic_statistics(&self) {
         let _guard = self.inner.statistics.operation.lock().await;
@@ -440,5 +449,19 @@ mod tests {
         service.set_traffic_statistics_enabled(false);
         wait_query(&service);
         assert!(!service.inner.statistics.data.lock().enabled);
+    }
+
+    #[test]
+    fn shutdown_poll_is_fast_when_core_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = AppService::with_paths(AppPaths::from_root(dir.path())).unwrap();
+        let started = std::time::Instant::now();
+        service.inner.rt.block_on(
+            service.poll_traffic_statistics_for_shutdown(std::time::Duration::from_millis(150)),
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        let shutdown_started = std::time::Instant::now();
+        service.shutdown();
+        assert!(shutdown_started.elapsed() < std::time::Duration::from_secs(1));
     }
 }

@@ -61,6 +61,14 @@ impl PopupManager {
         }
     }
 
+    pub fn dismiss_immediately(&mut self, cx: &mut App) {
+        if let (Some(handle), Some(view)) = (self.window, self.view.as_ref()) {
+            let _ = handle.update(cx, |_, window, cx| {
+                view.update(cx, |view, _| view.dismiss_immediately(window))
+            });
+        }
+    }
+
     pub fn toggle(&mut self, service: &AppService, anchor: Option<PopupAnchor>, cx: &mut App) {
         // Wayland cannot report global pointer hit-testing. Suppress the same
         // tray click's Activate when it immediately follows a focus dismissal.
@@ -726,7 +734,7 @@ impl PopupView {
         }
     }
 
-    fn dismiss(&mut self, window: &mut Window) {
+    fn dismiss_state(&mut self) {
         if let NodeScrollHint::Moving { origin, last, .. } = self.scroll_hint {
             let offset = self.scroll.offset();
             if offset.y == last {
@@ -736,7 +744,16 @@ impl PopupView {
         self.scroll_hint = NodeScrollHint::Idle;
         self.visible = false;
         self.deactivated_at = None;
+    }
+
+    fn dismiss(&mut self, window: &mut Window) {
+        self.dismiss_state();
         super::backend::hide_popup(window);
+    }
+
+    fn dismiss_immediately(&mut self, window: &mut Window) {
+        self.dismiss_state();
+        super::backend::hide_popup_immediately(window);
     }
 
     fn action(&mut self, action: TrayAction, window: &mut Window, cx: &mut Context<Self>) {
@@ -747,7 +764,11 @@ impl PopupView {
                 // Keep the requesting surface alive until the main window has asked for focus.
                 return;
             }
-            self.dismiss(window);
+            if command == super::TrayCommand::Quit {
+                self.dismiss_immediately(window);
+            } else {
+                self.dismiss(window);
+            }
         } else {
             self.refresh_dashboard(dashboard::build(&self.service), window, cx);
             cx.notify();

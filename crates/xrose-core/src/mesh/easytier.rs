@@ -444,6 +444,19 @@ impl Backend {
         }
         Ok(())
     }
+    pub async fn shutdown(&mut self) {
+        self.exit_gateway.take();
+        self.gateway.take();
+        self.forward_gateway.take();
+        let _ = self.services.apply(&[]).await;
+        // EasyTier's Instance::drop spawns an async cleanup task; bound it here
+        // so NIC/firewall teardown completes without stalling worker exit.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            self.instance.clear_resources(),
+        )
+        .await;
+    }
     pub async fn snapshot(&self) -> Result<MeshRuntimeView> {
         let ctx = self.instance.get_global_ctx();
         let observation = self.observation.lock().clone();

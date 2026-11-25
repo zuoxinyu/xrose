@@ -932,12 +932,17 @@ impl Backend {
         }
         Ok(Some(p.latency))
     }
+    pub fn shutdown(&mut self) {
+        self.task.abort();
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
 }
 impl Drop for Backend {
     fn drop(&mut self) {
-        self.task.abort();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.shutdown();
     }
 }
 

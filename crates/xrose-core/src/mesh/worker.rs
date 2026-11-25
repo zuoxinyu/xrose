@@ -58,7 +58,10 @@ pub fn main() -> Result<()> {
     };
     publish(&final_state);
     let result=runtime.block_on(async {
-        let mut backend=Backend::start(&boot).await?;
+        let Some(started) = stopping.run_until_cancelled(Backend::start(&boot)).await else {
+            return Ok::<(), Error>(());
+        };
+        let mut backend = started?;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(2));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut dns_suffix=None;
@@ -134,12 +137,17 @@ pub fn main() -> Result<()> {
                 final_state=state;publish(&final_state);
             }
         }}
-        drop(backend);Ok::<(),Error>(())
+        backend.shutdown().await;
+        drop(backend);
+        Ok::<(),Error>(())
     });
     let cleanup = super::platform::cleanup_dns(&boot.directory);
     let error = result.and(cleanup).err();
     final_state.finish(error.map(|e| e.to_string()));
     publish(&final_state);
+    // Bound runtime teardown so stray blocking tasks inside third-party backends
+    // cannot stall the worker until the helper's hard kill timeout.
+    runtime.shutdown_timeout(std::time::Duration::from_millis(100));
     Ok(())
 }
 
@@ -258,6 +266,12 @@ impl Backend {
                 t.forwards.apply(&rules.local).await?;
                 t.set_services(&rules.services)
             }
+        }
+    }
+    async fn shutdown(&mut self) {
+        match self {
+            Self::EasyTier(e) => e.shutdown().await,
+            Self::Tailscale(t) => t.shutdown(),
         }
     }
     async fn snapshot(&mut self) -> Result<MeshRuntimeView> {

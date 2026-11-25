@@ -707,6 +707,29 @@ pub fn hide_popup(window: &mut Window) {
     }
 }
 
+/// Hide the flyout immediately during application exit without waiting for animation.
+pub fn hide_popup_immediately(window: &mut Window) {
+    if let Ok(handle) = HasWindowHandle::window_handle(window)
+        && let RawWindowHandle::Win32(raw) = handle.as_raw()
+    {
+        let hwnd = raw.hwnd.get() as HWND;
+        if let Some((owner, _, _)) = icon_snapshot() {
+            // SAFETY: owner is the tray message window owned by this process.
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::KillTimer(owner as HWND, FLYOUT_TIMER);
+            }
+        }
+        *FLYOUT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        POPUP_OPS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        // SAFETY: hwnd belongs to this process.
+        unsafe {
+            if IsWindow(hwnd) != 0 {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+}
+
 pub fn show_popup(
     window: &mut Window,
     bounds: Bounds<gpui_kit::Pixels>,

@@ -567,6 +567,12 @@ impl CoreManager {
         self.supervisor.stop().await
     }
 
+    /// Stops the core during application exit without queuing behind an in-flight
+    /// start/reload operation (such as selector restoration or config validation).
+    pub async fn stop_for_shutdown(&self) -> Result<()> {
+        self.supervisor.close_and_stop().await
+    }
+
     pub async fn restart(&self) -> Result<()> {
         let _guard = self.operation.lock().await;
         self.supervisor.restart().await

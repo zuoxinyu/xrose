@@ -505,11 +505,15 @@ fn reader(
 }
 
 fn call(request: Request) -> Result<Reply> {
+    let timeout = match request.command {
+        Command::Stop => Duration::from_secs(3),
+        _ => Duration::from_secs(20),
+    };
     let response = super::privilege::call_with_timeout(
         &super::privilege::HelperRequest::TunCore {
             request: Box::new(request),
         },
-        Duration::from_secs(20),
+        timeout,
     )?;
     if !response.is_ok() {
         return Err(Error::process(format!(

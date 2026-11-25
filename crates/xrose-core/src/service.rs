@@ -440,6 +440,7 @@ struct Inner {
     exit_policy_revision: AtomicU64,
     rt: Runtime,
     shutdown: Once,
+    shutting_down: AtomicBool,
     subs: RwLock<Vec<Subscription>>,
     profiles: RwLock<Vec<ProfileMeta>>,
     active_profile: RwLock<Option<String>>,
@@ -608,6 +609,7 @@ impl AppService {
             exit_policy_revision: AtomicU64::new(0),
             rt,
             shutdown: Once::new(),
+            shutting_down: AtomicBool::new(false),
             subs: RwLock::new(subs),
             profiles: RwLock::new(profiles),
             active_profile: RwLock::new(active_profile),
@@ -5692,6 +5694,9 @@ impl AppService {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
                 let Some(inner) = weak.upgrade() else { break };
+                if inner.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
                 let service = AppService {
                     inner: inner.clone(),
                 };
@@ -5722,7 +5727,7 @@ impl AppService {
                 // Probe the privilege helper off the UI thread. The status is
                 // cached inside `privilege::status`, so this is cheap unless
                 // the cache expired.
-                if tick.is_multiple_of(3) {
+                if tick.is_multiple_of(3) && !inner.shutting_down.load(Ordering::Acquire) {
                     if let Ok(status) = tokio::task::spawn_blocking(privilege::status).await {
                         let changed = {
                             let mut guard = inner.helper.write();
@@ -5735,7 +5740,10 @@ impl AppService {
                         }
                     }
                 }
-                if tick.is_multiple_of(2) && !service.is_busy("core") {
+                if tick.is_multiple_of(2)
+                    && !service.is_busy("core")
+                    && !inner.shutting_down.load(Ordering::Acquire)
+                {
                     if let Ok(_guard) = inner.mesh.operation.try_lock() {
                         if inner.mesh.refresh().await.is_err()
                             && inner
@@ -5823,6 +5831,9 @@ impl AppService {
                     tick += 1;
                     continue;
                 }
+                if inner.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
                 service.poll_traffic_statistics().await;
                 if tick.is_multiple_of(5) {
                     if let Some((_, settings, _)) = service.inner.core.statistics_context() {
@@ -5857,6 +5868,9 @@ impl AppService {
             tokio::time::sleep(std::time::Duration::from_secs(25)).await;
             loop {
                 let Some(inner) = weak.upgrade() else { break };
+                if inner.shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
                 let service = AppService { inner };
                 let global_hours = service.settings().subscription_update_hours;
                 let due: Vec<String> = service
@@ -5885,26 +5899,34 @@ impl AppService {
     }
 
     fn shutdown_inner(&self) {
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.mesh_reconnect.lock().close();
-        self.inner.rt.block_on(async {
-            self.poll_traffic_statistics().await;
-            self.flush_traffic_statistics().await;
-        });
-        self.inner.mesh.shutdown();
-        self.inner.rt.block_on(self.stop_exit_gateways());
-        let _ = self.persist_model();
-        self.close_system_proxy();
-        let core = self.inner.core.clone();
+        let mesh_service = self.clone();
+        let proxy_service = self.clone();
+        let persist_service = self.clone();
+        let gateways_service = self.clone();
+        let core_service = self.clone();
         self.inner.rt.block_on(async move {
-            let _ = core.stop().await;
-        });
-        self.inner.rt.block_on(self.flush_traffic_statistics());
-        if self.runtime_uses_tun() && self.inner.helper.read().running {
-            let request = HelperRequest::RemoveTun {
-                interface: self.tun_interface(),
+            let mesh = tokio::task::spawn_blocking(move || mesh_service.inner.mesh.shutdown());
+            let proxy = tokio::task::spawn_blocking(move || proxy_service.close_system_proxy());
+            let persist = tokio::task::spawn_blocking(move || {
+                let _ = persist_service.persist_model();
+            });
+            let gateways = gateways_service.stop_exit_gateways();
+            let core_and_stats = async move {
+                core_service
+                    .poll_traffic_statistics_for_shutdown(std::time::Duration::from_millis(150))
+                    .await;
+                let core = core_service.inner.core.clone();
+                tokio::join!(
+                    async move {
+                        let _ = core.stop_for_shutdown().await;
+                    },
+                    core_service.flush_traffic_statistics(),
+                );
             };
-            let _ = privilege::call_with_timeout(&request, std::time::Duration::from_secs(1));
-        }
+            let _ = tokio::join!(mesh, proxy, persist, gateways, core_and_stats);
+        });
     }
 
     pub fn export_backup(&self) -> Result<String> {

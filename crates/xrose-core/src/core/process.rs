@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
@@ -133,6 +133,7 @@ struct RunContext {
     state: Arc<RwLock<ProcessState>>,
     stop: watch::Receiver<bool>,
     stop_requested: Arc<AtomicBool>,
+    phase_tx: watch::Sender<u64>,
     tail: Arc<Mutex<VecDeque<String>>>,
     watchdog: Arc<Mutex<WatchdogConfig>>,
 }
@@ -144,6 +145,8 @@ pub struct ProcessSupervisor {
     state: Arc<RwLock<ProcessState>>,
     stop_tx: Mutex<Option<watch::Sender<bool>>>,
     stop_requested: Arc<AtomicBool>,
+    closed: AtomicBool,
+    phase_tx: watch::Sender<u64>,
     logs: LogBus,
     tail: Arc<Mutex<VecDeque<String>>>,
     spec: Mutex<Option<SpawnSpec>>,
@@ -153,10 +156,13 @@ pub struct ProcessSupervisor {
 
 impl ProcessSupervisor {
     pub fn new(logs: LogBus) -> Self {
+        let (phase_tx, _) = watch::channel(0u64);
         Self {
             state: Arc::new(RwLock::new(ProcessState::default())),
             stop_tx: Mutex::new(None),
             stop_requested: Arc::new(AtomicBool::new(false)),
+            closed: AtomicBool::new(false),
+            phase_tx,
             logs,
             tail: Arc::new(Mutex::new(VecDeque::with_capacity(40))),
             spec: Mutex::new(None),
@@ -178,6 +184,9 @@ impl ProcessSupervisor {
     }
 
     pub async fn start(&self, spec: SpawnSpec, watchdog: WatchdogConfig) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(Error::process("应用正在退出"));
+        }
         if self.state.read().phase.is_alive() {
             return Err(Error::process("core 已在运行，请先停止"));
         }
@@ -214,6 +223,7 @@ impl ProcessSupervisor {
             state: self.state.clone(),
             stop: rx,
             stop_requested: self.stop_requested.clone(),
+            phase_tx: self.phase_tx.clone(),
             tail: self.tail.clone(),
             watchdog: self.watchdog.clone(),
         };
@@ -221,9 +231,20 @@ impl ProcessSupervisor {
         Ok(())
     }
 
+    /// Prevents future spawns and stops any active process immediately.
+    pub async fn close_and_stop(&self) -> Result<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.stop_with_timeout(Duration::from_secs(2)).await
+    }
+
     /// Stops the process; waits briefly for the state to settle so the UI can
     /// rely on `state()` right after the call returns.
     pub async fn stop(&self) -> Result<()> {
+        self.stop_with_timeout(Duration::from_secs(6)).await
+    }
+
+    async fn stop_with_timeout(&self, timeout: Duration) -> Result<()> {
+        let mut phase_rx = self.phase_tx.subscribe();
         if !self.state.read().phase.is_alive() {
             let mut state = self.state.write();
             state.phase = ProcessPhase::Stopped;
@@ -236,16 +257,25 @@ impl ProcessSupervisor {
         }
         {
             let mut state = self.state.write();
-            state.phase = ProcessPhase::Stopping;
+            if state.phase.is_alive() {
+                state.phase = ProcessPhase::Stopping;
+            }
         }
-        let deadline = Instant::now() + Duration::from_secs(6);
-        while Instant::now() < deadline {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
             if !self.state.read().phase.is_alive() {
                 return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(60)).await;
+            if tokio::time::timeout_at(deadline, phase_rx.changed())
+                .await
+                .is_err()
+            {
+                if !self.state.read().phase.is_alive() {
+                    return Ok(());
+                }
+                return Err(Error::process("core 未能在超时时间内退出"));
+            }
         }
-        Err(Error::process("core 未能在超时时间内退出"))
     }
 
     /// Restarts with the last command line.
@@ -322,6 +352,12 @@ async fn run_loop(mut ctx: RunContext) {
         };
         // Release the helper session before a watchdog restart reuses this owner.
         let _ = child.start_kill().await;
+
+        if ctx.stop_requested.load(Ordering::SeqCst) {
+            mark_stopped(&ctx);
+            ctx.logs.push(LogStream::App, LogLevel::Info, "core 已停止");
+            return;
+        }
         // Give the stdout/stderr readers a moment to flush the final lines.
         tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -375,7 +411,16 @@ async fn run_loop(mut ctx: RunContext) {
                 state.phase = ProcessPhase::Starting;
                 state.restarts = attempt;
             }
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = ctx.stop.changed() => {
+                    if *ctx.stop.borrow() {
+                        mark_stopped(&ctx);
+                        ctx.logs.push(LogStream::App, LogLevel::Info, "core 已停止");
+                        return;
+                    }
+                }
+            }
             continue;
         }
         {
@@ -384,6 +429,7 @@ async fn run_loop(mut ctx: RunContext) {
             state.pid = None;
             state.last_exit = Some(info);
         }
+        ctx.phase_tx.send_modify(|seq| *seq += 1);
         return;
     }
 }
@@ -495,16 +541,22 @@ where
 }
 
 fn mark_stopped(ctx: &RunContext) {
-    let mut state = ctx.state.write();
-    state.phase = ProcessPhase::Stopped;
-    state.pid = None;
+    {
+        let mut state = ctx.state.write();
+        state.phase = ProcessPhase::Stopped;
+        state.pid = None;
+    }
+    ctx.phase_tx.send_modify(|seq| *seq += 1);
 }
 
 async fn fail_or_retry(ctx: &RunContext, info: ExitInfo, _attempt: &mut u32) -> Option<()> {
-    let mut state = ctx.state.write();
-    state.phase = ProcessPhase::Failed;
-    state.pid = None;
-    state.last_exit = Some(info);
+    {
+        let mut state = ctx.state.write();
+        state.phase = ProcessPhase::Failed;
+        state.pid = None;
+        state.last_exit = Some(info);
+    }
+    ctx.phase_tx.send_modify(|seq| *seq += 1);
     None
 }
 
@@ -677,8 +729,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(8);
-        while supervisor.state().phase == ProcessPhase::Starting && Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while supervisor.state().phase == ProcessPhase::Starting
+            && std::time::Instant::now() < deadline
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(supervisor.state().phase, ProcessPhase::Running);
@@ -686,7 +740,7 @@ mod tests {
             enabled: true,
             max_retries: 1,
         });
-        while supervisor.state().restarts == 0 && Instant::now() < deadline {
+        while supervisor.state().restarts == 0 && std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(40)).await;
         }
         let retried = supervisor.state().restarts;
@@ -733,6 +787,57 @@ mod tests {
         };
         assert!(
             human_failure_reason(&info, &["failed to load config".into()]).contains("配置文件无效")
+        );
+    }
+
+    #[tokio::test]
+    async fn close_and_stop_rejects_subsequent_starts() {
+        let supervisor = ProcessSupervisor::new(LogBus::new(16));
+        supervisor.close_and_stop().await.unwrap();
+        let spec = SpawnSpec::new(CoreKind::SingBox, PathBuf::from("sing-box"));
+        let err = supervisor
+            .start(spec, WatchdogConfig::default())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("正在退出"), "{err}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn close_and_stop_interrupts_watchdog_backoff_quickly() {
+        let supervisor = ProcessSupervisor::new(LogBus::new(32));
+        let shell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let mut spec = SpawnSpec::new(CoreKind::SingBox, shell);
+        spec.args = vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "exit 1".into(),
+        ];
+        supervisor
+            .start(
+                spec,
+                WatchdogConfig {
+                    enabled: true,
+                    max_retries: 5,
+                },
+            )
+            .await
+            .unwrap();
+        // Wait until the first failure enters watchdog backoff.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while supervisor.state().restarts == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(supervisor.state().restarts >= 1);
+        let started = std::time::Instant::now();
+        supervisor.close_and_stop().await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(supervisor.state().phase, ProcessPhase::Stopped);
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "stopping during backoff took {elapsed:?}"
         );
     }
 }

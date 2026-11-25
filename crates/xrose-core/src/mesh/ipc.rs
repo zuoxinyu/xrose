@@ -112,6 +112,22 @@ pub enum WorkerCommand {
     },
 }
 
+const WORKER_STOP_GRACE: Duration = Duration::from_secs(2);
+const WORKER_SHUTDOWN_GRACE: Duration = Duration::from_millis(800);
+const WORKER_STOP_POLL: Duration = Duration::from_millis(15);
+
+fn stop_workers(workers: Vec<Arc<Worker>>, grace: Duration) {
+    match workers.len() {
+        0 => {}
+        1 => workers[0].stop_with_grace(grace),
+        _ => std::thread::scope(|scope| {
+            for worker in workers {
+                scope.spawn(move || worker.stop_with_grace(grace));
+            }
+        }),
+    }
+}
+
 struct Worker {
     child: Mutex<Child>,
     input: std::sync::mpsc::SyncSender<WorkerCommand>,
@@ -141,17 +157,21 @@ impl Worker {
             .try_send(value)
             .map_err(|_| Error::other("组网工作进程繁忙或已退出，请稍后重试"))
     }
+    #[cfg(test)]
     fn stop(&self) {
-        self.stopped.call_once(|| self.stop_child());
+        self.stop_with_grace(WORKER_STOP_GRACE);
     }
-    fn stop_child(&self) {
+    fn stop_with_grace(&self, grace: Duration) {
+        self.stopped.call_once(|| self.stop_child(grace));
+    }
+    fn stop_child(&self, grace: Duration) {
         let _ = self.send(WorkerCommand::Stop);
-        let deadline = Instant::now() + Duration::from_secs(4);
+        let deadline = Instant::now() + grace;
         while Instant::now() < deadline {
             if self.child.lock().try_wait().ok().flatten().is_some() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(WORKER_STOP_POLL);
         }
         let mut child = self.child.lock();
         #[cfg(unix)]
@@ -173,12 +193,12 @@ struct Session {
     workers: BTreeMap<MeshProvider, Arc<Worker>>,
 }
 impl Session {
+    fn take_workers(&mut self) -> Vec<Arc<Worker>> {
+        std::mem::take(&mut self.workers).into_values().collect()
+    }
+    #[cfg(test)]
     fn stop_all(&mut self) {
-        std::thread::scope(|scope| {
-            for (_, worker) in std::mem::take(&mut self.workers) {
-                scope.spawn(move || worker.stop());
-            }
-        });
+        stop_workers(self.take_workers(), WORKER_SHUTDOWN_GRACE);
     }
 }
 static SESSIONS: OnceLock<Mutex<BTreeMap<String, Session>>> = OnceLock::new();
@@ -227,6 +247,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         });
     }
     if let MeshCommand::DisconnectProfile { profile_id, logout } = &request.command {
+        let mut to_stop = Vec::new();
         for session in sessions.values_mut() {
             let provider = session
                 .workers
@@ -241,13 +262,15 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 if *logout {
                     worker.send(WorkerCommand::Logout)?;
                 } else {
-                    worker.stop();
+                    to_stop.push(worker.clone());
                 }
                 worker
                     .user_stopped
                     .store(true, std::sync::atomic::Ordering::Release);
             }
         }
+        drop(sessions);
+        stop_workers(to_stop, WORKER_STOP_GRACE);
         return Ok(MeshReply {
             version: PROTOCOL_VERSION,
             networks: Vec::new(),
@@ -283,6 +306,8 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
     if session.pid != request.owner_pid {
         return Err(Error::other("组网会话不属于调用进程"));
     }
+    let mut to_stop = Vec::new();
+    let mut stop_grace = WORKER_STOP_GRACE;
     match &request.command {
         MeshCommand::Start {
             profile,
@@ -455,7 +480,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                         monitor.state.lock().phase,
                         MeshPhase::Disconnected | MeshPhase::Stopping
                     );
-                    monitor.stop_child();
+                    monitor.stop_child(WORKER_STOP_GRACE);
                     if !expected {
                         let mut s = monitor.state.lock();
                         s.phase = MeshPhase::Failed;
@@ -473,10 +498,13 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
         | MeshCommand::ProbeProfile { .. } => unreachable!(),
         MeshCommand::Stop { provider } => {
             if let Some(w) = session.workers.remove(provider) {
-                w.stop();
+                to_stop.push(w);
             }
         }
-        MeshCommand::StopAll => session.stop_all(),
+        MeshCommand::StopAll => {
+            stop_grace = WORKER_SHUTDOWN_GRACE;
+            to_stop.extend(session.take_workers());
+        }
         MeshCommand::Logout { provider } => {
             if let Some(w) = session.workers.get(provider) {
                 w.send(WorkerCommand::Logout)?;
@@ -512,7 +540,7 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
             w.probe(ip)?;
         }
     }
-    Ok(MeshReply {
+    let reply = MeshReply {
         version: PROTOCOL_VERSION,
         helper_executable: helper_executable(),
         networks: session
@@ -524,7 +552,12 @@ pub fn dispatch(request: &MeshRequest) -> Result<MeshReply> {
                 state
             })
             .collect(),
-    })
+    };
+    // Release SESSIONS before waiting on worker teardown so concurrent helper
+    // requests (such as Status/Ping/TUN stop) are never blocked behind StopAll.
+    drop(sessions);
+    stop_workers(to_stop, stop_grace);
+    Ok(reply)
 }
 
 fn command_pipe(mut input: ChildStdin) -> std::sync::mpsc::SyncSender<WorkerCommand> {
@@ -548,12 +581,16 @@ fn command_pipe(mut input: ChildStdin) -> std::sync::mpsc::SyncSender<WorkerComm
 }
 
 pub fn call(request: MeshRequest) -> Result<MeshReply> {
+    call_with_timeout(request, Duration::from_secs(20))
+}
+
+pub fn call_with_timeout(request: MeshRequest, timeout: Duration) -> Result<MeshReply> {
     use crate::system::privilege::{self, HelperRequest, HelperResponse};
     match privilege::call_with_timeout(
         &HelperRequest::Mesh {
             request: Box::new(request),
         },
-        Duration::from_secs(20),
+        timeout,
     )? {
         HelperResponse::Ok { message } => {
             serde_json::from_str(&message).map_err(|_| Error::other("组网助手响应无效，请更新助手"))
@@ -607,6 +644,7 @@ mod tests {
         directory: &std::path::Path,
         provider: MeshProvider,
         script: &str,
+        wait_ready: bool,
     ) -> Arc<Worker> {
         #[cfg(unix)]
         let mut command = {
@@ -625,10 +663,21 @@ mod tests {
         };
         let mut child = command
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(if wait_ready {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        if wait_ready {
+            let mut line = String::new();
+            BufReader::new(child.stdout.take().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim(), "ready");
+        }
         let input = command_pipe(child.stdin.take().unwrap());
         Arc::new(Worker {
             child: Mutex::new(child),
@@ -645,12 +694,17 @@ mod tests {
         })
     }
 
-    fn stop_two_workers(script: &str, graceful: bool) -> Duration {
+    fn stop_two_workers(script: &str, graceful: bool, wait_ready: bool) -> Duration {
         let dir = tempfile::tempdir().unwrap();
         let workers = [MeshProvider::EasyTier, MeshProvider::Tailscale].map(|provider| {
             (
                 provider,
-                test_worker(&dir.path().join(format!("{provider:?}")), provider, script),
+                test_worker(
+                    &dir.path().join(format!("{provider:?}")),
+                    provider,
+                    script,
+                    wait_ready,
+                ),
             )
         });
         let mut session = Session {
@@ -681,9 +735,9 @@ mod tests {
         let script = "sleep 30 & wait";
         #[cfg(windows)]
         let script = "Start-Sleep -Seconds 30";
-        let elapsed = stop_two_workers(script, false);
+        let elapsed = stop_two_workers(script, false, false);
         assert!(
-            elapsed < Duration::from_secs(7),
+            elapsed < Duration::from_secs(2),
             "stop_all took {elapsed:?}"
         );
     }
@@ -691,10 +745,14 @@ mod tests {
     #[test]
     fn stop_all_reaps_responsive_workers_gracefully() {
         #[cfg(unix)]
-        let script = r#"IFS= read -r cmd && [ "$cmd" = '{"action":"stop"}' ]"#;
+        let script = r#"echo ready; IFS= read -r cmd && [ "$cmd" = '{"action":"stop"}' ]"#;
         #[cfg(windows)]
-        let script = r#"if ([Console]::ReadLine() -ne '{"action":"stop"}') { exit 1 }"#;
-        stop_two_workers(script, true);
+        let script = r#"[Console]::WriteLine('ready'); [Console]::Out.Flush(); if ([Console]::ReadLine() -ne '{"action":"stop"}') { exit 1 }"#;
+        let elapsed = stop_two_workers(script, true, true);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "graceful stop_all took {elapsed:?}"
+        );
     }
 
     #[cfg(windows)]

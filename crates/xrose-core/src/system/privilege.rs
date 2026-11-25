@@ -202,12 +202,50 @@ pub fn call(request: &HelperRequest) -> Result<HelperResponse> {
     call_with_timeout(request, Duration::from_secs(10))
 }
 
+fn connect_stream(name: interprocess::local_socket::Name<'_>, deadline: Instant) -> Result<Stream> {
+    #[cfg(windows)]
+    {
+        const ERROR_PIPE_BUSY: i32 = 231;
+        loop {
+            match Stream::connect(name.clone()) {
+                Ok(stream) => return Ok(stream),
+                Err(err)
+                    if err.raw_os_error() == Some(ERROR_PIPE_BUSY) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => {
+                    return Err(Error::other(format!(
+                        "无法连接提权助手（未安装或未运行）：{err}"
+                    )));
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = deadline;
+        Stream::connect(name)
+            .map_err(|e| Error::other(format!("无法连接提权助手（未安装或未运行）：{e}")))
+    }
+}
+
 pub fn call_with_timeout(request: &HelperRequest, timeout: Duration) -> Result<HelperResponse> {
-    let name = socket_name()?;
-    let mut stream = Stream::connect(name)
-        .map_err(|e| Error::other(format!("无法连接提权助手（未安装或未运行）：{e}")))?;
-    stream.set_recv_timeout(Some(timeout)).ok();
-    stream.set_send_timeout(Some(timeout)).ok();
+    call_on_with_timeout(socket_name()?, request, timeout)
+}
+
+fn call_on_with_timeout(
+    name: interprocess::local_socket::Name<'_>,
+    request: &HelperRequest,
+    timeout: Duration,
+) -> Result<HelperResponse> {
+    let deadline = Instant::now() + timeout;
+    let mut stream = connect_stream(name, deadline)?;
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(50));
+    stream.set_recv_timeout(Some(remaining)).ok();
+    stream.set_send_timeout(Some(remaining)).ok();
     let line = serde_json::to_string(request)?;
     stream
         .write_all(format!("{line}\n").as_bytes())
@@ -221,20 +259,49 @@ pub fn call_with_timeout(request: &HelperRequest, timeout: Duration) -> Result<H
     serde_json::from_str(response.trim()).map_err(|e| Error::other(format!("助手响应无效：{e}")))
 }
 
-/// Runs the helper server. The server handles one connection at a time (all
-/// requests are tiny) and exits when a handler returns
-/// [`HelperResponse::Stop`].
+/// Runs the helper server. Connections are dispatched concurrently so slow
+/// teardown requests (such as mesh worker stops) do not block unrelated IPC,
+/// and the server exits when a handler returns [`HelperResponse::Stop`].
 pub fn serve<F>(handler: F) -> Result<()>
 where
-    F: FnMut(HelperRequest) -> HelperResponse + Send + 'static,
+    F: Fn(HelperRequest) -> HelperResponse + Send + Sync + 'static,
 {
     #[cfg(unix)]
-    let socket_path = {
-        let path = unix_socket_path();
-        let _ = std::fs::remove_file(&path);
-        path
-    };
+    let socket_path = Some(unix_socket_path());
     let name = socket_name()?;
+    serve_on(
+        name,
+        #[cfg(unix)]
+        socket_path,
+        handler,
+    )
+}
+
+fn serve_on<F>(
+    name: interprocess::local_socket::Name<'static>,
+    #[cfg(unix)] socket_path: Option<std::path::PathBuf>,
+    handler: F,
+) -> Result<()>
+where
+    F: Fn(HelperRequest) -> HelperResponse + Send + Sync + 'static,
+{
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    struct ActiveGuard(Arc<AtomicUsize>);
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    const MAX_CONCURRENT_REQUESTS: usize = 32;
+
+    #[cfg(unix)]
+    if let Some(path) = &socket_path {
+        let _ = std::fs::remove_file(path);
+    }
+    let wake_name = Arc::new(name.clone());
     let options = ListenerOptions::new().name(name);
     #[cfg(unix)]
     let options = options.try_overwrite(true);
@@ -247,65 +314,112 @@ where
         .create_sync()
         .map_err(|e| Error::other(format!("创建 helper socket 失败：{e}")))?;
     #[cfg(unix)]
-    {
+    if let Some(path) = &socket_path {
         use std::os::unix::fs::PermissionsExt;
         // Allow unprivileged client UIDs to connect(2) to the root-owned socket;
         // `authorize` and `peer_pid` enforce UID/PID checks via kernel peer credentials.
-        let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666));
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
     }
-    let mut handler = handler;
+    let handler = Arc::new(handler);
+    let stopping = Arc::new(AtomicBool::new(false));
+    let active = Arc::new(AtomicUsize::new(0));
     for connection in listener {
-        let Ok(mut stream) = connection else { continue };
-        // A client that connects and stalls must not wedge the helper.
-        stream.set_recv_timeout(Some(Duration::from_secs(10))).ok();
-        stream.set_send_timeout(Some(Duration::from_secs(10))).ok();
-        if !authorize(&stream) {
-            let denied = HelperResponse::error("未授权的连接：提权助手只接受安装用户或 root");
-            let _ = stream.write_all(
-                format!("{}\n", serde_json::to_string(&denied).unwrap_or_default()).as_bytes(),
-            );
-            continue;
-        }
-        let mut line = String::new();
-        {
-            let mut reader = BufReader::new(std::io::Read::take(&mut stream, 262_145));
-            if reader.read_line(&mut line).is_err() {
-                continue;
-            }
-        }
-        if line.len() > 262_144 {
-            continue;
-        }
-        let response = match serde_json::from_str::<HelperRequest>(line.trim()) {
-            Ok(HelperRequest::TunCore { request }) => {
-                if peer_pid(&stream) != Some(request.owner_pid) {
-                    HelperResponse::error("TUN 调用进程身份校验失败")
-                } else {
-                    handler(HelperRequest::TunCore { request })
-                }
-            }
-            Ok(HelperRequest::Mesh { request }) => {
-                if peer_pid(&stream) != Some(request.owner_pid) {
-                    HelperResponse::error("组网调用进程身份校验失败")
-                } else {
-                    handler(HelperRequest::Mesh { request })
-                }
-            }
-            Ok(request) => handler(request),
-            Err(_) => HelperResponse::error("请求解析失败，请检查客户端与助手版本"),
-        };
-        let stop = matches!(response, HelperResponse::Stop { .. });
-        let _ = stream.write_all(
-            format!("{}\n", serde_json::to_string(&response).unwrap_or_default()).as_bytes(),
-        );
-        if stop {
+        if stopping.load(Ordering::Acquire) {
             break;
+        }
+        let Ok(stream) = connection else { continue };
+        if stopping.load(Ordering::Acquire) {
+            break;
+        }
+        if active.fetch_add(1, Ordering::AcqRel) < MAX_CONCURRENT_REQUESTS {
+            let guard = ActiveGuard(active.clone());
+            let handler = handler.clone();
+            let stopping = stopping.clone();
+            let wake_name = wake_name.clone();
+            if std::thread::Builder::new()
+                .name("xrose-helper-req".into())
+                .spawn(move || {
+                    let _guard = guard;
+                    handle_connection(stream, handler.as_ref(), &stopping, wake_name.as_ref());
+                })
+                .is_err()
+            {
+                // ActiveGuard already decremented `active` on drop.
+            }
+        } else {
+            active.fetch_sub(1, Ordering::AcqRel);
+            if handle_connection(stream, handler.as_ref(), &stopping, wake_name.as_ref()) {
+                break;
+            }
         }
     }
     super::tun_process::stop_all();
     #[cfg(unix)]
-    let _ = std::fs::remove_file(&socket_path);
+    if let Some(path) = &socket_path {
+        let _ = std::fs::remove_file(path);
+    }
     Ok(())
+}
+
+fn handle_connection<F>(
+    mut stream: Stream,
+    handler: &F,
+    stopping: &std::sync::atomic::AtomicBool,
+    wake_name: &interprocess::local_socket::Name<'static>,
+) -> bool
+where
+    F: Fn(HelperRequest) -> HelperResponse,
+{
+    use std::sync::atomic::Ordering;
+    // A client that connects and stalls must not wedge the helper.
+    stream.set_recv_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_send_timeout(Some(Duration::from_secs(10))).ok();
+    if !authorize(&stream) {
+        let denied = HelperResponse::error("未授权的连接：提权助手只接受安装用户或 root");
+        let _ = stream.write_all(
+            format!("{}\n", serde_json::to_string(&denied).unwrap_or_default()).as_bytes(),
+        );
+        return false;
+    }
+    let mut line = String::new();
+    {
+        let mut reader = BufReader::new(std::io::Read::take(&mut stream, 262_145));
+        if reader.read_line(&mut line).is_err() {
+            return false;
+        }
+    }
+    if line.is_empty() || line.len() > 262_144 {
+        return false;
+    }
+    let response = match serde_json::from_str::<HelperRequest>(line.trim()) {
+        Ok(HelperRequest::TunCore { request }) => {
+            if peer_pid(&stream) != Some(request.owner_pid) {
+                HelperResponse::error("TUN 调用进程身份校验失败")
+            } else {
+                handler(HelperRequest::TunCore { request })
+            }
+        }
+        Ok(HelperRequest::Mesh { request }) => {
+            if peer_pid(&stream) != Some(request.owner_pid) {
+                HelperResponse::error("组网调用进程身份校验失败")
+            } else {
+                handler(HelperRequest::Mesh { request })
+            }
+        }
+        Ok(request) => handler(request),
+        Err(_) => HelperResponse::error("请求解析失败，请检查客户端与助手版本"),
+    };
+    let stop = matches!(response, HelperResponse::Stop { .. });
+    let _ = stream.write_all(
+        format!("{}\n", serde_json::to_string(&response).unwrap_or_default()).as_bytes(),
+    );
+    let _ = stream.flush();
+    drop(stream);
+    if stop {
+        stopping.store(true, Ordering::Release);
+        let _ = Stream::connect(wake_name.clone());
+    }
+    stop
 }
 
 /// Executes one privileged request. Shared by the real helper and by
@@ -487,7 +601,7 @@ pub fn invalidate_status() {
 }
 
 /// Revision number bumped when helper behavior changes without a wire protocol bump.
-pub const HELPER_REVISION: u32 = 2;
+pub const HELPER_REVISION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHelperSignature {
@@ -2281,6 +2395,105 @@ mod tests {
             }
             .label(),
             "当前平台不支持"
+        );
+    }
+
+    #[test]
+    fn serve_handles_concurrent_requests_without_head_of_line_blocking() {
+        use std::sync::{Arc, Mutex, mpsc};
+        #[cfg(unix)]
+        let (_dir, name, socket_path) = {
+            use interprocess::local_socket::GenericFilePath;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("helper-concurrent.sock");
+            let name = path.clone().to_fs_name::<GenericFilePath>().unwrap();
+            (dir, name, Some(path))
+        };
+        #[cfg(windows)]
+        let name = {
+            use interprocess::local_socket::GenericNamespaced;
+            format!("io.xrose.helper-concurrent.{}", uuid::Uuid::new_v4())
+                .to_ns_name::<GenericNamespaced>()
+                .unwrap()
+        };
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+        let server_name = name.clone();
+        let server = std::thread::spawn(move || {
+            serve_on(
+                server_name,
+                #[cfg(unix)]
+                socket_path,
+                move |req| match req {
+                    HelperRequest::Status => {
+                        if let Some(tx) = entered_tx.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        let _ = release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(3));
+                        HelperResponse::ok("status-done")
+                    }
+                    HelperRequest::Ping => HelperResponse::ok("pong"),
+                    HelperRequest::Shutdown => HelperResponse::stop("bye"),
+                    _ => HelperResponse::error("unexpected"),
+                },
+            )
+            .unwrap();
+        });
+
+        // Wait until the listener is ready.
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        while call_on_with_timeout(
+            name.clone(),
+            &HelperRequest::Ping,
+            Duration::from_millis(200),
+        )
+        .is_err()
+        {
+            assert!(
+                Instant::now() < ready_deadline,
+                "helper server did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let slow_name = name.clone();
+        let slow_client = std::thread::spawn(move || {
+            call_on_with_timeout(slow_name, &HelperRequest::Status, Duration::from_secs(3))
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("slow request entered handler");
+
+        // A second request must finish immediately while the first is still blocked.
+        let ping_started = Instant::now();
+        let ping = call_on_with_timeout(name.clone(), &HelperRequest::Ping, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(ping.message(), "pong");
+        assert!(
+            ping_started.elapsed() < Duration::from_millis(500),
+            "concurrent ping blocked for {:?}",
+            ping_started.elapsed()
+        );
+
+        let _ = release_tx.send(());
+        let slow = slow_client.join().unwrap().unwrap();
+        assert_eq!(slow.message(), "status-done");
+
+        let stop_started = Instant::now();
+        let shutdown =
+            call_on_with_timeout(name, &HelperRequest::Shutdown, Duration::from_secs(2)).unwrap();
+        assert!(matches!(shutdown, HelperResponse::Stop { .. }));
+        server.join().unwrap();
+        assert!(
+            stop_started.elapsed() < Duration::from_secs(1),
+            "helper shutdown took {:?}",
+            stop_started.elapsed()
         );
     }
 }

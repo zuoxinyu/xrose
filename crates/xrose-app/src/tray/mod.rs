@@ -80,7 +80,7 @@ impl TrayManager {
         }
         let commands = std::mem::take(&mut *COMMANDS.lock());
         if commands.contains(&TrayCommand::Quit) {
-            self.popup.dismiss(cx);
+            self.popup.dismiss_immediately(cx);
             return Some(TrayCommand::Quit);
         }
         let mut result = None;
@@ -102,6 +102,13 @@ impl TrayManager {
         }
         self.popup.tick(service, cx);
         result
+    }
+
+    /// Immediately hides the flyout and removes the notification icon before
+    /// blocking on background service shutdown.
+    pub fn prepare_quit(&mut self, cx: &mut App) {
+        self.popup.dismiss_immediately(cx);
+        self.inner.take();
     }
 
     #[cfg(target_os = "linux")]

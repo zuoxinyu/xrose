@@ -569,6 +569,10 @@ pub fn hide_popup(window: &mut Window) {
     }
 }
 
+pub fn hide_popup_immediately(window: &mut Window) {
+    hide_popup(window);
+}
+
 pub fn show_popup(
     window: &mut Window,
     bounds: gpui_kit::Bounds<gpui_kit::Pixels>,

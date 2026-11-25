@@ -42,6 +42,10 @@ pub fn pointer_on_icon() -> bool {
 pub fn hide_popup(window: &mut gpui_kit::Window) {
     window.remove_window();
 }
+
+pub fn hide_popup_immediately(window: &mut gpui_kit::Window) {
+    hide_popup(window);
+}
 pub fn show_popup(
     window: &mut gpui_kit::Window,
     _bounds: gpui_kit::Bounds<gpui_kit::Pixels>,

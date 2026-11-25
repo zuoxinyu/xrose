@@ -201,6 +201,7 @@ fn main() {
                                     #[cfg(target_os = "linux")]
                                     cx.update(|cx| main.minimize(cx));
                                     tray::hide_main_window();
+                                    cx.update(|cx| tray.prepare_quit(cx));
                                     cx.background_executor()
                                         .spawn(async move { service_for_loop.shutdown() })
                                         .await;

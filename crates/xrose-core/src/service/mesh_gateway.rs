@@ -273,11 +273,18 @@ impl AppService {
     }
 
     pub(super) async fn stop_exit_gateways(&self) {
-        let mut gateways = self.inner.mesh_gateways.lock().await;
-        for (id, gateway) in std::mem::take(&mut *gateways) {
+        let taken = {
+            let mut gateways = self.inner.mesh_gateways.lock().await;
+            std::mem::take(&mut *gateways)
+        };
+        let mut stops = Vec::with_capacity(taken.len());
+        for (id, gateway) in taken {
             self.inner.mesh.set_exit_bridge(&id, None);
-            let _ = gateway.core.stop().await;
+            stops.push(async move {
+                let _ = gateway.core.stop_for_shutdown().await;
+            });
         }
+        futures_util::future::join_all(stops).await;
     }
 
     pub(super) async fn stop_exit_gateway(&self, profile_id: &str) {
