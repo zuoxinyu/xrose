@@ -52,6 +52,16 @@ pub enum BackdropStyle {
     Opaque,
 }
 
+/// Interface animation preference; defaults to following the OS reduced-motion setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MotionMode {
+    #[default]
+    System,
+    On,
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum LogLevel {
@@ -161,6 +171,7 @@ pub struct Settings {
     pub language: Language,
     pub theme: ThemeMode,
     pub backdrop: BackdropStyle,
+    pub motion: MotionMode,
     pub listen_host: String,
     pub mixed_port: u16,
     pub allow_lan: bool,
@@ -247,6 +258,7 @@ impl Default for Settings {
             language: Language::Zh,
             theme: ThemeMode::System,
             backdrop: BackdropStyle::Auto,
+            motion: MotionMode::System,
             listen_host: "127.0.0.1".into(),
             mixed_port: 7890,
             allow_lan: false,
@@ -619,6 +631,7 @@ mod tests {
         new.language = Language::En;
         new.theme = ThemeMode::Dark;
         new.backdrop = BackdropStyle::Opaque;
+        new.motion = MotionMode::Off;
         new.privacy_mode = !old.privacy_mode;
         new.show_tray_speed = !old.show_tray_speed;
         new.show_tray_indicator = !old.show_tray_indicator;
@@ -791,10 +804,12 @@ mod tests {
         assert_eq!(old.language, Language::En);
         assert_eq!(old.mixed_port, 8899);
         assert_eq!(old.backdrop, BackdropStyle::Auto);
+        assert_eq!(old.motion, MotionMode::System);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let settings = Settings {
             backdrop: BackdropStyle::MicaAlt,
+            motion: MotionMode::Off,
             ..old
         };
         settings.save(&path).unwrap();

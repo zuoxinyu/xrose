@@ -108,6 +108,8 @@ fn main() {
         .with_assets(brand_assets::BrandAssets)
         .run(move |cx| {
             init(cx);
+            ui::expand_motion::init_system_reduce_motion(cx);
+            ui::expand_motion::apply_motion_mode(app_service.settings().motion, cx);
             app_menu::install(&app_service, cx);
             #[cfg(target_os = "linux")]
             wayland::init(cx);
@@ -149,6 +151,7 @@ fn main() {
                     cx.update(|cx| main.minimize(cx));
                 }
                 let mut backdrop = service_for_loop.settings().backdrop;
+                let mut motion = service_for_loop.settings().motion;
                 loop {
                     tokio::select! {
                         _ = tray::wait_for_command() => {}
@@ -162,6 +165,11 @@ fn main() {
                     if backdrop != new_backdrop {
                         backdrop = new_backdrop;
                         cx.update(|cx| window_effects::refresh_all(backdrop, cx));
+                    }
+                    let new_motion = service_for_loop.settings().motion;
+                    if motion != new_motion {
+                        motion = new_motion;
+                        cx.update(|cx| ui::expand_motion::apply_motion_mode(motion, cx));
                     }
                     let language = service_for_loop.settings().language;
                     cx.update(|cx| app_menu::sync(language, cx));

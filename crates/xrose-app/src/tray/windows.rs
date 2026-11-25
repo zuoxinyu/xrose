@@ -817,12 +817,13 @@ fn animations_enabled() -> bool {
         SPI_GETCLIENTAREAANIMATION, SPI_GETUIEFFECTS, SystemParametersInfoW,
     };
     let (mut client, mut effects) = (0_i32, 0_i32);
-    unsafe {
+    let system_enabled = unsafe {
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &mut client as *mut _ as _, 0) != 0
             && SystemParametersInfoW(SPI_GETUIEFFECTS, 0, &mut effects as *mut _ as _, 0) != 0
             && client != 0
             && effects != 0
-    }
+    };
+    crate::ui::expand_motion::resolve_platform_animations(system_enabled)
 }
 
 unsafe fn animate_show(

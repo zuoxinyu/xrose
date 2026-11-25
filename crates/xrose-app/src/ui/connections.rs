@@ -2886,7 +2886,7 @@ impl AppView {
         .inset_0()
         .w_full()
         .h_full();
-        let graph = if active {
+        let graph = if active && !cx.reduce_motion() {
             graph
                 .with_animation(
                     "trace-flow",

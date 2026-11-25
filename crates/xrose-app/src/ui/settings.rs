@@ -10,7 +10,7 @@ use gpui_kit::*;
 use xrose_core::model::CoreKind;
 use xrose_core::service::ToastLevel;
 use xrose_core::settings::{
-    BackdropStyle, HttpLatencyMode, Language, LogLevel, Settings, ThemeMode,
+    BackdropStyle, HttpLatencyMode, Language, LogLevel, MotionMode, Settings, ThemeMode,
 };
 use xrose_core::system::CheckLevel;
 
@@ -351,8 +351,8 @@ impl AppView {
                 &p,
                 self.tr("外观", "Appearance"),
                 self.tr(
-                    "语言、主题与窗口材质",
-                    "Language, theme and window material",
+                    "语言、主题、窗口材质与动效",
+                    "Language, theme, window material and motion",
                 ),
             ))
             .child(setting_row(
@@ -447,6 +447,33 @@ impl AppView {
                     )),
                 ))
             })
+            .child(setting_row(
+                &p,
+                self.tr("界面动效", "Motion"),
+                self.tr(
+                    "控制展开过渡、弹窗与指示器动画；默认跟随系统减少动态效果设置",
+                    "Controls expand transitions, dialogs and indicator motion; follows system reduced motion by default",
+                ),
+                ChoiceGroup::new(
+                    "motion",
+                    vec![
+                        self.tr("跟随系统", "System"),
+                        self.tr("开启", "On"),
+                        self.tr("关闭", "Off"),
+                    ],
+                    match settings.motion {
+                        MotionMode::System => 0,
+                        MotionMode::On => 1,
+                        MotionMode::Off => 2,
+                    },
+                )
+                .on_change(cx.listener(|this, index: &usize, _, cx| {
+                    let mode = [MotionMode::System, MotionMode::On, MotionMode::Off][*index];
+                    this.service.set_motion(mode);
+                    super::expand_motion::apply_motion_mode(mode, cx);
+                    this.sync(cx);
+                })),
+            ))
     }
 
     fn settings_core_card(&self, cx: &mut Context<Self>) -> Div {

@@ -3856,6 +3856,14 @@ impl AppService {
         }
     }
 
+    pub fn set_motion(&self, motion: crate::settings::MotionMode) {
+        let mut settings = self.settings();
+        settings.motion = motion;
+        if let Err(err) = self.save_settings(&settings) {
+            self.toast(ToastLevel::Error, format!("保存动效设置失败：{err}"));
+        }
+    }
+
     pub fn set_core(&self, core: CoreKind) {
         let mut settings = self.settings();
         settings.core = core;
@@ -8176,6 +8184,20 @@ proxy-groups:
         assert_eq!(service.snapshot().config_dirty, was_dirty);
         let saved = crate::settings::Settings::load(&service.paths().settings_file()).unwrap();
         assert_eq!(saved.backdrop, crate::settings::BackdropStyle::Opaque);
+    }
+
+    #[test]
+    fn motion_preference_persists_without_dirtying_core_config() {
+        let (service, _dir) = service();
+        let was_dirty = service.snapshot().config_dirty;
+        service.set_motion(crate::settings::MotionMode::Off);
+        assert_eq!(
+            service.snapshot().settings.motion,
+            crate::settings::MotionMode::Off
+        );
+        assert_eq!(service.snapshot().config_dirty, was_dirty);
+        let saved = crate::settings::Settings::load(&service.paths().settings_file()).unwrap();
+        assert_eq!(saved.motion, crate::settings::MotionMode::Off);
     }
 
     #[test]

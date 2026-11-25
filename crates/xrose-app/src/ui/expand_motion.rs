@@ -4,6 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui_base::Easing;
@@ -12,6 +13,54 @@ use gpui_kit::{
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Style, Styled, Window, div,
     point, px, relative, size,
 };
+use xrose_core::settings::MotionMode;
+
+/// Tracks the last value written by `gpui_base::reduce_motion` so switching back to
+/// `MotionMode::System` restores ownership to the OS preference cleanly.
+static LAST_BASE_REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
+
+/// Encodes `MotionMode` (`0 = System`, `1 = On`, `2 = Off`) for platform backends
+/// outside GPUI's `App` context (such as the Windows tray flyout window).
+static MOTION_MODE_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+fn encode_motion_mode(mode: MotionMode) -> u8 {
+    match mode {
+        MotionMode::System => 0,
+        MotionMode::On => 1,
+        MotionMode::Off => 2,
+    }
+}
+
+/// Snapshot the system's initial reduced-motion state right after `gpui_kit::init`.
+pub(crate) fn init_system_reduce_motion(cx: &App) {
+    LAST_BASE_REDUCE_MOTION.store(cx.reduce_motion(), Ordering::Relaxed);
+}
+
+/// Apply the user's explicit motion preference across GPUI and native flyouts.
+pub(crate) fn apply_motion_mode(mode: MotionMode, cx: &mut App) {
+    MOTION_MODE_OVERRIDE.store(encode_motion_mode(mode), Ordering::Relaxed);
+    match mode {
+        MotionMode::System => {
+            cx.set_reduce_motion(LAST_BASE_REDUCE_MOTION.load(Ordering::Relaxed));
+            gpui_base::apply_system_reduce_motion(cx);
+            LAST_BASE_REDUCE_MOTION.store(cx.reduce_motion(), Ordering::Relaxed);
+        }
+        MotionMode::On => cx.set_reduce_motion(false),
+        MotionMode::Off => cx.set_reduce_motion(true),
+    }
+    cx.refresh_windows();
+}
+
+/// Resolve whether platform-native animations (such as the Windows taskbar flyout slide)
+/// should run given the OS's own animation setting.
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn resolve_platform_animations(system_enabled: bool) -> bool {
+    match MOTION_MODE_OVERRIDE.load(Ordering::Relaxed) {
+        1 => true,
+        2 => false,
+        _ => system_enabled,
+    }
+}
 
 /// Duration for expanding a collapsed disclosure panel (DESIGN.md §3.4: 120–180ms ease-out).
 pub(crate) const EXPAND_DURATION: Duration = Duration::from_millis(165);
@@ -907,5 +956,22 @@ mod tests {
         assert_eq!(capped_animated_height(px(240.0), px(800.0)), px(240.0));
         assert_eq!(capped_animated_height(px(36_000.0), px(800.0)), px(800.0));
         assert_eq!(capped_animated_height(px(500.0), px(100.0)), px(320.0));
+    }
+
+    #[test]
+    fn platform_animation_resolution_respects_explicit_motion_override() {
+        MOTION_MODE_OVERRIDE.store(encode_motion_mode(MotionMode::System), Ordering::Relaxed);
+        assert!(resolve_platform_animations(true));
+        assert!(!resolve_platform_animations(false));
+
+        MOTION_MODE_OVERRIDE.store(encode_motion_mode(MotionMode::On), Ordering::Relaxed);
+        assert!(resolve_platform_animations(true));
+        assert!(resolve_platform_animations(false));
+
+        MOTION_MODE_OVERRIDE.store(encode_motion_mode(MotionMode::Off), Ordering::Relaxed);
+        assert!(!resolve_platform_animations(true));
+        assert!(!resolve_platform_animations(false));
+
+        MOTION_MODE_OVERRIDE.store(encode_motion_mode(MotionMode::System), Ordering::Relaxed);
     }
 }
