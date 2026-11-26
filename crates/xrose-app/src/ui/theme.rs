@@ -218,7 +218,7 @@ impl Palette {
     /// Hover surface for borderless list cards and inset rows.
     pub fn row_hover(&self) -> Hsla {
         if self.is_dark {
-            self.panel_alt.opacity(0.5)
+            hsl(220., 0.10, 0.20)
         } else if self.light_mica() {
             hsl(196., 0.68, 0.48).opacity(0.115)
         } else {
@@ -527,6 +527,11 @@ mod tests {
         assert_eq!(p.row_bg(), p.bg);
         assert_ne!(p.row_bg(), p.panel);
         assert_ne!(p.row_bg(), p.row_hover());
+        assert_ne!(p.row_hover(), p.panel);
+        assert_ne!(p.row_hover(), p.panel_alt);
+        assert_ne!(p.row_hover(), p.accent);
+        assert_eq!(p.row_hover().a, 1.0);
+        assert!(p.row_hover().l > p.panel.l);
     }
 
     #[test]

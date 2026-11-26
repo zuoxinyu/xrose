@@ -1366,7 +1366,7 @@ impl Render for PopupView {
                                 .px_3()
                                 .h(px(38.))
                                 .cursor_pointer()
-                                .hover(|s| s.bg(p.panel_alt.opacity(0.5)))
+                                .hover(|s| s.bg(p.row_hover()))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.toggle_failures_expanded(window, cx);
                                 }))

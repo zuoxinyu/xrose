@@ -2932,7 +2932,7 @@ fn render_node_row(
     let drag_primary = p.primary;
     let drag_accent = p.accent;
     let hover_bg = p.row_hover();
-    let chevron_hover = p.panel_alt;
+    let chevron_hover = p.neutral_hover();
     let hover_group = SharedString::from(format!("node-group-{row_key}"));
     let is_pinned_exit = virtual_exit.is_some() || mesh_gateway;
 

@@ -85,6 +85,8 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
     --bg-app:    hsl(220 10% 9%);   /* #151619 */
     --surface:   #262626;           /* neutral-800（gpui-kit secondary） */
     --surface-2: #262626;           /* neutral-800（gpui-kit muted） */
+    --row-bg:    hsl(220 10% 9%);   /* #151619 卡片内无边框列表行 / 嵌套卡片 */
+    --row-hover: hsl(220 10% 20%);  /* #2e3138 列表行 hover 底（高于 --surface 以保持边界清晰） */
     --border:    #262626;           /* neutral-800 */
     --text:      #fafafa;           /* neutral-50 */
     --text-2:    hsl(0 0% 65%);     /* #a6a6a6 */
