@@ -9,7 +9,7 @@
 3. 不要发明新样式。先复用 §5 的组件；缺组件时先提议（Problem / 已有组件为何不够 / 用到的 token），再实现。
 4. 颜色、间距、圆角、字号只能引用 token。组件代码里出现裸 hex / 魔法数字即不合格。
 5. 截图与本文冲突时，不要静默二选一：在 PR 说明里写出冲突点。
-6. 文中 CSS 变量为对实现的映射：§3 的数值取自 `ui/theme.rs`、`ui/widgets.rs`、`window_effects.rs` 与 gpui-kit 0.9.0 默认主题；与实现冲突时以源码为准。
+6. 文中 CSS 变量为对实现的映射：§3 的数值取自 `ui/theme.rs`、`ui/widgets.rs`、`window_effects.rs` 与 gpui-kit 0.11.0 默认主题；与实现冲突时以源码为准。
 
 ---
 
@@ -41,7 +41,7 @@ Xrose：桌面端代理客户端 GUI，内核可选 sing-box / Xray。页面：�
 
 ### 3.1 颜色（取自当前实现）
 
-来源：`crates/xrose-app/src/ui/theme.rs`（`Palette`、`interaction()`、`interaction_tint()`）与 `window_effects.rs::make_surface_translucent`（覆盖 gpui-kit 主题）。颜色以 HSL 定义，下列 hex 为换算值（±1）。未覆盖的 token 直接取 gpui-kit 0.9.0（gpui-component `default-theme.json`，neutral / Tailwind 色阶）。
+来源：`crates/xrose-app/src/ui/theme.rs`（`Palette`、`interaction()`、`interaction_tint()`）与 `window_effects.rs::make_surface_translucent`（覆盖 gpui-kit 主题）。颜色以 HSL 定义，下列 hex 为换算值（±1）。未覆盖的 token 直接取 gpui-kit 0.11.0（gpui-component `default-theme.json`，neutral / Tailwind 色阶）。
 
 ```css
 :root {

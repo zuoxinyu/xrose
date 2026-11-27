@@ -4,20 +4,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
-use gpui_base::Easing;
+use gpui_base::{Easing, ReduceMotionPreference};
 use gpui_kit::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, Element, ElementId, GlobalElementId,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Style, Styled, Window, div,
     point, px, relative, size,
 };
 use xrose_core::settings::MotionMode;
-
-/// Tracks the last value written by `gpui_base::reduce_motion` so switching back to
-/// `MotionMode::System` restores ownership to the OS preference cleanly.
-static LAST_BASE_REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
 /// Encodes `MotionMode` (`0 = System`, `1 = On`, `2 = Off`) for platform backends
 /// outside GPUI's `App` context (such as the Windows tray flyout window).
@@ -31,23 +27,15 @@ fn encode_motion_mode(mode: MotionMode) -> u8 {
     }
 }
 
-/// Snapshot the system's initial reduced-motion state right after `gpui_kit::init`.
-pub(crate) fn init_system_reduce_motion(cx: &App) {
-    LAST_BASE_REDUCE_MOTION.store(cx.reduce_motion(), Ordering::Relaxed);
-}
-
 /// Apply the user's explicit motion preference across GPUI and native flyouts.
 pub(crate) fn apply_motion_mode(mode: MotionMode, cx: &mut App) {
     MOTION_MODE_OVERRIDE.store(encode_motion_mode(mode), Ordering::Relaxed);
-    match mode {
-        MotionMode::System => {
-            cx.set_reduce_motion(LAST_BASE_REDUCE_MOTION.load(Ordering::Relaxed));
-            gpui_base::apply_system_reduce_motion(cx);
-            LAST_BASE_REDUCE_MOTION.store(cx.reduce_motion(), Ordering::Relaxed);
-        }
-        MotionMode::On => cx.set_reduce_motion(false),
-        MotionMode::Off => cx.set_reduce_motion(true),
-    }
+    let preference = match mode {
+        MotionMode::System => ReduceMotionPreference::System,
+        MotionMode::On => ReduceMotionPreference::Allow,
+        MotionMode::Off => ReduceMotionPreference::Reduce,
+    };
+    gpui_base::set_reduce_motion_preference(preference, cx);
     cx.refresh_windows();
 }
 
@@ -608,14 +596,6 @@ struct RevealElement {
     measured_height: Rc<Cell<Option<Pixels>>>,
     visible_height: Rc<Cell<Option<Pixels>>>,
     child: AnyElement,
-}
-
-impl IntoElement for RevealElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
 }
 
 enum RevealLayoutState {

@@ -108,7 +108,6 @@ fn main() {
         .with_assets(brand_assets::BrandAssets)
         .run(move |cx| {
             init(cx);
-            ui::expand_motion::init_system_reduce_motion(cx);
             ui::expand_motion::apply_motion_mode(app_service.settings().motion, cx);
             app_menu::install(&app_service, cx);
             #[cfg(target_os = "linux")]
