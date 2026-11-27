@@ -1,7 +1,7 @@
 //! Native window materials shared by the main window and tray flyout.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 #[cfg(any(windows, target_os = "macos"))]
 use gpui_kit::component::ActiveTheme;
@@ -312,8 +312,9 @@ mod windows {
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::UI::Controls::MARGINS;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SetWindowLongW, SetWindowPos, WS_CAPTION, WS_SYSMENU,
+        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_EXSTYLE, GWL_STYLE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_CAPTION, WS_EX_TOOLWINDOW,
+        WS_SYSMENU,
     };
 
     #[repr(C)]
@@ -357,6 +358,28 @@ mod windows {
         }
     }
 
+    /// Compute the target `GWL_STYLE` when toggling DWM's native caption buttons.
+    ///
+    /// Fullscreen windows lack `WS_CAPTION` and are left untouched. Tool windows
+    /// (`WS_EX_TOOLWINDOW`, such as GPUI's `WindowKind::PopUp` tray flyout) receive
+    /// `WS_CAPTION` from `CreateWindowExW` when created with `WS_OVERLAPPED`, but
+    /// are intentionally created without `WS_SYSMENU`; never enable `WS_SYSMENU` on
+    /// them, or DWM composites a native close button in the top-right corner under
+    /// Acrylic (`DwmExtendFrameIntoClientArea(-1)`).
+    pub(super) fn resolve_caption_button_style(style: u32, ex_style: u32, visible: bool) -> u32 {
+        if (style & WS_CAPTION) != WS_CAPTION {
+            return style;
+        }
+        if (ex_style & WS_EX_TOOLWINDOW) != 0 {
+            return style & !WS_SYSMENU;
+        }
+        if visible {
+            style | WS_SYSMENU
+        } else {
+            style & !WS_SYSMENU
+        }
+    }
+
     /// Toggle DWM's native non-client caption buttons on captioned top-level windows.
     ///
     /// With `DwmExtendFrameIntoClientArea(-1)` and a translucent titlebar, DWM still
@@ -365,19 +388,12 @@ mod windows {
     /// while keeping `WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX`
     /// removes the DWM buttons (`DWMWA_CAPTION_BUTTON_BOUNDS` width becomes 0) while
     /// preserving borders, rounded corners, maximized work-area bounds, double-click
-    /// maximize, `Alt+F4`, and `SC_*` commands. Popup and fullscreen windows lack
-    /// `WS_CAPTION` and are left untouched.
+    /// maximize, `Alt+F4`, and `SC_*` commands.
     unsafe fn set_native_caption_buttons(hwnd: HWND, visible: bool) {
         unsafe {
             let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            if (style & WS_CAPTION) != WS_CAPTION {
-                return;
-            }
-            let desired = if visible {
-                style | WS_SYSMENU
-            } else {
-                style & !WS_SYSMENU
-            };
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+            let desired = resolve_caption_button_style(style, ex_style, visible);
             if desired != style {
                 SetWindowLongW(hwnd, GWL_STYLE, desired as i32);
                 SetWindowPos(
@@ -489,5 +505,39 @@ mod tests {
             assert_eq!(normal.a, 0.0);
             assert!(hover.a > 0.0 && hover.a < active.a);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tool_windows_never_gain_native_close_button() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW, WS_SYSMENU,
+        };
+
+        // Tray flyout (`WindowKind::PopUp`): has WS_CAPTION + WS_EX_TOOLWINDOW, no WS_SYSMENU.
+        assert_eq!(
+            windows::resolve_caption_button_style(WS_CAPTION, WS_EX_TOOLWINDOW, true),
+            WS_CAPTION
+        );
+        assert_eq!(
+            windows::resolve_caption_button_style(WS_CAPTION | WS_SYSMENU, WS_EX_TOOLWINDOW, true),
+            WS_CAPTION
+        );
+
+        // Main window: toggles WS_SYSMENU based on visibility.
+        assert_eq!(
+            windows::resolve_caption_button_style(WS_CAPTION | WS_SYSMENU, WS_EX_APPWINDOW, false),
+            WS_CAPTION
+        );
+        assert_eq!(
+            windows::resolve_caption_button_style(WS_CAPTION, WS_EX_APPWINDOW, true),
+            WS_CAPTION | WS_SYSMENU
+        );
+
+        // Fullscreen window: no WS_CAPTION, left untouched.
+        assert_eq!(
+            windows::resolve_caption_button_style(0, WS_EX_APPWINDOW, true),
+            0
+        );
     }
 }
